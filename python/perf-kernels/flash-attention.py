@@ -211,7 +211,7 @@ def _attn_fwd_inner(
             # our optimization to use 2^x instead of e^x results in an additional
             # scale factor of log2(e) which we must also multiply the bias with.
             qk += (bias * 1.44269504089)
-           
+
         if alibi_slope is not None:
             # Compute the global position of each token within the sequence
             global_m_positions = start_m*BLOCK_M + tl.arange(0, BLOCK_M)
@@ -425,7 +425,7 @@ def attn_fwd(
         bias_ptr = None
 
     if USE_ALIBI != 0:
-        a_offset = off_z * stride_az +  off_h_q * stride_ah 
+        a_offset = off_z * stride_az +  off_h_q * stride_ah
         alibi_slope = tl.load(alibi_slopes + a_offset)
     else:
         alibi_slope = None
@@ -668,14 +668,14 @@ def _bwd_kernel_dk_dv(
         do = tl.load(DO_block_ptr)
         # Compute dV.
         ppT = pT
-        ppT = ppT.to(tl.float16)
+        ppT = ppT.to(do.dtype)
         dv += tl.dot(ppT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m)
         # Compute dP and dS.
         dpT = tl.dot(v, tl.trans(do))
         dsT = pT * (dpT - Di[None, :])
-        dsT = dsT.to(tl.float16)
+        dsT = dsT.to(qT.dtype)
         dk += tl.dot(dsT, tl.trans(qT))
         # Increment pointers.
         curr_m += step_m
@@ -733,7 +733,7 @@ def _bwd_kernel_dq(dq, q, K, V,
         vT = tl.load(VT_block_ptr)
         dp = tl.dot(do, vT).to(tl.float32)
         ds = p * (dp - Di[:, None])
-        ds = ds.to(tl.float16)
+        ds = ds.to(kT.dtype)
         # Compute dQ.0.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
         dq += tl.dot(ds, tl.trans(kT))
@@ -752,6 +752,7 @@ def _attn_bwd(Q, K, V, sm_scale,
               stride_z, stride_h, stride_tok, stride_d,
               # H = 16, N_CTX = 1024
               H, N_CTX,
+              CAUSAL: tl.constexpr,
               BLOCK_DMODEL: tl.constexpr,
               BLOCK_M1: tl.constexpr,
               BLOCK_N1: tl.constexpr,
@@ -812,7 +813,7 @@ def _attn_bwd(Q, K, V, sm_scale,
     v = tl.load(V_block_ptr)
 
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
-    
+
     dk, dv = _bwd_kernel_dk_dv(
                             dk, dv,
                             Q, k, v, sm_scale,
@@ -822,7 +823,7 @@ def _attn_bwd(Q, K, V, sm_scale,
                             H, N_CTX,
                             MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL,
                             start_n, start_m, num_steps,
-                            MASK=True
+                            MASK=CAUSAL
                             )
 
     start_m += num_steps * MASK_BLOCK_M1
@@ -906,7 +907,7 @@ def _attn_bwd(Q, K, V, sm_scale,
                       H, N_CTX,
                       BLOCK_M2, MASK_BLOCK_N2, BLOCK_DMODEL,
                       start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,
-                      MASK=True
+                      MASK=CAUSAL
                       )
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
@@ -930,7 +931,7 @@ def _attn_bwd(Q, K, V, sm_scale,
     )
     dq *= LN2
     tl.store(DQ_block_ptr, dq.to(q.dtype))
-        
+
 empty = torch.empty(128, device="cuda")
 
 
@@ -939,7 +940,7 @@ class _attention(torch.autograd.Function):
     def forward(ctx, q, k, v, o, metadata):
         # NOTE: a large bias tensor leads to overflow during pointer arithmetic
         if (metadata.bias is not None):
-            assert(metadata.bias.numel() < 2 ** 31)    
+            assert(metadata.bias.numel() < 2 ** 31)
 
         if o is None:
             o = torch.empty_like(q, dtype=v.dtype)
@@ -990,7 +991,7 @@ class _attention(torch.autograd.Function):
                             metadata.bias.stride(2), metadata.bias.stride(3))
         else:
             bias_strides = (0,0,0,0)
-        
+
         if metadata.alibi_slopes is not None:
             alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
         else:
@@ -1075,6 +1076,7 @@ class _attention(torch.autograd.Function):
             M, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             N_HEAD, N_CTX,
+            CAUSAL=ctx.causal,
             BLOCK_DMODEL=ctx.BLOCK_DMODEL,
             BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1, BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,
             BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
@@ -1179,7 +1181,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, dtype=to
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * input_metadata.sm_scale
     if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"), 
+        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
                           diagonal=N_CTX_K-N_CTX_Q)
         scores[:, :, mask==0] = float("-inf")
     if use_alibi:
@@ -1343,8 +1345,9 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
                           ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
 @pytest.mark.parametrize('torch_sdpa_test', [True])
-@pytest.mark.parametrize('causal', [True])
-def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, dtype=torch.float16):
+@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, dtype):
     torch.manual_seed(20)
     if qseqlen_not_equal_kseqlen is not None:
         seqlen_q = qseqlen_not_equal_kseqlen
@@ -1367,7 +1370,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     o = torch.empty_like(q)
-    
+
     if causal:
         input_metadata.need_causal()
 
@@ -1465,6 +1468,16 @@ def varlen_benchmark_configs():
             ]
     return configs
 
+def nonvarlen_backward_benchmark_configs():
+    configs=[(16, 16, 16, 1024, 1024),
+            (8, 16, 16, 2048, 2048),
+            (4, 16, 16, 4096, 4096),
+            (2, 16, 16, 8192, 8192),
+            (1, 16, 16, 16384, 16384),
+            (2, 48, 48, 1024, 1024),
+            ]
+    return configs
+
 def run_benchmark(custom):
 
     args = parse_args()
@@ -1472,7 +1485,7 @@ def run_benchmark(custom):
     hk = args.hq if not args.hk else args.hk
     sk = args.sq if not args.sk else args.sk
     head_size = 128 if not args.d else args.d
-    mode = 'fwd'
+    mode = args.direction
     x_names=['BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K']
     causal = args.causal
     varlen = args.varlen
@@ -1482,6 +1495,8 @@ def run_benchmark(custom):
     else:
         if varlen:
             x_vals_list = varlen_benchmark_configs()
+        elif mode == 'bwd':
+            x_vals_list = nonvarlen_backward_benchmark_configs()
         else:
             x_vals_list = nonvarlen_benchmark_configs()
     print_time = args.return_time
@@ -1516,10 +1531,6 @@ def run_benchmark(custom):
         # else:
         #     bias = None
         bias = None
-
-        # Bwd pass only supports causal=True right now
-        if mode == 'bwd':
-            causal = True
 
         flops_per_matmul = 0
         if varlen:
@@ -1568,6 +1579,7 @@ def parse_args():
     parser.add_argument("-causal", action='store_true', default=False)
     parser.add_argument("-varlen", action='store_true', default=False)
     parser.add_argument("-dtype", default='fp16')
+    parser.add_argument("-direction", default='fwd')
     parser.add_argument("-return_time", action='store_true', default=False)
     return parser.parse_args()
 
