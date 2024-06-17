@@ -156,6 +156,9 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
   if (DEFINED TRITON_PLUGIN_DIRS)
     foreach(PLUGIN_DIR ${TRITON_PLUGIN_DIRS})
+      if (PLUGIN_DIR STREQUAL "nvidia")
+        continue()
+      endif()
       # Read the plugin name under dir/backend/name.conf
       cmake_path(APPEND PLUGIN_DIR "backend" "name.conf" OUTPUT_VARIABLE PLUGIN_NAME_PATH)
       file(READ ${PLUGIN_NAME_PATH} PLUGIN_NAME)
