@@ -159,3 +159,14 @@ Note, icache flush needs the module `python-hip`, which can be installed as:
 Rotating tensor and icache flush are to make perf numbers are closer to that in real applications.
 - Added `--bias_vector` to support kernel execution with bias (bias vector is of the same size as the number of rows of the output matrix, 
 so each element of the bias vector is added to all elements of the corresponding row of the output matrix.)
+
+# GEMM Tuning Script v3.3
+
+### Implementation changes
+
+- A separate file, named `generate_all_kernels.py`, is generated for compilations only.
+It contains all the kernels in the tuning space and they will be compiled by 64 threads by default.
+Compiling all the kernels in a single file in parallel is faster than splitting them 
+into multiple files. This can greatly reduce the compile time of the tuning process.
+- `configStr` does not contain gemm size anymore. This allows the same matmul_{configStr} kernel
+to be reused by different gemm sizes (this is not implemented yet).

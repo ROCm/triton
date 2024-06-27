@@ -170,70 +170,87 @@ def read_config(config):
     return block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, waves_per_eu, mfma_instr_size, kpack
 
 
-def gen_kernel_and_configStr_from_config(M, N, K, config, dtype_a, dtype_b, dtype_c, bias_size):
+def gen_configStr(config, bias_size):
     block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, waves_per_eu, mfmaInstrSize, kpack = read_config(config)
-    torch_dtype_a = 'fp16'
-    torch_dtype_b = 'fp16'
-    torch_dtype_c = 'fp16'
-    if dtype_a:
-        torch_dtype_a = tl_to_torch_types[name_to_tl_types[dtype_a]]
-    if dtype_b:
-        torch_dtype_b = tl_to_torch_types[name_to_tl_types[dtype_b]]
-    if dtype_c:
-        torch_dtype_c = tl_to_torch_types[name_to_tl_types[dtype_c]]
-    configStr = f"M{M}_N{N}_K{K}_BM{block_m}_BN{block_n}_BK{block_k}_GM{group_m}_SK{split_k}_nW{num_warps}_nS{num_stages}_EU{waves_per_eu}_kP{kpack}_mfma{mfmaInstrSize}"
+
+    ## {M}_{N}_{K} is removed since the same kernel can be used for differen gemm sizes
+    configStr = f"BM{block_m}_BN{block_n}_BK{block_k}_GM{group_m}_SK{split_k}_nW{num_warps}_nS{num_stages}_EU{waves_per_eu}_kP{kpack}_mfma{mfmaInstrSize}"
+
     if bias_size > 0:
         configStr += "_bias"
-    use_bias = bias_size > 0
-    matmul_def_str = f"""
-def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn, warmup=False):
-    grid = triton.cdiv(M, {block_m}) * triton.cdiv(N, {block_n}), {split_k}
-    #print(f'config: matmul_kernel_{configStr}', flush=True)
-    if warmup:
-        matmul_kernel_{configStr}.warmup(
-            {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_c},
-            M, N, K,
-            am, ak, bk, bn, cm, cn, biasn,
-            BLOCK_SIZE_M = {block_m},
-            BLOCK_SIZE_N = {block_n},
-            BLOCK_SIZE_K = {block_k},
-            GROUP_SIZE_M = {group_m},
-            SPLIT_K = {split_k},
-            num_warps = {num_warps},
-            num_stages = {num_stages},
-            waves_per_eu = {waves_per_eu},
-            matrix_instr_nonkdim = {mfmaInstrSize},
-            kpack = {kpack},
-            BIAS={use_bias},
-            grid=(1,),
-        )
-        return None
-    else:
-        matmul_kernel_{configStr}[grid](
-            a, b, c, bias,
-            M, N, K,
-            am, ak, bk, bn, cm, cn, biasn,
-            BLOCK_SIZE_M = {block_m},
-            BLOCK_SIZE_N = {block_n},
-            BLOCK_SIZE_K = {block_k},
-            GROUP_SIZE_M = {group_m},
-            SPLIT_K = {split_k},
-            num_warps = {num_warps},
-            num_stages = {num_stages},
-            waves_per_eu = {waves_per_eu},
-            matrix_instr_nonkdim = {mfmaInstrSize},
-            kpack = {kpack},
-            BIAS = {use_bias},
-        )
-        return c
 
-def try_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
+    return configStr
+
+## construct the configStr and generate the wrapper function matmul_{configStr}()
+## If `warmup` is set, the generated kernel will be **compiled**
+def gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, warmup):
+    block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, waves_per_eu, mfmaInstrSize, kpack = read_config(config)
+
+    configStr = gen_configStr(config, bias_size)
+
+    use_bias = bias_size > 0
+
+    if warmup:
+        torch_dtype_a = 'fp16'
+        torch_dtype_b = 'fp16'
+        torch_dtype_c = 'fp16'
+        if dtype_a:
+            torch_dtype_a = tl_to_torch_types[name_to_tl_types[dtype_a]]
+        if dtype_b:
+            torch_dtype_b = tl_to_torch_types[name_to_tl_types[dtype_b]]
+        if dtype_c:
+            torch_dtype_c = tl_to_torch_types[name_to_tl_types[dtype_c]]
+
+        matmul_def_str = f"""
+def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
+    matmul_kernel_{configStr}.warmup(
+        {torch_dtype_a}, {torch_dtype_b}, {torch_dtype_c}, {torch_dtype_c},
+        M, N, K,
+        am, ak, bk, bn, cm, cn, biasn,
+        BLOCK_SIZE_M = {block_m},
+        BLOCK_SIZE_N = {block_n},
+        BLOCK_SIZE_K = {block_k},
+        GROUP_SIZE_M = {group_m},
+        SPLIT_K = {split_k},
+        num_warps = {num_warps},
+        num_stages = {num_stages},
+        waves_per_eu = {waves_per_eu},
+        matrix_instr_nonkdim = {mfmaInstrSize},
+        kpack = {kpack},
+        BIAS={use_bias},
+        grid=(1,),
+    )
+    return None
+
+def try_compile_config_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
     try:
-        matmul_{configStr}(None, None, None, None, M, N, K, am, ak, bk, bn, cm, cn, biasn, True)
+        matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn)
         return True
     except Exception as e:
         print(f'invalid config(compilation): {configStr}: ', e, flush=True)
         return False
+"""
+    else:
+        matmul_def_str = f"""
+def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn):
+    grid = triton.cdiv(M, {block_m}) * triton.cdiv(N, {block_n}), {split_k}
+    matmul_kernel_{configStr}[grid](
+        a, b, c, bias,
+        M, N, K,
+        am, ak, bk, bn, cm, cn, biasn,
+        BLOCK_SIZE_M = {block_m},
+        BLOCK_SIZE_N = {block_n},
+        BLOCK_SIZE_K = {block_k},
+        GROUP_SIZE_M = {group_m},
+        SPLIT_K = {split_k},
+        num_warps = {num_warps},
+        num_stages = {num_stages},
+        waves_per_eu = {waves_per_eu},
+        matrix_instr_nonkdim = {mfmaInstrSize},
+        kpack = {kpack},
+        BIAS = {use_bias},
+    )
+    return c
 """
     return configStr, matmul_def_str
 
@@ -243,16 +260,18 @@ def generated_kernel_name(M, N, K, gpu_id):
     return f"{path}/generated_kernel{M}-{N}-{K}-{gpu_id}.py"
 
 
-# Open {len(gpus)} files
-# generated_kernelM-N-K-{gpus[0]}.py, generated_kernelM-N-K-{gpus[1]}.py, ..., generated_kernelM-N-K-{gpus[-1]}.py
+def generate_compile_kernel_filename():
+    path = os.path.dirname(os.path.abspath(__file__))
+    return f"{path}/generated_all_kernels.py"
+
+
+# Open {len(jobs)} files
+# generated_kernelM-N-K-0.py, generated_kernelM-N-K-1.py, ..., generated_kernelM-N-K-{njobs-1}.py
 # and generate
 # 1. matmul kernels of all configs
 # 2. wrapper function matmul to invoke all the generated kernels
-# 3. Another wraper function try_config to invoke matmul function
-# 4. test_gemm to invoke
-# 4.1 run try_config in parallel
-# 4.2 matmul in a loop of 10 iterations
-def generate_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush):
+# 3. test_gemm to invoke matmul in a loop of {iters} iterations
+def generate_profile_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush):
     filenames = []
     for i in range(jobs):
         filenames.append(generated_kernel_name(M, N, K, i))
@@ -281,7 +300,7 @@ from icache_flush import icache_flush
     idx = 0
     for config in configs:
         file_idx = idx % jobs
-        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(M, N, K, config, dtype_a, dtype_b, dtype_c, bias_size)
+        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, False)
         # Copy the matmul_kernel with name replaced
         matmul_kernel_config = matmul_kernel_code.replace("matmul_kernel", f"matmul_kernel_{configStr}")
         matmul_kernel_config = matmul_kernel_config.replace("import triton.language as tl", "")
@@ -292,7 +311,107 @@ from icache_flush import icache_flush
 
     # write test_gemm
     # pre string
-    test_gemm_pre_str = f"""def test_gemm(M, N, K, rotating_buffer_size, bias_size, num_threads):
+    test_gemm_pre_str = f"""def test_gemm(M, N, K, rotating_buffer_size, bias_size):
+    tensors = gen_rotating_tensors(M, N, K, '{dtype_a}', {col_a}, '{dtype_b}', {col_b}, '{dtype_c}',
+                                   1, '{init_type}', rotating_buffer_size, bias_size, device='cuda')
+
+    a = tensors['input_a'][0]
+    b = tensors['input_b'][0]
+    c = tensors['output_c'][0]
+    assert bias_size == M or bias_size == 0
+
+    stride_bias = tensors['bias'][0].stride(0) if bias_size > 0 else 0
+
+    try:
+        with open("{generate_compile_kernel_filename()}.failed_configs", "r") as f:
+            failed_configs = [cfg.strip() for cfg in f.readlines()]
+    except Exception:
+        failed_configs = []
+"""
+    for fi in range(jobs):
+        f_kernel[fi].write(test_gemm_pre_str + "\n")
+
+    # call all matmul_xxx functions
+    idx = 0
+    runs = iters if run_bench else 200
+    call_icache_flush = 'icache_flush()' if icache_flush else ''
+    for config in configs:
+        configStr = gen_configStr(config, bias_size)
+        matmul_call_str = f"""
+    if '{configStr}' not in failed_configs:
+        rotating_num = tensors['rotating_num']
+        for i in range({runs}):
+            a = tensors['input_a'][i % rotating_num]
+            b = tensors['input_b'][i % rotating_num]
+            c = tensors['output_c'][i % rotating_num]
+            bias = tensors['bias'][i % rotating_num] if bias_size > 0 else None"""
+        if icache_flush:
+            matmul_call_str += f"""
+            icache_flush()"""
+        matmul_call_str += f"""
+            d = matmul_{configStr}(a, b, c, bias, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1), bias.stride(0))"""
+        f_kernel[idx % jobs].write(matmul_call_str + "\n")
+        idx += 1
+    # post string
+    for fi in range(jobs):
+        f_kernel[fi].write("    return d\n")
+
+    # def main and call test_gemm
+    def_main_str = f"""
+def main():
+    parser = argparse.ArgumentParser(
+        prog="tune a specific gemm size",
+        allow_abbrev=False,)
+    parser.add_argument("-n", type=int, default=1, help='number of threads')
+    parser.add_argument("-rotating_tensor", type=int, default={rotating_buffer_size}, help='size of rotating buffer (MB), default: {rotating_buffer_size}')
+    args = parser.parse_args()
+    numThreads = args.n
+    rotating_buffer_size = args.rotating_tensor
+    """
+    test_gemm_call_str = f'test_gemm({M}, {N}, {K}, rotating_buffer_size, {M})'
+    for fi in range(jobs):
+        f_kernel[fi].write(def_main_str)
+        f_kernel[fi].write(test_gemm_call_str + "\n\n")
+        f_kernel[fi].write("""if __name__ == '__main__':
+   sys.exit(main())""")
+        f_kernel[fi].close()
+
+
+## Generate a single file that contains all kernels in the tuning space.
+## This file is used to **compile** the kernels in parallel
+def generate_compile_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush):
+
+    filename = generate_compile_kernel_filename()
+    f_kernel = open(filename, 'w')
+
+    # write imports
+    import_str = """import torch
+import triton
+import triton.language as tl
+import argparse
+import sys
+import multiprocessing
+from tune_gemm import gen_rotating_tensors
+"""
+
+    f_kernel.write(import_str + "\n")
+
+    # write definitions of matmul_kernel_xxx
+    # and matmul_xxx and try_compile_config
+    with open(os.path.dirname(os.path.abspath(__file__))+"/matmul_kernel.py") as file:
+        matmul_kernel_code = file.read()
+    for config in configs:
+        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, True)
+        # Copy the matmul_kernel with name replaced
+        matmul_kernel_config = matmul_kernel_code.replace("matmul_kernel", f"matmul_kernel_{configStr}")
+        matmul_kernel_config = matmul_kernel_config.replace("import triton.language as tl", "")
+        matmul_kernel_config = matmul_kernel_config.replace("import triton", "")
+        f_kernel.write(matmul_kernel_config + "\n\n")
+        f_kernel.write(matmul_def_str + "\n")
+
+    # write compile_kernels
+    # pre string
+    compile_kernels_pre_str = f"""def compile_kernels(M, N, K, rotating_buffer_size, bias_size, num_threads):
     thread_pool = multiprocessing.Pool(processes=num_threads)
     tensors = gen_rotating_tensors(M, N, K, '{dtype_a}', {col_a}, '{dtype_b}', {col_b}, '{dtype_c}',
                                    1, '{init_type}', rotating_buffer_size, bias_size, device='cuda')
@@ -308,91 +427,56 @@ from icache_flush import icache_flush
                  b.stride(0), b.stride(1),
                  c.stride(0), c.stride(1), stride_bias)
 
-    if num_threads > 1:
-        results = []
-        config_names = []
+    results = []
+    config_names = []
 """
-    for fi in range(jobs):
-        f_kernel[fi].write(test_gemm_pre_str + "\n")
+    f_kernel.write(compile_kernels_pre_str + "\n")
 
     # warm up call of all matmul functions in parallel
-    idx = 0
     for config in configs:
-        configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None, bias_size)
-        task_str = f"        results += [thread_pool.apply_async(try_config_{configStr}, args=task_args)]\n" + \
-                   f"        config_names += ['{configStr}']\n"
-        f_kernel[idx % jobs].write(task_str)
-        idx += 1
+        configStr = gen_configStr(config, bias_size)
+        task_str = f"    results += [thread_pool.apply_async(try_compile_config_{configStr}, args=task_args)]\n" + \
+                   f"    config_names += ['{configStr}']\n"
+        f_kernel.write(task_str)
 
-    for fi in range(jobs):
-        threadpool_str = """
-        failed_configs = []
-        for i in range(len(results)):
-            results[i].wait()
-            res = results[i].get()
-            if not res:
-                failed_configs += [config_names[i]]
-        thread_pool.close()
-        thread_pool.join()
+    threadpool_str = """
+    failed_configs = []
+    for i in range(len(results)):
+        results[i].wait()
+        res = results[i].get()
+        if not res:
+            failed_configs += [config_names[i]]
+    thread_pool.close()
+    thread_pool.join()
+    if failed_configs:
         with open("{filename}.failed_configs", "w") as f:
             for cfg in failed_configs:
                 f.write(cfg + "\\n")
-    else:
-        try:
-            with open("{filename}.failed_configs", "r") as f:
-                failed_configs = [cfg.strip() for cfg in f.readlines()]
-        except Exception:
-            failed_configs = []
-        """.format(filename=filenames[fi])
-        f_kernel[fi].write(threadpool_str)
-    # call all matmul_xxx functions
-    idx = 0
-    runs = iters if run_bench else 200
-    call_icache_flush = 'icache_flush()' if icache_flush else ''
-    for config in configs:
-        configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None, bias_size)
-        matmul_call_str = f"""
-        if '{configStr}' not in failed_configs:
-            rotating_num = tensors['rotating_num']
-            for i in range({runs}):
-                a = tensors['input_a'][i % rotating_num]
-                b = tensors['input_b'][i % rotating_num]
-                c = tensors['output_c'][i % rotating_num]
-                bias = tensors['bias'][i % rotating_num] if bias_size > 0 else None"""
-        if icache_flush:
-            matmul_call_str += f"""
-                icache_flush()"""
-        matmul_call_str += f"""
-                d = matmul_{configStr}(a, b, c, bias, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1), bias.stride(0))"""
-        f_kernel[idx % jobs].write(matmul_call_str + "\n")
-        idx += 1
-    # post string
-    for fi in range(jobs):
-        f_kernel[fi].write("        return d\n")
+""".format(filename=filename)
+    f_kernel.write(threadpool_str)
 
-    # def main and call test_gemm
+    # def main and call compile_kernels
     def_main_str = f"""
 def main():
     parser = argparse.ArgumentParser(
         prog="tune a specific gemm size",
         allow_abbrev=False,)
-    parser.add_argument("-n", type=int, default=1, help='number of threads')
-    parser.add_argument("-rotating_tensor", type=int, default={rotating_buffer_size}, help='size of rotating buffer (MB), default: 256')
+    parser.add_argument("-n", type=int, default=32, help='number of threads')
+    parser.add_argument("-rotating_tensor", type=int, default={rotating_buffer_size}, help='size of rotating buffer (MB), default: {rotating_buffer_size}')
     args = parser.parse_args()
     numThreads = args.n
     rotating_buffer_size = args.rotating_tensor
     """
-    test_gemm_call_str = f'test_gemm({M}, {N}, {K}, rotating_buffer_size, {M}, numThreads)'
-    for fi in range(jobs):
-        f_kernel[fi].write(def_main_str)
-        f_kernel[fi].write(test_gemm_call_str + "\n\n")
-        f_kernel[fi].write("""if __name__ == '__main__':
-   sys.exit(main())""")
-        f_kernel[fi].close()
+    compile_kernels_call_str = f'compile_kernels({M}, {N}, {K}, rotating_buffer_size, {M}, numThreads)'
 
+    f_kernel.write(def_main_str)
+    f_kernel.write(compile_kernels_call_str + "\n\n")
+    f_kernel.write("""if __name__ == '__main__':
+   sys.exit(main())""")
+    f_kernel.close()
 
 def extract_kernel_time(M, N, K, config, df, bias_size):
-    configStr, _ = gen_kernel_and_configStr_from_config(M, N, K, config, None, None, None, bias_size)
+    configStr = gen_configStr(config, bias_size)
     df = df[df['KernelName'].str.contains(configStr)]
     meanTime = df['DurationNs'].tail(100).mean()
     return config, meanTime
@@ -413,25 +497,27 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
         jobId += ngpus
 
 
-def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, 
-                     run_bench, jobs, iters, skipWarmup, verbose=0, num_threads=16, 
+def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs,
+                     run_bench, jobs, iters, skipWarmup, verbose=0, num_threads=32,
                      gpus=[0], rotating_buffer_size=256, bias_size = 0, icache_flush = False):
-    # Generate kernel out of all configs
-    generate_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush)
-
-    # remove any compiled kernel in the cache
-    run_bash_command("rm -rf ~/.triton/cache")
 
     # precompile the kernels in parallel
     start_time = datetime.now()
     if not skipWarmup:
-        for i in range(jobs):
-            kernel_name = generated_kernel_name(M, N, K, i)
-            run_bash_command(f"python {kernel_name} -n {num_threads}", capture=(verbose < 2))
+        # Generate kernel out of all configs
+        generate_compile_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush)
+        # remove any compiled kernel in the cache
+        run_bash_command("rm -rf ~/.triton/cache")
+
+        fname = generate_compile_kernel_filename()
+        run_bash_command(f"python {fname} -n {num_threads}", capture=(verbose < 2))
     compile_end = datetime.now()
     compile_time = compile_end - start_time
     if verbose:
         print(f"compile time: {compile_time}", flush=True)
+
+    # Generate kernels out of all configs
+    generate_profile_kernel(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type, configs, jobs, iters, run_bench, rotating_buffer_size, bias_size, icache_flush)
 
     # profile generated kernels
     running = [multiprocessing.Process(target=profile_batch_kernels, args=(M, N, K, gpu_id, gpus, jobs, verbose)) for gpu_id in gpus]
@@ -668,7 +754,7 @@ def parse_args():
     parser.add_argument("--benchmark", action='store_true', default=False, help="Benchmark the given config")
     parser.add_argument("--time_breakdown", action='store_true', default=False, help="Show detailed time breakdown of each step during the tuning")
     parser.add_argument("--verbose", action='store_true', default=False, help="enables time_breakdown and additional logging messages")
-    parser.add_argument("--num_threads", type=int, default=16, help="number of threads to use for kernel compilation and post processing")
+    parser.add_argument("--num_threads", type=int, default=32, help="number of threads to use for kernel compilation and post processing")
     parser.add_argument("--jobs", type=int, default=1, help="number of generated files")
     parser.add_argument("--iters", type=int, default=1000, help="number of generated files")
     parser.add_argument("--init_type", type=str, default='randn', help="Initialization type for input matrices (default uniform rand [0, 1.0)])")
@@ -877,7 +963,7 @@ def main():
         if not run_bench:
             print(f'TFLOPS: {formatted_tflops} time(us): {minTime}', end=" ", flush=True)
 
-        bestConfig_compact_str, _ = gen_kernel_and_configStr_from_config(M, N, K, bestConfig, None, None, None, bias_size)
+        bestConfig_compact_str = gen_configStr(bestConfig, bias_size)
         if not run_bench:
             print(f'best_config: {bestConfig_compact_str}', end=" ", flush=True)
 
@@ -894,11 +980,15 @@ def main():
 
         # remove generated files if asked to
         if not keepTmp:
+            if not skipWarmup:
+                os.remove(generate_compile_kernel_filename())
+                try:
+                    os.remove(generate_compile_kernel_filename() + ".failed_configs")
+                except OSError:
+                    pass
             for i in range(jobs):
                 generated_script = generated_kernel_name(M, N, K, i)
                 os.remove(generated_script)
-                if not skipWarmup:
-                    os.remove(generated_script + ".failed_configs")
                 for f in glob.glob(f"results-{i}.*"):
                     os.remove(f)
 
