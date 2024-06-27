@@ -109,7 +109,7 @@ def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
         # skip split_k that leads to EVEN_K = false
         leap = SPLIT_K * BLOCK_SIZE_K
         modv = K % leap
-        if modv != 0:
+        if modv != 0 and SPLIT_K != 1:
             continue
         # skip large GROUP_M
         if GROUP_M * BLOCK_SIZE_M > M and GROUP_M != 1:
@@ -183,7 +183,7 @@ def gen_configStr(config, bias_size):
 
 ## construct the configStr and generate the wrapper function matmul_{configStr}()
 ## If `warmup` is set, the generated kernel will be **compiled**
-def gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, warmup):
+def gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype_c, bias_size, warmup):
     block_m, block_n, block_k, group_m, split_k, num_warps, num_stages, waves_per_eu, mfmaInstrSize, kpack = read_config(config)
 
     configStr = gen_configStr(config, bias_size)
@@ -218,6 +218,7 @@ def matmul_{configStr}(M, N, K, am, ak, bk, bn, cm, cn, biasn):
         matrix_instr_nonkdim = {mfmaInstrSize},
         kpack = {kpack},
         BIAS={use_bias},
+        EVEN_K={EVEN_K},
         grid=(1,),
     )
     return None
@@ -249,6 +250,7 @@ def matmul_{configStr}(a, b, c, bias, M, N, K, am, ak, bk, bn, cm, cn, biasn):
         matrix_instr_nonkdim = {mfmaInstrSize},
         kpack = {kpack},
         BIAS = {use_bias},
+        EVEN_K = {EVEN_K}
     )
     return c
 """
@@ -300,7 +302,8 @@ from icache_flush import icache_flush
     idx = 0
     for config in configs:
         file_idx = idx % jobs
-        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, False)
+        EVEN_K = True if K % config.get('BLOCK_SIZE_K') == 0 else False
+        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype_c, bias_size, False)
         # Copy the matmul_kernel with name replaced
         matmul_kernel_config = matmul_kernel_code.replace("matmul_kernel", f"matmul_kernel_{configStr}")
         matmul_kernel_config = matmul_kernel_config.replace("import triton.language as tl", "")
@@ -401,7 +404,8 @@ from tune_gemm import gen_rotating_tensors
     with open(os.path.dirname(os.path.abspath(__file__))+"/matmul_kernel.py") as file:
         matmul_kernel_code = file.read()
     for config in configs:
-        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, dtype_a, dtype_b, dtype_c, bias_size, True)
+        EVEN_K = True if K % config.get('BLOCK_SIZE_K') == 0 else False
+        configStr, matmul_def_str = gen_kernel_and_configStr_from_config(config, EVEN_K, dtype_a, dtype_b, dtype_c, bias_size, True)
         # Copy the matmul_kernel with name replaced
         matmul_kernel_config = matmul_kernel_code.replace("matmul_kernel", f"matmul_kernel_{configStr}")
         matmul_kernel_config = matmul_kernel_config.replace("import triton.language as tl", "")

@@ -170,3 +170,5 @@ Compiling all the kernels in a single file in parallel is faster than splitting 
 into multiple files. This can greatly reduce the compile time of the tuning process.
 - `configStr` does not contain gemm size anymore. This allows the same matmul_{configStr} kernel
 to be reused by different gemm sizes (this is not implemented yet).
+- Add support for `EVEN_K` in the matmul kernel. Now the kernel support `BLOCK_SIZE_K`
+that cannot divide `K`.
