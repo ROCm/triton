@@ -276,10 +276,12 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
-                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
+                # FIXME: boundary check
+                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p).to(q.type.element_ty))
             p = tl.where(keep, p, 0.0)
         elif RETURN_ENCODED_SOFTMAX:
-            tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
+            # FIXME: boundary check
+            tl.store(encoded_sm_ptrs, p.to(q.type.element_ty))
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
@@ -395,11 +397,15 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             return
 
     # If MQA / GQA, set the K and V head offsets appropriately.
+    '''
+    # See https://github.com/ROCm/triton/issues/604
     GROUP_SIZE: tl.constexpr = HQ // HK
     if GROUP_SIZE != 1:
         off_h_k = off_h_q // GROUP_SIZE
     else:
         off_h_k = off_h_q
+    '''
+    off_h_k = off_h_q if HQ != HK else off_h_q // (HQ // HK)
 
     n_extra_tokens = 0
     if seqlen_k < BLOCK_N:
@@ -428,15 +434,15 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     else:
         alibi_slope = None
 
+    off_zh = off_z * HQ + off_h_q
     if ENABLE_DROPOUT:
-        off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base + off_zh * MAX_SEQLENS_Q * MAX_SEQLENS_K
     else:
         batch_philox_offset = 0
     # We can ask to return the dropout mask without actually doing any dropout. In
     # this case, we return an invalid pointer so indicate the mask is not valid.
     if RETURN_ENCODED_SOFTMAX:
-        encoded_sm_base = encoded_softmax + off_h_q * seqlen_q * seqlen_k
+        encoded_sm_base = encoded_softmax + off_zh * MAX_SEQLENS_Q * MAX_SEQLENS_K
         encoded_sm_ptrs = encoded_sm_base + offs_m[:, None] * seqlen_k + offs_n[None, :]
     else:
         encoded_sm_ptrs = None
