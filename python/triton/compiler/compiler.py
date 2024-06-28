@@ -434,9 +434,9 @@ def compile(fn, **kwargs):
         extern_libs = dict()
     debug = kwargs.get("debug", False)
     # Flag to control whether to store mma layout directly
-    optimize_epilogue = False
-    if os.environ.get('OPTIMIZE_EPILOGUE', '') == '1':
-        optimize_epilogue = True
+    optimize_epilogue = True
+    if os.environ.get('OPTIMIZE_EPILOGUE', '') == '0':
+        optimize_epilogue = False
     #
     cluster_info = ClusterInfo()
     if "clusterDims" in kwargs:
