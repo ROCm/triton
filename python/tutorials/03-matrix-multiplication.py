@@ -288,8 +288,7 @@ def matmul_kernel(
 # We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `_matmul`.
 @triton.jit
 def leaky_relu(x):
-    x = x + 1
-    return tl.where(x >= 0, x, 0.01 * x)
+    return tl.where(x > 0, x, 0.01 * x)
 
 
 # %%
@@ -341,7 +340,9 @@ def test_correctness(M, N, K, in_dtype, out_dtype):
     a = torch.randn((M, K), device='cuda', dtype=torch.float16)
     b = torch.randn((K, N), device='cuda', dtype=torch.float16)
     triton_output = matmul(a, b)
+    triton_relu_output = matmul(a, b, activation="leaky_relu")
     torch_output = torch.matmul(a, b)
+    torch_relu_output = torch.nn.functional.leaky_relu(torch_output)
     print(f"triton_output={triton_output}")
     print(f"torch_output={torch_output}")
     rtol = 0 if torch.version.hip is None else 1e-2
@@ -350,6 +351,12 @@ def test_correctness(M, N, K, in_dtype, out_dtype):
     else:
         print("❌ Triton and Torch differ")
         assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol)
+
+    if torch.allclose(triton_relu_output, torch_relu_output, atol=1e-2, rtol=rtol):
+        print("✅ Fused matmul Triton and Torch match")
+    else:
+        print("❌ Fused matmul Triton and Torch differ")
+        assert torch.allclose(triton_relu_output, torch_relu_output, atol=1e-2, rtol=rtol)
 
 
 # %%
@@ -369,6 +376,7 @@ verbose = False
     triton.testing.Benchmark(
         x_names=['M', 'N', 'K'],  # Argument names to use as an x-axis for the plot
         x_vals=[
+            (32, 32, 1026),
             (1024, 1024, 1024),
             (2048, 2048, 2048),
             (4096, 4096, 4096),
