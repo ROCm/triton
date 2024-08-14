@@ -11,6 +11,7 @@ import sys
 import yaml
 import os
 import subprocess
+import pytest
 
 
 
@@ -98,6 +99,7 @@ def get_full_tuning_space(use_split_k):
         'perf_model': None,
         "top_k": None
     },
+    reset_to_zero=['c_ptr'],
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % (args['BLOCK_SIZE_K'] * args['SPLIT_K']) == 0,
@@ -105,7 +107,7 @@ def get_full_tuning_space(use_split_k):
 @triton.jit
 def matmul_kernel_splitK(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
+    a_ptr, b_ptr, c_ptr, c_buf_ptr,
     # Matrix dimensions
     M, N, K,
     # The stride variables represent how much to increase the ptr by when moving by 1
@@ -128,7 +130,7 @@ def matmul_kernel_splitK(
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
     pid = tl.program_id(axis=0)
-    pid_z = tl.program_id(1)
+    pid_z = tl.program_id(axis=1)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -145,6 +147,7 @@ def matmul_kernel_splitK(
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
     # See above `Pointer Arithmetics` section for details
+
     if SPLIT_K == 1:
         offs_k = tl.arange(0, BLOCK_SIZE_K)
     else:
@@ -183,10 +186,6 @@ def matmul_kernel_splitK(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
-    if ACTIVATION == "leaky_relu":
-        accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.float16)
-
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -194,16 +193,62 @@ def matmul_kernel_splitK(
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     if SPLIT_K == 1:
+        if ACTIVATION == "leaky_relu":
+            accumulator = leaky_relu(accumulator)
+        c=accumulator.to(c_ptr.type.element_ty)
         tl.store(c_ptrs, c, mask=c_mask)
     else:
-        tl.atomic_add(c_ptrs, c, mask=c_mask)
+        c_buf_ptrs=c_buf_ptr + pid_z * M * N + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        tl.store(c_buf_ptrs, accumulator, mask=c_mask)
 
+@triton.jit
+def splitK_reduce(
+    c_ptr, c_buf_ptr,
+    M, N, K,
+    stride_cm, stride_cn,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows).
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    ACTIVATION: tl.constexpr):
+
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    # Initialize the accumulator
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    # Loop over the splits and accumulate
+    for k in range(SPLIT_K):
+        c_block_ptrs = c_buf_ptr + k * M * N + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        partial_result = tl.load(c_block_ptrs, mask=c_mask)
+        accumulator += partial_result
+
+    # Apply activation function if necessary
+    if ACTIVATION == "leaky_relu":
+        accumulator = leaky_relu(accumulator)
+
+    # Store the final accumulated result
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    tl.store(c_ptrs, accumulator, mask=c_mask)
 
 # We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `_matmul`.
 @triton.jit
 def leaky_relu(x):
-    x = x + 1
-    return tl.where(x >= 0, x, 0.01 * x)
+    return tl.where(x > 0, x, 0.01 * x)
 
 
 def need_split_k(SIZE_M, SIZE_N, SIZE_K):
@@ -218,7 +263,8 @@ def matmul(a, b, activation=""):
     M, K = a.shape
     K, N = b.shape
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    c = torch.zeros((M, N), device=a.device, dtype=a.dtype)
+    c_buf = torch.zeros((M, N, 10), device=a.device, dtype=torch.float32)
     # 1D launch kernel where each block gets its own program.
 
     grid_splitK = lambda META: (
@@ -226,32 +272,93 @@ def matmul(a, b, activation=""):
         META['SPLIT_K']
     )
     matmul_kernel_splitK[grid_splitK](
-        a, b, c,
+        a, b, c, c_buf,
         M, N, K,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
         ACTIVATION=activation
     )
+#    grid= lambda META: (triton.cdiv(K, splitk_v), )
+    best_config = matmul_kernel_splitK.get_best_config()
+    block_m = best_config.kwargs['BLOCK_SIZE_M']
+    block_n = best_config.kwargs['BLOCK_SIZE_N']
+    block_k = best_config.kwargs['BLOCK_SIZE_K']
+    group_m = best_config.kwargs['GROUP_SIZE_M']
+    split_k = best_config.kwargs['SPLIT_K']
+    grid = lambda META: (
+        triton.cdiv(M, META['BLOCK_SIZE_M'])*triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    if(split_k >1):
+        splitK_reduce[grid](
+            c, c_buf,
+            M, N, K,
+            c.stride(0), c.stride(1),
+            BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=block_n, BLOCK_SIZE_K=block_k,
+            SPLIT_K=split_k,
+            GROUP_SIZE_M=group_m,
+            ACTIVATION=activation
+            )
 
-    return c
+    return c.to(a.dtype)
 
+def unravel_index(indices, shape):
+    shape = torch.tensor(shape)
+    indices = indices % shape.prod()  # prevent out-of-bounds indices
 
-def test_correctness(M, N, K, datatype = torch.float16):
+    coord = torch.zeros(indices.size() + shape.size(), dtype=int)
+
+    for i, dim in enumerate(reversed(shape)):
+        coord[..., i] = indices % dim
+        indices = indices // dim
+
+    return coord.flip(-1)
+
+def maxloc(tensor1, tensor2):
+    diff_tensor=torch.abs(tensor1-tensor2)
+    maxloc=torch.argmax(diff_tensor)
+    maxloc2d=unravel_index(maxloc, diff_tensor.shape)
+    tensor1_v_maxloc=tensor1[maxloc2d[0], maxloc2d[1]]
+    tensor2_v_maxloc=tensor2[maxloc2d[0], maxloc2d[1]]
+
+    print("Max difference location (row, column):", maxloc2d)
+    print("Value at maxloc in triton output:",  tensor1_v_maxloc.item())
+    print("Value at maxloc in torch ouput:",  tensor2_v_maxloc.item())
+
+@pytest.mark.parametrize("M, N, K, datatype",
+[ (*shape, datatype)
+    for shape in [(128, 256, 32), (128, 16, 32), (32, 128, 64),
+                  (128, 128, 64), (64, 128, 128), (32, 128, 64),
+                  (64, 64, 32), (32, 32, 128), (128, 128, 64),
+                  (64, 128, 128), (512, 512, 512), (1024, 1024, 1024),
+                  (16, 16, 1026), (32, 32, 1026),
+                  (128, 32, 1026), (32, 128, 1026)]
+    for datatype in [torch.float16]]
+)
+def test_correctness(M, N, K, datatype):
     torch.manual_seed(0)
     a = torch.randn((M, K), device='cuda', dtype=datatype)
     b = torch.randn((K, N), device='cuda', dtype=datatype)
     triton_output = matmul(a, b)
+    triton_activation_output = matmul(a, b, activation= "leaky_relu")
     torch_output = torch.matmul(a, b)
+    torch_activation_output=torch.nn.functional.leaky_relu(torch_output)
     print(f"triton_output={triton_output}")
     print(f"torch_output={torch_output}")
-    rtol = 0 if torch.version.hip is None else 1e-2
+    rtol = 0 if torch.version.hip is None else 1e-3
     size_str = f'size, (M: {M}, N: {N}, K: {K})'
     if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
         print(f'✅ Triton and Torch match for {size_str}')
+        maxloc(triton_output,  torch_output)
     else:
         print(f'❌ Triton and Torch differ for {size_str}')
+        maxloc(triton_output,  torch_output)
 
+    if torch.allclose(triton_activation_output, torch_activation_output, atol=1e-2, rtol=rtol):
+        print(f'✅ fused matmul Triton and Torch match for {size_str}')
+        maxloc(triton_activation_output,  torch_activation_output)
+    else:
+        print(f'❌ fused matmul Triton and Torch differ for {size_str}')
+        maxloc(triton_activation_output,  torch_activation_output)
 
 def run_speed(M, N, K, datatype, use_rocprof, provider):
     a = torch.randn((M, K), device='cuda', dtype=datatype)
