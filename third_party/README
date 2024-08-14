@@ -1,0 +1,10 @@
+This directory contains links to the supported third party backends
+
+To enable the AMD HIP backend during the build, use:
+export TRITON_CODEGEN_AMD_HIP_BACKEND=1
+
+To enable the INTEL XPU backend during the build, use:
+export TRITON_CODEGEN_INTEL_XPU_BACKEND=1
+
+To enable the SHARED backend during the build, use:
+export TRITON_CODEGEN_TRITON_SHARED=1
