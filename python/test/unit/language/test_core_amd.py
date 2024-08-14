@@ -33,6 +33,13 @@ def hip_skip():
     import inspect
     return pytest.skip(f"Skipping {inspect.stack()[1][3]}!")
 
+try:
+    cache_contents=os.listdir(os.path.expanduser('~/.triton/cache'))
+    print(cache_contents)
+    exit(1)
+except:
+    print("no cache found!")
+
 if is_hip():
     GPU_DIALECT = "triton_gpu"
     THREADS_PER_WARP = 64
