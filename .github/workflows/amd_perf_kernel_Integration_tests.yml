@@ -129,6 +129,7 @@ jobs:
           pytest -vvvv ./python/perf-kernels/softmax.py
           pytest -vvv ./python/perf-kernels/rmsnorm.py
           pytest -vvv ./python/perf-kernels/layernorm.py
+          sh ./python/perf-kernels/streamk/utils/unittest.sh
       - name: Run Perf Kernels Benchmark
         run: |
           python ./python/perf-kernels/flash-attention.py
