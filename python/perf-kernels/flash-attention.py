@@ -102,7 +102,6 @@ class MetaData():
         assert q.shape[-1] == k.shape[-1] and q.shape[-1] == v.shape[-1]
         # TODO: Change assert if we support qkl f8 and v f16
         assert q.dtype == k.dtype and q.dtype == v.dtype
-        assert head_size <= 256
         assert o.shape == q.shape
         assert (nheads_q % nheads_k) == 0
         assert self.layout is not None
@@ -1150,6 +1149,10 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
     (4, 4, 2, 65, 1018, 65),
     (4, 4, 4, 128, 128, 65),
     (4, 4, 4, 113, 123, 1),
+    (1, 4, 4, 1024, 1024, 512),
+    (1, 4, 4, 1024, 65, 547),
+    (1, 4, 4, 512, 512, 1024),
+    (1, 4, 4, 512, 256, 1037),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [True, False])
@@ -1265,10 +1268,29 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(4, 48, 8192, 64), (4, 48, 256, 64), (4, 48, 512, 64),
-                                                 (4, 48, 1024, 64), (8, 48, 4096, 64), (4, 48, 8192, 64),
-                                                 (4, 48, 128, 128), (4, 48, 4096, 128), (4, 48, 16384, 128),
-                                                 (4, 16, 1024, 128), (4, 16, 8192, 128), (32, 48, 8192, 128)])
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
+    (1, 2, 256, 63),
+    (2, 8, 247, 63),
+    (3, 4, 256, 64),
+    (4, 48, 256, 64),
+    (4, 48, 512, 64),
+    (4, 48, 1024, 64),
+    (8, 48, 4096, 64),
+    (4, 48, 8192, 64),
+    (4, 48, 128, 128),
+    (4, 48, 4096, 128),
+    (4, 48, 16384, 128),
+    (4, 16, 1024, 128),
+    (4, 16, 8192, 128),
+    (32, 48, 8192, 128),
+    (32, 48, 8192, 128),
+    (32, 48, 8192, 128),
+    (4, 48, 517, 256),
+    (4, 48, 1024, 256),
+    (4, 16, 1024, 512),
+    (4, 16, 1024, 593),
+    (4, 16, 1024, 1024),
+])
 @pytest.mark.parametrize('causal', [True, False])
 def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
 
