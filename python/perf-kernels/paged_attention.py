@@ -245,7 +245,9 @@ def _fwd_grouped_kernel_stage1(
     BLOCK_N: tl.constexpr,
     BLOCK_H: tl.constexpr,
     logit_cap: tl.constexpr,
+    KV_TKN_BLK_SZ: tl.constexpr
 ):
+    log2e = 1.44269504
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
     cur_token_blk_in_batch = tl.program_id(2)
@@ -259,7 +261,8 @@ def _fwd_grouped_kernel_stage1(
 
     offs_d = tl.arange(0, BLOCK_DMODEL_POW2)
     offs_h = tl.arange(0, BLOCK_H)
-    offs_n = cur_token_blk_in_batch * BLOCK_N + tl.arange(0, BLOCK_N)
+    #offs_n = cur_token_blk_in_batch * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n_start = cur_token_blk_in_batch * BLOCK_N
 
     #load q [BLOCK_H, BLOCK_DMODEL]
     offs_q = cur_batch * stride_qbs + cur_q_heads[:, None] * stride_qh + offs_d[None, :]
@@ -267,53 +270,72 @@ def _fwd_grouped_kernel_stage1(
     q = tl.load(Q + offs_q, mask=mask, other=0.0).to(reduce_dtype)
     #tl.device_print("q", q)
 
-    #load k_loc from req_to_tokens ie do logical to physical block translation
-    k_loc = tl.load(Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n, mask=offs_n
-                    < cur_batch_seq_len, other=0)
+    m_i = tl.zeros([BLOCK_H], dtype=reduce_dtype) - float("inf")
+    l_i = tl.zeros([BLOCK_H], dtype=reduce_dtype)
+    acc = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=reduce_dtype)
 
-    #offs_k
-    offs_buf_k = (k_loc[None, :] * stride_buf_kbs + cur_kv_head * stride_buf_kh + offs_d[:, None])
-    #load kt [BLOCK_DMODEL, BLOCK_N]
-    k = tl.load(K_Buffer + offs_buf_k, mask=(offs_n[None, :] < cur_batch_seq_len) * (offs_d[:, None] < BLOCK_DMODEL),
-                other=0.0).to(reduce_dtype)
-    #tl.device_print("k", k)
+    kv_tkn_blk_sz = KV_TKN_BLK_SZ
+    offs_kv_tkn_blk = tl.arange(0, KV_TKN_BLK_SZ)
+    kv_tkn_blk_start = cur_token_blk_in_batch * BLOCK_N
+    kv_tkn_blk_end = tl.minimum(kv_tkn_blk_start + BLOCK_N, cur_batch_seq_len)
+    num_kv_tkn_blks = tl.cdiv(kv_tkn_blk_end - kv_tkn_blk_start, kv_tkn_blk_sz)
+    kv_loc_ptr = Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx 
+    for b in range(num_kv_tkn_blks):
+        #load k_loc from req_to_tokens ie do logical to physical block translation
+        offs_kv_loc = kv_tkn_blk_start + b*kv_tkn_blk_sz + offs_kv_tkn_blk
+        k_loc = tl.load(kv_loc_ptr + offs_kv_loc, mask=offs_kv_loc < cur_batch_seq_len, other=0)
 
-    #qk using tl.dot[BLOCK_H, BLOCK_N]
-    qk = tl.dot(q, k, out_dtype=tl.float32)
-    qk *= sm_scale
-    if logit_cap > 0:
-        qk = logit_cap * tanh(qk / logit_cap)
+        #tl.device_print("k_loc", k_loc)
+        #offs_k
+        offs_buf_k = (k_loc[None, :] * stride_buf_kbs + cur_kv_head * stride_buf_kh + offs_d[:, None])
+        #load kt [BLOCK_DMODEL, BLOCK_N]
+        k = tl.load(K_Buffer + offs_buf_k, mask=(offs_kv_loc[None, :] < cur_batch_seq_len) & (offs_d[:, None] < BLOCK_DMODEL),
+                    other=0.0).to(reduce_dtype)
+        #tl.device_print("k", k)
 
-    qk = tl.where(offs_n < cur_batch_seq_len, qk, float("-inf"))
+        #qk using tl.dot[BLOCK_H, BLOCK_N]
+        qk = tl.dot(q, k)
+        qk *= sm_scale
+        if logit_cap > 0:
+            qk = logit_cap * tanh(qk / logit_cap)
 
-    #tl.device_print("qk", qk)
-    #find max [BLOCK_H]
-    m = tl.max(qk, 1)
+        qk = tl.where(offs_kv_loc < cur_batch_seq_len, qk, float("-inf"))
 
-    #calculate p [BLOCK_H, BLOCK_N]
-    p = tl.exp(qk - m[:, None])
+        #find new max [BLOCK_H]
+        m_i_new = tl.maximum(m_i, tl.max(qk, axis=1))
 
-    #sum p [BLOCK_H]
-    exp_sum = tl.sum(p, 1)
+        #calculate p [BLOCK_H, BLOCK_N]
+        p = tl.exp2((qk - m_i_new[:, None])*log2e)
 
-    #load v_index from req_to_tokens ie do logical to physical block translation
-    v_loc = tl.load(Req_to_tokens + cur_batch_req_idx * stride_req_to_tokens_b + offs_n, mask=offs_n
-                    < cur_batch_seq_len, other=0)
-    #load v [BLOCK_N, BLOCK_DMODEL]
-    offs_buf_v = v_loc[:, None] * stride_buf_kbs + cur_kv_head * stride_buf_kh + offs_d[None, :]
-    v = tl.load(V_buffer + offs_buf_v, mask=(offs_n[:, None] < cur_batch_seq_len) & (offs_d[None, :] < BLOCK_DMODEL),
-                other=0.0).to(reduce_dtype)
+        #calculate alpha(scale)
+        alpha = tl.math.exp2((m_i - m_i_new) * log2e)
+        
+        #rescale current acc by alpha
+        acc *= alpha[:, None]
 
-    #calculate qkv and attn [BLOCK_H, BLOCK_DMODEL]
-    qkv = tl.dot(p, v)
-    attn = qkv / exp_sum[:, None]
-    #tl.device_print("attn", attn)
+        #load v_index from req_to_tokens ie do logical to physical block translation
+        v_loc = tl.load(kv_loc_ptr  + offs_kv_loc, mask=offs_kv_loc < cur_batch_seq_len, other=0)
+
+        #load v [BLOCK_N, BLOCK_DMODEL]
+        offs_buf_v = v_loc[:, None] * stride_buf_kbs + cur_kv_head * stride_buf_kh + offs_d[None, :]
+        v = tl.load(V_buffer + offs_buf_v, mask=(offs_kv_loc[:, None] < cur_batch_seq_len) & (offs_d[None, :] < BLOCK_DMODEL),
+                    other=0.0).to(reduce_dtype)
+
+        #calculate qkv and attn [BLOCK_H, BLOCK_DMODEL]
+        acc += tl.dot(p, v)
+
+
+        #update l_i and update m_i 
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        m_i = m_i_new
+    
+    acc = acc / l_i[:, None]
 
     #store exp_sum and max_logits
     offs_exp = cur_batch * stride_exp_sums_bs + cur_kv_head * stride_exp_sums_h + cur_token_blk_in_batch * stride_exp_sums_t
     offs_exp += offs_h
-    tl.store(exp_sums + offs_exp, exp_sum)
-    tl.store(max_logits + offs_exp, m)
+    tl.store(exp_sums + offs_exp, l_i, mask=offs_h < q_grp_sz)
+    tl.store(max_logits + offs_exp, m_i, mask=offs_h < q_grp_sz)
 
     #store logits
     off_token_blk_logit = cur_batch * stride_token_blk_logits_bs + cur_kv_head * stride_token_blk_logits_h
@@ -321,8 +343,7 @@ def _fwd_grouped_kernel_stage1(
         offs_h)[:, None] * stride_token_blk_logits_g + offs_d[None, :]
     m = (offs_h[:, None] < q_grp_sz) & (offs_d[None, :] < BLOCK_DMODEL)
     #tl.device_print("m",m)
-    tl.store(token_blk_logits + off_token_blk_logit, attn, mask=m)
-
+    tl.store(token_blk_logits + off_token_blk_logit, acc, mask=m)
 
 @triton.jit
 def _fwd_grouped_kernel_stage2(
@@ -440,7 +461,7 @@ def _decode_grouped_att_m_fwd(
                                      token_blk_logits.stride(3), exp_sums.stride(0), exp_sums.stride(1),
                                      exp_sums.stride(2), q_grp_sz=Q_GRP_SZ, num_kv_heads=num_kv_heads,
                                      BLOCK_DMODEL=BLOCK_DMODEL, BLOCK_DMODEL_POW2=BLOCK_DMODEL_POW2, BLOCK_N=BLOCK_N,
-                                     BLOCK_H=BLOCK_H, logit_cap=logit_cap)
+                                     BLOCK_H=BLOCK_H, logit_cap=logit_cap, KV_TKN_BLK_SZ=16)
 
 
 def _decode_grouped_reduce_fwd(out, token_blk_logits, exp_sums, max_logits, req_to_token, b_req_idx, b_start_loc,
@@ -479,7 +500,7 @@ def decode_attention_fwd(
     q_grp_sz = num_q_heads // num_kv_heads
     num_batch = b_req_idx.shape[0]
 
-    BLOCK_N = 16
+    BLOCK_N = 128
     NUM_TOKEN_BLKS = triton.cdiv(max_len_in_batch, BLOCK_N)
     NUM_TOKEN_BLKS_POW2 = triton.next_power_of_2(NUM_TOKEN_BLKS)
 
@@ -506,7 +527,12 @@ def decode_attention_fwd(
         _decode_grouped_att_m_fwd(q, k_buffer, v_buffer, token_blk_logits, exp_sums, max_logits, req_to_token,
                                   b_req_idx, b_start_loc, b_seq_len, max_len_in_batch, sm_scale, logit_cap, BLOCK_N,
                                   NUM_TOKEN_BLKS, NUM_TOKEN_BLKS_POW2, BLOCK_DMODEL, BLOCK_DMODEL_POW2, q_grp_sz)
+        #print(f"token_blk_logits.shape={token_blk_logits.shape}")
         #print(f"token_blk_logits={token_blk_logits}")
+        #print(f"max_logits.shape={max_logits.shape}")
+        #print(f"max_logits={max_logits}")
+        #print(f"exp_sums={exp_sums.shape}")
+        #print(f"exp_sums={exp_sums}")
         _decode_grouped_reduce_fwd(o, token_blk_logits, exp_sums, max_logits, req_to_token, b_req_idx, b_start_loc,
                                    b_seq_len, BLOCK_N, NUM_TOKEN_BLKS, NUM_TOKEN_BLKS_POW2, BLOCK_DMODEL,
                                    BLOCK_DMODEL_POW2, q_grp_sz)
@@ -559,23 +585,40 @@ def paged_attention_reference(
         query = query * scale
         #print(f"ref: query={query}")
         attn = torch.einsum("qhd,khd->hqk", query, keys)
-        #print(f"ref: qk={attn}")
+        print(f"ref: qk={attn}")
         attn = torch.softmax(attn, dim=-1)
-        #print(f"ref: sm(qk)={attn}")
+        print(f"ref: sm(qk)={attn}")
         out = torch.einsum("hqk,khd->qhd", attn, values)
-        #print(f"ref: sm(qk)v={out}")
+        print(f"ref: sm(qk)v={out}")
         out = out.view(num_q_heads, BLOCK_DMODEL)
         output[b].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize('B, H_Q, H_KV, D', [(1, 1, 1, 16), (1, 4, 4, 16), (4, 4, 4, 16), (4, 16, 16, 64),
-                                             (1, 2, 1, 16), (2, 2, 1, 16), (1, 8, 2, 16), (2, 8, 2, 16), (2, 16, 4, 16),
-                                             (4, 16, 4, 16), (4, 64, 4, 32), (32, 128, 2, 128), (64, 128, 2, 256),
-                                             (64, 128, 128, 16), (3, 4, 4, 32), (5, 64, 16, 1024)])
-def test_decode_attn_fwd(B, H_Q, H_KV, D):
+'''
+@pytest.mark.parametrize('B, H_Q, H_KV, D, SEQ_LEN', [(1, 1, 1, 16, 10), 
+                                             (1, 4, 4, 16, 10), 
+                                             (4, 4, 4, 16, 10), 
+                                             (4, 4, 4, 256, 10), 
+                                             (4, 16, 16, 64, 10),
+                                             (4, 16, 16, 64, 1024),
+                                             (1, 2, 1, 16, 2048), 
+                                             (2, 2, 1, 16, 1024), 
+                                             (1, 8, 2, 16, 1024), 
+                                             (2, 8, 2, 16, 1024), 
+                                             (2, 16, 4, 16, 512),
+                                             (4, 16, 4, 16, 512), 
+                                             (4, 64, 4, 32, 128), 
+                                             (32, 48, 8, 128, 128), 
+                                             (64, 48, 8, 128, 128),
+                                             (64, 64, 8, 128, 128), 
+                                             (3, 4, 4, 32, 256), 
+                                             (5, 64, 16, 128, 64)])
+'''
+@pytest.mark.parametrize('B, H_Q, H_KV, D, SEQ_LEN', [(32, 48, 8, 256, 2048 )]) 
+def test_decode_attn_fwd(B, H_Q, H_KV, D, SEQ_LEN):
     torch.set_printoptions(threshold=100000)
     dtype = torch.float16
-    seq_len = 5
+    seq_len =  SEQ_LEN
     total_tokens = B * seq_len
     sm_scale = 1.0 / (D**0.5)
 
@@ -710,8 +753,9 @@ def parse_args():
 
 
 def main():
-    args = parse_args()
-    run_benchmark(args)
+    #args = parse_args()
+    #run_benchmark(args)
+    test_decode_attn_fwd(1,2,1,16)
 
 
 if __name__ == "__main__":
