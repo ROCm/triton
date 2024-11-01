@@ -61,7 +61,7 @@
 // - Reset any of the *_STEP_VERSION defines to zero if the corresponding *_MAJOR_VERSION increases
 #define HIP_API_TABLE_STEP_VERSION 0
 #define HIP_COMPILER_API_TABLE_STEP_VERSION 0
-#define HIP_RUNTIME_API_TABLE_STEP_VERSION 3
+#define HIP_RUNTIME_API_TABLE_STEP_VERSION 9
 
 // HIP API interface
 typedef hipError_t (*t___hipPopCallConfiguration)(dim3* gridDim, dim3* blockDim, size_t* sharedMem,
@@ -722,6 +722,9 @@ typedef hipError_t (*t_hipStreamWriteValue32)(hipStream_t stream, void* ptr, uin
                                               unsigned int flags);
 typedef hipError_t (*t_hipStreamWriteValue64)(hipStream_t stream, void* ptr, uint64_t value,
                                               unsigned int flags);
+typedef hipError_t (*t_hipStreamBatchMemOp)(hipStream_t stream, unsigned int count,
+                                            hipStreamBatchMemOpParams* paramArray,
+                                            unsigned int flags);
 typedef hipError_t (*t_hipTexObjectCreate)(hipTextureObject_t* pTexObject,
                                            const HIP_RESOURCE_DESC* pResDesc,
                                            const HIP_TEXTURE_DESC* pTexDesc,
@@ -953,6 +956,17 @@ typedef hipError_t (*t_hipStreamBeginCaptureToGraph)(hipStream_t stream, hipGrap
                                                      size_t numDependencies,
                                                      hipStreamCaptureMode mode);
 typedef hipError_t (*t_hipGetFuncBySymbol)(hipFunction_t* functionPtr, const void* symbolPtr);
+typedef hipError_t (*t_hipDrvGraphAddMemFreeNode)(hipGraphNode_t* phGraphNode, hipGraph_t hGraph,
+                                  const hipGraphNode_t* dependencies, size_t numDependencies,
+                                  hipDeviceptr_t dptr);
+
+typedef hipError_t (*t_hipDrvGraphExecMemcpyNodeSetParams)(hipGraphExec_t hGraphExec,
+                                   hipGraphNode_t hNode, const HIP_MEMCPY3D* copyParams,
+                                   hipCtx_t ctx);
+
+typedef hipError_t (*t_hipDrvGraphExecMemsetNodeSetParams)(hipGraphExec_t hGraphExec,
+                                   hipGraphNode_t hNode, const HIP_MEMSET_NODE_PARAMS* memsetParams,
+                                   hipCtx_t ctx);
 typedef hipError_t (*t_hipSetValidDevices)(int* device_arr, int len);
 typedef hipError_t (*t_hipMemcpyAtoD)(hipDeviceptr_t dstDevice, hipArray_t srcArray,
                                       size_t srcOffset, size_t ByteCount);
@@ -970,8 +984,48 @@ typedef hipError_t (*t_hipMemcpy2DArrayToArray)(hipArray_t dst, size_t wOffsetDs
                                                 size_t wOffsetSrc, size_t hOffsetSrc, size_t width,
                                                 size_t height, hipMemcpyKind kind);
 
+
+typedef hipError_t (*t_hipGraphExecGetFlags)(hipGraphExec_t graphExec, unsigned long long* flags);
+typedef hipError_t (*t_hipGraphNodeSetParams)(hipGraphNode_t node, hipGraphNodeParams *nodeParams);
+typedef hipError_t (*t_hipGraphExecNodeSetParams)(hipGraphExec_t graphExec, hipGraphNode_t node,
+                                    hipGraphNodeParams* nodeParams);
+
+
+
+typedef hipError_t (*t_hipExternalMemoryGetMappedMipmappedArray)(
+    hipMipmappedArray_t* mipmap, hipExternalMemory_t extMem,
+    const hipExternalMemoryMipmappedArrayDesc* mipmapDesc);
+typedef hipError_t (*t_hipDrvGraphMemcpyNodeGetParams)(hipGraphNode_t hNode,
+                                        HIP_MEMCPY3D* nodeParams);
+
+typedef hipError_t (*t_hipDrvGraphMemcpyNodeSetParams)(hipGraphNode_t hNode,
+                                       const HIP_MEMCPY3D* nodeParams);
+
+typedef hipError_t (*t_hipExtHostAlloc)(void **ptr, size_t size,
+                                         unsigned int flags);
+
+typedef hipError_t (*t_hipDeviceGetTexture1DLinearMaxWidth)(size_t *maxWidthInElements,
+                                                            const hipChannelFormatDesc *fmtDesc,
+                                                            int device);
+
+typedef hipError_t (*t_hipGraphAddBatchMemOpNode)(hipGraphNode_t* phGraphNode, hipGraph_t hGraph,
+                                                  const hipGraphNode_t* dependencies,
+                                                  size_t numDependencies,
+                                                  const hipBatchMemOpNodeParams* nodeParams);
+typedef hipError_t (*t_hipGraphBatchMemOpNodeGetParams)(hipGraphNode_t hNode,
+                                                        hipBatchMemOpNodeParams* nodeParams_out);
+typedef hipError_t (*t_hipGraphBatchMemOpNodeSetParams)(hipGraphNode_t hNode,
+                                                        hipBatchMemOpNodeParams* nodeParams);
+typedef hipError_t (*t_hipGraphExecBatchMemOpNodeSetParams)(
+    hipGraphExec_t hGraphExec, hipGraphNode_t hNode, const hipBatchMemOpNodeParams* nodeParams);
+typedef hipError_t (*t_hipLaunchKernelExC)(const hipLaunchConfig_t* config, const void* fPtr,
+                                           void** args);
+typedef hipError_t (*t_hipDrvLaunchKernelEx)(const HIP_LAUNCH_CONFIG* config, hipFunction_t f,
+                                             void** params, void** extra);
+
 // HIP Compiler dispatch table
 struct HipCompilerDispatchTable {
+  // HIP_COMPILER_API_TABLE_STEP_VERSION == 0
   size_t size;
   t___hipPopCallConfiguration __hipPopCallConfiguration_fn;
   t___hipPushCallConfiguration __hipPushCallConfiguration_fn;
@@ -982,10 +1036,27 @@ struct HipCompilerDispatchTable {
   t___hipRegisterTexture __hipRegisterTexture_fn;
   t___hipRegisterVar __hipRegisterVar_fn;
   t___hipUnregisterFatBinary __hipUnregisterFatBinary_fn;
+
+  // DO NOT EDIT ABOVE!
+  // HIP_COMPILER_API_TABLE_STEP_VERSION == 1
+
+  // ******************************************************************************************* //
+  //
+  //                                            READ BELOW
+  //
+  // ******************************************************************************************* //
+  // KEEP AT END OF STRUCT
+  // 1) DO NOT REORDER ANY EXIST MEMBERS
+  // 2) INCREASE STEP VERSION DEFINE BEFORE ADDING NEW MEMBERS
+  // 3) INSERT NEW MEMBERS UNDER APPROPRIATE STEP VERSION COMMENT
+  // 4) GENERATE COMMENT FOR NEXT STEP VERSION
+  // 5) ADD "DO NOT EDIT ABOVE!" COMMENT
+  // ******************************************************************************************* //
 };
 
 // HIP API dispatch table
 struct HipDispatchTable {
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 0
   size_t size;
   t_hipApiName hipApiName_fn;
   t_hipArray3DCreate hipArray3DCreate_fn;
@@ -1433,8 +1504,14 @@ struct HipDispatchTable {
   t_hipExtGetLastError hipExtGetLastError_fn;
   t_hipTexRefGetBorderColor hipTexRefGetBorderColor_fn;
   t_hipTexRefGetArray hipTexRefGetArray_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 1
   t_hipGetProcAddress hipGetProcAddress_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 2
   t_hipStreamBeginCaptureToGraph hipStreamBeginCaptureToGraph_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 3
   t_hipGetFuncBySymbol hipGetFuncBySymbol_fn;
   t_hipSetValidDevices hipSetValidDevices_fn;
   t_hipMemcpyAtoD hipMemcpyAtoD_fn;
@@ -1443,4 +1520,50 @@ struct HipDispatchTable {
   t_hipMemcpyAtoHAsync hipMemcpyAtoHAsync_fn;
   t_hipMemcpyHtoAAsync hipMemcpyHtoAAsync_fn;
   t_hipMemcpy2DArrayToArray hipMemcpy2DArrayToArray_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 4
+  t_hipDrvGraphAddMemFreeNode hipDrvGraphAddMemFreeNode_fn;
+  t_hipDrvGraphExecMemcpyNodeSetParams hipDrvGraphExecMemcpyNodeSetParams_fn;
+  t_hipDrvGraphExecMemsetNodeSetParams hipDrvGraphExecMemsetNodeSetParams_fn;
+  t_hipGraphExecGetFlags hipGraphExecGetFlags_fn;
+  t_hipGraphNodeSetParams hipGraphNodeSetParams_fn;
+  t_hipGraphExecNodeSetParams hipGraphExecNodeSetParams_fn;
+  t_hipExternalMemoryGetMappedMipmappedArray hipExternalMemoryGetMappedMipmappedArray_fn;
+  t_hipDrvGraphMemcpyNodeGetParams hipDrvGraphMemcpyNodeGetParams_fn;
+  t_hipDrvGraphMemcpyNodeSetParams hipDrvGraphMemcpyNodeSetParams_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 5
+  t_hipExtHostAlloc hipExtHostAlloc_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 6
+  t_hipDeviceGetTexture1DLinearMaxWidth hipDeviceGetTexture1DLinearMaxWidth_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 7
+  t_hipStreamBatchMemOp hipStreamBatchMemOp_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 8
+  t_hipGraphAddBatchMemOpNode hipGraphAddBatchMemOpNode_fn;
+  t_hipGraphBatchMemOpNodeGetParams hipGraphBatchMemOpNodeGetParams_fn;
+  t_hipGraphBatchMemOpNodeSetParams hipGraphBatchMemOpNodeSetParams_fn;
+  t_hipGraphExecBatchMemOpNodeSetParams hipGraphExecBatchMemOpNodeSetParams_fn;
+
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION = 9
+  t_hipLaunchKernelExC hipLaunchKernelExC_fn;
+  t_hipDrvLaunchKernelEx hipDrvLaunchKernelEx_fn;
+
+  // DO NOT EDIT ABOVE!
+  // HIP_RUNTIME_API_TABLE_STEP_VERSION == 9
+
+  // ******************************************************************************************* //
+  //
+  //                                            READ BELOW
+  //
+  // ******************************************************************************************* //
+  // KEEP AT END OF STRUCT
+  // 1) DO NOT REORDER ANY EXIST MEMBERS
+  // 2) INCREASE STEP VERSION DEFINE BEFORE ADDING NEW MEMBERS
+  // 3) INSERT NEW MEMBERS UNDER APPROPRIATE STEP VERSION COMMENT
+  // 4) GENERATE COMMENT FOR NEXT STEP VERSION
+  // 5) ADD "DO NOT EDIT ABOVE!" COMMENT
+  // ******************************************************************************************* //
 };

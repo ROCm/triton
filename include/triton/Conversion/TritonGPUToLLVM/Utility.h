@@ -3,6 +3,7 @@
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -300,6 +301,8 @@ public:
 #define i16_ty rewriter.getIntegerType(16)
 #define i32_ty rewriter.getIntegerType(32)
 #define i64_ty rewriter.getIntegerType(64)
+#define i128_ty rewriter.getIntegerType(128)
+#define i256_ty rewriter.getIntegerType(256)
 #define ui32_ty rewriter.getIntegerType(32, false)
 #define ui64_ty rewriter.getIntegerType(64, false)
 #define f16_ty rewriter.getF16Type()
@@ -654,6 +657,7 @@ void finalizeTensorAtomicResults(Operation *op, RankedTensorType tensorTy,
                                  Value threadPred,
                                  const TargetInfoBase &targetInfo,
                                  const LLVMTypeConverter *typeConverter);
+
 } // namespace mlir
 
 #endif

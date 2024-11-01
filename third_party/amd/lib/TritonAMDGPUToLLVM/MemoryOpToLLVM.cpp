@@ -1,10 +1,14 @@
 #include "AsyncUtility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
+#include "TargetInfo.h"
+#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
@@ -51,76 +55,91 @@ private:
       return false;
     }
 
-    auto mfmaEnc = llvm::dyn_cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
-    if (!mfmaEnc) {
+    auto mfmaEnc =
+        llvm::dyn_cast_or_null<AMDMfmaEncodingAttr>(dotEnc.getParent());
+    auto wmmaEnc =
+        llvm::dyn_cast_or_null<AMDWmmaEncodingAttr>(dotEnc.getParent());
+    if ((!wmmaEnc) && (!mfmaEnc)) {
       return false;
     }
 
-    auto tilesPerWarp = mfmaEnc.getTilesPerWarp();
-    if (!mfmaEnc.hasUnitTilesPerWarp()) {
+    if (mfmaEnc && !mfmaEnc.hasUnitTilesPerWarp()) {
       return false;
     }
 
-    auto sharedEnc =
+    int rank = dstTy.getRank();
+    const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
+
+    auto swizzledEnc =
         dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(srcTy.getEncoding());
-    if (!sharedEnc)
+    auto paddedEnc =
+        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
+    if (!swizzledEnc && !paddedEnc)
       return false;
 
-    int rank = dstTy.getRank();
-    const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-    return kDim != sharedEnc.getOrder()[0];
+    bool out = kDim != (swizzledEnc ? swizzledEnc.getOrder()[0]
+                                    : paddedEnc.getOrder()[0]);
+    return out;
   }
 
-  bool checkKWidth(MemDescType srcTy, RankedTensorType dstTy) const {
-    // Single rate MFMA insts:
-    // fp16, bf16: mfma32x32x8, mfma16x16x16
-    // fp8, bf8: mfma32x32x16, mfma16x16x32
-    // int8: mfma32x32x16, mfma16x16x32
-    //
-    // Double rate MFMA insts:
-    // fp16, bf16: mfma32x32x16, mfma16x16x32
-    // fp8, bf8: mfma32x32x64, mfma16x16x128
-    // int8: mfma32x32x32, mfma16x16x64
-    //
-    // Check that kWidth of the dst dotOp layout is large enough to
-    // work with the transposed lds load instructions.
-    auto dotEnc = llvm::cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    auto mfmaEnc = llvm::cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
+  // bool checkPerformanceProperties(MemDescType srcTy,
+  //                                 RankedTensorType dstTy) const {
+  //   // The transposed load lowering logic assumes that double-rate MFMA (
+  //   // mfma32x32x16 and mfma16x16x32) instructions are used whenever
+  //   possible.
+  //   // This code verifies whether double-rate MFMA instructions are being
+  //   used
+  //   // and falls back to the default path if they are not. (Note: The
+  //   lowering
+  //   // logic for double-rate MFMA is the same as for single-rate (mfma32x32x8
+  //   // and mfma16x16x16) with kpack=2). This check should be removed once
+  //   // double-rate MFMA support is fully implemented in the compiler, leaving
+  //   // only an assertion. Currently, single-rate configurations with kpack=1
+  //   are
+  //   // still in use, so in such cases, we revert to the default lowering
+  //   logic
+  //   // without LDS transpose read instructions.
+  //   auto dotEnc =
+  //   llvm::dyn_cast_or_null<DotOperandEncodingAttr>(dstTy.getEncoding()); if
+  //   (!dotEnc) {
+  //     return false;
+  //   }
 
-    int rank = dstTy.getRank();
-    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
-                        .getIntOrFloatBitWidth();
-    int32_t kWidth = dotEnc.getKWidth();
-    const int32_t mDim = mfmaEnc.getMDim();
-    if (mDim != 32 && mDim != 16)
-      return false;
+  //   auto wmmaEnc =
+  //   llvm::dyn_cast_or_null<AMDWmmaEncodingAttr>(dotEnc.getParent()); auto
+  //   mfmaEnc =
+  //   llvm::dyn_cast_or_null<AMDMfmaEncodingAttr>(dotEnc.getParent()); int32_t
+  //   mDim = -1; if (wmmaEnc) {
+  //     return true;
+  //     //mDim = wmmaEnc.getMNKDimPerInstr()[0];
+  //   } else if (mfmaEnc) {
+  //     mDim = mfmaEnc.getMDim();
+  //   } else {
+  //     return false;
+  //   }
+  //   assert((mDim == 32 || mDim == 16) && "Invalid MFMA or WMMA instruction
+  //   dimension");
 
-    const int kFactor = 16 / bitwidth;
-    const int kSizeDoubleRateMfma32 = 16 * kFactor;
-    const int kSizeDoubleRateMfma16 = 32 * kFactor;
-    int largeTileThreshold =
-        (mDim == 32) ? kSizeDoubleRateMfma32 : kSizeDoubleRateMfma16;
+  //   int rank = dstTy.getRank();
+  //   auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
+  //                       .getIntOrFloatBitWidth();
+  //   int32_t kWidth = dotEnc.getKWidth();
 
-    // For FP8, wider MFMA instructions (scaled MFMA) have a k-dimension
-    // that is four times of regular MFMA instructions.
-    if (dstTy.getElementType().isFloat() && bitwidth == 8) {
-      largeTileThreshold *= 2;
-    }
+  //   const auto shape = dstTy.getShape();
+  //   const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
+  //   const bool isLargeTile = shape[kDim] >= largeTileThreshold;
 
-    const auto shape = dstTy.getShape();
-    const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-    const bool isLargeTile = shape[kDim] >= largeTileThreshold;
-
-    const int kWidthLargeTile = 8 * kFactor;
-    const int kWidthSmallTile = 4 * kFactor;
-    // For largeTile, i.e. double rated mfma is an option, it's accepted to
-    // have kWidth set for both double and single rated mfma
-    // For smallTile, it's only accepted to have kWidth set to single rate
-    // mfma. Smaller kWidth is not allowed to use transposed lds load.
-    return (isLargeTile &&
-            llvm::is_contained({kWidthLargeTile, kWidthSmallTile}, kWidth)) ||
-           (kWidth == kWidthSmallTile);
-  }
+  //   const int kWidthLargeTile = 8 * kFactor;
+  //   const int kWidthSmallTile = 4 * kFactor;
+  //   // For largeTile, i.e. double rated mfma is an option, it's accepted to
+  //   // have kWidth set for both double and single rated mfma
+  //   // For smallTile, it's only accepted to have kWidth set to single rate
+  //   // mfma. Smaller kWidth is not allowed to use transposed lds load.
+  //   return (isLargeTile &&
+  //           llvm::is_contained({kWidthLargeTile, kWidthSmallTile}, kWidth))
+  //           ||
+  //          (kWidth == kWidthSmallTile);
+  // }
 
   bool checkCurrentLimitation(Operation *localLoad,
                               RankedTensorType dstTy) const {
@@ -141,7 +160,6 @@ private:
                        RankedTensorType dstTy) const {
     auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
                         .getIntOrFloatBitWidth();
-
     // 1. Check GPU arch properties.
     if (!targetInfo.canUseLDSTransLoad(bitwidth)) {
       return false;
@@ -158,11 +176,34 @@ private:
     }
 
     // 4. Check kWidth
-    if (!checkKWidth(srcTy, dstTy)) {
-      return false;
-    }
+    // if (!checkKWidth(srcTy, dstTy)) {
+    //   return false;
+    // }
 
+    // 4. Check current limitations.
+    // if (bitwidth != 16) {
+    //   return false;
+    // }
     return true;
+  }
+
+  Value transLoadGfx1250(ConversionPatternRewriter &rewriter, Location loc,
+                         unsigned bitwidth, Type vecTy, Value vecAddr) const {
+
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    if (bitwidth == 16) {
+      return LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
+                                             "llvm.amdgcn.ds.load.tr16.b128",
+                                             {vecTy}, {vecAddr})
+          .getResult(0);
+    }
+    // This works for fp8 and fp4, because fp4 in reality does not exist.
+    auto l = LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
+                                             "llvm.amdgcn.ds.load.tr8.b64",
+                                             {vec_ty(i32_ty, 2)}, {vecAddr})
+                 .getResult(0);
+    l = b.bitcast(l, vec_ty(i8_ty, 8));
+    return l;
   }
 
   LogicalResult
@@ -179,7 +220,15 @@ private:
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
     auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
-    auto ldsTransLayout = chooseDsReadB64TrLayout(dotEnc, shape, llBitwidth);
+    if (auto wmmaLayout = llvm::cast<AMDWmmaEncodingAttr>(dotEnc.getParent())) {
+      int bitness = dotEnc.getOpIdx() == 0 ? wmmaLayout.getBitnessA()
+                                           : wmmaLayout.getBitnessB();
+      // We cannot use transpose linear layouts for mx data types, because the
+      // layouts don't match
+      if (bitness != 0)
+        return failure();
+    }
+    auto ldsTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, llBitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
     SmallVector<Value> outVals;
@@ -190,7 +239,14 @@ private:
         ldsTransLayout, srcTy, llvmElemTy,
         /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
         laneId, warpId, [&](VectorType vecTy, Value vecAddr) {
-          if constexpr (isPackedLoad) {
+          if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA5) {
+            auto vecVal =
+                transLoadGfx1250(rewriter, loc, bitwidth, vecTy, vecAddr);
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              outVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          } else if constexpr (isPackedLoad) {
             assert(bitwidth == 8);
             auto numElems = vecTy.getNumElements();
             auto numElemsI32 = (numElems * bitwidth / 32);
@@ -264,7 +320,7 @@ void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
   patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
       typeConverter, targetInfo, transBenefit);
-  patterns.add<
-      TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
-      typeConverter, targetInfo, benefit);
+  // patterns.add<
+  //     TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
+  //     typeConverter, targetInfo, benefit);
 }

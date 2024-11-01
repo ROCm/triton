@@ -2,11 +2,14 @@
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonAMDGPUToLLVM/GCNAsmFormat.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/PatternMatch.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 
 namespace tt = mlir::triton;
@@ -151,11 +154,11 @@ static Value shuffleCommonImpl(Location loc, RewriterBase &rewriter,
       }
     } else {
       if (!llvm::is_contained({ISAFamily::CDNA2, ISAFamily::CDNA3,
-                               ISAFamily::CDNA4, ISAFamily::RDNA3,
-                               ISAFamily::RDNA4},
+                               ISAFamily::CDNA4, ISAFamily::CDNA5,
+                               ISAFamily::RDNA3, ISAFamily::RDNA4},
                               isaFamily)) {
-        // DPP is only supported for CDNA2/CDNA3/CDNA4/RDNA3/RDNA4 right now, so
-        // we fallback to ds_swizzle for other architectures.
+        // DPP is only supported for CDNA2/CDNA3/CDNA4/CDNA5/RDNA3/RDNA4 right
+        // now, so we fallback to ds_swizzle for other architectures.
         //
         // This map facilates the butterfly shuffle pattern for a stride less
         // than 16. The pattern stride is the key of the map.
@@ -302,19 +305,67 @@ Value permute(Location loc, RewriterBase &rewriter, Value x, Value y,
   return op.getResult(0);
 }
 
+Value getGroupMask(RewriterBase &rewriter, Location loc, ArrayRef<Value> wid,
+                   ArrayRef<unsigned> ctasPerCga, ArrayRef<unsigned> splits,
+                   ArrayRef<unsigned> order) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  SmallVector<unsigned> strides = {ctasPerCga[order[0]], 1};
+  Value mask = b.i32_val(0);
+
+  int broadCastDim = 0;
+  int groupSize = 1;
+  for (unsigned dim = 0; dim < splits.size(); dim++) {
+    groupSize = ctasPerCga[dim] / splits[dim];
+    if (groupSize > 1) {
+      broadCastDim = dim;
+      break;
+    }
+  }
+  if (groupSize == 1)
+    return mask;
+
+  SmallVector<Value> coords = llvm::to_vector(wid);
+  for (int i = 0; i < groupSize; i++) {
+    coords[broadCastDim] = b.i32_val(i);
+    Value l = linearize(rewriter, loc, coords, ctasPerCga, order);
+    Value bit = b.shl(b.i32_val(1), l);
+    mask = b.xor_(mask, bit);
+  }
+  return mask;
+}
+
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                ProgramIDDim axis) {
-  Value blockId =
-      rewriter.create<::mlir::gpu::BlockIdOp>(loc, mlir::gpu::Dimension(axis));
-  return rewriter.create<arith::IndexCastOp>(loc, i32_ty, blockId);
+
+  assert(moduleOp);
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(moduleOp);
+  assert(numCTAs >= 1);
+  if (numCTAs == 1) {
+    Value blockId = rewriter.create<::mlir::gpu::BlockIdOp>(
+        loc, mlir::gpu::Dimension(axis));
+    return rewriter.create<arith::IndexCastOp>(loc, i32_ty, blockId);
+  }
+
+  static constexpr const char *intrinsics[] = {"llvm.amdgcn.cluster.id.x",
+                                               "llvm.amdgcn.cluster.id.y",
+                                               "llvm.amdgcn.cluster.id.z"};
+
+  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsics[int(axis)],
+                                         {rewriter.getI32Type()}, {})
+      .getResult(0);
 }
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, triton::CacheModifier cm,
-             bool forceNoAliasAsyncLoads) {
+             Value pred, Value falseVal, Value multicastMask,
+             triton::CacheModifier cm, bool forceNoAliasAsyncLoads) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  Type funcType = getFunctionType(elemTy, ValueRange({ptr, pred, falseVal}));
+  SmallVector values{ptr, pred, falseVal};
+  // if (multicastMask){
+  //   values.push_back(multicastMask);
+  // }
+  Type funcType = getFunctionType(elemTy, ValueRange(values));
   auto parent = ptr.getParentRegion()->getParentOfType<LLVM::LLVMFuncOp>();
   auto getLoadNameRaw = [](triton::CacheModifier cm) {
     switch (cm) {
@@ -337,8 +388,7 @@ Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
   auto mangledName = mangleFunc(funcName, funcType);
   LLVM::LLVMFuncOp funcOp =
       appendOrGetExternFuncOp(rewriter, parent, mangledName, funcType);
-  return LLVM::createLLVMCallOp(rewriter, loc, funcOp,
-                                ValueRange({ptr, pred, falseVal}))
+  return LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange(values))
       .getResult();
 }
 
@@ -635,9 +685,6 @@ bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
       return false;
     }
   }
-  // Additionally we could swizzle based on the warp dimension so we need to
-  // check that when all bases are divided by contig, none of the first
-  // (log2(warpSize) + 1) bits are set to 1
   assert(llvm::isPowerOf2_32(threadsPerWarp));
   assert(llvm::isPowerOf2_32(contig));
   unsigned mask = (threadsPerWarp * contig) - 1;
@@ -888,5 +935,4 @@ SmallVector<Value, 4> upcast8xMxfp4_SW(RewriterBase &rewriter, Operation *op,
 
   return {res_10, res_32, res_54, res_76};
 }
-
 } // namespace mlir::LLVM::AMD

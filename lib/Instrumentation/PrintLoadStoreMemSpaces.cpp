@@ -89,7 +89,6 @@ static PassPluginLibraryInfo getPassPluginInfo() {
   const auto callback = [](PassBuilder &PB) {
     PB.registerOptimizerLastEPCallback([&](ModulePassManager &MPM, auto, auto) {
       MPM.addPass(LoadStoreMemSpace());
-      return true;
     });
   };
 

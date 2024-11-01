@@ -25,6 +25,7 @@ private:
   SmallVector<Value> strides;
   SmallVector<Value> offsets;
   ArrayRef<int64_t> tensorShape;
+  ArrayRef<int32_t> order;
 
   // A cache to avoid generating the same offset with range
   DenseMap<unsigned, Value> cachedOffsetWithRange;
@@ -39,9 +40,10 @@ public:
   RewritedInfo(Value base, const SmallVector<Value> &shape,
                const SmallVector<Value> &strides,
                const SmallVector<Value> &offsets,
-               const ArrayRef<int64_t> &tensorShape)
+               const ArrayRef<int64_t> &tensorShape,
+               const ArrayRef<int32_t> &order)
       : base(base), shape(shape), strides(strides), offsets(offsets),
-        tensorShape(tensorShape) {
+        tensorShape(tensorShape), order(order) {
     assert(shape.size() == strides.size() && shape.size() == offsets.size() &&
            shape.size() == tensorShape.size());
   }
@@ -51,6 +53,7 @@ public:
   Value getOffset(unsigned i) { return offsets[i]; }
 
   SmallVector<Value> getOffsets() { return offsets; }
+  ArrayRef<int32_t> getOrder() { return order; }
 
   void setOffset(unsigned i, Value newOffset) {
     offsets[i] = newOffset;
@@ -188,6 +191,33 @@ public:
     Value constant = builder.create<arith::ConstantOp>(loc, attr);
     return builder.create<triton::SplatOp>(loc, otherTensorType, constant);
   }
+
+  // Value generateMakeTensorPtr(OpBuilder &builder, const Location &loc) {
+  //   SmallVector<int32_t> tensorShape32Bits;
+  //   for (int64_t s : tensorShape)
+  //     tensorShape32Bits.push_back(int32_t(s));
+
+  //   SmallVector<Value> strides32Bits;
+  //   for (Value stride : strides) {
+  //     Value i32Stride =
+  //         builder.create<arith::TruncIOp>(loc, builder.getI32Type(), stride);
+  //     strides32Bits.push_back(i32Stride);
+  //   }
+
+  //   SmallVector<Value> shape32Bits;
+  //   for (Value s : shape) {
+  //     Value s32 =
+  //         builder.create<arith::TruncIOp>(loc, builder.getI32Type(), s);
+  //     shape32Bits.push_back(s32);
+  //   }
+  //   SmallVector<Value> actualStride{strides[order[1]], strides[1-order[1]]};
+  //   SmallVector<Value> actualShape{shape32Bits[order[1]],
+  //   shape32Bits[1-order[1]]}; SmallVector<int32_t>
+  //   actualTensorShape{tensorShape32Bits[order[1]],
+  //   tensorShape32Bits[1-order[1]]}; return
+  //   builder.create<triton::MakeTensorDescOp>(
+  //       loc, base, actualShape, actualStride, actualTensorShape);
+  // }
 };
 
 } // namespace
@@ -224,13 +254,19 @@ public:
       oldOperands.append(operands.begin() + index + 1, operands.end());
     }
   }
-
+  // Operation *rewriteReinterpretTensorDecp(OpBuilder &builder,
+  // triton::ReinterpretTensorDescOp op, std::stack<Operation *> &eraser){
+  //   rewritedInfo[op.getResult()] = rewritedInfo[op.getRawDesc()];
+  //   eraser.push(op);
+  //   return nullptr;
+  // }
   Operation *rewriteMakeTensorPtrOp(OpBuilder &builder,
                                     triton::MakeTensorPtrOp op,
                                     std::stack<Operation *> &eraser) {
     // Save info for later use
     auto ptrType = cast<triton::PointerType>(op.getType());
     auto tensorType = cast<RankedTensorType>(ptrType.getPointeeType());
+    auto order = op.getOrder();
 
     // Cast I32 offsets into I64
     SmallVector<Value> i64Offsets;
@@ -243,7 +279,7 @@ public:
     // Save information
     rewritedInfo[op.getResult()] =
         RewritedInfo(op.getBase(), op.getShape(), op.getStrides(), i64Offsets,
-                     tensorType.getShape());
+                     tensorType.getShape(), op.getOrder());
 
     // Erase the original operation
     eraser.push(op);
@@ -275,6 +311,42 @@ public:
     eraser.push(op);
     return nullptr;
   }
+  // Operation *rewriteExperimentalLoadStoreOp(OpBuilder &builder, Operation
+  // *op,
+  //                                           std::stack<Operation *> &eraser)
+  //                                           {
+  //   auto ptr = op->getOperand(0);
+
+  // Get info from previous results
+  //   assert(rewritedInfo.count(ptr));
+  //   auto info = rewritedInfo[ptr];
+  //   auto newPtr = info.generateMakeTensorPtr(builder, op->getLoc());
+  //   eraser.push(op);
+  //   if (auto loadOp = dyn_cast<triton::ExperimentalDescriptorLoadOp>(op)) {
+  //     SmallVector<Value> offsets = info.getOffsets();
+  //     SmallVector<Value> offsets32Bit;
+  //     for (auto offset : offsets){
+  //       Value i32Offset=
+  //           builder.create<arith::TruncIOp>(op->getLoc(),
+  //           builder.getI32Type(), offset);
+  //       offsets32Bit.push_back(i32Offset);
+  //     }
+  //     ArrayRef<int32_t> order = info.getOrder();
+  //     SmallVector<Value> actualOffset{offsets32Bit[order[1]],
+  //     offsets32Bit[1-order[1]]}; Value newResult =
+  //     builder.create<triton::ExperimentalDescriptorLoadOp>(
+  //         op->getLoc(), loadOp.getType(), newPtr,
+  //         ValueRange{actualOffset}, loadOp.getCache(),
+  //         loadOp.getEvict());
+  //     loadOp->getResult(0).replaceAllUsesWith(newResult);
+  //   } else if (auto storeOp =
+  //                  dyn_cast<triton::ExperimentalDescriptorStoreOp>(op)) {
+  //     builder.create<triton::ExperimentalDescriptorStoreOp>(
+  //         op->getLoc(), newPtr, storeOp.getSrc(),
+  //         ValueRange{storeOp.getIndices()});
+  //   }
+  //   return nullptr;
+  // }
 
   Operation *rewriteLoadStoreOp(OpBuilder &builder, Operation *op,
                                 std::stack<Operation *> &eraser) {
@@ -496,10 +568,17 @@ public:
     // next one, simply return `nullptr`
     if (auto makeTensorPtrOp = dyn_cast<triton::MakeTensorPtrOp>(op)) {
       return rewriteMakeTensorPtrOp(builder, makeTensorPtrOp, eraser);
+      // } else if (auto reinterpretTensorDescOp=
+      // dyn_cast<triton::ReinterpretTensorDescOp>(op)){
+      //   return rewriteReinterpretTensorDecp(builder, reinterpretTensorDescOp,
+      //   eraser);
     } else if (auto advanceOp = dyn_cast<triton::AdvanceOp>(op)) {
       return rewriteAdvanceOp(builder, advanceOp, eraser);
     } else if (isa<triton::LoadOp>(op) || isa<triton::StoreOp>(op)) {
       return rewriteLoadStoreOp(builder, op, eraser);
+      // } else if (isa<triton::DescriptorLoadOp>(op) ||
+      //            isa<triton::DescriptorStoreOp>(op)) {
+      //   return rewriteExperimentalLoadStoreOp(builder, op, eraser);
     } else if (isa<scf::SCFDialect, cf::ControlFlowDialect>(op->getDialect())) {
       if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
         return rewriteIfOp(builder, ifOp, eraser);

@@ -11,6 +11,9 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
 
   // CDNA ISA cases
   switch (kind) {
+  case llvm::AMDGPU::GK_GFX1250:
+  case llvm::AMDGPU::GK_GFX1251:
+    return ISAFamily::CDNA5;
   case llvm::AMDGPU::GK_GFX950:
     return ISAFamily::CDNA4;
   case llvm::AMDGPU::GK_GFX942:
@@ -58,6 +61,7 @@ bool isCDNA(ISAFamily isaFamily) {
   case ISAFamily::CDNA2:
   case ISAFamily::CDNA3:
   case ISAFamily::CDNA4:
+  case ISAFamily::CDNA5:
     return true;
   default:
     break;

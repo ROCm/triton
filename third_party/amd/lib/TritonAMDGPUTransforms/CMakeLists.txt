@@ -1,9 +1,11 @@
 add_triton_library(TritonAMDGPUTransforms
   AccelerateAMDMatmul.cpp
   BlockPingpong.cpp
+  CoalesceAsyncCopy.cpp
   CanonicalizePointers.cpp
   CoalesceAsyncCopy.cpp
   ConvertToBufferOps.cpp
+  ConvertToTensorOps.cpp
   OptimizeEpilogue.cpp
   OptimizeDotOperands.cpp
   HoistLayoutConversions.cpp
@@ -15,7 +17,7 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
-
+  PlanCTA.cpp
   DEPENDS
   TritonAMDGPUIR
   TritonAMDGPUTransformsIncGen

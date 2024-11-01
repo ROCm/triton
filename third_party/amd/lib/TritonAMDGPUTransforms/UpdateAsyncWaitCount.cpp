@@ -1,3 +1,4 @@
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "amd/lib/TritonAMDGPUTransforms/Utility.h"
@@ -67,6 +68,9 @@ int getNumberOfLoadInstructions(Operation *op) {
       if (auto copyOp = llvm::dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(defOp)) {
         count += getNumberOfLoadInstructions(copyOp.getSrc().getType(),
                                              copyOp.getResult().getType());
+      } else if (auto copyOp = llvm::dyn_cast<
+                     triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(defOp)) {
+        count++;
       } else if (auto copyOp =
                      llvm::dyn_cast<amdgpu::BufferLoadToLocalOp>(defOp)) {
         auto srcTy = cast<RankedTensorType>(LLVM::AMD::getPointerTypeWithShape(
@@ -91,7 +95,8 @@ int getNumberOfLoadInstructions(Operation *op) {
 // waitcnt to represent the number of hardware instructions we are
 // interleaving with. This allows us to manually emit the waitcnt during
 // lowering.
-void updateWaitCount(ttg::AsyncWaitOp waitOp, RewriterBase &rewriter) {
+template <typename WaitType>
+void updateWaitCount(WaitType waitOp, RewriterBase &rewriter) {
   int waitCnt = std::numeric_limits<int>::max();
 
   // AsyncWait can await multiple tokens so we get the minimum from all
@@ -127,11 +132,23 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
 
     ModuleOp m = getOperation();
 
+    // gfx950 async wait
     SmallVector<ttg::AsyncWaitOp> waitOps;
     getOperation()->walk(
         [&](ttg::AsyncWaitOp waitOp) { waitOps.push_back(waitOp); });
 
     for (auto waitOp : waitOps) {
+      IRRewriter builder(waitOp->getContext());
+      updateWaitCount(waitOp, builder);
+    }
+
+    // gfx125x async wait
+    SmallVector<triton::amdgpu::AsyncTDMWait> waitTDMOps;
+    getOperation()->walk([&](triton::amdgpu::AsyncTDMWait waitOp) {
+      waitTDMOps.push_back(waitOp);
+    });
+
+    for (auto waitOp : waitTDMOps) {
       IRRewriter builder(waitOp->getContext());
       updateWaitCount(waitOp, builder);
     }

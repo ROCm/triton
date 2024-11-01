@@ -1,0 +1,1741 @@
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPULegalizerInfo.cpp b/llvm/lib/Target/AMDGPU/AMDGPULegalizerInfo.cpp
+index 0986ce9b86f3..d3c691401eb0 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPULegalizerInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPULegalizerInfo.cpp
+@@ -4530,6 +4530,13 @@ bool AMDGPULegalizerInfo::loadInputValue(
+       ArgDescriptor::createRegister(AMDGPU::TTMP6, 0x00F00000u);
+   const ArgDescriptor ClusterWorkGroupMaxFlatID =
+       ArgDescriptor::createRegister(AMDGPU::TTMP6, 0x0F000000u);
++  std::optional<std::array<unsigned, 3>> ClusterDims = MFI->getClusterDims();
++
++  auto LoadConstant = [&](unsigned N) {
++    B.buildConstant(DstReg, N);
++    return true;
++  };
++
+   if (ST.hasArchitectedSGPRs() &&
+       (AMDGPU::isCompute(CC) || CC == CallingConv::AMDGPU_Gfx)) {
+     switch (ArgType) {
+@@ -4552,31 +4559,43 @@ bool AMDGPULegalizerInfo::loadInputValue(
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_X:
++      if (ClusterDims && (*ClusterDims)[0] == 1)
++        return LoadConstant(0);
+       Arg = &ClusterWorkGroupIDX;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Y:
++      if (ClusterDims && (*ClusterDims)[1] == 1)
++        return LoadConstant(0);
+       Arg = &ClusterWorkGroupIDY;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Z:
++      if (ClusterDims && (*ClusterDims)[2] == 1)
++        return LoadConstant(0);
+       Arg = &ClusterWorkGroupIDZ;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_X:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[0] - 1);
+       Arg = &ClusterWorkGroupMaxIDX;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Y:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[1] - 1);
+       Arg = &ClusterWorkGroupMaxIDY;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Z:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[2] - 1);
+       Arg = &ClusterWorkGroupMaxIDZ;
+       ArgRC = &AMDGPU::SReg_32RegClass;
+       ArgTy = LLT::scalar(32);
+@@ -4598,8 +4617,7 @@ bool AMDGPULegalizerInfo::loadInputValue(
+     if (ArgType == AMDGPUFunctionArgInfo::KERNARG_SEGMENT_PTR) {
+       // The intrinsic may appear when we have a 0 sized kernarg segment, in which
+       // case the pointer argument may be missing and we use null.
+-      B.buildConstant(DstReg, 0);
+-      return true;
++      return LoadConstant(0);
+     }
+
+     // It's undefined behavior if a function marked with the amdgpu-no-*
+diff --git a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
+index 89fcf1740417..2ff17aacd204 100644
+--- a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
++++ b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
+@@ -2630,6 +2630,12 @@ SDValue SITargetLowering::getPreloadedValue(
+       ArgDescriptor::createRegister(AMDGPU::TTMP6, 0x00F00000u);
+   const ArgDescriptor ClusterWorkGroupMaxFlatID =
+       ArgDescriptor::createRegister(AMDGPU::TTMP6, 0x0F000000u);
++  std::optional<std::array<unsigned, 3>> ClusterDims = MFI.getClusterDims();
++
++  auto LoadConstant = [&](unsigned N) {
++    return DAG.getConstant(N, SDLoc(), VT);
++  };
++
+   if (Subtarget->hasArchitectedSGPRs() &&
+       (AMDGPU::isCompute(CC) || CC == CallingConv::AMDGPU_Gfx)) {
+     switch (PVID) {
+@@ -2652,31 +2658,43 @@ SDValue SITargetLowering::getPreloadedValue(
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_X:
++      if (ClusterDims && (*ClusterDims)[0] == 1)
++        return LoadConstant(0);
+       Reg = &ClusterWorkGroupIDX;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Y:
++      if (ClusterDims && (*ClusterDims)[1] == 1)
++        return LoadConstant(0);
+       Reg = &ClusterWorkGroupIDY;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Z:
++      if (ClusterDims && (*ClusterDims)[2] == 1)
++        return LoadConstant(0);
+       Reg = &ClusterWorkGroupIDZ;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_X:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[0] - 1);
+       Reg = &ClusterWorkGroupMaxIDX;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Y:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[1] - 1);
+       Reg = &ClusterWorkGroupMaxIDY;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+       break;
+     case AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Z:
++      if (ClusterDims)
++        return LoadConstant((*ClusterDims)[2] - 1);
+       Reg = &ClusterWorkGroupMaxIDZ;
+       RC = &AMDGPU::SReg_32RegClass;
+       Ty = LLT::scalar(32);
+diff --git a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.cpp b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.cpp
+index c4a9da9f17f5..74c1dd9b8fbe 100644
+--- a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.cpp
+@@ -171,6 +171,17 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
+     VGPRForAGPRCopy =
+         AMDGPU::VGPR_32RegClass.getRegister(ST.getMaxNumVGPRs(F) - 1);
+   }
++
++  if (F.hasFnAttribute("amdgpu-cluster-dims")) {
++    SmallVector<unsigned, 3> V =
++        AMDGPU::getIntegerVecAttribute(F, "amdgpu-cluster-dims", 3);
++    if (any_of(V, [](unsigned D) { return D == 0; })) {
++      LLVMContext &Ctx = F.getContext();
++      Ctx.emitError("invalid amdgpu-cluster-dims in " + F.getName());
++    } else {
++      ClusterDims = {V[0], V[1], V[2]};
++    }
++  }
+ }
+
+ MachineFunctionInfo *SIMachineFunctionInfo::clone(
+diff --git a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
+index b2f873c9f3b1..0c3f7731d51d 100644
+--- a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
++++ b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
+@@ -480,6 +480,9 @@ class SIMachineFunctionInfo final : public AMDGPUMachineFunction,
+   // Default/requested number of work groups for the function.
+   SmallVector<unsigned> MaxNumWorkGroups = {0, 0, 0};
+
++  // Requested cluster dimensions.
++  std::optional<std::array<unsigned, 3>> ClusterDims;
++
+ private:
+   unsigned NumUserSGPRs = 0;
+   unsigned NumSystemSGPRs = 0;
+@@ -1225,6 +1228,11 @@ public:
+   /// ResourceAnalsysis because it is difficult to derive this number from
+   /// MIR after LowerVGPREncoding.
+   std::optional<int> MaxPerWaveVGPR;
++
++  /// \returns Requested cluster dimensions.
++  std::optional<std::array<unsigned, 3>> getClusterDims() const {
++    return ClusterDims;
++  }
+ };
+
+ } // end namespace llvm
+diff --git a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.id.ll b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.id.ll
+index e1104e5146a0..a6bb92fd7c45 100644
+--- a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.id.ll
++++ b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.id.ll
+@@ -189,18 +189,545 @@ define amdgpu_kernel void @test_workgroup_id_x(ptr addrspace(1) %out) #1 {
+   ret void
+ }
+
++define amdgpu_kernel void @test_workgroup_id_x_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="1,2,2" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_id_x_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_id_x_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_x_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_id_x_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.id.x()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
+ define amdgpu_kernel void @test_workgroup_id_y(ptr addrspace(1) %out) #1 {
+ ; CHECK-UNKNOWN-LABEL: test_workgroup_id_y:
+ ; CHECK-UNKNOWN:       ; %bb.0:
+ ; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
+-; CHECK-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
++; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_id_y:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
++; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_y:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-G-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
++; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_id_y:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-G-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
++; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.id.y()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
++define amdgpu_kernel void @test_workgroup_id_y_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="2,1,2" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_id_y_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_id_y_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_y_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_id_y_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.id.y()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
++define amdgpu_kernel void @test_workgroup_id_z(ptr addrspace(1) %out) #1 {
++; CHECK-UNKNOWN-LABEL: test_workgroup_id_z:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
+ ; CHECK-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
+ ; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
+ ; CHECK-UNKNOWN-NEXT:    s_endpgm
+ ;
+-; CHECK-MESA3D-LABEL: test_workgroup_id_y:
++; CHECK-MESA3D-LABEL: test_workgroup_id_z:
+ ; CHECK-MESA3D:         .amd_kernel_code_t
+ ; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
+ ; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
+@@ -271,24 +798,24 @@ define amdgpu_kernel void @test_workgroup_id_y(ptr addrspace(1) %out) #1 {
+ ; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
+ ; CHECK-MESA3D-NEXT:  ; %bb.0:
+ ; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
+-; CHECK-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
+ ; CHECK-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
+ ; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
+ ; CHECK-MESA3D-NEXT:    s_endpgm
+ ;
+-; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_y:
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_z:
+ ; CHECK-G-UNKNOWN:       ; %bb.0:
+ ; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
+-; CHECK-G-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-G-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
+ ; CHECK-G-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
+ ; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
+ ; CHECK-G-UNKNOWN-NEXT:    s_endpgm
+ ;
+-; CHECK-G-MESA3D-LABEL: test_workgroup_id_y:
++; CHECK-G-MESA3D-LABEL: test_workgroup_id_z:
+ ; CHECK-G-MESA3D:         .amd_kernel_code_t
+ ; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
+ ; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
+@@ -359,29 +886,29 @@ define amdgpu_kernel void @test_workgroup_id_y(ptr addrspace(1) %out) #1 {
+ ; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
+ ; CHECK-G-MESA3D-NEXT:  ; %bb.0:
+ ; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
+-; CHECK-G-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40004
++; CHECK-G-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
+ ; CHECK-G-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
+ ; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
+ ; CHECK-G-MESA3D-NEXT:    s_endpgm
+-  %id = call i32 @llvm.amdgcn.cluster.workgroup.id.y()
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.id.z()
+   store i32 %id, ptr addrspace(1) %out
+   ret void
+ }
+
+-define amdgpu_kernel void @test_workgroup_id_z(ptr addrspace(1) %out) #1 {
+-; CHECK-UNKNOWN-LABEL: test_workgroup_id_z:
++define amdgpu_kernel void @test_workgroup_flat_id(ptr addrspace(1) %out) {
++; CHECK-UNKNOWN-LABEL: test_workgroup_flat_id:
+ ; CHECK-UNKNOWN:       ; %bb.0:
+ ; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
+-; CHECK-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
++; CHECK-UNKNOWN-NEXT:    s_getreg_b32 s2, hwreg(HW_REG_IB_STS2, 21, 4)
+ ; CHECK-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
+ ; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
+ ; CHECK-UNKNOWN-NEXT:    s_endpgm
+ ;
+-; CHECK-MESA3D-LABEL: test_workgroup_id_z:
++; CHECK-MESA3D-LABEL: test_workgroup_flat_id:
+ ; CHECK-MESA3D:         .amd_kernel_code_t
+ ; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
+ ; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
+@@ -452,24 +979,24 @@ define amdgpu_kernel void @test_workgroup_id_z(ptr addrspace(1) %out) #1 {
+ ; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
+ ; CHECK-MESA3D-NEXT:  ; %bb.0:
+ ; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
+-; CHECK-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
++; CHECK-MESA3D-NEXT:    s_getreg_b32 s2, hwreg(HW_REG_IB_STS2, 21, 4)
+ ; CHECK-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, s2
+ ; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
+ ; CHECK-MESA3D-NEXT:    s_endpgm
+ ;
+-; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_z:
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_flat_id:
+ ; CHECK-G-UNKNOWN:       ; %bb.0:
+ ; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
+-; CHECK-G-UNKNOWN-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
++; CHECK-G-UNKNOWN-NEXT:    s_getreg_b32 s2, hwreg(HW_REG_IB_STS2, 21, 4)
+ ; CHECK-G-UNKNOWN-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
+ ; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
+ ; CHECK-G-UNKNOWN-NEXT:    s_endpgm
+ ;
+-; CHECK-G-MESA3D-LABEL: test_workgroup_id_z:
++; CHECK-G-MESA3D-LABEL: test_workgroup_flat_id:
+ ; CHECK-G-MESA3D:         .amd_kernel_code_t
+ ; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
+ ; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
+@@ -540,11 +1067,184 @@ define amdgpu_kernel void @test_workgroup_id_z(ptr addrspace(1) %out) #1 {
+ ; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
+ ; CHECK-G-MESA3D-NEXT:  ; %bb.0:
+ ; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
+-; CHECK-G-MESA3D-NEXT:    s_bfe_u32 s2, ttmp6, 0x40008
++; CHECK-G-MESA3D-NEXT:    s_getreg_b32 s2, hwreg(HW_REG_IB_STS2, 21, 4)
+ ; CHECK-G-MESA3D-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+ ; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v1, 0 :: v_dual_mov_b32 v0, s2
+ ; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
+ ; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.flat.id()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
++define amdgpu_kernel void @test_workgroup_id_z_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="2,2,1" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_id_z_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_id_z_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_id_z_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v0, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_id_z_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 1
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_mov_b32_e32 v0, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v0, v0, s[0:1]
+ ; CHECK-G-MESA3D-NEXT:    s_endpgm
+   %id = call i32 @llvm.amdgcn.cluster.workgroup.id.z()
+   store i32 %id, ptr addrspace(1) %out
+diff --git a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.max.id.ll b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.max.id.ll
+index cc1dd5b6dbce..f899448d8d24 100644
+--- a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.max.id.ll
++++ b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cluster.workgroup.max.id.ll
+@@ -189,6 +189,179 @@ define amdgpu_kernel void @test_workgroup_max_id_x(ptr addrspace(1) %out) #1 {
+   ret void
+ }
+
++define amdgpu_kernel void @test_workgroup_max_id_x_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="5,6,7" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_max_id_x_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 4
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_max_id_x_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 4
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_max_id_x_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 4 :: v_dual_mov_b32 v1, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_max_id_x_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v0, 4 :: v_dual_mov_b32 v1, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.max.id.x()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
+ define amdgpu_kernel void @test_workgroup_max_id_y(ptr addrspace(1) %out) #1 {
+ ; CHECK-UNKNOWN-LABEL: test_workgroup_max_id_y:
+ ; CHECK-UNKNOWN:       ; %bb.0:
+@@ -370,6 +543,179 @@ define amdgpu_kernel void @test_workgroup_max_id_y(ptr addrspace(1) %out) #1 {
+   ret void
+ }
+
++define amdgpu_kernel void @test_workgroup_max_id_y_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="5,6,7" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_max_id_y_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 5
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_max_id_y_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 5
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_max_id_y_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 5 :: v_dual_mov_b32 v1, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_max_id_y_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v0, 5 :: v_dual_mov_b32 v1, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.max.id.y()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
+ define amdgpu_kernel void @test_workgroup_max_id_z(ptr addrspace(1) %out) #1 {
+ ; CHECK-UNKNOWN-LABEL: test_workgroup_max_id_z:
+ ; CHECK-UNKNOWN:       ; %bb.0:
+@@ -551,6 +897,179 @@ define amdgpu_kernel void @test_workgroup_max_id_z(ptr addrspace(1) %out) #1 {
+   ret void
+ }
+
++define amdgpu_kernel void @test_workgroup_max_id_z_optimized(ptr addrspace(1) %out) "amdgpu-cluster-dims"="5,6,7" {
++; CHECK-UNKNOWN-LABEL: test_workgroup_max_id_z_optimized:
++; CHECK-UNKNOWN:       ; %bb.0:
++; CHECK-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 6
++; CHECK-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-UNKNOWN-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-MESA3D-LABEL: test_workgroup_max_id_z_optimized:
++; CHECK-MESA3D:         .amd_kernel_code_t
++; CHECK-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     priority = 0
++; CHECK-MESA3D-NEXT:     float_mode = 240
++; CHECK-MESA3D-NEXT:     priv = 0
++; CHECK-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-MESA3D-NEXT:     debug_mode = 0
++; CHECK-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-MESA3D-NEXT:     enable_exception = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-MESA3D-NEXT:     private_element_size = 1
++; CHECK-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-MESA3D-NEXT:     call_convention = -1
++; CHECK-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-MESA3D-NEXT:  ; %bb.0:
++; CHECK-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-MESA3D-NEXT:    v_dual_mov_b32 v0, 0 :: v_dual_mov_b32 v1, 6
++; CHECK-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-MESA3D-NEXT:    global_store_b32 v0, v1, s[0:1]
++; CHECK-MESA3D-NEXT:    s_endpgm
++;
++; CHECK-G-UNKNOWN-LABEL: test_workgroup_max_id_z_optimized:
++; CHECK-G-UNKNOWN:       ; %bb.0:
++; CHECK-G-UNKNOWN-NEXT:    s_load_b64 s[0:1], s[4:5], 0x24
++; CHECK-G-UNKNOWN-NEXT:    v_dual_mov_b32 v0, 6 :: v_dual_mov_b32 v1, 0
++; CHECK-G-UNKNOWN-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-UNKNOWN-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-UNKNOWN-NEXT:    s_endpgm
++;
++; CHECK-G-MESA3D-LABEL: test_workgroup_max_id_z_optimized:
++; CHECK-G-MESA3D:         .amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:     amd_code_version_major = 1
++; CHECK-G-MESA3D-NEXT:     amd_code_version_minor = 2
++; CHECK-G-MESA3D-NEXT:     amd_machine_kind = 1
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_major = 12
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_minor = 5
++; CHECK-G-MESA3D-NEXT:     amd_machine_version_stepping = 0
++; CHECK-G-MESA3D-NEXT:     kernel_code_entry_byte_offset = 256
++; CHECK-G-MESA3D-NEXT:     kernel_code_prefetch_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     granulated_workitem_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     granulated_wavefront_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     priority = 0
++; CHECK-G-MESA3D-NEXT:     float_mode = 240
++; CHECK-G-MESA3D-NEXT:     priv = 0
++; CHECK-G-MESA3D-NEXT:     enable_dx10_clamp = 0
++; CHECK-G-MESA3D-NEXT:     debug_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_ieee_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_wgp_mode = 0
++; CHECK-G-MESA3D-NEXT:     enable_mem_ordered = 1
++; CHECK-G-MESA3D-NEXT:     enable_fwd_progress = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_wave_byte_offset = 0
++; CHECK-G-MESA3D-NEXT:     user_sgpr_count = 8
++; CHECK-G-MESA3D-NEXT:     enable_trap_handler = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_x = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_y = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_id_z = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_workgroup_info = 0
++; CHECK-G-MESA3D-NEXT:     enable_vgpr_workitem_id = 2
++; CHECK-G-MESA3D-NEXT:     enable_exception_msb = 0
++; CHECK-G-MESA3D-NEXT:     granulated_lds_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_exception = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_buffer = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_queue_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_kernarg_segment_ptr = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_dispatch_id = 1
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_flat_scratch_init = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_private_segment_size = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_x = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_y = 0
++; CHECK-G-MESA3D-NEXT:     enable_sgpr_grid_workgroup_count_z = 0
++; CHECK-G-MESA3D-NEXT:     enable_wavefront_size32 = 1
++; CHECK-G-MESA3D-NEXT:     enable_ordered_append_gds = 0
++; CHECK-G-MESA3D-NEXT:     private_element_size = 1
++; CHECK-G-MESA3D-NEXT:     is_ptr64 = 1
++; CHECK-G-MESA3D-NEXT:     is_dynamic_callstack = 0
++; CHECK-G-MESA3D-NEXT:     is_debug_enabled = 0
++; CHECK-G-MESA3D-NEXT:     is_xnack_enabled = 0
++; CHECK-G-MESA3D-NEXT:     workitem_private_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     workgroup_group_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     gds_segment_byte_size = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_byte_size = 24
++; CHECK-G-MESA3D-NEXT:     workgroup_fbarrier_count = 0
++; CHECK-G-MESA3D-NEXT:     wavefront_sgpr_count = 6
++; CHECK-G-MESA3D-NEXT:     workitem_vgpr_count = 2
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_vgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_first = 0
++; CHECK-G-MESA3D-NEXT:     reserved_sgpr_count = 0
++; CHECK-G-MESA3D-NEXT:     debug_wavefront_private_segment_offset_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     debug_private_segment_buffer_sgpr = 0
++; CHECK-G-MESA3D-NEXT:     kernarg_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     group_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     private_segment_alignment = 4
++; CHECK-G-MESA3D-NEXT:     wavefront_size = 5
++; CHECK-G-MESA3D-NEXT:     call_convention = -1
++; CHECK-G-MESA3D-NEXT:     runtime_loader_kernel_symbol = 0
++; CHECK-G-MESA3D-NEXT:    .end_amd_kernel_code_t
++; CHECK-G-MESA3D-NEXT:  ; %bb.0:
++; CHECK-G-MESA3D-NEXT:    s_load_b64 s[0:1], s[4:5], 0x0
++; CHECK-G-MESA3D-NEXT:    v_dual_mov_b32 v0, 6 :: v_dual_mov_b32 v1, 0
++; CHECK-G-MESA3D-NEXT:    s_wait_kmcnt 0x0
++; CHECK-G-MESA3D-NEXT:    global_store_b32 v1, v0, s[0:1]
++; CHECK-G-MESA3D-NEXT:    s_endpgm
++  %id = call i32 @llvm.amdgcn.cluster.workgroup.max.id.z()
++  store i32 %id, ptr addrspace(1) %out
++  ret void
++}
++
+ attributes #0 = { nounwind readnone }
+ attributes #1 = { nounwind }
+
+diff --git a/llvm/test/CodeGen/AMDGPU/lower-work-group-id-intrinsics.ll b/llvm/test/CodeGen/AMDGPU/lower-work-group-id-intrinsics.ll
+index 45192df83760..3b035bbb4b36 100644
+--- a/llvm/test/CodeGen/AMDGPU/lower-work-group-id-intrinsics.ll
++++ b/llvm/test/CodeGen/AMDGPU/lower-work-group-id-intrinsics.ll
+@@ -104,8 +104,177 @@ define amdgpu_cs void @_amdgpu_cs_main() {
+ ; GFX1250-GISEL-NEXT:    s_bfe_u32 s4, ttmp6, 0x40008
+ ; GFX1250-GISEL-NEXT:    s_mul_i32 s2, s3, s2
+ ; GFX1250-GISEL-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
+-; GFX1250-GISEL-NEXT:    s_add_co_i32 s4, s4, s2
+-; GFX1250-GISEL-NEXT:    s_cmp_eq_u32 s5, 0
++; GFX1250-GISEL-NEXT:    s_add_co_i32 s5, s5, s3
++; GFX1250-GISEL-NEXT:    s_cmp_eq_u32 s2, 0
++; GFX1250-GISEL-NEXT:    s_cselect_b32 s2, s4, s5
++; GFX1250-GISEL-NEXT:    v_dual_mov_b32 v0, s0 :: v_dual_mov_b32 v1, s1
++; GFX1250-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX1250-GISEL-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX1250-GISEL-NEXT:    s_endpgm
++.entry:
++  %idx = call i32 @llvm.amdgcn.workgroup.id.x()
++  %idy = call i32 @llvm.amdgcn.workgroup.id.y()
++  %idz = call i32 @llvm.amdgcn.workgroup.id.z()
++  %ielemx = insertelement <3 x i32> undef, i32 %idx, i64 0
++  %ielemy = insertelement <3 x i32> %ielemx, i32 %idy, i64 1
++  %ielemz = insertelement <3 x i32> %ielemy, i32 %idz, i64 2
++  call void @llvm.amdgcn.raw.ptr.buffer.store.v3i32(<3 x i32> %ielemz, ptr addrspace(8) undef, i32 0, i32 0, i32 0)
++  ret void
++}
++
++define amdgpu_cs void @workgroup_id_no_clusters() "amdgpu-cluster-dims"="1,1,1" {
++; GFX9-SDAG-LABEL: workgroup_id_no_clusters:
++; GFX9-SDAG:       ; %bb.0: ; %.entry
++; GFX9-SDAG-NEXT:    s_lshr_b32 s0, ttmp7, 16
++; GFX9-SDAG-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v0, ttmp9
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v1, s1
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v2, s0
++; GFX9-SDAG-NEXT:    buffer_store_dwordx3 v[0:2], off, s[0:3], 0
++; GFX9-SDAG-NEXT:    s_endpgm
++;
++; GFX9-GISEL-LABEL: workgroup_id_no_clusters:
++; GFX9-GISEL:       ; %bb.0: ; %.entry
++; GFX9-GISEL-NEXT:    s_mov_b32 s0, ttmp9
++; GFX9-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX9-GISEL-NEXT:    s_lshr_b32 s2, ttmp7, 16
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v0, s0
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v1, s1
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX9-GISEL-NEXT:    buffer_store_dwordx3 v[0:2], off, s[0:3], 0
++; GFX9-GISEL-NEXT:    s_endpgm
++;
++; GFX12-SDAG-LABEL: workgroup_id_no_clusters:
++; GFX12-SDAG:       ; %bb.0: ; %.entry
++; GFX12-SDAG-NEXT:    s_and_b32 s0, ttmp7, 0xffff
++; GFX12-SDAG-NEXT:    s_lshr_b32 s1, ttmp7, 16
++; GFX12-SDAG-NEXT:    v_dual_mov_b32 v0, ttmp9 :: v_dual_mov_b32 v1, s0
++; GFX12-SDAG-NEXT:    v_mov_b32_e32 v2, s1
++; GFX12-SDAG-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX12-SDAG-NEXT:    s_endpgm
++;
++; GFX12-GISEL-LABEL: workgroup_id_no_clusters:
++; GFX12-GISEL:       ; %bb.0: ; %.entry
++; GFX12-GISEL-NEXT:    s_mov_b32 s0, ttmp9
++; GFX12-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX12-GISEL-NEXT:    s_lshr_b32 s2, ttmp7, 16
++; GFX12-GISEL-NEXT:    v_dual_mov_b32 v0, s0 :: v_dual_mov_b32 v1, s1
++; GFX12-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX12-GISEL-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX12-GISEL-NEXT:    s_endpgm
++;
++; GFX1250-SDAG-LABEL: workgroup_id_no_clusters:
++; GFX1250-SDAG:       ; %bb.0: ; %.entry
++; GFX1250-SDAG-NEXT:    s_and_b32 s0, ttmp7, 0xffff
++; GFX1250-SDAG-NEXT:    s_lshr_b32 s1, ttmp7, 16
++; GFX1250-SDAG-NEXT:    v_dual_mov_b32 v0, ttmp9 :: v_dual_mov_b32 v1, s0
++; GFX1250-SDAG-NEXT:    v_mov_b32_e32 v2, s1
++; GFX1250-SDAG-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX1250-SDAG-NEXT:    s_endpgm
++;
++; GFX1250-GISEL-LABEL: workgroup_id_no_clusters:
++; GFX1250-GISEL:       ; %bb.0: ; %.entry
++; GFX1250-GISEL-NEXT:    s_mov_b32 s0, ttmp9
++; GFX1250-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX1250-GISEL-NEXT:    s_lshr_b32 s2, ttmp7, 16
++; GFX1250-GISEL-NEXT:    v_dual_mov_b32 v0, s0 :: v_dual_mov_b32 v1, s1
++; GFX1250-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX1250-GISEL-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX1250-GISEL-NEXT:    s_endpgm
++.entry:
++  %idx = call i32 @llvm.amdgcn.workgroup.id.x()
++  %idy = call i32 @llvm.amdgcn.workgroup.id.y()
++  %idz = call i32 @llvm.amdgcn.workgroup.id.z()
++  %ielemx = insertelement <3 x i32> undef, i32 %idx, i64 0
++  %ielemy = insertelement <3 x i32> %ielemx, i32 %idy, i64 1
++  %ielemz = insertelement <3 x i32> %ielemy, i32 %idz, i64 2
++  call void @llvm.amdgcn.raw.ptr.buffer.store.v3i32(<3 x i32> %ielemz, ptr addrspace(8) undef, i32 0, i32 0, i32 0)
++  ret void
++}
++
++define amdgpu_cs void @workgroup_id_optimized() "amdgpu-cluster-dims"="2,3,4" {
++; GFX9-SDAG-LABEL: workgroup_id_optimized:
++; GFX9-SDAG:       ; %bb.0: ; %.entry
++; GFX9-SDAG-NEXT:    s_lshr_b32 s0, ttmp7, 16
++; GFX9-SDAG-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v0, ttmp9
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v1, s1
++; GFX9-SDAG-NEXT:    v_mov_b32_e32 v2, s0
++; GFX9-SDAG-NEXT:    buffer_store_dwordx3 v[0:2], off, s[0:3], 0
++; GFX9-SDAG-NEXT:    s_endpgm
++;
++; GFX9-GISEL-LABEL: workgroup_id_optimized:
++; GFX9-GISEL:       ; %bb.0: ; %.entry
++; GFX9-GISEL-NEXT:    s_mov_b32 s0, ttmp9
++; GFX9-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX9-GISEL-NEXT:    s_lshr_b32 s2, ttmp7, 16
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v0, s0
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v1, s1
++; GFX9-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX9-GISEL-NEXT:    buffer_store_dwordx3 v[0:2], off, s[0:3], 0
++; GFX9-GISEL-NEXT:    s_endpgm
++;
++; GFX12-SDAG-LABEL: workgroup_id_optimized:
++; GFX12-SDAG:       ; %bb.0: ; %.entry
++; GFX12-SDAG-NEXT:    s_and_b32 s0, ttmp7, 0xffff
++; GFX12-SDAG-NEXT:    s_lshr_b32 s1, ttmp7, 16
++; GFX12-SDAG-NEXT:    v_dual_mov_b32 v0, ttmp9 :: v_dual_mov_b32 v1, s0
++; GFX12-SDAG-NEXT:    v_mov_b32_e32 v2, s1
++; GFX12-SDAG-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX12-SDAG-NEXT:    s_endpgm
++;
++; GFX12-GISEL-LABEL: workgroup_id_optimized:
++; GFX12-GISEL:       ; %bb.0: ; %.entry
++; GFX12-GISEL-NEXT:    s_mov_b32 s0, ttmp9
++; GFX12-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX12-GISEL-NEXT:    s_lshr_b32 s2, ttmp7, 16
++; GFX12-GISEL-NEXT:    v_dual_mov_b32 v0, s0 :: v_dual_mov_b32 v1, s1
++; GFX12-GISEL-NEXT:    v_mov_b32_e32 v2, s2
++; GFX12-GISEL-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX12-GISEL-NEXT:    s_endpgm
++;
++; GFX1250-SDAG-LABEL: workgroup_id_optimized:
++; GFX1250-SDAG:       ; %bb.0: ; %.entry
++; GFX1250-SDAG-NEXT:    s_lshl_b32 s0, ttmp9, 1
++; GFX1250-SDAG-NEXT:    s_and_b32 s1, ttmp6, 15
++; GFX1250-SDAG-NEXT:    s_and_b32 s2, ttmp7, 0xffff
++; GFX1250-SDAG-NEXT:    s_add_co_i32 s1, s1, s0
++; GFX1250-SDAG-NEXT:    s_mul_i32 s0, s2, 3
++; GFX1250-SDAG-NEXT:    s_bfe_u32 s3, ttmp6, 0x40004
++; GFX1250-SDAG-NEXT:    s_lshr_b32 s4, ttmp7, 16
++; GFX1250-SDAG-NEXT:    s_add_co_i32 s3, s3, s0
++; GFX1250-SDAG-NEXT:    s_lshl_b32 s0, s4, 2
++; GFX1250-SDAG-NEXT:    s_bfe_u32 s5, ttmp6, 0x40008
++; GFX1250-SDAG-NEXT:    s_getreg_b32 s6, hwreg(HW_REG_IB_STS2, 6, 4)
++; GFX1250-SDAG-NEXT:    s_add_co_i32 s5, s5, s0
++; GFX1250-SDAG-NEXT:    s_cmp_eq_u32 s6, 0
++; GFX1250-SDAG-NEXT:    s_cselect_b32 s0, s4, s5
++; GFX1250-SDAG-NEXT:    s_cselect_b32 s1, ttmp9, s1
++; GFX1250-SDAG-NEXT:    s_cselect_b32 s2, s2, s3
++; GFX1250-SDAG-NEXT:    s_delay_alu instid0(SALU_CYCLE_1)
++; GFX1250-SDAG-NEXT:    v_dual_mov_b32 v0, s1 :: v_dual_mov_b32 v1, s2
++; GFX1250-SDAG-NEXT:    v_mov_b32_e32 v2, s0
++; GFX1250-SDAG-NEXT:    buffer_store_b96 v[0:2], off, s[0:3], null
++; GFX1250-SDAG-NEXT:    s_endpgm
++;
++; GFX1250-GISEL-LABEL: workgroup_id_optimized:
++; GFX1250-GISEL:       ; %bb.0: ; %.entry
++; GFX1250-GISEL-NEXT:    s_and_b32 s0, ttmp6, 15
++; GFX1250-GISEL-NEXT:    s_getreg_b32 s2, hwreg(HW_REG_IB_STS2, 6, 4)
++; GFX1250-GISEL-NEXT:    s_lshl1_add_u32 s0, ttmp9, s0
++; GFX1250-GISEL-NEXT:    s_cmp_eq_u32 s2, 0
++; GFX1250-GISEL-NEXT:    s_cselect_b32 s0, ttmp9, s0
++; GFX1250-GISEL-NEXT:    s_and_b32 s1, ttmp7, 0xffff
++; GFX1250-GISEL-NEXT:    s_bfe_u32 s3, ttmp6, 0x40004
++; GFX1250-GISEL-NEXT:    s_mul_i32 s4, s1, 3
++; GFX1250-GISEL-NEXT:    s_delay_alu instid0(SALU_CYCLE_1) | instskip(SKIP_4) | instid1(SALU_CYCLE_1)
++; GFX1250-GISEL-NEXT:    s_add_co_i32 s3, s3, s4
++; GFX1250-GISEL-NEXT:    s_cmp_eq_u32 s2, 0
++; GFX1250-GISEL-NEXT:    s_cselect_b32 s1, s1, s3
++; GFX1250-GISEL-NEXT:    s_lshr_b32 s3, ttmp7, 16
++; GFX1250-GISEL-NEXT:    s_bfe_u32 s4, ttmp6, 0x40008
++; GFX1250-GISEL-NEXT:    s_lshl2_add_u32 s4, s3, s4
++; GFX1250-GISEL-NEXT:    s_cmp_eq_u32 s2, 0
+ ; GFX1250-GISEL-NEXT:    s_cselect_b32 s2, s3, s4
+ ; GFX1250-GISEL-NEXT:    v_dual_mov_b32 v0, s0 :: v_dual_mov_b32 v1, s1
+ ; GFX1250-GISEL-NEXT:    v_mov_b32_e32 v2, s2

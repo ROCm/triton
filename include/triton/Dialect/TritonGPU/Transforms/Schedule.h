@@ -165,7 +165,7 @@ public:
 
   LLVM_DUMP_METHOD void dump();
 
-private:
+public:
   int numStages = 0;
 };
 

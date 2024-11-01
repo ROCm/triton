@@ -556,4 +556,12 @@ void ConcatOp::getCanonicalizationPatterns(mlir::RewritePatternSet &patterns,
   patterns.add(foldConcatOpFromSingleSource);
 }
 
+void AsyncTDMCopyGlobalToLocalOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getDescPtrMutable(),
+                       mlir::triton::GlobalMemory::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getResultMutable(),
+                       mlir::triton::gpu::SharedMemory::get());
+}
 } // namespace mlir::triton::amdgpu

@@ -33,6 +33,7 @@ class HIPOptions:
     waves_per_eu: int = 1
     num_stages: int = 2
     num_ctas: int = 1
+    global_prefetch: int = 0
     extern_libs: dict = None
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
@@ -189,7 +190,8 @@ class HIPBackend(BaseBackend):
         pm.enable_debug()
         passes.common.add_inliner(pm)
         passes.ttir.add_rewrite_tensor_pointer(pm)
-        passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
+        if options.arch not in {"gfx1250", "gfx1251"}:
+            passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
@@ -210,9 +212,17 @@ class HIPBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttgpuir.add_coalesce(pm)
+        if amd.has_cluster_feature(options.arch):
+            cluster_info = amd.ClusterInfo()
+            if options.cluster_dims is not None:
+                cluster_info.clusterDimX = options.cluster_dims[0]
+                cluster_info.clusterDimY = options.cluster_dims[1]
+                cluster_info.clusterDimZ = options.cluster_dims[2]
+            amd.passes.ttgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
+
         passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
         amd.passes.ttgpuir.add_optimize_dot_operands(pm, options.arch)
@@ -223,18 +233,19 @@ class HIPBackend(BaseBackend):
         passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
 
-        global_prefetch = knobs.amd.global_prefetch
+        global_prefetch = options.global_prefetch
         local_prefetch = knobs.amd.local_prefetch
-        use_async_copy = knobs.amd.use_async_copy
+        use_async_copy = True  #knobs.amd.use_async_copy
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
 
         amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
                                                use_block_pingpong)
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
+        amd.passes.ttgpuir.add_convert_to_tensor_ops(pm)
         passes.common.add_canonicalizer(pm)
-        if options.schedule_hint.lower() != "none":
-            amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
+        # if options.schedule_hint.lower() != "none":
+        #     amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
         if is_in_thread_transpose_enabled(options.arch):
@@ -256,6 +267,8 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
+        if amd.has_cluster_feature(options.arch):
+            metadata["cluster_dims"] = (cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
         return mod
 
     @staticmethod
@@ -323,7 +336,7 @@ class HIPBackend(BaseBackend):
         if not knobs.compilation.disable_line_info:
             passes.llvmir.add_di_scope(pm)
 
-        amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)
+        amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, options.arch, __HIP_FTZ)
         pm.run(mod)
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
@@ -367,7 +380,7 @@ class HIPBackend(BaseBackend):
         # Hint the compiler that we'd like the firmware to set the kernel arguments
         # to user SGPRs so that the kernel does not need to s_load its arguments
         # from memory.
-        amd.set_all_fn_arg_inreg(fns[0])
+        # amd.set_all_fn_arg_inreg(fns[0])
 
         if knobs.compilation.enable_asan:
             default_libdir = Path(__file__).parent / 'lib'

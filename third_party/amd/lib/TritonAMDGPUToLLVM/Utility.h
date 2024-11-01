@@ -43,13 +43,17 @@ Value permute(Location loc, RewriterBase &rewriter, Value a, Value b,
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                ProgramIDDim axis);
 
+Value getGroupMask(RewriterBase &rewriter, Location loc, ArrayRef<Value> wid,
+                   ArrayRef<unsigned> ctasPerCga, ArrayRef<unsigned> splits,
+                   ArrayRef<unsigned> order);
+
 // Loads from shared or global memory with predication.
 // `otherElems` is used to mask out the elements that are not loaded
 // forceNoAliasAsyncLoads=true adds alias information to the llvm.load to
 // signal its not aliasing with any AsyncCopyGlobalToLocal/BufferLoadToLocal to
 // avoid conservative waits. See `addLocalLoadNoAliasScope` for more details
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal,
+             Value pred, Value falseVal, Value multicastMask = {},
              triton::CacheModifier cm = triton::CacheModifier::NONE,
              bool forceNoAliasAsyncLoads = false);
 
@@ -191,6 +195,16 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
                                                /*srcLoHiSel=*/true));
   return results;
 }
+
+// Returns true if we can perform coalesced write from the source encoding to
+// the destination encoding.
+bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
+                                      RankedTensorType srcTy,
+                                      triton::gpu::MemDescType dstTy,
+                                      unsigned vectorSize);
+
+bool isUsedByDotScaledOp(Operation *op);
+
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_

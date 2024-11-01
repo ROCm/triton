@@ -18,6 +18,7 @@ class NVMMASharedEncodingAttr;
 class TensorOrMemDesc;
 class MemDescType;
 class CTALayoutAttr;
+class AMDWmmaEncodingAttr;
 
 // - BlockedEncodingAttrs have the following input dimensions.
 //
@@ -112,8 +113,21 @@ LinearLayout chooseShemLayoutForRegToRegConversion(
 
 // The primary goal of this function is to efficiently load 2D tiles of a
 // tensor from shared memory using the `ds_read_tr` instruction for AMD GPUs.
-LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
-                                     int32_t elemBitWidth);
+LinearLayout chooseDsReadB64Tr16Layout(Attribute enc, ArrayRef<int64_t> shape,
+                                       int32_t elemBitWidth);
+
+// // Create LinearLayout for mxfp4 and mxfp8 operand in scaled mfma.
+// // For mxfp4, we use dot layout directly. Mxfp8 is not covered by dot
+// // layout, so we need to manually create linear layout for it.
+// LinearLayout
+// chooseScaledMfmaOperandLayout(AMDMfmaEncodingAttr mfmaEnc, int kWidth,
+//                               int dotOperandIdx, ScaleDotElemType elemType,
+//                               llvm::ArrayRef<int64_t> dotOperandShape);
+// LinearLayout
+// chooseScaledWmmaOperandLayout(AMDWmmaEncodingAttr wmmaEnc, int kWidth,
+//                               int dotOperandIdx, ScaleDotElemType elemType,
+//                               llvm::ArrayRef<int64_t> dotOperandShape);
+// >>>>>>> d2d63f4783 (Enable mixed data types on mi400)
 
 LinearLayout getScaleTMEMStoreLinearLayout(RankedTensorType scaleType,
                                            int numWarps);
@@ -134,6 +148,11 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          unsigned mfmaMDim,
                                          ArrayRef<unsigned> tilesPerWarp,
                                          ArrayRef<unsigned> warpsPerCTA);
+
+LinearLayout chooseScaledWmmaScaleLayout(
+    MLIRContext *ctx, int dotOperandIdx,
+    const std::vector<std::vector<int32_t>> &dotOperandWarpBasis,
+    ArrayRef<int64_t> dotOperandShape);
 
 // Create LinearLayout for nvidia mma tile.
 LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape,

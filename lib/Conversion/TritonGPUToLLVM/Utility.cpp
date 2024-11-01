@@ -821,6 +821,7 @@ bool emitTransferBetweenRegistersAndShared(
                                     smemOffset, /*offsetInBytes=*/false);
       smemOffset = b.add(smemOffset, padOffset);
     }
+
     auto vecAddr = b.gep(smemBase.getType(), elemLlvmTy, smemBase, smemOffset,
                          LLVM::GEPNoWrapFlags::inbounds);
     vecAddrVec.push_back(vecAddr);
@@ -1036,6 +1037,18 @@ Value createConstantI32(Location loc, OpBuilder &rewriter, int32_t v) {
 
 Value createConstantI64(Location loc, OpBuilder &rewriter, int64_t v) {
   auto i64ty = rewriter.getIntegerType(64);
+  return rewriter.create<LLVM::ConstantOp>(loc, i64ty,
+                                           IntegerAttr::get(i64ty, v));
+}
+
+Value createConstantI128(Location loc, OpBuilder &rewriter, int64_t v) {
+  auto i64ty = rewriter.getIntegerType(128);
+  return rewriter.create<LLVM::ConstantOp>(loc, i64ty,
+                                           IntegerAttr::get(i64ty, v));
+}
+
+Value createConstantI256(Location loc, OpBuilder &rewriter, int64_t v) {
+  auto i64ty = rewriter.getIntegerType(256);
   return rewriter.create<LLVM::ConstantOp>(loc, i64ty,
                                            IntegerAttr::get(i64ty, v));
 }

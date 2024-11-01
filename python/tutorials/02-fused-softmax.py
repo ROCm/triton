@@ -115,6 +115,7 @@ def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n
 properties = driver.active.utils.get_device_properties(DEVICE.index)
 NUM_SM = properties["multiprocessor_count"]
 NUM_REGS = properties["max_num_regs"]
+print(NUM_REGS)
 SIZE_SMEM = properties["max_shared_mem"]
 WARP_SIZE = properties["warpSize"]
 target = triton.runtime.driver.active.get_current_target()

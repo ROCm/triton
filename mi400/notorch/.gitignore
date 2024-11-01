@@ -1,0 +1,7 @@
+/venv/
+/dist/
+/*.egg-info/
+__pycache__/
+
+/hsakmt_counters.csv
+/gclog.cfg

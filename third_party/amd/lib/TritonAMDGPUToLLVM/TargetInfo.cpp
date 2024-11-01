@@ -4,8 +4,11 @@
 #include "Utility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 using mlir::triton::AMD::DppCtrl;
 namespace mlir::triton::AMD {
@@ -68,19 +71,55 @@ llvm::AMDGPU::GPUKind TargetInfo::getGPUKind() const {
 int TargetInfo::getWarpSize() const { return isCDNA(getISAFamily()) ? 64 : 32; }
 
 int TargetInfo::getSharedMemorySize() const {
-  int kbytes = getISAFamily() == ISAFamily::CDNA4 ? 160 : 64;
+  int kbytes = (getISAFamily() == ISAFamily::CDNA5
+                    ? 380
+                    : (getISAFamily() == ISAFamily::CDNA4 ? 160 : 64));
   return kbytes * 1024;
 }
 
 bool TargetInfo::supportMaximumMinimum() const {
-  return getISAFamily() == ISAFamily::CDNA4;
+  return getISAFamily() == ISAFamily::CDNA4 ||
+         getISAFamily() == ISAFamily::CDNA5;
+}
+
+bool TargetInfo::supportLDSLoadTransposed() const {
+  return getISAFamily() == ISAFamily::CDNA4 ||
+         getISAFamily() == ISAFamily::CDNA5;
 }
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   // On AMD hardware we don't have CTA clusters like NVIDIA. So this will always
   // be zero. Whoever calling into this should make sure the whole program does
   // not try to utilize CTA clusters.
-  return rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
+  if (getISAFamily() != ISAFamily::CDNA5) {
+    return rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
+  }
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  // We do not have an intrinsic to get a flat cluster workgroup id so we need
+  // to calculate from x,y,z ids and sizes Note that the rder of dispatch is
+  // z->y->x
+  auto createIntrinsic = [&](auto instrinsic) {
+    return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, instrinsic,
+                                           {rewriter.getI32Type()}, {})
+        .getResult(0);
+  };
+
+  auto idX = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.x");
+  auto idY = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.y");
+  auto idZ = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.z");
+  Value one =
+      rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), 1);
+  auto dimX =
+      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.x"));
+  auto dimY =
+      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.y"));
+  auto dimZ =
+      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.z"));
+
+  auto linearX = idX;
+  auto linearY = b.mul(idY, dimX);
+  return b.add(linearX, linearY);
 }
 
 Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
@@ -110,7 +149,8 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
 }
 
 bool TargetInfo::canUseLDSTransLoad(int bitwidth) const {
-  return getISAFamily() == ISAFamily::CDNA4 &&
+  return (getISAFamily() == ISAFamily::CDNA4 ||
+          getISAFamily() == ISAFamily::CDNA5) &&
          llvm::is_contained({16, 8, 4, 6}, bitwidth);
 }
 
@@ -125,7 +165,8 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
       loc, elemTy, rewriter.getZeroAttr(elemTy));
   bool addAliasGroup = localLoadOp && isSyncedViaAsyncWait(localLoadOp);
   return mlir::LLVM::AMD::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
-                                 triton::CacheModifier::NONE, addAliasGroup);
+                                 Value(), triton::CacheModifier::NONE,
+                                 addAliasGroup);
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
@@ -291,7 +332,8 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             unsigned interleave) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  if (getISAFamily() == ISAFamily::CDNA4 &&
+  if ((getISAFamily() == ISAFamily::CDNA4 ||
+       getISAFamily() == ISAFamily::CDNA5) &&
       warpReduceSwap16or32(rewriter, loc, acc, op, numLaneToReduce, interleave))
     return true;
   if (numLaneToReduce != getWarpSize())
@@ -586,7 +628,10 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
     return llvm::is_contained({32, /*16, 8*/}, bitWidth);
   case ISAFamily::CDNA4:
     // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
-    return llvm::is_contained({128, /*96, */ 32, /*16, 8*/}, bitWidth);
+    return llvm::is_contained({128, 64, /*96, */ 32, /*16, 8*/}, bitWidth);
+  case ISAFamily::CDNA5:
+    // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
+    return llvm::is_contained({128, 64, /*96, */ 32, 16, 8}, bitWidth);
   default:
     break;
   }

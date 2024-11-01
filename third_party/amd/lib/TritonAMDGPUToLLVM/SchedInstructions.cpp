@@ -3,6 +3,7 @@
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -42,7 +43,8 @@ Operation *createSchedBarrier(PatternRewriter &rewriter, Location loc,
 Operation *createIglpOpt(PatternRewriter &rewriter, Location loc, int value) {
   IntegerAttr iglpValue =
       rewriter.getI32IntegerAttr(static_cast<int32_t>(value));
-  return rewriter.create<ROCDL::IglpOpt>(loc, iglpValue);
+  // return rewriter.create<ROCDL::IglpOpt>(loc, iglpValue);
+  return nullptr;
 }
 
 struct InstructionSchedHintsRewriter
@@ -117,8 +119,8 @@ struct TritonAMDGPULowerInstructionSchedHints
     target.addLegalDialect<LLVM::LLVMDialect>();
     target.addIllegalOp<triton::amdgpu::InstructionSchedHint>();
     target.addLegalOp<ROCDL::SchedBarrier>();
-    target.addLegalOp<ROCDL::IglpOpt>();
-    target.addLegalOp<ROCDL::SchedGroupBarrier>();
+    // target.addLegalOp<ROCDL::IglpOpt>();
+    // target.addLegalOp<ROCDL::SchedGroupBarrier>();
 
     RewritePatternSet patterns(ctx);
 

@@ -250,6 +250,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   }
 }
 
+
 // -----
 
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [2, 1, 0]}>
@@ -285,6 +286,31 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.thr
 
     %ptr0 = tt.splat %arg3 : !tt.ptr<f16> -> tensor<2x16x16x!tt.ptr<f16>, #mma1>
     tt.store %ptr0, %0 : tensor<2x16x16x!tt.ptr<f16>, #mma1>
+    tt.return
+  }
+}
+
+// -----
+
+// MI400 tests
+
+#mma = #triton_gpu.amd_wmma<{version = 2, Kdim=32, warpsPerCTA = [2, 2]}>
+#shared = #triton_gpu.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 8 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func @wmma2_dot_operand(%arg0: !tt.memdesc<64x64xf16, #shared>) {
+    %0 = triton_gpu.local_load %arg0 : !tt.memdesc<64x64xf16, #shared> -> tensor<64x64xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %1 = triton_gpu.local_load %arg0 : !tt.memdesc<64x64xf16, #shared> -> tensor<64x64xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    tt.return
+  }
+}
+
+// -----
+
+#mma2 = #triton_gpu.amd_wmma<{version = 2, Kdim=32, warpsPerCTA = [2, 2]}>
+#shared = #triton_gpu.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 8 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func @wmma2_dot(%arg0: tensor<16x32xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma2, kWidth = 16}>>, %arg1: tensor<32x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma2, kWidth = 16}>>, %arg2: tensor<16x16xf16, #mma2>) {
+    %0 = tt.dot %arg0, %arg1, %arg2, inputPrecision = ieee : tensor<16x32xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma2, kWidth = 16}>> * tensor<32x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma2, kWidth = 16}>> -> tensor<16x16xf16, #mma2>
     tt.return
   }
 }

@@ -61,10 +61,8 @@ bool GpuHello::runOnModule(Module &module) {
 
 static PassPluginLibraryInfo getPassPluginInfo() {
   const auto callback = [](PassBuilder &pb) {
-    pb.registerOptimizerLastEPCallback([&](ModulePassManager &mpm, auto, auto) {
-      mpm.addPass(GpuHello());
-      return true;
-    });
+    pb.registerOptimizerLastEPCallback(
+        [&](ModulePassManager &mpm, auto, auto) { mpm.addPass(GpuHello()); });
   };
 
   return {LLVM_PLUGIN_API_VERSION, "gpu-hello", LLVM_VERSION_STRING, callback};

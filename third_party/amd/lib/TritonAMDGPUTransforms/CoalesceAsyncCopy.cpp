@@ -156,7 +156,8 @@ public:
     case triton::AMD::ISAFamily::CDNA1:
     case triton::AMD::ISAFamily::CDNA2:
     case triton::AMD::ISAFamily::CDNA3:
-    case triton::AMD::ISAFamily::CDNA4: {
+    case triton::AMD::ISAFamily::CDNA4:
+    case triton::AMD::ISAFamily::CDNA5: {
       break;
     }
     default:

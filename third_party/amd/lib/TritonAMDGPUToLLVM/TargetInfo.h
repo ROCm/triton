@@ -19,6 +19,8 @@ public:
 
   int getSharedMemorySize() const;
 
+  bool supportLDSLoadTransposed() const;
+
   bool supportMaximumMinimum() const override;
 
   Value getClusterCTAId(RewriterBase &rewriter, Location loc) const override;
@@ -74,10 +76,10 @@ public:
 
   bool supportVectorizedAtomics() const override;
 
-  bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
-
   void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                              Operation *llLoadOp) const override;
+
+  bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
 
 private:
   void printfImpl(Value formatStrStart, int formatStrByteCount, ValueRange args,

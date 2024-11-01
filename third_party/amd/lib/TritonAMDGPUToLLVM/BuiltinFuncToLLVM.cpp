@@ -1,11 +1,17 @@
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 
 #include "AsyncUtility.h"
+#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 namespace mlir::triton {
 #define GEN_PASS_DEF_CONVERTBUILTINFUNCTOLLVM
@@ -18,8 +24,9 @@ namespace {
 
 class CallOpConversion : public OpRewritePattern<LLVM::CallOp> {
 public:
-  CallOpConversion(mlir::MLIRContext *context, bool ftz)
-      : OpRewritePattern(context, 1), ftz(ftz) {}
+  CallOpConversion(mlir::MLIRContext *context, AMD::TargetInfo targetInfo,
+                   bool ftz)
+      : OpRewritePattern(context, 1), targetInfo(targetInfo), ftz(ftz) {}
 
   LogicalResult
   matchAndRewrite(LLVM::CallOp callOp,
@@ -28,7 +35,7 @@ public:
       return convertPredicatedLoad(callOp, rewriter);
     } else if (isPredicatedStore(callOp)) {
       return convertPredicatedStore(callOp, rewriter);
-    } else if (isWrappedLLVMIntrinsic(callOp)) {
+    } else if (isWrappedLLVMIntrinsic(callOp) || isOcmlCall(callOp)) {
       return convertToLLVMIntrinsic(callOp, rewriter);
     } else {
       return failure();
@@ -48,6 +55,15 @@ private:
   bool isWrappedLLVMIntrinsic(LLVM::CallOp callOp) const {
     if (std::optional<StringRef> callee = callOp.getCallee()) {
       if (callee.value().starts_with("__triton_hip_")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool isOcmlCall(LLVM::CallOp callOp) const {
+    if (std::optional<StringRef> callee = callOp.getCallee()) {
+      if (callee.value().starts_with("__ocml_")) {
         return true;
       }
     }
@@ -123,14 +139,43 @@ private:
     //              | 1         | 0       | (cv) flat load sc0 sc1
     auto [volatileFlag, nonTmpFlag] =
         mlir::LLVM::AMD::getCacheModifierFlagsForPredicatedCall(callOp);
-    auto loadOp = rewriter.create<LLVM::LoadOp>(
-        loc, elemTy, ptr, /*alignment=*/0, volatileFlag, nonTmpFlag);
-    bool addAsyncNoAliasInfo =
-        callOp.getCallee().value().contains(mlir::LLVM::AMD::noAliasAsyncLoads);
-    if (addAsyncNoAliasInfo) {
-      AMD::addLocalLoadNoAliasScope(loadOp);
+    ModuleOp mod = callOp->getParentOfType<ModuleOp>();
+    int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
+    Value load;
+    auto vecType = dyn_cast<VectorType>(elemTy);
+    int bitness = (vecType ? vecType.getElementType().getIntOrFloatBitWidth()
+                           : elemTy.getIntOrFloatBitWidth());
+    int elems = (vecType ? vecType.getNumElements() : 1);
+    bool canUseClusterLoad = (numCTAs > 1) && operands.size() > 3 &&
+                             ((elems * bitness) / 32 > 0) && !volatileFlag &&
+                             !nonTmpFlag;
+    if (canUseClusterLoad) {
+      auto b = TritonLLVMOpBuilder(loc, rewriter);
+      Value multicastMask = operands[3];
+
+      std::string intrinsic =
+          "llvm.amdgcn.cluster.load.b" + std::to_string(elems * bitness);
+
+      Type retType = i32_ty;
+      if (elems > 1)
+        retType = vec_ty(i32_ty, elems * bitness / 32);
+
+      load = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsic, retType,
+                                             {ptr, b.i32_val(0), multicastMask})
+                 ->getResult(0);
+      load = b.bitcast(load, elemTy);
+
+    } else {
+      auto loadOp = rewriter.create<LLVM::LoadOp>(
+          loc, elemTy, ptr, /*alignment=*/0, volatileFlag, nonTmpFlag);
+      bool addAsyncNoAliasInfo = callOp.getCallee().value().contains(
+          mlir::LLVM::AMD::noAliasAsyncLoads);
+      if (addAsyncNoAliasInfo) {
+        AMD::addLocalLoadNoAliasScope(loadOp);
+      }
+      load = loadOp.getResult();
     }
-    rewriter.create<LLVM::BrOp>(loc, loadOp->getResult(0), afterLoad);
+    rewriter.create<LLVM::BrOp>(loc, load, afterLoad);
     rewriter.setInsertionPointToStart(falseBlock);
     rewriter.create<LLVM::BrOp>(loc, falseVal, afterLoad);
     rewriter.setInsertionPointToStart(afterLoad);
@@ -225,6 +270,12 @@ private:
       replacementOp = rewriter.create<LLVM::FDivOp>(
           loc, returnType, exp2XMinus1->getResult(0), exp2XPlus1->getResult(0),
           defaultFlags);
+    } else if (calleeName == "__ocml_tanh_f32") {
+      if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA5) {
+        const char *intrinsic = "llvm.amdgcn.tanh.f32";
+        replacementOp = LLVM::createLLVMIntrinsicCallOp(
+            rewriter, loc, intrinsic, returnType, operands[0]);
+      }
     }
 
     if (replacementOp) {
@@ -236,13 +287,17 @@ private:
   }
 
 private:
+  AMD::TargetInfo targetInfo;
   bool ftz;
 };
 
 struct ConvertBuiltinFuncToLLVM
     : public triton::impl::ConvertBuiltinFuncToLLVMBase<
           ConvertBuiltinFuncToLLVM> {
-  explicit ConvertBuiltinFuncToLLVM(bool ftz) { this->ftz = ftz; }
+  explicit ConvertBuiltinFuncToLLVM(StringRef targetArch, bool ftz) {
+    this->arch = targetArch.str();
+    this->ftz = ftz;
+  }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -251,8 +306,9 @@ struct ConvertBuiltinFuncToLLVM
     GreedyRewriteConfig config;
     config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Aggressive);
 
+    AMD::TargetInfo targetInfo(this->arch.getValue());
     RewritePatternSet patterns(context);
-    patterns.add<CallOpConversion>(context, this->ftz);
+    patterns.add<CallOpConversion>(context, targetInfo, this->ftz);
 
     if (mlir::applyPatternsGreedily(mod, std::move(patterns), config)
             .failed()) {
@@ -266,8 +322,8 @@ struct ConvertBuiltinFuncToLLVM
 namespace mlir::triton {
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertBuiltinFuncToLLVMPass(bool ftz) {
-  return std::make_unique<ConvertBuiltinFuncToLLVM>(ftz);
+createConvertBuiltinFuncToLLVMPass(StringRef targetArch, bool ftz) {
+  return std::make_unique<ConvertBuiltinFuncToLLVM>(targetArch, ftz);
 }
 
 } // namespace mlir::triton

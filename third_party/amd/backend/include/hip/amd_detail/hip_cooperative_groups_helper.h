@@ -102,6 +102,33 @@ typedef enum {
  *  on Windows.
  *
  */
+namespace helper {
+/**
+ * @brief Create output mask from input_mask at places where base_mask is set
+ *
+ * Example: base_mask = 0101'0101, input_mask = 1111'0000
+ * Output mask: 1100
+ * Explaination:
+ *           | | | |  | | | |
+ * base:    0|1|0|1|'0|1|0|1|   // Which bits are set
+ * input:   1|1|1|1|'0|0|0|0|   // Which values are picked
+ *           | | | |  | | | |
+ * output:    1   1    0   0
+ */
+__CG_STATIC_QUALIFIER__ unsigned long long adjust_mask(
+    unsigned long long base_mask, unsigned long long input_mask) {
+  unsigned long long out = 0;
+  for (unsigned int i = 0, index = 0; i < __AMDGCN_WAVEFRONT_SIZE; i++) {
+    auto lane_active = base_mask & (1ull << i);
+    if (lane_active) {
+      auto result = input_mask & (1ull << i);
+      out |= ((result ? 1ull : 0ull) << index);
+      index++;
+    }
+  }
+  return out;
+}
+}  // namespace helper
 /**
  *
  * @brief  Functionalities related to multi-grid cooperative group type
@@ -230,13 +257,94 @@ __CG_STATIC_QUALIFIER__ unsigned int masked_bit_count(lane_mask x, unsigned int 
 
 }  // namespace coalesced_group
 
+namespace cluster {
+__CG_STATIC_QUALIFIER__ void sync() {
+#if __has_builtin(__builtin_amdgcn_s_cluster_barrier)
+  // Generates a signal + wait combination for cluster barrier
+  __builtin_amdgcn_s_cluster_barrier();
+#else
+  __builtin_amdgcn_s_barrier();  // fallback to s_barrier if device does not support clusters
+#endif
+}
 
+__CG_STATIC_QUALIFIER__ void barrier_signal() {
+#if __has_builtin(__builtin_amdgcn_s_barrier_signal)
+  // Signal the cluster barrier, -3 means user cluster barrier
+  __builtin_amdgcn_s_barrier_signal(-3);
+#endif
+}
+
+__CG_STATIC_QUALIFIER__ void barrier_wait() {
+#if __has_builtin(__builtin_amdgcn_s_barrier_wait)
+  // wait on the cluster barrier, -3 means user cluster barrier
+  __builtin_amdgcn_s_barrier_wait(-3);
+#else
+  __builtin_amdgcn_s_barrier();  // Fall back to s_barrier
+#endif
+}
+
+__CG_STATIC_QUALIFIER__ dim3 block_index() {
+#if __has_builtin(__builtin_amdgcn_cluster_workgroup_id_x)
+  return dim3(__builtin_amdgcn_cluster_workgroup_id_x(), __builtin_amdgcn_cluster_workgroup_id_y(),
+              __builtin_amdgcn_cluster_workgroup_id_z());
+#else
+  return dim3{0, 0, 0};
+#endif
+}
+
+__CG_STATIC_QUALIFIER__ dim3 dim_blocks() {
+#if __has_builtin(__builtin_amdgcn_cluster_workgroup_max_id_x)
+  return dim3(__builtin_amdgcn_cluster_workgroup_max_id_x() + 1,
+              __builtin_amdgcn_cluster_workgroup_max_id_y() + 1,
+              __builtin_amdgcn_cluster_workgroup_max_id_z() + 1);
+#else
+  return dim3{1, 1, 1};
+#endif
+}
+
+__CG_STATIC_QUALIFIER__ unsigned int block_rank() {
+  auto idx = block_index();
+  auto dim = dim_blocks();
+  return idx.x + idx.y * dim.x + idx.z * dim.x * dim.y;
+}
+
+__CG_STATIC_QUALIFIER__ dim3 thread_index() {
+  const dim3 blockIndex = block_index();
+  return dim3(blockIndex.x * blockDim.x + threadIdx.x, blockIndex.y * blockDim.y + threadIdx.y,
+              blockIndex.z * blockDim.z + threadIdx.z);
+}
+
+__CG_STATIC_QUALIFIER__ unsigned int num_blocks() {
+#if __has_builtin(__builtin_amdgcn_cluster_workgroup_max_flat_id)
+  return __builtin_amdgcn_cluster_workgroup_max_flat_id() + 1;
+#else
+  return 1;
+#endif
+}
+
+__CG_STATIC_QUALIFIER__ dim3 dim_threads() {
+  const dim3 dimBlocks = dim_blocks();
+  const unsigned int x = dimBlocks.x * blockDim.x;
+  const unsigned int y = dimBlocks.y * blockDim.y;
+  const unsigned int z = dimBlocks.z * blockDim.z;
+  return dim3(x, y, z);
+}
+
+__CG_STATIC_QUALIFIER__ unsigned int num_threads() {
+  auto d = dim_threads();
+  return d.x * d.y * d.z;
+}
+
+__CG_STATIC_QUALIFIER__ unsigned int thread_rank() {
+  return block_rank() * (blockDim.x * blockDim.y * blockDim.z) +
+      ((threadIdx.z * blockDim.y * blockDim.x) + (threadIdx.y * blockDim.x) + threadIdx.x);
+}
+}  // namespace cluster
 }  // namespace internal
-
 }  // namespace cooperative_groups
 /**
-*  @}
-*/
+ *  @}
+ */
 
 #endif  // __cplusplus
 #endif  // HIP_INCLUDE_HIP_AMD_DETAIL_HIP_COOPERATIVE_GROUPS_HELPER_H

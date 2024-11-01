@@ -342,6 +342,11 @@ static const char *hipLibSearchPaths[] = {{"{libhip_path}"}};
 #define HIP_SYMBOL_LIST(FOR_EACH_ERR_FN, FOR_EACH_STR_FN)                     \\
   FOR_EACH_STR_FN(hipGetLastError)                                            \\
   FOR_EACH_STR_FN(hipGetErrorString, hipError_t hipError)                     \\
+  FOR_EACH_ERR_FN(hipDrvLaunchKernelEx,                                       \\
+                  const HIP_LAUNCH_CONFIG *config,                            \\
+                  hipFunction_t f,                                            \\
+                  void **kernelParams,                                        \\
+                  void **extra)                                               \\
   FOR_EACH_ERR_FN(hipModuleLaunchKernel, hipFunction_t f,                     \\
                   unsigned int gridDimX, unsigned int gridDimY,               \\
                   unsigned int gridDimZ, unsigned int blockDimX,              \\
@@ -445,6 +450,26 @@ static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas
   void *params[] = {{ {', '.join(params)} }};
   if (gridX*gridY*gridZ > 0 && launch_cooperative_grid) {{
     HIP_CHECK(hipSymbolTable.hipModuleLaunchCooperativeKernel(function, gridX, gridY, gridZ, {warp_size}*num_warps, 1, 1, shared_memory, stream, params, 0));
+    return;
+  }}
+  if (gridX*gridY*gridZ > 0 && num_ctas > 1){{
+    HIP_LAUNCH_CONFIG config;
+    config.gridDimX = gridX * clusterDimX;
+    config.gridDimY = gridY * clusterDimY;
+    config.gridDimZ = gridZ * clusterDimZ;
+    config.blockDimX = {warp_size}*num_warps;
+    config.blockDimY = 1;
+    config.blockDimZ = 1;
+    hipLaunchAttribute attribute[1];
+    attribute[0].id = hipLaunchAttributeClusterDimension;
+    attribute[0].val.clusterDim.x = clusterDimX;
+    attribute[0].val.clusterDim.y = clusterDimY;
+    attribute[0].val.clusterDim.z = clusterDimZ;
+    config.attrs = attribute;
+    config.numAttrs = 1;
+    config.hStream = stream;
+    config.sharedMemBytes = shared_memory;
+    HIP_CHECK(hipSymbolTable.hipDrvLaunchKernelEx(&config, function, params, 0));
     return;
   }}
   if (gridX*gridY*gridZ > 0) {{

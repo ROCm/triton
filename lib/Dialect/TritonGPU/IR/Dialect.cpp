@@ -1295,6 +1295,9 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
   unsigned version = 0;
   bool isTransposed = false;
+  unsigned kDim = 16;
+  unsigned bitnessA = 0;
+  unsigned bitnessB = 0;
   SmallVector<unsigned> warpsPerCTA;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
@@ -1309,8 +1312,20 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
       if (parseBool(parser, attr, isTransposed, "isTranspose").failed())
         return {};
     }
+    if (attr.getName() == "KDim") {
+      if (parseUInt(parser, attr, kDim, "KDim").failed())
+        return {};
+    }
     if (attr.getName() == "warpsPerCTA") {
       if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
+        return {};
+    }
+    if (attr.getName() == "bitnessA") {
+      if (parseUInt(parser, attr, bitnessA, "bitness").failed())
+        return {};
+    }
+    if (attr.getName() == "bitnessB") {
+      if (parseUInt(parser, attr, bitnessB, "bitness").failed())
         return {};
     }
     if (attr.getName() == "CTAsPerCGA") {
@@ -1336,13 +1351,16 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
     return {};
 
   return parser.getChecked<AMDWmmaEncodingAttr>(
-      parser.getContext(), version, isTransposed, warpsPerCTA, *CTALayout);
+      parser.getContext(), version, isTransposed, kDim, bitnessA, bitnessB,
+      warpsPerCTA, *CTALayout);
 }
 
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "version = " << getVersion()
-          << ", isTranspose = " << getIsTransposed() << ", warpsPerCTA = ["
+          << ", isTranspose = " << getIsTransposed() << ", KDim = " << getKdim()
+          << ", bitnessA = " << getBitnessA()
+          << ", bitnessB = " << getBitnessB() << ", warpsPerCTA = ["
           << ArrayRef(getWarpsPerCTA()) << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getWarpsPerCTA().size());
@@ -1351,11 +1369,19 @@ void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
 
 LogicalResult
 AMDWmmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
-                            unsigned version, bool isTransposed,
+                            unsigned version, bool isTransposed, unsigned kDim,
+                            unsigned bitnessA, unsigned bitnessB,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             mlir::triton::gpu::CTALayoutAttr) {
-  if (version != 1 && version != 2) {
-    return emitError() << "WMMA version must be in the [1, 2] range";
+  if (version != 1 && version != 2 && version != 3) {
+    return emitError() << "WMMA version must be in the [1, 3] range";
+  }
+  // Transposed layout is needed for bypassing LDS between multiple dots.
+  // Version 1 tt.dot results and tt.dot operand layouts are different,
+  // therefore we test and support transposed only for version 2/3.
+  if (version != 2 && version != 3 && isTransposed) {
+    return emitError()
+           << "Transposed WMMA is supported only for version 2 and 3";
   }
   return success();
 }
@@ -1508,6 +1534,7 @@ Attribute parseSwizzledEncoding(AsmParser &parser, Type type) {
   unsigned vec = 0;
   unsigned perPhase = 0;
   unsigned maxPhase = 0;
+
   SmallVector<unsigned> order;
   NamedAttrList remainingAttrs;
   for (const NamedAttribute &attr : dict) {
@@ -1541,7 +1568,7 @@ Attribute parseSwizzledEncoding(AsmParser &parser, Type type) {
 LogicalResult
 SwizzledSharedEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                    unsigned vec, unsigned perPhase,
-                                   unsigned maxPhase, ArrayRef<unsigned> order,
+                                   unsigned padAmount, ArrayRef<unsigned> order,
                                    CTALayoutAttr ctaLayout) {
   if (order.size() != ctaLayout.getRank()) {
     return emitError() << "order size (" << order.size()
@@ -1552,7 +1579,43 @@ SwizzledSharedEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
 }
 
 Attribute SwizzledSharedEncodingAttr::parse(AsmParser &parser, Type type) {
-  return parseSwizzledEncoding<SwizzledSharedEncodingAttr>(parser, type);
+  if (parser.parseLess().failed())
+    return {};
+  // Parse the data as a dictionary
+  DictionaryAttr dict;
+  if (parser.parseAttribute(dict).failed())
+    return {};
+  if (parser.parseGreater().failed())
+    return {};
+
+  unsigned vec = 0;
+  unsigned perPhase = 0;
+  unsigned maxPhase = 0;
+
+  SmallVector<unsigned> order;
+  NamedAttrList remainingAttrs;
+  for (const NamedAttribute &attr : dict) {
+    if (attr.getName() == "vec") {
+      if (parseUInt(parser, attr, vec, "vec").failed())
+        return {};
+    } else if (attr.getName() == "perPhase") {
+      if (parseUInt(parser, attr, perPhase, "perPhase").failed())
+        return {};
+    } else if (attr.getName() == "maxPhase") {
+      if (parseUInt(parser, attr, maxPhase, "maxPhase").failed())
+        return {};
+    } else if (attr.getName() == "order") {
+      if (parseIntArrayAttr(parser, attr, order, "order").failed())
+        return {};
+    } else {
+      remainingAttrs.push_back(attr);
+    }
+  }
+
+  if (auto CTALayout = parseCTAAttrs(parser, remainingAttrs, order.size()))
+    return parser.getChecked<SwizzledSharedEncodingAttr>(
+        parser.getContext(), vec, perPhase, maxPhase, order, *CTALayout);
+  return {};
 }
 
 void SwizzledSharedEncodingAttr::print(AsmPrinter &printer) const {
@@ -1560,7 +1623,7 @@ void SwizzledSharedEncodingAttr::print(AsmPrinter &printer) const {
           << "vec = " << getVec() //
           << ", perPhase = " << getPerPhase()
           << ", maxPhase = " << getMaxPhase() //
-          << ", order = [" << getOrder() << "]";
+          << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getOrder().size());
   printer << "}>";
@@ -2089,10 +2152,12 @@ AMDWmmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 
 SmallVector<int64_t>
 AMDWmmaEncodingAttr::getElemsPerInstrForOperands(int kDim, int opIdx) const {
+  int bitness = opIdx == 0 ? getBitnessA() : getBitnessB();
+  int factor = (bitness == 4 ? 2 : 1);
   if (opIdx == 0)
-    return {16, kDim};
+    return {16, kDim / factor};
   else
-    return {kDim, 16};
+    return {kDim / factor, 16};
 }
 
 SmallVector<int64_t>
@@ -2122,9 +2187,9 @@ AMDWmmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
   }
 }
 
-SmallVector<unsigned> AMDWmmaEncodingAttr::getMNKDimPerInstr() {
+SmallVector<unsigned> AMDWmmaEncodingAttr::getMNKDimPerInstr() const {
   // TODO: move magic numbers out of the code
-  return {16, 16, 16};
+  return {16, 16, getKdim()};
 }
 
 SwizzledSharedEncodingAttr AMDWmmaEncodingAttr::composeSharedLayoutForOperand(
@@ -2189,43 +2254,43 @@ NvidiaMmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 SmallVector<int64_t>
 NvidiaMmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> shape, int bitwidth,
                                         int kWidth, int opIdx) const {
-  assert(kWidth >= std::max(32 / bitwidth, 1) &&
-         "kWidth must be >= max(32 / bitwidth, 1) for this function to be "
-         "well-defined");
-  auto rank = shape.size();
-  // Broadcast long K
-  auto warpsPerCTA = to_vector(getWarpsPerCTA());
-  auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
-  warpsPerCTA[kDim] = 1;
+  // assert(
+  //     kWidth >= 32 / bitwidth &&
+  //     "kWidth must be >= 32 / bitwidth for this function to be
+  //     well-defined");
+  // auto rank = shape.size();
+  // // Broadcast long K
+  // auto warpsPerCTA = getWarpsPerCTA();
+  // auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
+  // warpsPerCTA[kDim] = 1;
 
-  SmallVector<int> tileSize;
-  if (rank == 3) {
-    tileSize.push_back(1);
-  }
-  // warpSizeK * (warpRepK * VecBitWidth)
-  auto tileBitWidthK = (isAmpere() && bitwidth == 64) ? (4 * 256) : (4 * 64);
-  if (opIdx == 0) {
-    // m x k
-    tileSize.push_back(16);
-    tileSize.push_back(tileBitWidthK / bitwidth);
-  } else {
-    // k x n
-    // Hopper path never uses the n value, since this method is only invoked
-    // for in-RF (dotOpEnc) operands, but WGMMA only supports in A to be in RF
-    // so it's fine if the n is incorrect here
-    tileSize.push_back(tileBitWidthK / bitwidth);
-    tileSize.push_back(8);
-  }
+  // SmallVector<int> tileSize;
+  // if (rank == 3) {
+  //   tileSize.push_back(1);
+  // }
+  // if (opIdx == 0) {
+  //   // m x k
+  //   tileSize.push_back(16);
+  //   tileSize.push_back(4 * 64 / bitwidth);
+  // } else {
+  //   // k x n
+  //   // Hopper path never uses the n value, since this method is only invoked
+  //   // for in-RF (dotOpEnc) operands, but WGMMA only supports in A to be in
+  //   RF
+  //   // so it's fine if the n is incorrect here
+  //   tileSize.push_back(4 * 64 / bitwidth);
+  //   tileSize.push_back(8);
+  // }
 
-  SmallVector<int64_t> numRep;
-  // Lezcano: This is odd. Why do we always return a vector of size 3?
-  if (rank != 3) {
-    numRep.push_back(1);
-  }
-  for (auto [s, size, warp] : llvm::zip(shape, tileSize, warpsPerCTA)) {
-    numRep.push_back(std::max<int64_t>(1, s / (size * warp)));
-  }
-  return numRep;
+  // SmallVector<int64_t> numRep;
+  // // Lezcano: This is odd. Why do we always return a vector of size 3?
+  // if (rank != 3) {
+  //   numRep.push_back(1);
+  // }
+  // for (auto [s, size, warp] : llvm::zip(shape, tileSize, warpsPerCTA)) {
+  //   numRep.push_back(std::max<int64_t>(1, s / (size * warp)));
+  // }
+  return {};
 }
 
 //===----------------------------------------------------------------------===//

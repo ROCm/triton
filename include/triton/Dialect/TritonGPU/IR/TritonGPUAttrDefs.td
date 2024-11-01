@@ -98,6 +98,7 @@ Right now, Triton implements two main classes of layouts: shared, and distribute
 //===----------------------------------------------------------------------===//
 
 def CTALayoutAttr : TritonGPU_Attr<"CTALayout", "cta_layout"> {
+  let mnemonic = "cta_layout";
   let parameters = (
     ins
     ArrayRefParameter<"unsigned">:$CTAsPerCGA,
@@ -171,6 +172,7 @@ addition, if there's only one CTA per CGA, then Triton canonicalizes CTAOrder to
 
   let genVerifyDecl = 1;
   let skipDefaultBuilders = 1;
+  let assemblyFormat = "`<` `{` struct(params) `}` `>`";
 }
 
 //===----------------------------------------------------------------------===//
@@ -1262,6 +1264,9 @@ Row |
     ins
     "unsigned": $version,
     "bool":$isTransposed,
+    "unsigned": $Kdim,
+    "unsigned":$bitnessA,
+    "unsigned":$bitnessB,
     ArrayRefParameter<"unsigned">:$warpsPerCTA,
     "CTALayoutAttr":$CTALayout
   );
@@ -1274,7 +1279,7 @@ Row |
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape,
                                           Type elemType, int kWidth, int kDim, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
-    static SmallVector<unsigned> getMNKDimPerInstr();
+    SmallVector<unsigned> getMNKDimPerInstr() const;
 
     // Returns a swizzled shared layout matching this WMMA layout for the
     // dot operand at the given |operandIdx| with |operandShape|.

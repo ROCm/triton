@@ -8,6 +8,7 @@
 #include "triton/Analysis/Alias.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Tools/GenericSwizzling.h"
@@ -153,7 +154,6 @@ private:
       numElems = product<int64_t>(shapePerCTA);
     }
     int64_t bytes = numElems * allocType.getElementTypeBitWidth() / 8;
-
     auto alignment = alloc.getAlignmentOrDefault();
     allocation->addBuffer<BufferT::BufferKind::Explicit>(alloc, bytes,
                                                          alignment);

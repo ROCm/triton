@@ -43,9 +43,10 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
         [](mlir::PassManager &pm, const std::string &arch, bool ftz) {
           pm.addPass(createConvertTritonAMDGPUToLLVMPass(arch, ftz));
         });
-  m.def("add_builtin_func_to_llvmir", [](mlir::PassManager &pm, bool ftz) {
-    pm.addPass(createConvertBuiltinFuncToLLVMPass(ftz));
-  });
+  m.def("add_builtin_func_to_llvmir",
+        [](mlir::PassManager &pm, const std::string &arch, bool ftz) {
+          pm.addPass(createConvertBuiltinFuncToLLVMPass(arch, ftz));
+        });
   m.def("insert_instruction_sched_hints", [](mlir::PassManager &pm,
                                              const std::string &variant) {
     pm.addPass(createTritonAMDGPUInsertInstructionSchedHintsPass(variant));
@@ -82,7 +83,6 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                             const std::string &, bool);
   ADD_PASS_WRAPPER_0("add_reorder_instructions",
                      mlir::createTritonAMDGPUReorderInstructions);
-  ADD_PASS_WRAPPER_0("add_fold_true_cmpi", mlir::createTritonAMDFoldTrueCmpI);
   ADD_PASS_OPTION_WRAPPER_1("add_block_pingpong",
                             mlir::createTritonAMDGPUBlockPingpong, int32_t);
   ADD_PASS_OPTION_WRAPPER_5("add_stream_pipeline",
@@ -94,10 +94,15 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_1("add_update_async_wait_count",
                             mlir::createTritonAMDGPUUpdateAsyncWaitCount,
                             std::string);
-  m.def("add_in_thread_transpose", [](mlir::PassManager &pm) {
-    pm.addNestedPass<mlir::triton::FuncOp>(
-        mlir::createTritonAMDGPUInThreadTranspose());
-  });
+
+  ADD_PASS_WRAPPER_0("add_convert_to_tensor_ops",
+                     mlir::createTritonAMDGPUConvertToTensorOps);
+  ADD_PASS_WRAPPER_0("add_fold_true_cmpi", mlir::createTritonAMDFoldTrueCmpI);
+  ADD_PASS_OPTION_WRAPPER_1("add_coalesce_async_copy",
+                            mlir::createTritonAMDGPUCoalesceAsyncCopy,
+                            const std::string &);
+  ADD_PASS_WRAPPER_1("add_plan_cta", mlir::createTritonAMDGPUPlanCTAPass,
+                     mlir::triton::amdgpu::ClusterInfo *);
 }
 
 void addControlConstant(llvm::Module *module, const char *name,
@@ -325,6 +330,15 @@ void init_triton_amd(py::module &&m) {
     return false;
   });
 
+  m.def("has_cluster_feature", [](const std::string &arch) {
+    using mlir::triton::AMD::ISAFamily;
+    switch (mlir::triton::AMD::deduceISAFamily(arch)) {
+    case ISAFamily::CDNA5:
+      return true;
+    default:
+      return false;
+    }
+  });
   m.def("set_all_fn_arg_inreg", [](llvm::Function *fn) {
     for (llvm::Argument &arg : fn->args()) {
       // Check for incompatible attributes.
@@ -333,7 +347,6 @@ void init_triton_amd(py::module &&m) {
       arg.addAttr(llvm::Attribute::InReg);
     }
   });
-
   m.def("link_hsaco",
         [](const std::string &inPath, const std::string &outPath) {
           if (auto errString = lldInvoke(inPath.c_str(), outPath.c_str()))
@@ -342,7 +355,18 @@ void init_triton_amd(py::module &&m) {
                                      " because " + errString.value());
         });
 
-  m.def("add_scalarize_packed_fops_llvm_pass", [](llvm::Function *fn) {
-    mlir::triton::AMD::runScalarizePackedFOpsPass(*fn);
-  });
+  py::class_<mlir::triton::amdgpu::ClusterInfo>(m, "ClusterInfo")
+      .def(py::init<>())
+      .def_readwrite("clusterDimX",
+                     &mlir::triton::amdgpu::ClusterInfo::clusterDimX)
+      .def_readwrite("clusterDimY",
+                     &mlir::triton::amdgpu::ClusterInfo::clusterDimY)
+      .def_readwrite("clusterDimZ",
+                     &mlir::triton::amdgpu::ClusterInfo::clusterDimZ)
+      .def("__repr__", [](mlir::triton::amdgpu::ClusterInfo &self) {
+        std::ostringstream oss;
+        oss << "(" << self.clusterDimX << ", " << self.clusterDimY << ", "
+            << self.clusterDimZ << ")";
+        return oss.str();
+      });
 }

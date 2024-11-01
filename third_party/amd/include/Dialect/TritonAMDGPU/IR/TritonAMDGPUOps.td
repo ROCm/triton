@@ -28,6 +28,7 @@
 include "mlir/IR/OpBase.td"
 include "triton/Dialect/Triton/IR/TritonDialect.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
+include "triton/Dialect/TritonGPU/IR/TritonGPUTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
 include "triton/Dialect/Triton/IR/TritonOpInterfaces.td"
@@ -644,5 +645,77 @@ def LocalLoadPackedTransposedOp : TT_AMDGPU_Op<"local_load_packed_tranposed", [L
   let assemblyFormat = [{$src (`token` $token^)? attr-dict `:` qualified(type($src)) `->` type($result)}];
   let hasVerifier = 1;
 }
+
+def GlobalTDMPrefetchOp : TT_AMDGPU_Op<"global_prefetch", [
+  MemoryEffects<[MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>]>{
+  let summary = "Prefetch a block of address in L2. Please note that we won't write any LDS, but we want to mirror the real TDM instruction";
+  let description = [{
+  }];
+  let arguments = (ins
+    TT_TensorDescType:$desc_ptr,
+    Variadic<I32>:$indices,
+    TTG_MemDescType:$result,
+    I1:$pred,
+    I32:$waveId
+  );
+
+  let results = (outs TTG_AsyncToken:$retToken);
+
+  let assemblyFormat = [{
+    $desc_ptr $indices $result `,` $pred `,` $waveId
+    attr-dict `:` type($desc_ptr)  `->` type($result)
+  }];
+}
+
+def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
+  [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "copy data based on descriptor from global memory to local memory asynchronously";
+
+  let description = [{
+    This operation copies data from global memory to local memory
+    asynchronously.  This is analogue to tt.load except the data are copied to
+    local memory pointed by the memory descriptor instread of a distributed
+    tensor. The data copied depends on the global memory descriptor pointed to
+    by `desc_ptr`.
+  }];
+
+  // let hasVerifier = 1;
+  let arguments = (
+    ins TT_TensorDescType:$desc_ptr,
+    Variadic<I32>:$indices,
+    TTG_MemDescType:$result,
+    I1:$pred,
+    I32:$waveId
+  );
+
+  let results = (outs TTG_AsyncToken:$token);
+
+  let assemblyFormat = [{
+    $desc_ptr $indices $result `,` $pred `,` $waveId
+    attr-dict `:` type($desc_ptr)  `->` type($result)
+  }];
+}
+
+def AsyncTDMWait : TT_AMDGPU_Op<"async_tdm_store_wait"> {
+  let summary = "wait until all the inputs are read.";
+  // let arguments = (ins I32Attr:$num);
+  let arguments = (ins Variadic<TTG_AsyncToken>:$asyncToken, I32Attr:$num);
+  let description = [{
+    Wait until all the read operations are done from the associated store operations.
+    This is needed before the shared memory can be written to.
+  }];
+  let results = (outs TTG_AsyncToken:$retToken);
+
+  let assemblyFormat = "$asyncToken attr-dict";
+}
+
+def GetWaveIdOp : TT_AMDGPU_Op<"get_wave_id", [Pure]> {
+    let arguments = (ins);
+
+    let results = (outs I32:$result);
+
+    let assemblyFormat = "attr-dict `:` type($result)";
+}
+
 
 #endif

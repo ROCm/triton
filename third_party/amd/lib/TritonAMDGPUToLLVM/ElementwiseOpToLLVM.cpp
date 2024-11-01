@@ -1,4 +1,5 @@
 #include "TargetInfo.h"
+#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "Utility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -286,11 +287,40 @@ cvtScalePkDowncastToFp8(Location loc, ConversionPatternRewriter &rewriter,
 }
 
 // Fp16 -> OCP Bf8 (RTNE)
+static SmallVector<Value>
+Fp16_to_Fp8E5M2_RTNE_SW_CDNA5(Location loc, ConversionPatternRewriter &rewriter,
+                              const SmallVector<Value> &v) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto fp16x2VecTy = vec_ty(f16_ty, 2);
+  Value fp16x2Vec0 = b.undef(fp16x2VecTy);
+  Value fp16x2Vec1 = b.undef(fp16x2VecTy);
+  fp16x2Vec0 = b.insert_element(fp16x2VecTy, fp16x2Vec0, v[0], b.i32_val(0));
+  fp16x2Vec0 = b.insert_element(fp16x2VecTy, fp16x2Vec0, v[1], b.i32_val(1));
+  fp16x2Vec1 = b.insert_element(fp16x2VecTy, fp16x2Vec1, v[2], b.i32_val(0));
+  fp16x2Vec1 = b.insert_element(fp16x2VecTy, fp16x2Vec1, v[3], b.i32_val(1));
+
+  Value a0 = b.bitcast(fp16x2Vec0, i32_ty);
+  Value a1 = b.bitcast(fp16x2Vec1, i32_ty);
+
+  a0 = b.and_(i32_ty, a0, b.i32_val(0xfffefffe));
+  a1 = b.and_(i32_ty, a1, b.i32_val(0xfffefffe));
+
+  a0 = b.add(i32_ty, a0, b.i32_val(0x00800080));
+  a1 = b.add(i32_ty, a1, b.i32_val(0x00800080));
+
+  auto fp8x4VecTy = vec_ty(i8_ty, 4);
+  a0 = b.bitcast(a0, fp8x4VecTy);
+  a1 = b.bitcast(a1, fp8x4VecTy);
+
+  return {b.extract_element(i8_ty, a0, b.i32_val(1)),
+          b.extract_element(i8_ty, a0, b.i32_val(3)),
+          b.extract_element(i8_ty, a1, b.i32_val(1)),
+          b.extract_element(i8_ty, a1, b.i32_val(3))};
+}
 
 static SmallVector<Value>
 Fp16_to_Fp8E5M2_RTNE_SW(Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) {
-
   assert(v.size() == 4);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -341,8 +371,11 @@ Fp16_to_Fp8E5M2_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
 }
 
 ConverterT Fp16_to_Fp8E5M2_RTNE(AMD::ISAFamily isaFamily) {
-  return isaFamily == AMD::ISAFamily::CDNA4 ? Fp16_to_Fp8E5M2_RTNE_HW
-                                            : Fp16_to_Fp8E5M2_RTNE_SW;
+  return isaFamily == AMD::ISAFamily::CDNA4
+             ? Fp16_to_Fp8E5M2_RTNE_HW
+             : (isaFamily == AMD::ISAFamily::CDNA5
+                    ? Fp16_to_Fp8E5M2_RTNE_SW_CDNA5
+                    : Fp16_to_Fp8E5M2_RTNE_SW);
 }
 
 // Fp16 -> OCP Bf8 (RTZ)
@@ -771,8 +804,9 @@ Fp32_to_Fp8E5M2_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
 }
 
 ConverterT Fp32_to_Fp8E5M2_RTNE(AMD::ISAFamily isaFamily) {
-  return isaFamily == AMD::ISAFamily::CDNA4 ? Fp32_to_Fp8E5M2_RTNE_HW
-                                            : Fp32_to_Fp8E5M2_RTNE_SW;
+  return Fp32_to_Fp8E5M2_RTNE_SW;
+  // return isaFamily == AMD::ISAFamily::CDNA4 ? Fp32_to_Fp8E5M2_RTNE_HW
+  //                                           : Fp32_to_Fp8E5M2_RTNE_SW;
 }
 
 // Fp32 -> Nanoo Bf8 on CDNA3
@@ -1803,17 +1837,18 @@ struct FpToFpOpConversion
     // 1. fp32 -> ocp fp8/bf8 on CDNA4: has hardware support
     // 2. fp32 -> nanoo fp8/bf8 on CDNA3: has hardware support
     // 3. fp32 -> ocp fp8/bf8 on non-CDNA4: has software support
-    bool useFP16IntermediateSrc =
-        srcElementType.isF32() && !dstElementType.isF16() &&
+    bool useFP16IntermediateSrc = true;
+    srcElementType.isF32() && !dstElementType.isF16() &&
         roundingMode == RoundingMode::RTNE &&
-        !(isaFamily == AMD::ISAFamily::CDNA4 &&
-          (llvm::isa<Float8E4M3FNType, Float8E4M3FNUZType, Float8E5M2Type,
-                     Float8E5M2FNUZType>(dstElementType))) &&
-        !(isaFamily == AMD::ISAFamily::CDNA3 &&
-          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(
-              dstElementType))) &&
-        !(isaFamily != AMD::ISAFamily::CDNA4 &&
-          (llvm::isa<Float8E5M2Type, Float8E4M3FNType>(dstElementType)));
+        (isaFamily == AMD::ISAFamily::CDNA5 ||
+         !(isaFamily == AMD::ISAFamily::CDNA4 &&
+           (llvm::isa<Float8E4M3FNType, Float8E4M3FNUZType, Float8E5M2Type,
+                      Float8E5M2FNUZType>(dstElementType))) &&
+             !(isaFamily == AMD::ISAFamily::CDNA3 &&
+               (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(
+                   dstElementType))) &&
+             !(isaFamily != AMD::ISAFamily::CDNA4 &&
+               (llvm::isa<Float8E5M2Type, Float8E4M3FNType>(dstElementType))));
 
     // fp8/bf8->f32, if neither nanoo fp8/bf8 on CDNA3 nor ocp fp8/bf8 on CDNA4,
     // is done in two steps: fp8/bf8->fp16 and fp16->fp32
@@ -1847,12 +1882,12 @@ struct FpToFpOpConversion
       return outVals;
     }
     if (useFP16IntermediateSrc) {
-      if (isaFamily == AMD::ISAFamily::CDNA4)
-        inVals = convertFp32ToFp16RTNE(loc, rewriter, inVals, f16_ty);
-      else {
-        for (Value &v : inVals)
-          v = LLVM::AMD::cvtFp32ToFp16RTNE_oneValue(loc, rewriter, v);
-      }
+      // if (isaFamily == AMD::ISAFamily::CDNA4)
+      //   inVals = convertFp32ToFp16RTNE(loc, rewriter, inVals, f16_ty);
+      // else {
+      for (Value &v : inVals)
+        v = LLVM::AMD::cvtFp32ToFp16RTNE_oneValue(loc, rewriter, v);
+      // }
     }
 
     inVals.resize(numElements, b.undef(typeConverter->convertType(srcType)));

@@ -1,0 +1,26 @@
+[project]
+name = "notorch"
+version = "0.0.1"
+description = "An extremely minimal shim for Pytorch"
+license = { text = "Proprietary" }
+authors = [
+    {name = "Max Erenberg", email = "Max.Erenberg@amd.com"},
+]
+dependencies = [
+    "hip-python>=6.3.3",
+    "numpy>=2.2.0",
+]
+requires-python = ">= 3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://gerrit-git.amd.com/plugins/gitiles/dcg/er/dcg_pemu/+/refs/heads/notorch"
+Repository = "https://gerrit-git.amd.com/plugins/gitiles/dcg/er/dcg_pemu/+/refs/heads/notorch"
+
+[tool.setuptools]
+packages = ["torch"]
