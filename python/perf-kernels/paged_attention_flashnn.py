@@ -13,7 +13,7 @@ import torch
 #From VLLM 
 #_SEQ_PARTITION_SIZE = 512 #CUDA
 #_SEQ_PARTITION_SIZE = 1024 #HIP
-_SEQ_PARTITION_SIZE = 8 #HIP
+_SEQ_PARTITION_SIZE = 4 #HIP
 
 def paged_attention(
     out: torch.Tensor,  #[num_seqs, num_kv_heads*query_grp_sz, head_sz]
@@ -147,9 +147,9 @@ def paged_attn_wo_dot(
                                 alibi_slope,
                                 query.stride(0),
                                 query.stride(1),
-                                out.stride(0),
-                                out.stride(1),
-                                out.stride(2),
+                                logits.stride(0),
+                                logits.stride(1),
+                                logits.stride(2),
                                 key_cache.stride(0),
                                 key_cache.stride(1),
                                 key_cache.stride(2),
@@ -221,6 +221,8 @@ def _paged_attn_wo_dot_wo_partition_kernel(
     kv_head_idx = head_idx // QUERY_GRP_SZ
     seq_idx = tl.program_id(axis=1)
 
+    dtype = q.dtype.element_ty
+
     #seq_len
     seq_len = tl.load(seq_lens + seq_idx)
 
@@ -238,7 +240,7 @@ def _paged_attn_wo_dot_wo_partition_kernel(
 
     #load q [1, HEAD_SZ]
     q = tl.load(q_ptr + seq_idx*stride_q_s + head_idx*stride_q_h + head_sz_offs)
-    q = (q*scale).to(out.dtype.element_ty) #Fix this hardcoded dtype
+    q = (q*scale).to(dtype) #Fix this hardcoded dtype
 
     qkv = tl.zeros([KV_BLK_SZ, HEAD_SZ], dtype=tl.float32)
     qk_max = float("-inf")
@@ -255,9 +257,9 @@ def _paged_attn_wo_dot_wo_partition_kernel(
         kv_offs_0 = tl.load(blk_start_ptr + blk_idx + 0) * stride_k_b + kv_offs
         mask = kv_blk_offs[:, None] < (seq_len - blk_idx * KV_BLK_SZ)
         #load k [KV_BLK_SZ, HEAD_SZ]
-        k_0 = tl.load(k_cache_ptr + kv_offs_0)
+        k_0 = tl.load(k_cache_ptr + kv_offs_0).to(dtype)
         #load v [KV_BLK_SZ, HEAD_SZ]
-        v_0 = tl.load(v_cache_ptr + kv_offs_0)
+        v_0 = tl.load(v_cache_ptr + kv_offs_0).to(dtype)
 
         #calculate qk #[KV_BLK_SZ]
         _qk_0 = tl.sum((q[None, :]*k_0).to(tl.float32), axis=1)
@@ -287,26 +289,26 @@ def _paged_attn_wo_dot_wo_partition_kernel(
 
 @triton.jit
 def _paged_attn_wo_dot_w_partition_kernel(
-    exp_sums,
-    max_logits,
-    out,
-    q,
-    k_cache,
-    v_cache,
+    exp_sums_ptr,
+    max_logits_ptr,
+    logits_ptr,
+    q_ptr,
+    k_cache_ptr,
+    v_cache_ptr,
     scale,
-    block_tables,
-    seq_lens,
+    blk_tables_ptr,
+    ctx_lens_ptr,
     alibi_slopes,
-    stride_qs,
-    stride_qh,
-    stride_os,
-    stride_oh,
-    stride_op,
-    stride_kn, 
-    stride_kh,
-    stride_kb,
-    stride_exps,
-    stride_exph,
+    stride_q_s,
+    stride_q_h,
+    stride_logits_s,
+    stride_logits_h,
+    stride_logits_p,
+    stride_k_s, 
+    stride_k_nh,
+    stride_k_b,
+    stride_exp_s,
+    stride_exp_h,
     KV_BLK_SZ: tl.constexpr,
     HEAD_SZ: tl.constexpr,
     QUERY_GRP_SZ: tl.constexpr,
@@ -314,103 +316,96 @@ def _paged_attn_wo_dot_w_partition_kernel(
     MAX_NUM_BLKS_PER_SEQ: tl.constexpr,
     MAX_SEQ_LEN_POW2: tl.constexpr,
 ):
-    #get head_idx, kv_head_idx
-    head_idx = tl.program_id(axis=0)
+    seq_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    ctx_part_idx = tl.program_id(2)
     kv_head_idx = head_idx // QUERY_GRP_SZ
-    seq_idx = tl.program_id(axis=1)
-    ctx_par_idx = tl.program_id(axis=2)
 
-    #seq_len
-    seq_len = tl.load(seq_lens + seq_idx)
+    log2e: tl.constexpr = 1.4426950408889634
+    dtype = q_ptr.dtype.element_ty
 
-    #skip if this par_idx is bigger than seq_len
-    if ctx_par_idx * SEQ_PARTITION_SZ >= seq_len:
+    ctx_len = tl.load(ctx_lens_ptr + seq_idx)
+
+    if ctx_part_idx * SEQ_PARTITION_SZ >= ctx_len:
         return
 
-    #set start and ending blocks
-    num_ctx_blocks = tl.cdiv(seq_len, KV_BLK_SZ)
-    num_ctx_blks_per_par = SEQ_PARTITION_SZ // KV_BLK_SZ
-    start_blk_idx = ctx_par_idx * num_ctx_blks_per_par
-    end_blk_idx = tl.minimum(start_blk_idx + num_ctx_blks_per_par, num_ctx_blocks)
+    ctx_start_idx = ctx_part_idx * SEQ_PARTITION_SZ
+    ctx_end_idx = tl.minimum(ctx_start_idx + SEQ_PARTITION_SZ, ctx_len)
 
-    #alibi slopes calculation
-    if alibi_slopes is None:
-        alibi_slope = 0.0
-    else:
-        alibi_slope = tl.load(alibi_slopes + head_idx)
+    #This conversion is needed. Otherwise, this causes a compilation error with mismatch types in the loop below
+    #num_kv_blks = tl.cdiv(ctx_end_idx - ctx_start_idx, KV_BLK_SZ).to(tl.int32)
+    num_kv_blks = tl.cdiv(ctx_end_idx - ctx_start_idx, KV_BLK_SZ)
     
-    block_offs = tl.arange(0, KV_BLK_SZ)
-    head_sz_offs = tl.arange(0, HEAD_SZ)
+    blk_offs = tl.arange(0, KV_BLK_SZ)
+    head_offs = tl.arange(0, HEAD_SZ)
 
-    #load q [BLOCK_SZ, HEAD_SZ]
-    q_val = tl.load(q + seq_idx*stride_qs + head_idx*stride_qh + head_sz_offs)
-    q_val = (q_val*scale).to(tl.float16) #Fix this hardcoded dtype
-
-    qkv = tl.zeros([KV_BLK_SZ, HEAD_SZ], dtype=tl.float32)
-    qk_max = float("-inf")
-    exp_sum = 0.0
-    base_offs_kv = (
-        kv_head_idx * stride_kh + block_offs[:, None]*stride_kb + head_sz_offs[None, :]
-    )
-    blk_base_ptrs = block_tables + seq_idx * MAX_NUM_BLKS_PER_SEQ
+    kv_offs = (kv_head_idx * stride_k_nh 
+        + blk_offs[:, None] * stride_k_b 
+        + head_offs[None, :])
     
-    #loop unroll. calculate qkv
-    #loop over blocks
-    for blk_idx in range(start_blk_idx, end_blk_idx-1):
-        #get k block indices
-        offs_kv_0 = tl.load(blk_base_ptrs + blk_idx + 0) * stride_kn + base_offs_kv
-        #load k
-        k_0 = tl.load(k_cache + offs_kv_0)
-        #load v
-        v_0 = tl.load(v_cache + offs_kv_0)
+    q_offs = (seq_idx * stride_q_s 
+        + head_idx * stride_q_h 
+        + head_offs)
+    
+    # load q[HEAD_SZ]
+    q = tl.load(q_ptr + q_offs)
+    q = (q * scale)
 
-        #calculate qk
-        _qk_0 = tl.sum((q_val[None, :]*k_0).to(tl.float32), axis=1)
+    max_logit_i = float("-inf")
+    exp_sum_i = 0.0
+    acc = tl.zeros([KV_BLK_SZ, HEAD_SZ], dtype=tl.float32)
 
-        #add alibi slopes
-        if alibi_slope is not None:
-            _qk_0 += alibi_slope *((blk_idx + 0) * KV_BLK_SZ + block_offs - seq_len + 1)
-        _qk_max = tl.maximum(tl.max(_qk_0, axis=0), qk_max)
-        exp_tmp = tl.exp(_qk_0 - _qk_max)
-        _exp_sum = exp_sum * tl.exp(qk_max - _qk_max) + tl.sum(exp_tmp, axis=0)
-        qkv_sum_tmp = (tl.exp(_qk_0[:, None] - _qk_max)).to(v_cache.dtype.element_ty) * v_0
-        qkv = (qkv * (exp_sum * tl.exp(qk_max - _qk_max)) + qkv_sum_tmp) / _exp_sum
-        qk_max = _qk_max
-        exp_sum = _exp_sum
+    kv_blk_start = ctx_part_idx * (SEQ_PARTITION_SZ // KV_BLK_SZ)
+    blk_tables_start_ptr = blk_tables_ptrs + seq_idx * stride_blk_tables_s
+    for b in range(num_kv_blks):
+        blk_idx = kv_blk_start + b
+        blk_num = tl.load(blk_tables_start_ptr + blk_idx*stride_blk_tables_nb)
 
-    #do last loop masked
-    physical_block_idx = tl.load(block_tables + seq_idx * MAX_NUM_BLKS_PER_SEQ + blk_idx)
-    mask = block_offs[:, None] < (seq_len - blk_idx * KV_BLK_SZ)
-    offs_kv = physical_block_idx * stride_kn + base_offs_kv
+        kv_blk_offs = blk_num * stride_k_s + kv_offs
+        mask_offset = blk_idx * KV_BLK_SZ + blk_offs
+        kv_mask = mask_offset[:, None] < ctx_len
 
-    k = tl.load(k_cache + offs_kv, mask=mask, other=0.0)
-    v = tl.load(v_cache + offs_kv, mask=mask, other=0.0)
+        # load k[KV_BLK_SZ, HEAD_SZ]
+        k = tl.load(k_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
 
-    _qk = tl.sum((q_val[None, :] * k).to(tl.float32), axis=1)
-    _qk = tl.where(block_offs < (seq_len - blk_idx * KV_BLK_SZ), _qk, float("-inf"))
-    _qk += alibi_slope * (blk_idx * KV_BLK_SZ + block_offs - seq_len + 1)
-    _qk_max = tl.maximum(tl.max(_qk, axis=0), qk_max)
+        # qk: [KV_BLK_SZ]
+        qk = tl.sum((q[None, :], k), axis=1)
+        
+        qk = tl.where(mask_offset < ctx_len, qk, float("-inf")) 
 
-    _exp_sum = exp_sum * tl.exp(qk_max - _qk_max) + tl.sum(tl.exp(_qk - _qk_max), axis=0)
-    qkv = (qkv * (exp_sum * tl.exp(qk_max - _qk_max)) + (tl.exp(_qk[:, None] - _qk_max)) * v)
-    qkv = qkv / _exp_sum
-    qk_max = _qk_max
-    exp_sum = _exp_sum
+        max_logit_i_new = tl.maximum(max_logit_i, tl.max(qk, axis=0))   #_qk_max
 
-    #store exp_sumps
-    #store max_logits
-    offs_exp = seq_idx * stride_exps + head_idx * stride_exph + ctx_par_idx
-    tl.store(exp_sums + offs_exp, exp_sum)
-    tl.store(max_logits + offs_exp, qk_max)
+        # p: [KV_BLK_SZ]
+        p = tl.math.exp2((qk - max_logit_i_new) * log2e)
+        alpha = tl.math.exp2((max_logit_i - max_logit_i_new) * log2e)
+        acc *= alpha[:, None]
 
-    #store out
-    offs_out = (
-        seq_idx * stride_os
-        + head_idx * stride_oh
-        + ctx_par_idx * stride_op
-        + head_sz_offs
+        # v: [KV_BLK_SZ, HEAD_SZ]
+        v = tl.load(v_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
+
+        p = p
+        # acc: [KV_BLK_SZ, HEAD_SZ]
+        acc += p[:, None] * v
+        
+        exp_sum_i = exp_sum_i * alpha + tl.sum(p, axis=0)
+        max_logit_i = max_logit_i_new
+    acc = acc / exp_sum_i
+
+    max_logits_offs = (
+            seq_idx * stride_exp_s
+        +   head_idx * stride_exp_h
+        +   ctx_part_idx
     )
-    tl.store(out + offs_out, tl.sum(qkv, axis=0))
+    tl.store(max_logits_ptr + max_logits_offs, max_logit_i)
+    tl.store(exp_sums_ptr + max_logits_offs, exp_sum_i)
+
+    logits_offs = (seq_idx * stride_logits_s
+        + head_idx * stride_logits_h
+        + ctx_part_idx * stride_logits_p
+        + head_offs
+    )
+
+    tl.store(logits_ptr + logits_offs, tl.sum(acc,axis=0)) 
 
 @triton.jit
 def _paged_attn_wo_dot_reduce_kernel(
@@ -642,8 +637,7 @@ def _paged_attn_w_dot_wo_partition_kernel(
 
     log2e: tl.constexpr = 1.4426950408889634
 
-    reduce_type = q_ptr.dtype.element_ty
-    #reduce_type = q_ptr.dtype.element_ty
+    dtype = q_ptr.dtype.element_ty
 
     ctx_len = tl.load(ctx_lens_ptr + seq_idx)
     num_kv_blks = tl.cdiv(ctx_len, KV_BLK_SZ).to(tl.int32)
@@ -679,7 +673,7 @@ def _paged_attn_w_dot_wo_partition_kernel(
         kv_mask = mask_offset[:, None] < ctx_len
 
         # load k[KV_BLK_SZ, HEAD_SZ]
-        k = tl.load(k_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
+        k = tl.load(k_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0).to(dtype)
 
         # qk: [QUERY_GRP_SZ_POW2, KV_BLK_SZ]
         qk = tl.dot(q, k.T, out_dtype=tl.float32)
@@ -694,7 +688,7 @@ def _paged_attn_w_dot_wo_partition_kernel(
         acc *= alpha[:, None]
 
         # v: [KV_BLK_SZ, HEAD_SZ]
-        v = tl.load(v_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
+        v = tl.load(v_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0).to(dtype)
 
         p = p.to(v.dtype)
         acc += tl.dot(p, v, out_dtype=tl.float32)
@@ -752,6 +746,7 @@ def _paged_attn_w_dot_w_partition_kernel(
     max_num_partitions = tl.num_programs(2)
 
     log2e: tl.constexpr = 1.4426950408889634
+    dtype = q_ptr.dtype.element_ty
 
     ctx_len = tl.load(ctx_lens_ptr + seq_idx)
 
@@ -776,7 +771,7 @@ def _paged_attn_w_dot_w_partition_kernel(
     grp_mask = q_grp_offs[:, None] < QUERY_GRP_SZ
     # load q[QUERY_GRP_SZ_POW2, HEAD_SZ]
     q = tl.load(q_ptr + q_offs, mask=grp_mask, other=0.0)
-    q = (q * attn_scale).to(q_ptr.dtype.element_ty)
+    q = (q * attn_scale).to(dtype)
 
     max_logit_i = tl.zeros([QUERY_GRP_SZ_POW2], dtype=tl.float32) + float("-inf")
     exp_sum_i = tl.zeros([QUERY_GRP_SZ_POW2], dtype=tl.float32)
@@ -793,7 +788,7 @@ def _paged_attn_w_dot_w_partition_kernel(
         kv_mask = mask_offset[:, None] < ctx_len
 
         # load k[KV_BLK_SZ, HEAD_SZ]
-        k = tl.load(k_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
+        k = tl.load(k_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0).to(dtype)
 
         # qk: [QUERY_GRP_SZ_POW2, KV_BLOCK_SIZE]
         qk = tl.dot(q, k.T, out_dtype=tl.float32)
@@ -808,7 +803,7 @@ def _paged_attn_w_dot_w_partition_kernel(
         acc *= alpha[:, None]
 
         # v: [KV_BLK_SZ, HEAD_SZ]
-        v = tl.load(v_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0)
+        v = tl.load(v_cache_ptr + kv_blk_offs, mask=kv_mask, other=0.0).to(dtype)
 
         p = p.to(v.dtype)
         acc += tl.dot(p, v, out_dtype=tl.float32)
@@ -932,8 +927,8 @@ def paged_attention_reference(
     head_sz = v_cache.shape[2]
     kv_blk_sz = v_cache.shape[3]
 
-    print(f"ref: query={query}")
-    print(f"ref: blk_tables={blk_tables}")
+    #print(f"ref: query={query}")
+    #print(f"ref: blk_tables={blk_tables}")
     num_seqs = query.shape[0]
     for s in range(num_seqs):
         q = query[s].unsqueeze(0)
@@ -959,39 +954,46 @@ def paged_attention_reference(
 
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
-        print(f"q.shape={q.shape}")
-        print(f"key.shape={keys.shape}")
-        print(f"values.shape={values.shape}")
+        #print(f"q.shape={q.shape}")
+        #print(f"ref{s} key.shape={keys.shape}")
+        #print(f"ref{s} values.shape={values.shape}")
 
         scale = 1.0 / (head_sz**0.5)
         q = q * scale
         print(f"ref{s}: q={q}")
         attn = torch.einsum("qhd,khd->hqk", q, keys)
-        print(f"ref{s}: qk={attn.shape}")
+        print(f"ref{s}: qk={attn}")
         attn = torch.softmax(attn, dim=-1)
-        print(f"ref{s}: sm(qk)={attn.shape}")
+        print(f"ref{s}: sm(qk)={attn}")
         out = torch.einsum("hqk, khd->qhd", attn,values)
-        print(f"ref{s}: out={out.shape}")
+        #print(f"ref{s}: out={out.shape}")
         out = out.view(num_q_heads, head_sz)
         output[s].copy_(out, non_blocking=True)
 
 
 
-#@pytest.mark.parametrize('B, H_Q, H_KV, D', [(1, 1, 1, 16), (1, 4, 4, 16), (4, 4, 4, 16), (4, 16, 16, 64),
-#                                             (1, 2, 1, 16), (2, 2, 1, 16), (1, 8, 2, 16), (2, 8, 2, 16), (2, 16, 4, 16),
-#                                             (4, 16, 4, 16), (4, 64, 4, 32), (32, 128, 2, 128), (64, 128, 2, 256),
-#                                             (64, 128, 128, 16), (3, 4, 4, 32), (5, 64, 16, 1024)])
-def test_paged_attn(B, H_Q, H_KV, D, KV_BLK_SZ, SEQ_LEN):
+@pytest.mark.parametrize('B, H_Q, H_KV, D, KV_BLK_SZ, SEQ_LEN, dtype', [
+            (1, 1, 1, 1, 1, 1, torch.float32),
+            (1, 1, 1, 1, 1, 10, torch.float32),
+            (1, 1, 1, 16, 4, 1, torch.float32),
+            (1, 1, 1, 16, 4, 10, torch.float32),
+            ])
+def test_paged_attn(B, H_Q, H_KV, D, KV_BLK_SZ, SEQ_LEN, dtype):
     torch.set_printoptions(threshold=100000)
     num_blocks = 4 
-    dtype = torch.float16
 
-    query = torch.randn(B, H_Q, D, dtype=dtype, device="cuda")
+    #query = torch.randn(B, H_Q, D, dtype=dtype, device="cuda")
+    query = torch.tensor([[[0.4712]]], dtype=dtype, device="cuda")
     x = min(D, 16 // torch.tensor([], dtype=dtype).element_size())
     #print(f"x={x}")
-    key_cache = torch.randn(num_blocks, H_KV, D // x, KV_BLK_SZ, x, dtype=dtype, device="cuda")
-    value_cache = torch.randn(num_blocks, H_KV, D, KV_BLK_SZ, dtype=dtype, device="cuda")
+    #key_cache = torch.randn(num_blocks, H_KV, D // x, KV_BLK_SZ, x, dtype=dtype, device="cuda")
+    #value_cache = torch.randn(num_blocks, H_KV, D, KV_BLK_SZ, dtype=dtype, device="cuda")
 
+    key_cache=torch.tensor([[[[[-0.8981]]]], [[[[ 0.3902]]]], [[[[-1.2611]]]], [[[[-1.8928]]]]], dtype=dtype, device='cuda:0')
+    value_cache=torch.tensor([[[[-0.6247]]], [[[ 0.2135]]], [[[ 0.3552]]], [[[-0.4653]]]] , dtype=dtype, device='cuda:0')
+
+    #print(f"key_cache={key_cache}")
+    #print(f"value_cache={value_cache}")
     key_cache_tri = key_cache.permute(0, 1, 3, 2, 4).flatten(3, 4).contiguous().cuda()
     value_cache_tri = value_cache.permute(0, 1, 3, 2).contiguous().cuda()
 
@@ -1004,13 +1006,16 @@ def test_paged_attn(B, H_Q, H_KV, D, KV_BLK_SZ, SEQ_LEN):
         block_table = [random.randint(0, num_blocks - 1) for _ in range(max_num_blks_per_seq)]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int32, device="cuda")
-
+    block_tables = torch.tensor([[1, 3, 3, 1, 2]], device='cuda:0', dtype=torch.int32)
     attn_scale = 1.0 / (D**0.5)
-    #print(f"q={query}")
-    #print(f"key_cache={key_cache}")
-    #print(f"value_cache={value_cache}")
+    print(f"q.shape={query.shape}")
+    print(f"q={query}")
+    print(f"key_cache_tri.shape={key_cache_tri.shape}")
+    print(f"key_cache_tri={key_cache_tri}")
+    print(f"value_cache_tri.shape={value_cache_tri.shape}")
+    print(f"value_cache_tri={value_cache_tri}")
     #print(f"block_tables.shape={block_tables.shape}")
-    #print(f"block_tables={block_tables}")
+    print(f"block_tables={block_tables}")
 
     torch_output = torch.zeros(B, H_Q, D, dtype=dtype, device="cuda")
     paged_attention_reference(torch_output, query, key_cache, value_cache, block_tables, context_lens)
@@ -1131,7 +1136,10 @@ def main():
     #run_benchmark(args)
     #test_paged_attn(2, 2, 2, 1, 1, 10)
     #B, H_Q, H_KV, D, KV_BLK_SZ, SEQ_LEN
-    test_paged_attn(2, 2, 1, 16, 16, 32)
+    #test_paged_attn(1, 1, 1, 1, 1, 1)
+    #test_paged_attn(1, 1, 1, 1, 1, 1)
+    #test_paged_attn(2, 2, 1, 16, 16, 32)
+    test_paged_attn(1, 1, 1, 1, 1, 5, torch.float32)
 
 
 if __name__ == "__main__":
