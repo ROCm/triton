@@ -16,12 +16,13 @@ import triton.language as tl
 import triton.tools.experimental_descriptor
 import triton.profiler as proton
 
-if torch.cuda.is_available():
-    from triton._C.libtriton import nvidia
-    cublas_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
-    cublas = nvidia.cublas.CublasLt(cublas_workspace)
-else:
-    cublas = None
+# if torch.cuda.is_available():
+#     from triton._C.libtriton import nvidia
+#     cublas_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
+#     cublas = nvidia.cublas.CublasLt(cublas_workspace)
+# else:
+
+cublas = None
 
 
 def is_cuda():
@@ -396,6 +397,9 @@ def bench(K, dtype, reps=10):
 
     proton.activate(0)
 
+    print("")
+    print(f"Benchmarking with M={M}, N={N}, K={K}", end="")
+
     if cublas is not None:
         for _ in range(reps):
             cublas_matmul(a, b)
@@ -405,10 +409,23 @@ def bench(K, dtype, reps=10):
             torch_matmul(a, b)
             time.sleep(0.01)
     for _ in range(reps):
+        
+        torch.cuda.synchronize()
+        start_t = time.time()
         matmul(a, b.T)
+        torch.cuda.synchronize()
+        print(f"matmul iteration takes: {time.time() - start_t}")
+        
         time.sleep(0.01)
     for _ in range(reps):
+
+        torch.cuda.synchronize()
+        start_t = time.time()
         matmul_persistent(a, b.T)
+        torch.cuda.synchronize()
+        print(f"persistent matmul iteration takes: {time.time() - start_t}")
+
+
         time.sleep(0.01)
     if supports_tma():
         for _ in range(reps):
@@ -474,6 +491,8 @@ if __name__ == "__main__":
     validate(8192, 8192, 512, dtype)
 
     proton.start("matmul", hook="triton")
-    for K in range(args.K_range[0], args.K_range[1] + 1, args.K_step):
-        bench(K, dtype)
+
+    # for K in range(args.K_range[0], args.K_range[1] + 1, args.K_step):
+    # print("K: ", argsK)
+    bench(args.K, dtype)
     proton.finalize()
