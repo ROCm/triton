@@ -419,16 +419,28 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
     tile_id = start_pid - NUM_WG
 
     # TODO: bottom up traversal of the Q blocks might help in causal scenario? Why?
+    # actually flipping the traversal order at every second head would achieve the best balancing of the workload
 
     while tile_id + NUM_WG < num_tiles_total:
         # tile id basically tells us the Q block we are handling
         tile_id += NUM_WG 
         off_z = tile_id // num_tiles_per_sample # at which batch sample are we
         off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
+        # flip the order of traversing the Q blocks per head
+        start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
 
-        start_m = tile_id % num_tiles_per_sample % num_tiles_per_head # at which tile are we inside the head
+        # off_hz = tile_id // (num_tiles_per_head) # at which head are we going 
+        
+        # # flip the traversal order of the Q blocks at every second head
+        # flip_traversal = off_hz % 2
+        # if flip_traversal:
+        #     offsets_m = BLOCK_M - tl.arange(0, BLOCK_M) - 1
+        # else:
+        #     offsets_m = tl.arange(0, BLOCK_M)
 
-        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+
+        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) 
+
         offs_n = tl.arange(0, BLOCK_N)
         offs_d = tl.arange(0, BLOCK_DMODEL)
         
@@ -1651,8 +1663,8 @@ def main():
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
 
-    #print("Running benchmark...")
-    #run_benchmark(custom_config, args)
+    print("Running benchmark...")
+    run_benchmark(custom_config, args)
     print("Running single forward with timing...")
     test_op_fwd(16,16,16,1024,1024,128,True, False, "bhsd")
 

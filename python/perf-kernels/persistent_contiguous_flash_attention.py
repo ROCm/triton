@@ -1012,13 +1012,10 @@ class _attention(torch.autograd.Function):
         # kernel is padded - there is no padding in memory for any dims.
         padded_d_model = max(padded_d_model, 16)
 
-        # naive
+        # baseline where we launch as many workgroups as we have tiles
         # grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
         # total_num_tiles: triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']) * nheads_q * batch
         
-        
-
-
         # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
         # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
         # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing

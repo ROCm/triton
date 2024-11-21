@@ -982,8 +982,8 @@ class _attention(torch.autograd.Function):
 
 
         if metadata.persistent:
-            # from persistent_flash_attention import attn_fwd as attn_fwd_persistent
-            from persistent_contiguous_flash_attention import attn_fwd as attn_fwd_persistent
+            from persistent_flash_attention import attn_fwd as attn_fwd_persistent
+            # from persistent_contiguous_flash_attention import attn_fwd as attn_fwd_persistent
             NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count         
             grid = lambda META: (min(NUM_CU*META['GRID_CU_MULTIP'], triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M'])*nheads_q*batch), )
             attn_fwd_persistent[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
