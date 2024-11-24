@@ -157,7 +157,6 @@ class Autotuner(KernelInterface):
                 finally:
                     # Throw exception raised by `self.fn.run`
                     raise
-            #return kernel_hash
             self.post_hook(args, exception=None)
             return directory_path
             
@@ -184,10 +183,10 @@ class Autotuner(KernelInterface):
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
                 timings = {}
-                hashes = {}
+                ir_paths = {}
                 for config in pruned_configs:
-                    timing, hash = self._bench(*args, config=config, **kwargs)
-                    hashes[config] = hash
+                    timing, ir_path = self._bench(*args, config=config, **kwargs)
+                    ir_paths[config] = ir_path
                     timings[config] = timing
                 # timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
                 bench_end = time.time()
@@ -200,35 +199,22 @@ class Autotuner(KernelInterface):
             config = self.configs[0]
         self.best_config = config
         if os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1" and not used_cached_result:
-            best_hash = hashes.get(config, None)
+            best_path = ir_paths.get(config, None)
             print(f"Triton autotuning for function {self.base_fn.__name__} finished after "
                   f"{self.bench_time:.2f}s; best config selected: {self.best_config};")
             
-            print(f"Best config compilation results saved in folder .triton/cache/{best_hash}") 
+            print(f"Compilation results for the best config saved inside the folder {best_path}") 
             if os.getenv("TRITON_PRUNE_COMPILED", None) == "1":
                 import shutil
-                print("Pruning the other compilation folders for the non optimal configs.")
-                cache_dir = os.path.expanduser("~/.triton/cache")  # Path to the Triton cache directory
-                if os.path.exists(cache_dir):
-                    for hash in hashes.values():
-                        hash_folder = os.path.join(cache_dir, hash)
-                        if hash != best_hash:
-                            if os.path.exists(hash_folder):
-                                try:
-                                    shutil.rmtree(hash_folder)  # Remove the folder
-                                    print(f"Removed hash folder: {hash_folder}")
-                                except Exception as e:
-                                    print(f"Failed to remove folder {hash_folder}: {e}")
-                            else:
-                                print(f"not found folder: {hash_folder}")
-                        
-                else:
-                    print("~/.triton/cache does not exist")
+                print("Pruning the other compilation results of the non optimal configs:")
+                for path in ir_paths.values():
+                    if os.path.exists(path) and path != best_path:
+                        try:
+                            shutil.rmtree(path)
+                            print(f"Removed {path}")
+                        except Exception as e:
+                            print(f"Failed to remove {path}: {e}")
                
-        
-        
-
-
         if config.pre_hook is not None:
             config.pre_hook({**self.nargs, **kwargs, **config.all_kwargs()})
         ret = self.fn.run(
