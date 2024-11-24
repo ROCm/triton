@@ -232,6 +232,7 @@ def compile(src, target=None, options=None):
     env_vars = get_cache_invalidating_env_vars()
     key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
     hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    
     fn_cache_manager = get_cache_manager(hash)
     # For dumping/overriding only hash the source as we want it to be independent of triton
     # core changes to make it easier to track kernels by hash.
@@ -244,6 +245,8 @@ def compile(src, target=None, options=None):
     # A PID string can be 5-character long. A UUID string has typically 36 characters. Let's truncate
     # the file name to 150 characters to be safe.
     file_name = src.name[:150]
+
+
     metadata_filename = f"{file_name}.json"
     metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
     metadata_path = metadata_group.get(metadata_filename)
@@ -293,8 +296,10 @@ def compile(src, target=None, options=None):
             print(f"Creating new locations for {ir_full_name}")
         module = next_module
     # write-back metadata
-    metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
-                                                             binary=False)
+    metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename, binary=False)
+    # print(metadata_group)
+
+
     fn_cache_manager.put_group(metadata_filename, metadata_group)
     # Compilation completed, disabling multithreading in context.
     # This is needed to safely finalize threads pool inside context: if current process forks before
@@ -351,7 +356,13 @@ class CompiledKernel:
 
     def __init__(self, src, metadata_group, hash):
         from collections import namedtuple
+
+
         metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
+        # print("metadata path", metadata_path)
+        
+        self.metadata_path = metadata_path
+        
         metadata = json.loads(metadata_path.read_text())
         metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.

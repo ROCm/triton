@@ -47,7 +47,7 @@ def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mod
 
     with torch.cuda.stream(torch.cuda.Stream()):
         # warmup
-        fn()
+        kernel_hash = fn()
         if grad_to_none is not None:
             for x in grad_to_none:
                 x.detach_()
@@ -89,7 +89,7 @@ def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mod
             end_event.record()
             torch.cuda.synchronize()
             ret += [start_event.elapsed_time(end_event) / n_repeat]
-        return _summarize_statistics(torch.tensor(ret), quantiles, return_mode)
+        return _summarize_statistics(torch.tensor(ret), quantiles, return_mode), kernel_hash
 
 
 def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_mode="mean"):
@@ -113,8 +113,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     import torch
 
     di = runtime.driver.active.get_device_interface()
-
-    fn()
+    fn()    
     di.synchronize()
 
     cache = runtime.driver.active.get_empty_cache_for_benchmark()

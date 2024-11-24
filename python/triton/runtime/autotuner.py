@@ -122,6 +122,7 @@ class Autotuner(KernelInterface):
         if do_bench is None:
             self.do_bench = driver.active.get_benchmarker()
         else:
+            
             self.do_bench = do_bench
 
     def _bench(self, *args, config, **meta):
@@ -138,22 +139,28 @@ class Autotuner(KernelInterface):
         full_nargs = {**self.nargs, **current}
 
         def kernel_call():
+            #print("comes to kernel call")
             if config.pre_hook:
                 config.pre_hook(full_nargs)
             self.pre_hook(args)
             try:
-                self.fn.run(
+                metadata_path = self.fn.run(
                     *args,
                     **current,
-                )
+                ).metadata_path
+
+                directory_path = os.path.dirname(metadata_path)
+
             except Exception as e:
                 try:
                     self.post_hook(args, exception=e)
                 finally:
                     # Throw exception raised by `self.fn.run`
                     raise
-
+            #return kernel_hash
             self.post_hook(args, exception=None)
+            return directory_path
+            
 
         try:
             return self.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8))
@@ -176,7 +183,13 @@ class Autotuner(KernelInterface):
                 used_cached_result = False
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+                timings = {}
+                hashes = {}
+                for config in pruned_configs:
+                    timing, hash = self._bench(*args, config=config, **kwargs)
+                    hashes[config] = hash
+                    timings[config] = timing
+                # timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start
                 self.cache[key] = builtins.min(timings, key=timings.get)
@@ -187,8 +200,35 @@ class Autotuner(KernelInterface):
             config = self.configs[0]
         self.best_config = config
         if os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1" and not used_cached_result:
+            best_hash = hashes.get(config, None)
             print(f"Triton autotuning for function {self.base_fn.__name__} finished after "
                   f"{self.bench_time:.2f}s; best config selected: {self.best_config};")
+            
+            print(f"Best config compilation results saved in folder .triton/cache/{best_hash}") 
+            if os.getenv("TRITON_PRUNE_COMPILED", None) == "1":
+                import shutil
+                print("Pruning the other compilation folders for the non optimal configs.")
+                cache_dir = os.path.expanduser("~/.triton/cache")  # Path to the Triton cache directory
+                if os.path.exists(cache_dir):
+                    for hash in hashes.values():
+                        hash_folder = os.path.join(cache_dir, hash)
+                        if hash != best_hash:
+                            if os.path.exists(hash_folder):
+                                try:
+                                    shutil.rmtree(hash_folder)  # Remove the folder
+                                    print(f"Removed hash folder: {hash_folder}")
+                                except Exception as e:
+                                    print(f"Failed to remove folder {hash_folder}: {e}")
+                            else:
+                                print(f"not found folder: {hash_folder}")
+                        
+                else:
+                    print("~/.triton/cache does not exist")
+               
+        
+        
+
+
         if config.pre_hook is not None:
             config.pre_hook({**self.nargs, **kwargs, **config.all_kwargs()})
         ret = self.fn.run(

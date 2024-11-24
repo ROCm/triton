@@ -332,27 +332,30 @@ def is_rdna():
                                                                                    "gfx1102", "gfx1200", "gfx1201")
 
 
+
+# So with persistent kernels we must ensure that the launched workgroups run concurrently
+# We can have NUM_WG = NUM_CU i.e. GRID_CU_MULTIP=1, and then num_warps=8 with waves_per_eu=2. 
+# (waves_per_eu=2 will hint to the compiler to reduce VGPR pressure in order to ensure that we fit 2 warps per eu. We have 4 EUs in a single CU.)
+# or we can have NUM_WG = 2*NUM_CU, with num_warps=4 with waves_per_eu=2.
+# or even (GRID_CU_MULTIP, num_warps, waves_per_eu) = (4,2,2) or (8,1,1). 
+# TODO: lets see what the VGPR usage is, if we could be able to even fit waves_per_eu=3, and then configs like (1,12,3), (2,6,3), (3,4,3).
+
+
 def get_cdna_autotune_configs():
     return [
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+                      num_warps=8),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+                      num_warps=8),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+                      num_warps=8),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+                      num_warps=8),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 4}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 4}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
                       num_warps=4),
         # Fall-back config.
         triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
-                       num_warps=8),
+                      num_warps=4),
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 
 
@@ -403,7 +406,6 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr, GRID_CU_MULTIP: tl.constexpr):
     
-    
     """
     This implements the persistent kernel optimization to flash attention. With persistent kernels, we launch NUM_WG = NUM_CU * GRID_CU_MULTIP number of workgroups,
     and each workgroup loops over num_tiles_total // NUM_WG number of tiles. This is meant to reduce the launch overhead that we would otherwise incure when launching
@@ -415,32 +417,25 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
     num_tiles_per_sample = num_tiles_per_head * HQ # times the number of heads
     num_tiles_total = num_tiles_per_sample * ZQ # times the number of samples
 
-    start_pid = tl.program_id(0)
+    start_pid = tl.program_id(0) # number in range 0 to NUM_WG
     tile_id = start_pid - NUM_WG
-
-    # TODO: bottom up traversal of the Q blocks might help in causal scenario? Why?
-    # actually flipping the traversal order at every second head would achieve the best balancing of the workload
 
     while tile_id + NUM_WG < num_tiles_total:
         # tile id basically tells us the Q block we are handling
         tile_id += NUM_WG 
         off_z = tile_id // num_tiles_per_sample # at which batch sample are we
         off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
-        # flip the order of traversing the Q blocks per head
-        start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
-
-        # off_hz = tile_id // (num_tiles_per_head) # at which head are we going 
         
-        # # flip the traversal order of the Q blocks at every second head
-        # flip_traversal = off_hz % 2
-        # if flip_traversal:
-        #     offsets_m = BLOCK_M - tl.arange(0, BLOCK_M) - 1
-        # else:
-        #     offsets_m = tl.arange(0, BLOCK_M)
+        # flip the order of traversing the Q blocks per head periodically
+        period = NUM_WG // num_tiles_per_head + 1
+        off_hz = tile_id // (num_tiles_per_head) # at which head are we in
+        if off_hz % period:
+            start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
+        else:
+            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
 
-
+        # Do the specified Q block computation (following is the same as in normal flash attention)
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) 
-
         offs_n = tl.arange(0, BLOCK_N)
         offs_d = tl.arange(0, BLOCK_DMODEL)
         

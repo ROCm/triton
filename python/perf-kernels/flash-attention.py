@@ -1452,24 +1452,25 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
 
 def nonvarlen_benchmark_configs():
     configs = [
-        (16, 16, 16, 1024, 1024),
-        (8, 16, 16, 2048, 2048),
-        (4, 16, 16, 4096, 4096),
-        (2, 16, 16, 8192, 8192),
-        (1, 16, 16, 16384, 16384),
-        (2, 48, 48, 1024, 1024),
-        (2, 48, 48, 2048, 1024),
-        (2, 48, 48, 4096, 8192),
-        (2, 48, 48, 8192, 4096),
-        (2, 48, 48, 16384, 8192),
-        (8, 16, 16, 1989, 15344),
-        (4, 16, 16, 4097, 163),
-        (2, 16, 16, 8122, 2159),
-        (1, 16, 16, 16281, 7),
-        (2, 48, 48, 1021, 1020),
-        (2, 48, 48, 2001, 2048),
-        (2, 48, 48, 3996, 9639),
-        (2, 48, 48, 8181, 1021),
+        (32, 32, 32, 512, 512),
+        # (16, 16, 16, 1024, 1024),
+        # (8, 16, 16, 2048, 2048),
+        # (4, 16, 16, 4096, 4096),
+        # (2, 16, 16, 8192, 8192),
+        # (1, 16, 16, 16384, 16384),
+        # (2, 48, 48, 1024, 1024),
+        #(2, 48, 48, 2048, 1024),
+        #(2, 48, 48, 4096, 8192),
+        #(2, 48, 48, 8192, 4096),
+        #(2, 48, 48, 16384, 8192),
+        #(8, 16, 16, 1989, 15344),
+        #(4, 16, 16, 4097, 163),
+        #(2, 16, 16, 8122, 2159),
+        #(1, 16, 16, 16281, 7),
+        #(2, 48, 48, 1021, 1020),
+        #(2, 48, 48, 2001, 2048),
+        #(2, 48, 48, 3996, 9639),
+        #(2, 48, 48, 8181, 1021),
     ]
     return configs
 
@@ -1626,12 +1627,16 @@ def main():
            "Only fp16, bf16 and f32 types currently supported."
 
 
+    # print("Validating correctness...")
+    # print(f"test_op_fwd(16,16,16,1024,1024,128,{args.causal}, False, \"bhsd\", {args.persistent}): ")
+    # test_op_fwd(16,16,16,1024,1024,128, args.causal, False, "bhsd", args.persistent)
+    # print(f"test_op_varlen_fwd(4, 48, 8192, 64, {args.causal}, {args.persistent}): ")
+    # test_op_varlen_fwd(4, 48, 8192, 64, args.causal, args.persistent)
+
+
     print("Running benchmark...")
     run_benchmark(custom_config, args)
-    print(f"test_op_fwd(16,16,16,1024,1024,128,{args.causal}, False, \"bhsd\", {args.persistent}): ")
-    test_op_fwd(16,16,16,1024,1024,128, args.causal, False, "bhsd", args.persistent)
-    print(f"test_op_varlen_fwd(4, 48, 8192, 64, {args.causal}, {args.persistent}): ")
-    test_op_varlen_fwd(4, 48, 8192, 64, args.causal, args.persistent)
+    
 
     
 
