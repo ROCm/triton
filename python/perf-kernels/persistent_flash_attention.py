@@ -343,16 +343,25 @@ def is_rdna():
 
 def get_cdna_autotune_configs():
     return [
+        # persistent settings
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
                       num_warps=8),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
-                      num_warps=8),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
-                      num_warps=8),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
-                      num_warps=8),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 3}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+                      num_warps=4),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
                       num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+                      num_warps=8),
         # Fall-back config.
         triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
                       num_warps=4),
@@ -409,7 +418,19 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
     """
     This implements the persistent kernel optimization to flash attention. With persistent kernels, we launch NUM_WG = NUM_CU * GRID_CU_MULTIP number of workgroups,
     and each workgroup loops over num_tiles_total // NUM_WG number of tiles. This is meant to reduce the launch overhead that we would otherwise incure when launching
-    a workgroup per each tile as is done with the standard flash attention (flash-attention.py).
+    a workgroup per each Q tile as is done with the standard flash attention (flash-attention.py).
+    
+    TODO: figure out a way to ensure balanced workloads. 
+    Unbalanced workloads can result in low occupancy running at the end,
+    when only a part of the launched workgroups still continue running.
+    This is particularly problematic when causal=True and MAX_SEQLENS_Q >> MAX_SEQLENS_K 
+    (i.e. most of the Q tiles have 0 workload due to masking).
+    
+    What is currently done:
+    - tile_ID is increased iteratively by NUM_WG
+    - tiles are traversed in reverse order inside the heads in order to have low workload tiles at the very end
+
+    Software scheduler is probably an overkill, but would solve it.
     """
     NUM_WG = NUM_CU * GRID_CU_MULTIP
 
@@ -427,12 +448,12 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
         off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
         
         # flip the order of traversing the Q blocks per head periodically
-        period = NUM_WG // num_tiles_per_head + 1
-        off_hz = tile_id // (num_tiles_per_head) # at which head are we in
-        if off_hz % period:
-            start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
-        else:
-            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
+        # period = NUM_WG // num_tiles_per_head + 1
+        # off_hz = tile_id // (num_tiles_per_head) # at which head are we in
+        # if off_hz % period:
+        start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
+        # else:
+        #     start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
 
         # Do the specified Q block computation (following is the same as in normal flash attention)
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) 
@@ -462,8 +483,6 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
             seqlen_k = MAX_SEQLENS_K
 
         if continue_condition:
-            # (rest of the loop code)
-
             # Now we compute whether we need to exit early due to causal masking.
             # This is because for seqlen_q > seqlen_k, M rows of the attn scores
             # are completely masked, resulting in 0s written to the output, and
@@ -498,7 +517,6 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                 # work around would be
                 # o_ptrs_mask2 = offs_m[:, None] < seqlen_q
                 # tl.store(o_ptrs, acc, mask=o_ptrs_mask2)
-                # TODO: which is better?
 
                 # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
                 # statically known.

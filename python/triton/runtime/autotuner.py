@@ -206,12 +206,12 @@ class Autotuner(KernelInterface):
             print(f"Compilation results for the best config saved inside the folder {best_path}") 
             if os.getenv("TRITON_PRUNE_COMPILED", None) == "1":
                 import shutil
-                print("Pruning the other compilation results of the non optimal configs:")
+                #print("Pruning the other compilation results of the non optimal configs:")
                 for path in ir_paths.values():
                     if os.path.exists(path) and path != best_path:
                         try:
                             shutil.rmtree(path)
-                            print(f"Removed {path}")
+                            #print(f"Removed {path}")
                         except Exception as e:
                             print(f"Failed to remove {path}: {e}")
                
