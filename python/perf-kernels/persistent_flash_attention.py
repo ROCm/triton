@@ -311,7 +311,8 @@ def is_rdna():
 # or we can have NUM_WG = 2*NUM_CU, with num_warps=4 with waves_per_eu=2.
 # or even (GRID_CU_MULTIP, num_warps, waves_per_eu) = (4,2,2) or (8,1,1). 
 # TODO: lets see what the VGPR usage is, if we could be able to even fit waves_per_eu=3, and then configs like (1,12,3), (2,6,3), (3,4,3).
-
+# Theres also quite a complex effect to the size of the modulo set (total num tiles % num tiles that can run concurrently on device). 
+# So we would want b * h * sq // BLOCK_M % num wg to be as close to 0 (spend little time in low occupancy mode) or to num_wg (the last modulo set also reaches near full occupancy)
 
 def get_cdna_autotune_configs():
     return [
@@ -330,14 +331,35 @@ def get_cdna_autotune_configs():
         #               num_warps=4),
         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
         #               num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+        #               num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
                       num_warps=4),
-        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
-        #               num_warps=8),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 4, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
+        #               num_warps=16),
         # # Fall-back config.
         # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1}, num_stages=1,
         #               num_warps=4),
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+
+
+# def get_cdna_autotune_configs():
+#     return [
+#         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#         #               num_warps=4),
+#         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#                       num_warps=4),
+#         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#         #               num_warps=4),
+#         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#         #               num_warps=4),
+#         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#         #               num_warps=4),
+#         # # Fall-back config.
+#         # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
+#         #               num_warps=4),
+#     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+
 
 
 def get_rdna_autotune_configs():
@@ -389,7 +411,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
     
     """
     This implements the persistent kernel optimization to flash attention. With persistent kernels, we launch NUM_WG = NUM_CU * GRID_CU_MULTIP number of workgroups,
-    and each workgroup loops over num_tiles_total // NUM_WG number of tiles. This is meant to reduce the launch overhead that we would otherwise incure when launching
+    and each workgroup loops over num_tiles_total // NUM_WG number of tiles. This is meant to amortize the workgroup launch overhead that we would otherwise incure when launching
     a workgroup per each Q tile as is done with the standard flash attention (flash-attention.py).
     
     TODO: figure out a way to ensure balanced workloads. 
@@ -402,7 +424,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
     - tile_ID is increased iteratively by NUM_WG
     - tiles are traversed in reverse order inside the heads in order to have low workload tiles at the very end
 
-    Software scheduler is probably an overkill, but would solve it.
+    Software scheduler is probably an overkill, but would solve it. Maybe a simple atomic counter would work?
     """
     NUM_WG = NUM_CU * GRID_CU_MULTIP
 
@@ -418,12 +440,18 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
         tile_id += NUM_WG 
         off_z = tile_id // num_tiles_per_sample # at which batch sample are we
         off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
-        
+
+
+        # start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
+        # flip the traversal order of Q blocks inside head
+        start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
+
+
         # flip the order of traversing the Q blocks per head periodically
         # period = NUM_WG // num_tiles_per_head + 1
         # off_hz = tile_id // (num_tiles_per_head) # at which head are we in
         # if off_hz % period:
-        start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
+        #     start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
         # else:
         #     start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
 
