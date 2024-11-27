@@ -630,9 +630,6 @@ def get_cdna_autotune_configs_persistent():
                       num_warps=4),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
                       num_warps=4),
-        # Fall-back config.
-        # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2}, num_stages=1,
-        #               num_warps=4),
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 
 
@@ -699,7 +696,6 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
     num_tiles_per_sample = num_tiles_per_head * HQ # times the number of heads
     num_tiles_total = num_tiles_per_sample * ZQ # times the number of samples
     
-    pid = tl.program_id(0)
 
     tile_id = tl.atomic_add(atomic_counter, CHUNK_SIZE) # atomic counter is a tensor with a single element (initialized as -CHUNK_SIZE)    
 
@@ -709,8 +705,10 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
         while (tile_id < num_tiles_total) and (chunk_iter < CHUNK_SIZE):
             off_z = tile_id // num_tiles_per_sample # at which batch sample are we
             off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
-            start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1
-            # Do the specified Q block computation (following is the same as in normal flash attention)
+            
+            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
+            # start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # flip the order of traversal inside a head
+
             offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) 
             offs_n = tl.arange(0, BLOCK_N)
             offs_d = tl.arange(0, BLOCK_DMODEL)
@@ -1314,10 +1312,8 @@ class _attention(torch.autograd.Function):
         if metadata.persistent:
             NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count         
             grid = lambda META: (min(NUM_CU*META['GRID_CU_MULTIP'], triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M'])*nheads_q*batch), )
-            CHUNK_SIZE = 1
-            atomic_counter = torch.ones([1], dtype=torch.int32, device='cuda') * (-8)
-            print(atomic_counter)
-            print("Doing persistent attention")
+            CHUNK_SIZE = 2
+            atomic_counter = torch.zeros([1], dtype=torch.int32, device='cuda')
             attn_fwd_persistent[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
                         *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                         dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
@@ -1970,9 +1966,9 @@ def main():
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
 
-    test_op_fwd(16,16,16,1024,1024,128, args.causal, False, "bhsd", args.persistent)
+    # test_op_fwd(16,16,16,1024,1024,128, args.causal, False, "bhsd", args.persistent)
 
-    # run_benchmark(custom_config, args)
+    run_benchmark(custom_config, args)
 
 
 if __name__ == '__main__':
