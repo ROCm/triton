@@ -691,6 +691,7 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
     Balancing the workloads is handled by scheduling the tasks to different workgroups with a simple atomic counter. 
     TODO: atomic counter way of scheduling leads to worse performance in causal=False case. 
     Possible reason: when causal=False workloads are already balanced and tl.atomic_add calls become bottleneck (all WGs arrive at the same time to the tl.atomic_add call and it becomes serialized).
+    TODO: increase atomic counter in chunks (reduce the number of tl.atomic_add calls)
     """
     # NUM_WG = NUM_CU * GRID_CU_MULTIP # number of workgroups launched
 
@@ -698,30 +699,20 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
     num_tiles_per_sample = num_tiles_per_head * HQ # times the number of heads
     num_tiles_total = num_tiles_per_sample * ZQ # times the number of samples
 
-    tile_id = tl.atomic_add(atomic_counter, CHUNK_SIZE)
+    start_pid = tl.program_id(0)
+    
+    tile_id = tl.atomic_add(atomic_counter, CHUNK_SIZE) # atomic counter is a tensor with a single element (initialized as -CHUNK_SIZE)    
 
     while tile_id < num_tiles_total:
         # tile id basically tells us the Q block we are handling
-        # tile_id += NUM_WG
         chunk_iter = 0
-        while tile_id < num_tiles_total and chunk_iter < CHUNK_SIZE:
+        while (tile_id < num_tiles_total) and (chunk_iter < CHUNK_SIZE):
+            # tl.device_print("tile_id: ", tile_id)
+            # tl.device_print("num tiles total: ", num_tiles_total)
+            # tl.device_assert(tile_id < num_tiles_total, "tile_id exceeds the number of tiles")
             off_z = tile_id // num_tiles_per_sample # at which batch sample are we
             off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
-
-
             start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
-            # flip the traversal order of Q blocks inside head
-            # start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
-
-
-            # flip the order of traversing the Q blocks per head periodically
-            # period = NUM_WG // num_tiles_per_head + 1
-            # off_hz = tile_id // (num_tiles_per_head) # at which head are we in
-            # if off_hz % period:
-            #     start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
-            # else:
-            #     start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
-
             # Do the specified Q block computation (following is the same as in normal flash attention)
             offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) 
             offs_n = tl.arange(0, BLOCK_N)
@@ -1327,7 +1318,7 @@ class _attention(torch.autograd.Function):
             NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count         
             grid = lambda META: (min(NUM_CU*META['GRID_CU_MULTIP'], triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M'])*nheads_q*batch), )
             CHUNK_SIZE = 8
-            atomic_counter = torch.ones([1], dtype=torch.int32, device='cuda') * (-CHUNK_SIZE)
+            atomic_counter = torch.ones([1], dtype=torch.int32, device='cuda') * (-8)
             print("Doing persistent attention")
             attn_fwd_persistent[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
                         *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
