@@ -689,18 +689,6 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
     This implements the persistent kernel optimization to flash attention. With persistent kernels, we launch NUM_WG = NUM_CU * GRID_CU_MULTIP number of workgroups,
     and each workgroup loops over num_tiles_total // NUM_WG number of tiles. This is meant to amortize the workgroup launch overhead that we would otherwise incure when launching
     a workgroup per each Q tile as is done with the standard flash attention (flash-attention.py).
-    
-    TODO: figure out a way to ensure balanced workloads. 
-    Unbalanced workloads can result in low occupancy running at the end,
-    when only a part of the launched workgroups still continue running.
-    This is particularly problematic when causal=True and MAX_SEQLENS_Q >> MAX_SEQLENS_K 
-    (i.e. most of the Q tiles have 0 workload due to masking).
-    
-    What is currently done:
-    - tile_ID is increased iteratively by NUM_WG
-    - tiles are traversed in reverse order inside the heads in order to have low workload tiles at the very end
-
-    Software scheduler is probably an overkill, but would solve it. Maybe a simple atomic counter would work?
     """
     NUM_WG = NUM_CU * GRID_CU_MULTIP
 
@@ -717,11 +705,9 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
         off_z = tile_id // num_tiles_per_sample # at which batch sample are we
         off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head # at which head are we inside the sample
 
-
         # start_m = tile_id % num_tiles_per_sample % num_tiles_per_head
         # flip the traversal order of Q blocks inside head
         start_m = num_tiles_per_head - tile_id % num_tiles_per_sample % num_tiles_per_head - 1 # at which tile are we inside the head
-
 
         # flip the order of traversing the Q blocks per head periodically
         # period = NUM_WG // num_tiles_per_head + 1
