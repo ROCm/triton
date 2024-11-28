@@ -698,8 +698,35 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
     num_tiles_per_sample = num_tiles_per_head * HQ # times the number of heads
     num_tiles_total = num_tiles_per_sample * ZQ # times the number of samples
 
-    # atomic counter is initialized as 0
-    tile_id = atomic_counter.atomic_add(1) # retuns the value BEFORE the atomic operation
+    # these two should produce exactly the same
+
+    # atomic counter is initialized as atomic_counter = torch.zeros([1], dtype=torch.int32, device='cuda') outside the triton function
+    # tile_id = atomic_counter.atomic_add(1) # retuns the value BEFORE the atomic operation. Does work but is too slow
+    
+    # TODO: make the following work. Now I get an error.
+    tile_id = tl.zeros((1,), dtype=tl.int32)  # Ensure it matches the output constraint
+    increment = tl.full((1,), 1, dtype=tl.int32)  # Ensure it matches the input constraint
+    # Inline assembly for atomic add
+    tl.inline_asm_elementwise(
+        """
+        global_atomic_add.u32 $0, $1, $2;
+        """,
+        (
+            "=r,"
+            "l,"
+            "r"
+        ),
+        args=[
+            tile_id.to(tl.uint32),          # Output: the original value of the counter
+            atomic_counter,   # Input: pointer to the atomic counter
+            increment.to(tl.uint32),                 # Input: increment value
+        ],
+        dtype=tl.int32,  # Ensure correct data type for the operation
+        is_pure=False,   # Mark as side-effecting operation
+        pack=1           # Single operation
+    )
+    # tile_id = tl.load(tmp)
+
 
     while tile_id < num_tiles_total:
         # tile id basically tells us the Q block we are handling
@@ -915,7 +942,7 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:
                     if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
-                        out_mask_boundary = tl.full((BLOCK_DMODEL, ), causal_start_idx, dtype=tl.int32)
+                        out_mask_boundary = causal_start_idx.broadcast_to([BLOCK_DMODEL, ])# tl.full((BLOCK_DMODEL, ), causal_start_idx, dtype=tl.int32)
                         mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
                         out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
                         z = 0.0
@@ -926,7 +953,7 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
                 # This is only true for the last M block. For others, overflow_size will be -ve
                 overflow_size = end_m_idx - seqlen_q
                 if overflow_size > 0:
-                    boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
+                    boundary = (BLOCK_M - overflow_size).broadcast_to([BLOCK_M, ]) # tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
                     l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
                     tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
                 else:
@@ -942,7 +969,25 @@ def attn_fwd_persistent(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz
                     o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
                 tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
-        tile_id = atomic_counter.atomic_add(1)
+        # tile_id = atomic_counter.atomic_add(1)
+        tl.inline_asm_elementwise(
+            """
+            global_atomic_add.u32 $0, $1, $2;
+            """,
+            (
+                "=r,"
+                "l,"
+                "r"
+            ),
+            args=[
+                tile_id,          # Output: the original value of the counter
+                atomic_counter,   # Input: pointer to the atomic counter
+                increment,                 # Input: increment value
+            ],
+            dtype=tl.int32,  # Ensure correct data type for the operation
+            is_pure=False,   # Mark as side-effecting operation
+            pack=1           # Single operation
+        )
 
 
 @triton.jit
@@ -1966,9 +2011,9 @@ def main():
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
 
-    # test_op_fwd(22,16,16,1500,1500,128, args.causal, False, "bhsd", args.persistent)
+    test_op_fwd(22,16,16,1500,1500,128, args.causal, False, "bhsd", args.persistent)
 
-    run_benchmark(custom_config, args)
+    # run_benchmark(custom_config, args)
 
 
 if __name__ == '__main__':
