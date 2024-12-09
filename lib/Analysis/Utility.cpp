@@ -10,6 +10,7 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Support/LLVM.h"
+#include "triton/Conversion/MLIRTypes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -565,7 +566,33 @@ bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
   return ans;
 }
 
-bool cvtReordersRegisters(RankedTensorType srcTy, RankedTensorType dstTy) {
+bool matchMFMAAndDotOperandShuffleCase(RankedTensorType srcTy,
+                                       RankedTensorType dstTy) {
+  auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcTy.getEncoding());
+  auto dotOperandLayout = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+  if (!mfmaLayout || !dotOperandLayout)
+    return false;
+
+  // Currently supporting 32x32 and 16x16 FP8 MFMA -> dot operand case
+  return dotOperandLayout.getParent() == mfmaLayout &&
+         dotOperandLayout.getOpIdx() == 0 && mfmaLayout.getIsTransposed() &&
+         dotOperandLayout.getKWidth() == 8 &&
+         getContigPerThread(mfmaLayout)[1] == 4 &&
+         ((mfmaLayout.getMDim() == 16 && mfmaLayout.getNDim() == 16) ||
+          (mfmaLayout.getMDim() == 32 && mfmaLayout.getNDim() == 32)) &&
+         triton::type::isFloat8(srcTy.getElementType()) &&
+         triton::type::isFloat8(dstTy.getElementType()) &&
+         mfmaLayout.getWarpsPerCTA()[1] == 1;
+}
+
+// We get the smallest submap of srcTy^{-1} * dstTy that is not the identity
+// under kBlock, kWarp or kLane (in that order). The idea here is that if we
+// have a transformation that's the identity on kBlock, we don't need to use
+// distributed shared memory. If it's also the identity on kWarp, we can
+// transfer via warp-shuffles, and if it's the identity on kLane just have to
+// reorder the registers
+std::optional<LinearLayout> minimalCvtLayout(RankedTensorType srcTy,
+                                             RankedTensorType dstTy) {
   MLIRContext *ctx = srcTy.getContext();
   std::optional<LinearLayout> srcLayout =
       toLinearLayout(srcTy.getShape(), srcTy.getEncoding());
@@ -625,8 +652,11 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
   // TODO(Keren): We didn't check `cvtNeedsWarpShuffle` here because it's not
   // supported yet in Triton's backend.
   return !cvtReordersRegisters(srcTy, dstTy) &&
-         !isMmaToDotShortcut(srcTy, dstTy) &&
-         !isMfmaToDotShortcut(srcTy, dstTy);
+         !isBlockedToDotShortcut(srcTy, dstTy) &&
+         !matchMmaV3AndDotOperandLayout(srcTy, dstTy) &&
+         // to be removed when generalized warp shuffle conversions
+         // are ready:
+         !matchMFMAAndDotOperandShuffleCase(srcTy, dstTy);
 }
 
 bool atomicNeedsSharedMemory(Value value) {
