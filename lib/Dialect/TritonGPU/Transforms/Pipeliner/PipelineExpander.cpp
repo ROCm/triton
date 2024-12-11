@@ -66,8 +66,10 @@ protected:
   Value lb;
   Value step;
   bool dynamicLoop;
-  triton::PipeliningOption::AnnotationlFnType annotateFn = nullptr;
   bool peelEpilogue;
+  bool guardEpilogue;
+
+  triton::PipeliningOption::AnnotationlFnType annotateFn = nullptr;
   triton::PipeliningOption::PredicateOpFnType predicateFn = nullptr;
 
   // When peeling the kernel we generate several version of each value for
@@ -157,6 +159,7 @@ bool LoopPipelinerInternal::initializeLoopInfo(
     }
   }
   peelEpilogue = options.peelEpilogue;
+  guardEpilogue = options.guardEpilogue && dynamicLoop;
   predicateFn = options.predicateFn;
   if ((!peelEpilogue || dynamicLoop) && predicateFn == nullptr) {
     LDBG("--no epilogue or predicate set -> BAIL");
@@ -717,7 +720,7 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
     // increment to next iterI
     iterI = rewriter.create<arith::AddIOp>(loc, iterI, one);
 
-    if (dynamicLoop) {
+    if (guardEpilogue) {
       // Disable stages when `i` is greater than total_iters.
       // pred = total_iters >= i
       predicates[i] = rewriter.create<arith::CmpIOp>(
@@ -742,7 +745,7 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
               newOperand->set(replacement);
             }
           });
-      if (dynamicLoop) {
+      if (guardEpilogue) {
         OpBuilder::InsertionGuard insertGuard(rewriter);
         newOp = predicateFn(rewriter, newOp, predicates[currentVersion]);
         if (!newOp)
@@ -772,7 +775,7 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
         }
       }
     }
-    if (dynamicLoop) {
+    if (guardEpilogue) {
       // Select return values from this stage (live outs) based on predication.
       // If the stage is valid select the peeled value, else use previous stage
       // value.

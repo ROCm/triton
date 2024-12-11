@@ -119,7 +119,7 @@ public:
   StreamPipeliner(scf::ForOp _forOp, int _numStages, int _globalPrefetch,
                   int _localPrefetch)
       : forOp(_forOp), numStages(_numStages), numBuffers(1),
-        schedule(numStages),
+        mustGuardEpilogue(false), schedule(numStages),
         axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
     int lastStage = numStages - 1;
     stages[SCHED_GLOBAL_LOAD] = 0;
@@ -164,6 +164,7 @@ private:
   // User settings
   int numStages;
 
+  bool mustGuardEpilogue;
   // Computed number of buffers
   int numBuffers;
 
@@ -698,11 +699,17 @@ void StreamPipeliner::scheduleRemainingToLastStage() {
   // Assign the rest of the ops to the last stage.
   // Take care of the ordering of the ops - uses cannot be scheduled to the
   // cluster before the definition.
+  int count = 0;
   auto cluster = clusters[SCHED_COMPUTE];
   DenseMap<Operation *, tt::CoarseSchedule::Cluster> opToCluster;
   for (auto &op : forOp.getBody()->without_terminator()) {
-    if (schedule.count(&op) == 0)
+    if (schedule.count(&op) == 0) {
       opToCluster[&op] = cluster;
+      count++;
+    }
+  }
+  if (count != 0) {
+    mustGuardEpilogue = true;
   }
   SmallVector<Operation *> queue;
   for (auto [op, stage, cluster] : schedule.getOpsInOrder(forOp)) {
@@ -838,6 +845,7 @@ LogicalResult StreamPipeliner::preprocessLoopAndBuildSchedule() {
       schedule.createFinalSchedule(forOp);
 
   // Fill out the pipeline options.
+  options.guardEpilogue = mustGuardEpilogue;
   options.getScheduleFn =
       [coarseSchedule](scf::ForOp,
                        std::vector<std::pair<Operation *, unsigned>> &s) {
@@ -858,6 +866,8 @@ LogicalResult StreamPipeliner::pipelineLoop() {
     return failure();
   LDBG("Loop before sending to expander:\n" << *forOp);
 
+  auto *block = forOp->getBlock();
+  Location loc = forOp.getLoc();
   IRRewriter rewriter(forOp->getContext());
   rewriter.setInsertionPoint(forOp);
   return tt::pipelineForLoop(rewriter, forOp, options);
