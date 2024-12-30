@@ -25,7 +25,7 @@ Value getPredMask(RewriterBase &rewriter, Type typeLike, Value currentMask,
                   Value pred);
 
 /// Function to mask operations during scheduling.
-Operation *predicateOp(RewriterBase &rewriter, Operation *op, Value pred);
+Operation *predicateOp(RewriterBase &rewriter, Operation *op, Value pred, bool guard);
 
 /// Replace all uses of `oldUse` with `val` and propagate the type if needed.
 /// This is useful when we need to change a memory descriptor from immutable to

@@ -51,7 +51,7 @@ static Operation *streamPredication(RewriterBase &rewriter, Operation *op,
     ifOp.getElseBodyBuilder().create<scf::YieldOp>(loc, dotOp->getOperand(2));
     return ifOp;
   }
-  return tt::predicateOp(rewriter, op, pred);
+  return tt::predicateOp(rewriter, op, pred, guard);
 }
 
 namespace {
