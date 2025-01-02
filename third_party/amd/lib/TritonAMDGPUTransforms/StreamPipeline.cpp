@@ -51,7 +51,7 @@ static Operation *streamPredication(RewriterBase &rewriter, Operation *op,
     ifOp.getElseBodyBuilder().create<scf::YieldOp>(loc, dotOp->getOperand(2));
     return ifOp;
   }
-  return tt::predicateOp(rewriter, op, pred, guard);
+  return tt::predicateOp(rewriter, op, pred, guardEpilogue);
 }
 
 namespace {
@@ -151,6 +151,8 @@ private:
   void createStreamCopy(tt::LoadOp loadOp, Value alloc, Value extractIdx);
   void createStreamOps();
 
+  void checkComputeOp(Operation *op);
+
   void scheduleOp(Operation *op, SchedType type, int stage = -1) {
     if (stage < 0)
       stage = stages[type];
@@ -201,6 +203,14 @@ private:
 };
 
 } // namespace
+
+void StreamPipeliner::checkComputeOp(Operation *op) {
+  if (!mlir::isMemoryEffectFree(op))
+    mustGuardEpilogue = true;
+  // ops that return non-zero
+  if (!isa<tt::DotOp>(op))
+    mustGuardEpilogue = true;
+}
 
 // Init Schedule Config based on settings and loop characteristics.
 // Create clusters in order of ops in loop. This can interleave ops
@@ -602,6 +612,7 @@ LogicalResult StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
   for (auto &[loadOp, dist, use] : loadOpToIndLevelAndUse) {
     // Non-LoadOp(s) are the (final) root uses of all LoadOp(s).
     if (!isa<tt::LoadOp>(use)) {
+      checkComputeOp(use);
       scheduleOp(use, SCHED_COMPUTE);
       rootUsers.insert(use);
     }
