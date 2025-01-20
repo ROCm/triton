@@ -73,6 +73,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::registerTritonAMDGPUConvertToBufferOps();
   mlir::triton::registerTritonAMDGPUInsertInstructionSchedHints();
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
+  mlir::triton::registerTritonAMDGPURefineOps();
 
   registry
       .insert<mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
