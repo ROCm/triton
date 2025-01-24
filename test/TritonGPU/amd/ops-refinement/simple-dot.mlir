@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline='num_stages=2' -cse -canonicalize -triton-amdgpu-refine-ops='arch=gfx942 granularity=small_tile' -canonicalize | FileCheck %s
+// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline='num_stages=2' -cse -canonicalize -triton-amdgpu-refine-ops='arch=gfx942' -canonicalize | FileCheck %s
 
 #mma = #ttg.amd_mfma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [2, 2], instrShape = [32, 32], isTransposed = true}>
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
