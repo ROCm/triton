@@ -15,8 +15,6 @@ add_triton_library(TritonAMDGPUTransforms
   UpdateAsyncWaitCount.cpp
   Utility.cpp
   MembarAnalysis.cpp
-  RefineOps.cpp
-  RescheduleOps.cpp
 
   DEPENDS
   TritonAMDGPUIR

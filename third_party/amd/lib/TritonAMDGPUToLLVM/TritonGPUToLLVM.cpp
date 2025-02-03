@@ -157,8 +157,7 @@ struct ConvertTritonAMDGPUToLLVM
     };
 
     auto populatePatterns6 = [&](auto populateFunc, int benefit) {
-      populateFunc(typeConverter, patterns, axisInfoAnalysis, targetInfo,
-                   benefit);
+      populateFunc(typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
     };
 
     auto populatePatterns7 = [&](auto populateFunc, int benefit) {
@@ -169,10 +168,11 @@ struct ConvertTritonAMDGPUToLLVM
                                                patterns, AMDBenefit);
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, commonBenefit);
-    AMD::populateDotOpToLLVMPatterns(typeConverter, patterns, axisInfoAnalysis,
-                                     AMDBenefit);
-    AMD::populateElementwiseOpToLLVMPatterns(
-        typeConverter, patterns, ftz, axisInfoAnalysis, targetInfo, AMDBenefit);
+    AMD::populateDotOpToLLVMPatterns(typeConverter, patterns,
+                                     axisInfoAnalysis, AMDBenefit);
+    AMD::populateElementwiseOpToLLVMPatterns(typeConverter, patterns, ftz,
+                                             axisInfoAnalysis,
+                                             targetInfo, AMDBenefit);
     AMD::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                            axisInfoAnalysis, AMDBenefit);
     populatePatterns7(mlir::triton::populateReduceOpToLLVMPatterns,
