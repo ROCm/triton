@@ -222,6 +222,22 @@ struct TritonAMDGPUInsertInstructionSchedHints
                                                                 schedHint);
         }
       });
+    }
+    return;
+
+    switch (schedHint) {
+    case mlir::triton::amdgpu::SchedHint::local_prefetch:
+      mod.walk([&](scf::ForOp forOp) {
+        // Note, instruction schedule barriers are inserted only in the case of
+        // a single `tt.dot` op in a `scf::ForOp` scope in the current
+        // implementation.
+        if (auto dotOp = getSingleDotOpIfExists(forOp)) {
+          OpBuilder rewriter(ctx);
+          rewriter.setInsertionPointToStart(forOp.getBody());
+          rewriter.create<triton::amdgpu::InstructionSchedHint>(forOp->getLoc(),
+                                                                schedHint);
+        }
+      });
       return;
     }
 

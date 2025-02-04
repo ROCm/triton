@@ -1367,75 +1367,39 @@ struct TritonAMDGPURefineOps
       return signalPassFailure();
     }
 
-    RewritePatternSet primaryPatterns(context);
-    primaryPatterns.add<LocalAllocOpPattern>(context, /*benefit=*/1);
-    walkAndApplyPatterns(func, std::move(primaryPatterns));
+    mod->walk([&](amdgpu::InstructionSchedHint hint) {
+      if (hint.getVariant() != amdgpu::SchedHint::refine_ops) {
+        return WalkResult::advance();
+      }
 
-    RewritePatternSet patterns(context);
-    patterns.add<LocalLoadOpPattern>(context, /*benefit=*/1);
-    patterns.add<DotOpPattern>(context, /*benefit=*/1);
-    patterns.add<LoadOpPattern>(context, /*benefit=*/1);
-    patterns.add<AMDGCNBufferLoadOp>(context, /*benefit=*/1);
-    patterns.add<LocalStoreOpPattern>(context, /*benefit=*/1);
-    patterns.add<ReduceOpPattern>(context, /*benefit=*/1);
-    patterns.add<ExpandDimsOpPattern>(context, /*benefit=*/1);
-    patterns.add<BroadcastOpPattern>(context, /*benefit=*/1);
+      auto *block = hint->getBlock();
+      block->walk([&](triton::DotOp dotOp) {
+        OpBuilder rewriter(dotOp->getContext());
+        // TODO: extend to WMMA instructions
+        if (failed(rewriteMFMA(rewriter, dotOp))) {
+          LDBG("failed to refine tt.dotOp: " << *dotOp);
+        }
+      });
 
-    GranularityType granType;
-    if (granularity == "small_tile") {
-      granType = GranularityType::SMALL;
-    } else if (granularity == "semantic_tile") {
-      granType = GranularityType::SEM;
-    } else {
-      func.emitError("unsupported granularity: '")
-          << this->granularity.getValue() << "'";
-      return signalPassFailure();
-    }
+      block->walk([&](triton::LoadOp loadOp) {
+        OpBuilder rewriter(loadOp->getContext());
+        if (loadOp->getNumOperands() == 1) {
+          if (failed(rewriteLoadOp(rewriter, loadOp))) {
+            LDBG("failed to refine tt.loadOp: " << *loadOp);
+          }
+        }
+      });
 
-    // Elementwise patterns
-#define REFINE_ELEMENTWISE_OP(OP_TYPE)                                         \
-  patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, /*benefit=*/1, granType);
-
-    REFINE_ELEMENTWISE_OP(math::RsqrtOp)
-    REFINE_ELEMENTWISE_OP(math::Exp2Op)
-    REFINE_ELEMENTWISE_OP(arith::TruncFOp)
-    REFINE_ELEMENTWISE_OP(arith::ExtFOp)
-    REFINE_ELEMENTWISE_OP(arith::FPToSIOp)
-    REFINE_ELEMENTWISE_OP(arith::SIToFPOp)
-    REFINE_ELEMENTWISE_OP(triton::FpToFpOp)
-    REFINE_ELEMENTWISE_OP(triton::PreciseSqrtOp)
-    REFINE_ELEMENTWISE_OP(math::SqrtOp)
-    REFINE_ELEMENTWISE_OP(math::ExpOp)
-    REFINE_ELEMENTWISE_OP(arith::SubIOp)
-    REFINE_ELEMENTWISE_OP(arith::AddIOp)
-    REFINE_ELEMENTWISE_OP(arith::MulIOp)
-    REFINE_ELEMENTWISE_OP(arith::DivSIOp)
-    REFINE_ELEMENTWISE_OP(arith::DivUIOp)
-    REFINE_ELEMENTWISE_OP(arith::RemFOp)
-    REFINE_ELEMENTWISE_OP(arith::RemSIOp)
-    REFINE_ELEMENTWISE_OP(arith::RemUIOp)
-    REFINE_ELEMENTWISE_OP(arith::AndIOp)
-    REFINE_ELEMENTWISE_OP(arith::OrIOp)
-    REFINE_ELEMENTWISE_OP(arith::XOrIOp)
-    REFINE_ELEMENTWISE_OP(arith::ShLIOp)
-    REFINE_ELEMENTWISE_OP(arith::ShRSIOp)
-    REFINE_ELEMENTWISE_OP(arith::ShRUIOp)
-    REFINE_ELEMENTWISE_OP(arith::MinNumFOp)
-    REFINE_ELEMENTWISE_OP(arith::MaxNumFOp)
-    REFINE_ELEMENTWISE_OP(arith::MinSIOp)
-    REFINE_ELEMENTWISE_OP(arith::MaxSIOp)
-    REFINE_ELEMENTWISE_OP(arith::MinUIOp)
-    REFINE_ELEMENTWISE_OP(arith::MaxUIOp)
-    REFINE_ELEMENTWISE_OP(arith::AddFOp)
-    REFINE_ELEMENTWISE_OP(arith::SubFOp)
-    REFINE_ELEMENTWISE_OP(arith::MulFOp)
-    REFINE_ELEMENTWISE_OP(arith::DivFOp)
-    REFINE_ELEMENTWISE_OP(arith::MaximumFOp)
-    REFINE_ELEMENTWISE_OP(arith::MinimumFOp)
-    REFINE_ELEMENTWISE_OP(triton::gpu::ConvertLayoutOp)
-
-#undef REFINE_ELEMENTWISE_OP
-    walkAndApplyPatterns(func, std::move(patterns));
+      block->walk([&](triton::gpu::LocalStoreOp storeOp) {
+        OpBuilder rewriter(storeOp->getContext());
+        if (storeOp->getNumOperands() == 2) {
+          if (failed(rewriteLocalStoreOp(rewriter, storeOp))) {
+            LDBG("failed to refine ttg.localLoadOp: " << *storeOp);
+          }
+        }
+      });
+      return WalkResult::advance();
+    });
   }
 };
 

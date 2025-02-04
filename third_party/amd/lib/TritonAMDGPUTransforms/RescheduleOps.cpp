@@ -446,163 +446,24 @@ struct TritonAMDGPURescheduleOps
   explicit TritonAMDGPURescheduleOps(StringRef targetArch) {
     this->arch = targetArch.str();
   }
-
-  LogicalResult verify(Block *mlirBlock) {
-    // make sure that a block gets terminated with `cf::BranchOp`
-    if (!dyn_cast<cf::BranchOp>(&(mlirBlock->back()))) {
-      return failure();
-    }
-
-    // do't schedule if there is not enough operations in a block
-    if (mlirBlock->getOperations().size() < 3)
-      return failure();
-    return success();
-  }
-  /*
-    reschedule() is the top-level scheduling pass for a single block,
-    whose purpose is to improve performance and regalloc of backend compilers.
-    Before this pass, mfmas and local_loads (belonging to dots)
-    were already annotated with their dot-tile info.
-    The order of re-scheduling is:
-     - Place order dependencies on dots according to dot-tiling.
-     - Place order dependencies on local_loads according to dot-tiling.
-     - Determine min-register vs max-latency-hiding preference.
-     - Determine memory op order and co-scheduling.
-     - Place order dependencies between memory ops.
-     - Determine memory ops' early/late preference.
-     - Determine memory ops' preferred issue rate.
-     - Determine memory ops' supported issue rate.
-     - Place performance and anti-dependencies between memory ops and dots.
-     - Run scheduler with new dependencies in place.
-    Note that rescheduling can be run after any new dependencies are created to
-    visualize graph.
-  */
-  void reschedule(Block *mlirBlock) {
-
-    Graph graph(mlirBlock);
-    graph.setNodesWeights(BasicDotWeightStrategy());
-    LDBG("Dependency graph in dot-format:\n" << graph);
-
-    GraphManager manager(graph);
-    MachineModel machineModel;
-    SmallVector<Operation *> rescheduledOps;
-
-    auto defaultSelector = [&](const SmallVector<Node *> readyNodes) {
-      size_t minSourceCodeNodeIndex = std::numeric_limits<size_t>::max();
-      Node *earliestNodeToRun = nullptr;
-      for (auto node : readyNodes) {
-        const auto sourceCodeIndex = manager.getNodeSourceCodeIndex(node);
-        if (minSourceCodeNodeIndex > sourceCodeIndex) {
-          minSourceCodeNodeIndex = sourceCodeIndex;
-          earliestNodeToRun = node;
-        }
-      }
-      return earliestNodeToRun;
-    };
-
-    auto nodeWeightsSelector = [&](const SmallVector<Node *> readyNodes) {
-      int32_t maxWeightValue = std::numeric_limits<int32_t>::min();
-      Node *selectedNode = nullptr;
-      for (auto node : readyNodes) {
-        if (node->getWeight() > maxWeightValue) {
-          maxWeightValue = node->getWeight();
-          selectedNode = node;
-        }
-      }
-      return selectedNode;
-    };
-
-    const bool verbose = false;
-    std::string dbgStr;
-    llvm::raw_string_ostream dbgStream(dbgStr);
-    while (!manager.finished()) {
-      const auto &readyNodes = manager.getCurrentLeafs();
-      MachineModel::Result selectionResult = machineModel.select(readyNodes);
-      auto selectedNode = selectionResult.selectedNode;
-      bool selectedFromMachineModel = selectedNode ? true : false;
-
-      if (!selectedNode) {
-        selectedNode = nodeWeightsSelector(selectionResult.normPriorityNodes);
-      }
-
-      bool selectedFromNormPrioQueue = false;
-      if (!selectedNode) {
-        selectedNode = defaultSelector(selectionResult.normPriorityNodes);
-        selectedFromNormPrioQueue = true;
-      }
-
-      bool selectedFromLowPrioqueue = false;
-      if (!selectedNode) {
-        selectedNode = defaultSelector(selectionResult.lowPriorityNodes);
-        selectedFromLowPrioqueue = true;
-      }
-
-      assert(selectedNode != nullptr);
-
-      if (verbose) {
-        dbgStream << std::string(80, '+') << "\n";
-        for (auto n : selectionResult.normPriorityNodes) {
-          n->getOp()->print(dbgStream);
-          dbgStream << '\n';
-        }
-        dbgStream << "\n\n\nSelected\n";
-        selectedNode->getOp()->print(dbgStream);
-        dbgStream << '\n';
-        machineModel.printState(dbgStream);
-        dbgStream << "selectedFromMachineModel: " << selectedFromMachineModel
-                  << "; "
-                  << "selectedFromNormPrioQueue: " << selectedFromNormPrioQueue
-                  << "; "
-                  << "selectedFromLowPrioqueue: " << selectedFromLowPrioqueue
-                  << '\n';
-      }
-
-      manager.removeLeaf(selectedNode);
-      rescheduledOps.push_back(selectedNode->getOp());
-    }
-
-    if (verbose)
-      llvm::outs() << dbgStream.str() << '\n';
-
-    std::string outStr;
-    llvm::raw_string_ostream outStream(outStr);
-    outStream << "\n\n\n...." << std::string(80, '-') << '\n';
-    for (auto op : rescheduledOps) {
-      op->print(outStream);
-      outStream << "\n";
-    }
-
-    // re-order instruction based on the new schedule
-    // move instruction from the tail to the begining of the current BB
-    // one-by-one
-    for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
-      (*it)->moveBefore(mlirBlock, mlirBlock->begin());
-    }
-
-    OpBuilder builder(&(mlirBlock->front()));
-    for (auto &op : mlirBlock->getOperations()) {
-      if (dyn_cast<triton::LoadOp>(&op)) {
-        auto barrier = createSchedBarrier(
-            builder, op.getLoc(), mlir::amdgpu::sched_barrier_opt_enum::none);
-        barrier->moveAfter(&op);
-      }
-    }
+  void reschedule(Block *block) {
+    // TODO: build dependency graph
+    // TODO: use gpu.barrier as havy-edges
+    // TODO: move ops around to improve ILP
   }
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     llvm::SmallVector<Block *> blocks;
-    mod.walk([&](triton::amdgpu::InstructionSchedHint hint) {
-      if (hint.getVariant() == triton::amdgpu::SchedHint::refine_ops) {
+    mod.walk([&](amdgpu::InstructionSchedHint hint) {
+      if (hint.getVariant() == amdgpu::SchedHint::refine_ops) {
         blocks.push_back(hint->getBlock());
         hint->erase();
       }
     });
 
     for (auto block : blocks) {
-      if (succeeded(verify(block))) {
-        reschedule(block);
-      }
+      reschedule(block);
     }
   }
 };
