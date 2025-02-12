@@ -400,8 +400,11 @@ public:
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
-    // Always use transposed mfma layout. This enables larger vectorization
-    // for global store instructions
+    if (isSecondDot(dotOp) && (retShape[0] == mDim)) {
+      warpsPerTile[0] = 1;
+      warpsPerTile[1] = (unsigned)numWarps;
+    }
+
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
