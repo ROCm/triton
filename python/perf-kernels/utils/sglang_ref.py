@@ -475,6 +475,7 @@ def _fwd_grouped_persistent_kernel_stage1(
                 qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf"))
 
                 offs_buf_v = (kv_loc[:, None] * stride_buf_vbs + cur_kv_head * stride_buf_vh + offs_dv[None, :])
+                
                 v = tl.load(
                     V_Buffer + offs_buf_v,
                     mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
@@ -539,7 +540,7 @@ def _decode_grouped_persistent_att_m_fwd(
     # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
     extra_kargs = {"waves_per_eu": 2, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    num_stages = 1
+    num_stages = 4
     num_warps = 4
 
     BLOCK_H = 16

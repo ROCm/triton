@@ -55,14 +55,11 @@ def attn_mqa(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen, num_
     device = q_input.device
 
     
-    attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 1, dtype=q_input.dtype, device=device)
+    attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 16, dtype=q_input.dtype, device=device)
     
     if persistent:
-        mid_o = torch.empty(B, H, num_kv_splits, kv_lora_rank, dtype=q_input.dtype, device=device)
-        mid_o1 = torch.empty(B, H, num_kv_splits, 16, dtype=q_input.dtype, device=device)
-        decode_attention_fwd(q_input, k_input, v_input, mid_o, mid_o1, Req_to_tokens, B_req_idx, B_Seqlen,
+        decode_attention_fwd(q_input, k_input, v_input, attn_logits[..., :kv_lora_rank], attn_logits[..., kv_lora_rank:], Req_to_tokens, B_req_idx, B_Seqlen,
                                         num_kv_splits, sm_scale, logit_cap)
-        attn_logits = torch.concatenate((mid_o, mid_o1[..., :1]), dim=-1)
     else:
         decode_attention_fwd(q_input, k_input, v_input, attn_logits, Req_to_tokens, B_req_idx, B_Seqlen,
                                         num_kv_splits, sm_scale, logit_cap)
@@ -177,6 +174,12 @@ def benchmark(args):
                     (64, 16, 2048, 512, 128, 64, 32),
                     (128, 16, 2048, 512, 128, 64, 32),
                     ]
+    
+    if args.B:
+        x_vals_list = [
+                    (args.B, 16, 2048, 512, 128, 64, 128),
+                    ]
+
     x_names = ["B", "H", "S", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "num_kv_splits"]
 
     line_vals = [ "persistent", "ref"] 
@@ -234,6 +237,7 @@ def parse_args():
     parser.add_argument("-persistent", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
+    parser.add_argument("-B", type=int, default=0)
     return parser.parse_args()
 
 arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
