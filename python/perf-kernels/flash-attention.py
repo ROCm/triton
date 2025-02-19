@@ -611,7 +611,7 @@ def attn_fwd(
         persistent_atomic_counter,
         Num_CU : constexpr_or_i32,
         GRID_CU_MULTIP: tl.constexpr,
-        Batch : constexpr_or_i32,
+        Batch, # we need batch size in order to calculate total pids for persistent approach
         # Performance
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -1327,6 +1327,10 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata: MetaData):
+        
+        if metadata.causal:
+            metadata.set_persistent("dynamic")
+        
         if o is None:
             if not metadata.int8:
                 o = torch.empty_like(q, dtype=v.dtype)
@@ -1390,7 +1394,7 @@ class _attention(torch.autograd.Function):
 
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
-
+        
         if metadata.persistent:
             grid = lambda META: (min(NUM_CU * META['GRID_CU_MULTIP'],
                                      triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']) * nheads_q * batch), )
