@@ -540,7 +540,7 @@ def _decode_grouped_persistent_att_m_fwd(
     # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
     extra_kargs = {"waves_per_eu": 2, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    num_stages = 4
+    num_stages = 1
     num_warps = 4
 
     BLOCK_H = 16
