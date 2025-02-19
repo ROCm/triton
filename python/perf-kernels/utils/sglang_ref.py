@@ -355,7 +355,8 @@ def _fwd_grouped_persistent_kernel_stage1(
     Req_to_tokens,
     B_req_idx,
     B_Seqlen,
-    Att_Out,
+    mid_o,
+    mid_o1,
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -366,6 +367,9 @@ def _fwd_grouped_persistent_kernel_stage1(
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
+    stride_mid_o1b,
+    stride_mid_o1h,
+    stride_mid_o1s,
     batch_num,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
@@ -491,15 +495,15 @@ def _fwd_grouped_persistent_kernel_stage1(
                         offs_dv[None, :])
 
             tl.store(
-                Att_Out + offs_mid_o,
+                mid_o + offs_mid_o,
                 acc / e_sum[:, None],
                 mask=(mask_h[:, None]) & (mask_dv[None, :]),
             )
 
-            offs_mid_o_1 = (cur_batch * stride_mid_ob + cur_head * stride_mid_oh + split_kv_id * stride_mid_os + Lv)
+            offs_mid_o_1 = (cur_batch * stride_mid_o1b + cur_head * stride_mid_o1h + split_kv_id * stride_mid_o1s)
 
             tl.store(
-                Att_Out + offs_mid_o_1,
+                mid_o1 + offs_mid_o_1,
                 e_max + tl.log(e_sum),
                 mask=mask_h,
             )
@@ -513,7 +517,8 @@ def _decode_grouped_persistent_att_m_fwd(
     q,
     k_buffer,
     v_buffer,
-    att_out,
+    mid_o,
+    mid_o1,
     Req_to_tokens,
     B_req_idx,
     B_Seqlen,
@@ -562,7 +567,8 @@ def _decode_grouped_persistent_att_m_fwd(
         Req_to_tokens,
         B_req_idx,
         B_Seqlen,
-        att_out,
+        mid_o,
+        mid_o1,
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
@@ -570,9 +576,12 @@ def _decode_grouped_persistent_att_m_fwd(
         k_buffer.stride(1),
         v_buffer.stride(0),
         v_buffer.stride(1),
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
+        mid_o.stride(0),
+        mid_o.stride(1),
+        mid_o.stride(2),
+        mid_o1.stride(0),
+        mid_o1.stride(1),
+        mid_o1.stride(2),
         batch,
         kv_group_num=kv_group_num,
         q_head_num=head_num,

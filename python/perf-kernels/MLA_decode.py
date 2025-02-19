@@ -54,9 +54,18 @@ def attn_mqa(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen, num_
     kv_lora_rank = v_input.shape[-1]
     device = q_input.device
 
+    
     attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 1, dtype=q_input.dtype, device=device)
-    decode_attention_fwd(q_input, k_input, v_input, attn_logits, Req_to_tokens, B_req_idx, B_Seqlen,
-                                    num_kv_splits, sm_scale, logit_cap)
+    
+    if persistent:
+        mid_o = torch.empty(B, H, num_kv_splits, kv_lora_rank, dtype=q_input.dtype, device=device)
+        mid_o1 = torch.empty(B, H, num_kv_splits, 16, dtype=q_input.dtype, device=device)
+        decode_attention_fwd(q_input, k_input, v_input, mid_o, mid_o1, Req_to_tokens, B_req_idx, B_Seqlen,
+                                        num_kv_splits, sm_scale, logit_cap)
+        attn_logits = torch.concatenate((mid_o, mid_o1[..., :1]), dim=-1)
+    else:
+        decode_attention_fwd(q_input, k_input, v_input, attn_logits, Req_to_tokens, B_req_idx, B_Seqlen,
+                                        num_kv_splits, sm_scale, logit_cap)
     
     return attn_logits
 
