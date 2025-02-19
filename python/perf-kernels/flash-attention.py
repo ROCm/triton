@@ -380,16 +380,20 @@ def is_rdna():
 
 def get_cdna_autotune_configs():
     return [
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #               num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #               num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #               num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #               num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1},
+        #               num_stages=1, num_warps=4),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
                       num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+                      num_stages=1, num_warps=4),            
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 
 
@@ -1901,7 +1905,7 @@ def run_benchmark(custom, args):
     int8_kv = args.int8_kv and int8
     varlen = args.layout == 'thd'
     configs = []
-    plot_name = f'fused-attention-{mode}-d{head_size}-layout{args.layout}'
+    plot_name = f'fused-attention-{mode}-d{head_size}-layout{args.layout}-persistent{args.persistent}'
     extra_args = {'D_HEAD': head_size, 'dtype': dtype, 'causal': causal, 'mode': mode}
     if custom:
         x_vals_list = [(args.b, args.hq, hk, args.sq, sk)]
@@ -1914,7 +1918,7 @@ def run_benchmark(custom, args):
         if args.model:
             x_vals_list = model_benchmark_configs(args)
             x_names = ['model', 'BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K', 'D_HEAD']
-            plot_name = f'fused-attention-{mode}-layout{args.layout}'
+            plot_name = f'fused-attention-{mode}-layout{args.layout}-persistent{args.persistent}'
             extra_args = {'dtype': dtype, 'causal': causal, 'mode': mode}
 
     print_time = args.return_time
@@ -2005,6 +2009,9 @@ def run_benchmark(custom, args):
     bench_flash_attention.run(save_path=".", print_data=True, show_plots=True)
 
 
+    return x_vals_list, x_names, plot_name
+
+
 def supported_layouts():
     layouts = \
         'bhsd: Q, K, V are individual tensors of [batch, num_heads, seqlen_q/k, head_size]' \
@@ -2056,7 +2063,7 @@ arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': tor
 import re
 from prettytable import PrettyTable
 
-def parse_vgpr_usage(file_path):
+def parse_vgpr_usage(file_path, x_vals_list, x_names, plot_name):
     with open(file_path, "r") as f:
         lines = f.readlines()
     
@@ -2065,13 +2072,28 @@ def parse_vgpr_usage(file_path):
     table_lines = []
     in_table = False
 
+    run_idx = 0
+
     for line in lines:
-        if re.search(r"\.name:", line):
+        
+        if re.search(r"Triton autotuning for", line):
+            vgpr_info.append("------------------")
+            vgpr_info.append(" | ".join([f"{x_name}:{x_val}" for x_val, x_name in zip(x_vals_list[run_idx], x_names) ]))
             vgpr_info.append(line.strip())
+            vgpr_info.append("------------------")
+            run_idx += 1
+        
+        if re.search(r"Autotuning kernel", line):
+            vgpr_info.append(line.strip())
+
+        if re.search(r"\.name:", line):
+            # vgpr_info.append(x_vals_list[run_idx])
+            vgpr_info.append(line.strip())
+            
         if re.search(r"\.vgpr_count:", line) or re.search(r"\.vgpr_spill_count:", line):
             vgpr_info.append(line.strip())
         # Detect start of table
-        if re.match(r"^\s*fused-attention-", line):
+        if re.match(rf"^\s*{plot_name}", line):
             in_table = True
             # table_lines.append(line.strip())
         elif in_table:
@@ -2130,8 +2152,9 @@ def print_vgpr(custom_config, args):
         sys.stderr = temp_file
         
         os.environ["AMDGCN_ENABLE_DUMP"] = "1"
-        # os.environ["TRITON_ALWAYS_COMPILE"] = "1"
-        run_benchmark(custom_config, args) # Run the benchmark
+        os.environ["TRITON_ALWAYS_COMPILE"] = "1"
+        os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+        x_vals_list, x_names, plot_name = run_benchmark(custom_config, args) # Run the benchmark
         
         sys.stdout.flush()
         sys.stderr.flush()
@@ -2143,7 +2166,7 @@ def print_vgpr(custom_config, args):
     time.sleep(0.5)  # Ensure everything is written before reading
 
     # Parse and print relevant output
-    parse_vgpr_usage(output_file)
+    parse_vgpr_usage(output_file, x_vals_list, x_names, plot_name)
 
     # Remove the temporary file
     os.unlink(output_file)
