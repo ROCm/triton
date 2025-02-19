@@ -222,8 +222,8 @@ struct TritonAMDGPUInsertInstructionSchedHints
                                                                 schedHint);
         }
       });
+      return;
     }
-    return;
 
     switch (schedHint) {
     case mlir::triton::amdgpu::SchedHint::local_prefetch:
