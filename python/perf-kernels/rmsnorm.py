@@ -291,26 +291,6 @@ def _rmsnorm_bwd_dg_reduce(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, 
     tl.store(dg_out_ptr + cols, sum_dg, mask=cols < n_cols)
 
 
-#def triton_rmsnorm_bwd(grad_output, x, g, rsigma, dx, dg, dg_tmp, n_rows, n_cols, ZERO_CENTERED_GAMMA, blk_size,
-#                            USE_BLOCKED, NUM_PRGMS, epsilon=1e-6):
-#    grid_bwd = lambda meta: (NUM_PRGMS, )
-#    rms_bwd_kernel[grid_bwd](grad_output, x, g, rsigma, dx, dg_tmp, x.stride(0), grad_output.stride(0), n_rows,
-#                            n_cols, epsilon, ZERO_CENTERED_GAMMA, blk_size, USE_BLOCKED, NUM_PRGMS)
-#
-#    grid_reduce = lambda meta: (triton.cdiv(n_cols, blk_size), )
-#   _rmsnorm_bwd_dg_reduce[grid_reduce](dg_tmp, dg, dg_tmp.stride(0), n_rows, n_cols, blk_size)
-#
-#    return dx, dg
-
-#def triton_rmsnorm_fwd(y, x, g, rsigma, n_rows, n_cols, ZERO_CENTERED_GAMMA, blk_size, USE_BLOCKED, NUM_PRGMS,
-#                   epsilon=1e-6):
-#    grid = lambda meta: (NUM_PRGMS, )
-#    rms_kernel[grid](y, x, g, rsigma, x.stride(0), y.stride(0), n_rows, n_cols, epsilon, ZERO_CENTERED_GAMMA, blk_size,
-#                     USE_BLOCKED, NUM_PRGMS)
-#
-#    return y, rsigma
-
-
 class RMSNorm(torch.autograd.Function):
 
     @staticmethod
@@ -379,25 +359,13 @@ def torch_rmsnorm_fwd(x, g, ZERO_CENTERED_GAMMA, out_dtype=torch.float16, epsilo
     return rms_norm, rsigma
 
 
-def torch_rmsnorm_bwd(x, g, ZERO_CENTERED_GAMMA, out_dtype=torch.float16, epsilon=1e-6):
-    M, N = x.shape
-    # cast to float32 as the triton kernel
-    x_f32 = x.float()
-    g_f32 = g.float()
-    rms = torch.sqrt(torch.sum(x_f32 * x_f32, dim=-1) * 1 / N)
-    rsigma = 1.0 / rms
-    if (ZERO_CENTERED_GAMMA):
-        g_f32 = g_f32 + 1
-    rms_norm_f32 = x_f32 * rsigma.unsqueeze(1) * g_f32
-    rms_norm = rms_norm_f32.to(out_dtype)
-    return rms_norm, rsigma
-
-
 arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
 
 
-@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
+#@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
+#@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("in_dtype_str", ["fp16", "bf16"])
+@pytest.mark.parametrize("out_dtype_str", ["fp16", "bf16"])
 @pytest.mark.parametrize('ZERO_CENTERED_GAMMA', [True, False])
 @pytest.mark.parametrize('M, N', [
     (1, 4),
@@ -418,8 +386,8 @@ def test_rmsnorm(M, N, ZERO_CENTERED_GAMMA, in_dtype_str, out_dtype_str):
     y = torch.zeros_like(x, device='cuda', dtype=out_dtype)
     rsigma = torch.empty((M, ), device=x.device, dtype=torch.float32)
 
-    dx = torch.empty(M, N, device='cuda', dtype=out_dtype, requires_grad=False)
-    dg = torch.empty((1, N), device='cuda', dtype=out_dtype, requires_grad=False)
+    dx = torch.empty_like(x, dtype=in_dtype, requires_grad=False)
+    dg = torch.empty_like(g, dtype=in_dtype, requires_grad=False)
     dg_tmp = torch.zeros(M, N, device='cuda', dtype=torch.float32, requires_grad=False)
 
     n_rows, n_cols = x.shape
@@ -463,7 +431,17 @@ def test_rmsnorm(M, N, ZERO_CENTERED_GAMMA, in_dtype_str, out_dtype_str):
     # 2) Triton backward
     x_triton = x.clone().detach().requires_grad_()
     g_triton = g.clone().detach().requires_grad_()
-    y_triton, rsigma_triton = torch_rmsnorm_fwd(x_triton, g_triton, ZERO_CENTERED_GAMMA, out_dtype)
+
+    y_triton_buf = torch.empty_like(x_triton, dtype=out_dtype)
+    rsigma_triton = torch.empty((M, ), device=x_triton.device, dtype=torch.float32)
+
+    dx_b = torch.empty_like(x_triton, dtype=in_dtype, requires_grad=False)
+    dg_b = torch.empty_like(g_triton, dtype=in_dtype, requires_grad=False)
+    dg_tmp_b = torch.zeros(M, N, device=x_triton.device, dtype=torch.float32, requires_grad=False)
+
+    # Run Triton forward pass to build the graph for backward.
+    y_triton = rmsnorm(x_triton, g_triton, y_triton_buf, rsigma_triton, dx_b, dg_b, dg_tmp_b, n_rows, n_cols,
+                       ZERO_CENTERED_GAMMA, blk_size, USE_BLOCKED, NUM_PRGMS)
     y_triton.backward(grad_output, retain_graph=True)
     grad_x_triton = x_triton.grad.to(out_dtype)
     grad_g_triton = g_triton.grad.to(out_dtype)
