@@ -288,7 +288,7 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
 
             int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
             // vecSize is set to kWidth of the dotop layout
-            int vecSize = dotOpEnc.getKWidth();
+            int vecSize = dotOpEnc.getKWidth() / 2;
             int maxPhase = std::max(std::min(SIMDWidth / perPhase, innerDimLength / vecSize), 1);
 
             // TODO (zhanglx): figure out better parameters for mfma4

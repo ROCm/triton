@@ -330,12 +330,29 @@ def test_mxfp_only(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
     a = torch.randint(20, 40, (M, K), dtype=torch.uint8, device=device).view(torch.float8_e5m2)
     a_f16 = f8_to_f16(a, dtype_src_str)
     b = torch.randint(20, 40, (K, N), dtype=torch.uint8, device=device).view(torch.float8_e5m2)
+    #b = torch.randint(20, 40, (N, K), dtype=torch.uint8, device=device).T.view(torch.float8_e5m2)
     b_f16 = f8_to_f16(b, dtype_src_str)
-    # a_scale = torch.randint(128, 130, (M, K // 32), dtype=torch.uint8, device=device)
-    a_scale = torch.full((M, K // 32), 128, dtype=torch.uint8, device=device)
-    # b_scale = torch.randint(128, 130, (N, K // 32), dtype=torch.uint8, device=device)
-    b_scale = torch.full((N, K // 32), 128, dtype=torch.uint8, device=device)
+    a_scale = torch.randint(128, 130, (M, K // 32), dtype=torch.uint8, device=device)
+    #a_scale = torch.full((M, K // 32), 130, dtype=torch.uint8, device=device)
+    b_scale = torch.randint(128, 130, (N, K // 32), dtype=torch.uint8, device=device)
+    #b_scale = torch.full((N, K // 32), 128, dtype=torch.uint8, device=device)
 
+    #for row in range(0, 16):
+    #    for col in range (0, 4):
+    #        a_scale[row][col] = 128 if row % 2 == 0 else 129
+            #print(f"a_scale[{row}][{col}] = {a_scale[row][col]}", end=',')
+        #print("")
+
+    #for row in range(0, 16):
+    #    for col in range (0, 4):
+    #        b_scale[row][col] = 130 if row % 2 == 0 else 128
+            #print(f"b_scale[{row}][{col}] = {b_scale[row][col]}", end=',')
+        #print("")
+
+    #torch.save(b_f16, 'b_f16_k_contig.pt')
+    b_f16_k_contig = torch.load('b_f16_k_contig.pt')
+    b_f16_non_k_contig = torch.load('b_f16_non_k_contig.pt')
+    torch.testing.assert_close(b_f16_k_contig, b_f16_non_k_contig, atol=0.0001, rtol=0.0001)
     # print(f'{a=}, {a.shape=}')
     # print(f'{b=}, {b.shape=}')
     # print(f'{a_scale=}, {a_scale.shape=}')
@@ -344,7 +361,8 @@ def test_mxfp_only(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
     dtype_dst = getattr(torch, dtype_dst_str)
     output = torch.empty((M, N), dtype=dtype_dst, device=device)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    kernel_kwargs = {}
+    kernel_kwargs = {'num_warps': 1, 'waves_per_eu': 6}
+    print(f"{b.shape=}  {b.stride(0) = }  {b.stride(1)=}")
     out = mxfp_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, a_scale.stride(0), a.stride(0), a.stride(1),
                             b.stride(0), b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K,
                             NUM_STAGES=NUM_STAGES, **kernel_kwargs)
@@ -364,12 +382,16 @@ def test_mxfp_only(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
     rtol = 0.0001
     # print(f'{output=}')
     # print(f'{ref_out=}')
+    torch.set_printoptions(linewidth=200)
+    #print(f"{output - ref_out}")
     torch.testing.assert_close(ref_out, output, atol=atol, rtol=rtol)
 
     # Pipelining of dot_scaled requires tmem_copy to be used, which in turn
     # requires the scales to be in the blocked layout in global memory.
     assert "ttng.wait_barrier" not in out.asm["ttgir"]
 
+
+test_mxfp_only(16, 16, 256, 16, 16, 128, 1, 'cuda')
 
 def _knob_promote_lhs_to_tmem(monkeypatch):
     # Promoting the LHS to TMEM should be patched because it will otherwise

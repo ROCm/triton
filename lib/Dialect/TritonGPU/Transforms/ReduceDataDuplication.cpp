@@ -42,8 +42,11 @@ public:
           dyn_cast<triton::gpu::DotOperandEncodingAttr>(dstType.getEncoding());
       if (!dstDotOp)
         return;
-      if (!cvtNeedsSharedMemory(srcType, dstType))
-        return;
+      llvm::outs() << "Found cvt to dotOperandLayout\n";
+      //if (!cvtNeedsSharedMemory(srcType, dstType)) {
+          //  llvm::outs() << "And it does not need shared memory?\n";
+          //  return;
+          //}
       auto srcOrder = triton::gpu::getOrder(srcEncoding);
       auto rank = srcOrder.size();
       SmallVector<unsigned> sharedOrder;
