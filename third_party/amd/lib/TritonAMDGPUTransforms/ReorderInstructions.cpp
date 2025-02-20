@@ -154,6 +154,8 @@ static void sinkDotConversion(triton::FuncOp funcOp) {
 //    %3 = local_store %1, %2
 //    %4 = local_load %2
 static void hoistLocalLoad(triton::FuncOp funcOp) {
+  DenseMap<Operation *, ttg::LocalLoadOp> allocMap;
+  SmallVector<Operation *> toRemove;
   funcOp.walk([&](ttg::LocalLoadOp localLoad) {
     auto localAlloc = localLoad.getSrc().getDefiningOp<ttg::LocalAllocOp>();
     if (!localAlloc)
@@ -167,11 +169,25 @@ static void hoistLocalLoad(triton::FuncOp funcOp) {
       auto srcTensorOp = localAlloc.getSrc().getDefiningOp();
       // Check if localAlloc is in the loop but it's src tensor defining op is
       // outside of it.
-      if (!srcTensorOp || !isCrossLoopBoundary(localAlloc, srcTensorOp))
+      if (srcTensorOp) {
+        auto fa = allocMap.find(srcTensorOp);
+        if (fa != allocMap.end()) {
+          // If a similar local_load was already hoisted, reuse the load.
+          // This is needed for the pipelined epilogue.
+          // assert *fa === localLoad
+          Value result = fa->second;
+          localLoad->replaceAllUsesWith(ValueRange{result});
+          toRemove.push_back(localLoad);
+          toRemove.push_back(localAlloc);
+          return;
+        } else if (!isCrossLoopBoundary(localAlloc, srcTensorOp))
+          return;
+      } else
         return;
 
       localAlloc->moveAfter(srcTensorOp);
       localLoad->moveAfter(localAlloc);
+      allocMap.insert(std::make_pair(srcTensorOp, localLoad));
       return;
     }
 
@@ -192,14 +208,30 @@ static void hoistLocalLoad(triton::FuncOp funcOp) {
     auto srcTensorOp = localStore->getOperand(0).getDefiningOp();
     // Check if localStore is in the loop but it's src tensor defining op is
     // outside of it.
-    if (!srcTensorOp || !isCrossLoopBoundary(localStore, srcTensorOp)) {
+    if (srcTensorOp) {
+      auto fa = allocMap.find(srcTensorOp);
+      if (fa != allocMap.end()) {
+        // If a similar local_load was already hoisted, reuse the load.
+        // This is needed for the pipelined epilogue.
+        // assert *fa === localLoad
+        Value result = fa->second;
+        localLoad->replaceAllUsesWith(ValueRange{result});
+        toRemove.push_back(localLoad);
+        toRemove.push_back(localStore);
+        toRemove.push_back(localAlloc);
+        return;
+      } else if (!isCrossLoopBoundary(localStore, srcTensorOp))
+        return;
+    } else
       return;
-    }
 
     localAlloc->moveAfter(srcTensorOp);
     localStore->moveAfter(localAlloc);
     localLoad->moveAfter(localStore);
+    allocMap.insert(std::make_pair(srcTensorOp, localLoad));
   });
+  for (auto *op : toRemove)
+    op->erase();
 }
 
 // Sink conversion after the last dealloc but before the first use in its block.
