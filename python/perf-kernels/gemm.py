@@ -11,31 +11,36 @@ from utils.benchmark_utils import get_available_models, get_model_configs
 
 @triton.autotune(
     configs=[
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2,
-                'kpack': 2, 'matrix_instr_nonkdim': 16
-            }, num_warps=8, num_stages=2),
+#        triton.Config(
+#            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
+#            num_warps=8, num_stages=2),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
-                'kpack': 1
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0,
+                'kpack': 1, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant': "none"
             }, num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 32, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
+#        triton.Config(
+#            {
+#                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2,
+#                'kpack': 2, 'matrix_instr_nonkdim': 16
+#            }, num_warps=8, num_stages=2),
+#        triton.Config(
+#            {
+#                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
+#                'kpack': 1
+#            }, num_warps=8, num_stages=2),
+#        triton.Config(
+#            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
+#            num_warps=8, num_stages=2),
+#        triton.Config(
+#            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
+#            num_warps=4, num_stages=2),
+#        triton.Config(
+#            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+#            num_warps=8, num_stages=2),
+#        triton.Config(
+#            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 32, 'waves_per_eu': 2},
+#            num_warps=4, num_stages=2),
     ],
     key=['M', 'N', 'K'],
     use_cuda_graph=True,
@@ -68,6 +73,14 @@ def matmul_kernel(
     APPLY_SCALE: tl.constexpr,
     ACTIVATION: tl.constexpr,
 ):
+
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
+
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
