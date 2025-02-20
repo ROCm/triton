@@ -1,0 +1,35 @@
+version: "3.4"
+services:
+  triton_dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MUID: "${MUID}"
+        MGID: "${MGID}"
+        USERNAME: "${USER}"
+    shm_size: '1G'
+    image: "${USER}/triton"
+    ipc: "host"
+    cap_add:
+      - SYS_PTRACE
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    network_mode: "host"
+    security_opt:
+      - "seccomp=unconfined"
+    group_add:
+      - "${VIDEO_GROUP}"
+      - "${RENDER_GROUP}"
+    volumes:
+      - type: bind
+        source: "${HOME}"
+        target: "${HOME}"
+      - "local-files:/var/${USER}"
+      - "/tmp/.X11-unix:/tmp/.X11-unix"
+      - "/etc/apt:/etc/apt"
+      - "/mnt/m2m_nobackup/dtanner:${HOME}/nobackup"
+
+volumes:
+  local-files:

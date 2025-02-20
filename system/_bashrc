@@ -1,0 +1,5 @@
+export DEBUG=true
+export TRITON_DIR=$(realpath ~/nobackup/rocm_triton_refine_ops)
+export TRITON_BUILD_DIR="${TRITON_DIR}/python/build"
+export TRITON_BIN="${TRITON_BUILD_DIR}/$(ls ${TRITON_BUILD_DIR} | grep -i cmake)/bin"
+export PATH=${TRITON_BIN}:${PATH}
