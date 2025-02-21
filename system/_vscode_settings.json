@@ -1,0 +1,21 @@
+{
+  "files.watcherExclude": {
+      "**/.ccls-cache/**": true,
+      "**/.cache/**": true,
+      "**/.clangd/**": true,
+      "**/.git/objects/**": true,
+      "**/.git/rr-cache/**": true,
+      "${workspaceFolder}/build/**": true
+  },
+  "cmake.configureOnOpen": false,
+  "clangd.path": "/home/dtanner/.vscode-server/data/User/globalStorage/llvm-vs-code-extensions.vscode-clangd/install/19.1.2/clangd_19.1.2/bin/clangd",
+  "clangd.arguments": [
+      "-log=verbose",
+      "-pretty",
+      "--background-index",
+      "--header-insertion=never",
+      "--compile-commands-dir=/home/dtanner/nobackup/rocm_triton/python/build/cmake.linux-x86_64-cpython-3.10"],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "editor.tabSize": 2,
+  "python.defaultInterpreterPath": "/opt/conda/envs/py_3.10/bin/python3"
+}
