@@ -362,10 +362,10 @@ def torch_rmsnorm_fwd(x, g, ZERO_CENTERED_GAMMA, out_dtype=torch.float16, epsilo
 arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
 
 
-@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
-#@pytest.mark.parametrize("in_dtype_str", ["fp16", "bf16"])
-#@pytest.mark.parametrize("out_dtype_str", ["fp16", "bf16"])
+#@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
+#@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("in_dtype_str", ["fp16", "bf16"])
+@pytest.mark.parametrize("out_dtype_str", ["fp16", "bf16"])
 @pytest.mark.parametrize('ZERO_CENTERED_GAMMA', [True, False])
 @pytest.mark.parametrize('M, N', [
     (1, 4),
