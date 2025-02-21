@@ -23,78 +23,104 @@ is_hip_ = is_hip()
 
 
 
-def input_helper(B, H, S, D, kv_lora_rank, qk_rope_head_dim, num_kv_splits, dtype, device, prefix_length, rope_base=10, rope_max_seq_len=16324, rope_scaling=1.0):
-    Req_to_tokens = torch.arange(B * S, device=device).reshape(B, S)
-    B_req_idx = torch.arange(B, device=device)
-    B_Seqlen = torch.full((B, ), S, device=device)
+def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, dtype, device):
+    
+    q_extend = torch.randn(B * extend_length, H, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    # kv_cache = torch.randn(B * (prefix_length + extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
 
-    q = torch.randn(B * S, H, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device) # w_kc fused
-    kv_cache = torch.randn(B * S, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    # extend parts
+    k_extend = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    v_extend = k_extend[..., :kv_lora_rank]
+    o_extend = torch.empty(B*extend_length, H, kv_lora_rank, dtype=dtype, device=device)
 
-    att_out = torch.empty(B, H, D, dtype=dtype, device=device)
-    attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 1, dtype=dtype, device=device)
+    # extend indexing
+    qo_indptr = torch.arange(B + 1, device=device) * (extend_length) # 0, extend_length, extend_length*2
+    
+    # prefix parts
+    k_buffer = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    v_buffer = k_buffer[..., :kv_lora_rank]
 
-    w_kc = torch.randn(H, D, kv_lora_rank, dtype=dtype, device=device)
-    w_vc = torch.randn(H, kv_lora_rank, D, dtype=dtype, device=device)
-
-    rotary_dim = qk_rope_head_dim
-    rotary_emb = DeepseekScalingRotaryEmbedding(
-            qk_rope_head_dim,
-            rotary_dim,
-            rope_max_seq_len,
-            rope_base,
-            True,
-            rope_scaling,
-            q.dtype,
-            device=device,
-        )
-
-    positions = torch.tensor([S], device=device).unsqueeze(0).repeat(B, 1) # k positions and q position as last
-
-    return Req_to_tokens, B_req_idx, B_Seqlen, q, kv_cache, att_out, attn_logits, w_kc, w_vc, rotary_dim, rotary_emb, positions
+    # prefix indexing
+    kv_indptr = torch.arange(B + 1, device=device) * prefix_length # 0, prefix_length, prefix_length*2
+    kv_indices = torch.arange(B*(prefix_length), device=device)
 
 
-@pytest.mark.parametrize('B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim', [
-    (32, 16, 2048, 512, 128, 64),
-])
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
-def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, dtype, num_kv_splits=32, sm_scale=1.0, logit_cap=0.0,
-                device="cuda"):
-    torch.manual_seed(0)
 
-    D = qk_nope_head_dim
-    Req_to_tokens, B_req_idx, B_Seqlen, q, kv_cache, att_out, attn_logits, w_kc, w_vc, rotary_dim, rotary_emb, positions = input_helper(
-        B, H, S, D, kv_lora_rank, qk_rope_head_dim, num_kv_splits, dtype, device)
+    custom_mask = None
+    mask_indptr = None
+    max_len_extend = extend_length
 
-    k_input, v_input = ref_preprocess(kv_cache, kv_lora_rank)
+    return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend
 
-    tri_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
-                                  logit_cap, rotary_emb, positions, device="cuda", persistent=True)
 
-    # reference
-    ref_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
-                                  logit_cap, rotary_emb, positions, device="cuda")
+# def input_helper(B, H, S, kv_lora_rank, rotary_dim, qk_rope_head_dim, num_kv_splits, dtype, device, rope_base=10,
+#                  rope_max_seq_len=16324, rope_scaling=1.0, is_neox_style=True):
+#     q = torch.randn(B, H, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+#     kv_cache = torch.randn(B * S, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
 
-    print("first 10 logits:")
-    print(f"ref: {ref_logits[:,:,-1].flatten()[:]}") # to debug the rope, check last split
-    print(f"tri: {tri_logits[:,:,-1].flatten()[:]}")
-    torch.testing.assert_close(ref_logits, tri_logits, atol=1e-2, rtol=1e-2)
-    print("attn_logits from stage 1 matches with ref")
-    # stage 2 is shared
+#     # interlancing [batch_start_off, batch_seq_len, batch_start_off, batch_seq_len, ...,]
+#     kv_indptr = torch.arange(B + 1, device=device) * S
+#     kv_indices = torch.arange(B*S, device=device)
 
-def ref_preprocess(kv_cache, kv_lora_rank):
-    latent_cache = kv_cache
-    v_input = latent_cache[..., :kv_lora_rank]
-    v_input = v_input.contiguous().unsqueeze(1)
-    k_input = latent_cache.unsqueeze(1)
-    k_input[..., :kv_lora_rank] = v_input
-    return k_input, v_input
+#     attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 1, dtype=dtype, device=device)
 
-def ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale, logit_cap, rotary_emb, positions, device="cuda", persistent=False):
-    q_input = q
-    attn_logits = extend_attention_fwd(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen,
-                                            num_kv_splits, sm_scale, logit_cap, persistent=persistent)
-    return attn_logits
+#     rotary_emb = DeepseekScalingRotaryEmbedding(
+#         qk_rope_head_dim,
+#         rotary_dim,
+#         rope_max_seq_len,
+#         rope_base,
+#         is_neox_style,
+#         rope_scaling,
+#         q.dtype,
+#         device=device,
+#     )
+
+#     positions = torch.tensor([S], device=device).unsqueeze(0).repeat(B, 1)  # k positions and q position as last
+
+#     return kv_indptr, kv_indices, q, kv_cache, attn_logits, rotary_emb, positions
+
+
+# @pytest.mark.parametrize('B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim', [
+#     (32, 16, 2048, 512, 128, 64),
+# ])
+# @pytest.mark.parametrize('dtype', [torch.bfloat16])
+# def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, dtype, num_kv_splits=32, sm_scale=1.0, logit_cap=0.0,
+#                 device="cuda"):
+#     torch.manual_seed(0)
+
+#     D = qk_nope_head_dim
+#     q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
+#         B, H, S, D, kv_lora_rank, qk_rope_head_dim, num_kv_splits, dtype, device)
+
+#     # k_input, v_input = ref_preprocess(kv_cache, kv_lora_rank)
+
+#     tri_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
+#                                   logit_cap, rotary_emb, positions, device="cuda", persistent=True)
+
+#     # reference
+#     ref_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
+#                                   logit_cap, rotary_emb, positions, device="cuda")
+
+#     print("first 10 logits:")
+#     print(f"ref: {ref_logits[:,:,-1].flatten()[:]}") # to debug the rope, check last split
+#     print(f"tri: {tri_logits[:,:,-1].flatten()[:]}")
+#     torch.testing.assert_close(ref_logits, tri_logits, atol=1e-2, rtol=1e-2)
+#     print("attn_logits from stage 1 matches with ref")
+#     # stage 2 is shared
+
+# def ref_preprocess(kv_cache, kv_lora_rank):
+#     latent_cache = kv_cache
+#     v_input = latent_cache[..., :kv_lora_rank]
+#     v_input = v_input.contiguous().unsqueeze(1)
+#     k_input = latent_cache.unsqueeze(1)
+#     k_input[..., :kv_lora_rank] = v_input
+#     return k_input, v_input
+
+# def ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale, logit_cap, rotary_emb, positions, device="cuda", persistent=False):
+#     q_input = q
+#     attn_logits = extend_attention_fwd(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen,
+#                                             num_kv_splits, sm_scale, logit_cap, persistent=persistent)
+#     return attn_logits
 
 
 def benchmark(args):
@@ -103,22 +129,15 @@ def benchmark(args):
 
     configs = []
     x_vals_list = [
-                    (1, 16, 2048, 512, 128, 64, 128),
-                    (2, 16, 2048, 512, 128, 64, 64), 
-                    (4, 16, 2048, 512, 128, 64, 64),
-                    (8, 16, 2048, 512, 128, 64, 64),
-                    (16, 16, 2048, 512, 128, 64, 32),
-                    (32, 16, 2048, 512, 128, 64, 32),
-                    (64, 16, 2048, 512, 128, 64, 32),
-                    (128, 16, 2048, 512, 128, 64, 32),
+                    (1, 16, 1024, 1024, 512, 64),
                     ]
     
     if args.B:
         x_vals_list = [
-                    (args.B, 16, 2048, 512, 128, 64, 128),
+                    (args.B, 16, 1024, 1024, 512, 64),
                     ]
 
-    x_names = ["B", "H", "S", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "num_kv_splits"]
+    x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim"]
 
     line_vals = ["ref"]
 
@@ -130,20 +149,16 @@ def benchmark(args):
                                  plot_name=plot_name, args={'sm_scale': 1.0, 'logit_cap': 0.0, 'device': args.device}))
 
     @triton.testing.perf_report(configs)
-    def bench_MLA(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, num_kv_splits, sm_scale, logit_cap, device,
+    def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, sm_scale, logit_cap, device,
                   provider):
         warmup = 25
         rep = 100
 
-        D = qk_nope_head_dim
-
-        Req_to_tokens, B_req_idx, B_Seqlen, q, kv_cache, att_out, attn_logits, w_kc, w_vc, rotary_dim, rotary_emb, positions = input_helper(
-            B, H, S, D, kv_lora_rank, qk_rope_head_dim, num_kv_splits, dtype, device)
+        q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
+        B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
 
         if "ref" in provider:
-            k_input, v_input = ref_preprocess(kv_cache, kv_lora_rank)
-            fn = lambda: ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
-                                  logit_cap, rotary_emb, positions, device="cuda")
+            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend)
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms

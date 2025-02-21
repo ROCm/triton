@@ -130,6 +130,7 @@ def _fwd_kernel(
     for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_seq_len_prefix
+        
         offs_kv_loc = tl.load(
             kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
         )
@@ -196,6 +197,7 @@ def _fwd_kernel(
         e_max = n_e_max
 
     # stage 2: compute the triangle part
+    qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
     for start_n in range(0, cur_block_m_end, BLOCK_N):
@@ -208,11 +210,12 @@ def _fwd_kernel(
             + cur_kv_head * stride_kh
             + offs_d[:, None]
         )
-        k = tl.load(
-            K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+        
+        k =  tl.load(
+           K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
         )
 
-        qk = tl.dot(q, k, out_dtype=tl.float32)
+        qk += tl.dot(q, k, out_dtype=tl.float32)
         if BLOCK_DPE > 0:
             offs_kpe = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
@@ -269,6 +272,9 @@ def _fwd_kernel(
 
         e_max = n_e_max
 
+    
+
+    
     offs_o = (
         (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
         * stride_obs
@@ -278,6 +284,11 @@ def _fwd_kernel(
     tl.store(
         O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None] & mask_dv[None, :]
     )
+
+
+
+
+
 
 
 def extend_attention_fwd(
@@ -322,7 +333,7 @@ def extend_attention_fwd(
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     if is_hip_:
-        BLOCK_M, BLOCK_N = (64, 64)
+        BLOCK_M, BLOCK_N = (16, 16)
         num_warps = 4
 
     else:
@@ -348,6 +359,8 @@ def extend_attention_fwd(
     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
 
     USE_CUSTOM_MASK = custom_mask is not None
+
+    assert not USE_CUSTOM_MASK, "Do not do this"
 
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
@@ -395,6 +408,293 @@ def extend_attention_fwd(
         num_stages=num_stages,
         **extra_kargs,
     )
+
+
+@triton.jit
+def _fwd_fused_kernel(
+    Q_Extend,
+    K_Extend,
+    V_Extend,
+    O_Extend,
+    K_Buffer,
+    V_Buffer,
+    W_KC,
+    W_VC,
+    qo_indptr,
+    kv_indptr,
+    kv_indices,
+    mask_ptr,
+    mask_indptr,
+    sm_scale,
+    kv_group_num,
+    stride_qbs,
+    stride_qh,
+    stride_kbs,
+    stride_kh,
+    stride_vbs,
+    stride_vh,
+    stride_obs,
+    stride_oh,
+    stride_buf_kbs,
+    stride_buf_kh,
+    stride_buf_vbs,
+    stride_buf_vh,
+    stride_w_h,
+    stride_w_c,
+    stride_w_d,
+    logit_cap: tl.constexpr,
+    Lq: tl.constexpr,
+    Lv: tl.constexpr,
+    C: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DPE: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    USE_CUSTOM_MASK: tl.constexpr,
+):
+    cur_seq = tl.program_id(0)
+    cur_head = tl.program_id(1)
+    cur_block_m = tl.program_id(2)
+    cur_kv_head = cur_head // kv_group_num
+
+    cur_seq_extend_start_idx = tl.load(qo_indptr + cur_seq)
+    cur_seq_len_extend = tl.load(qo_indptr + cur_seq + 1) - cur_seq_extend_start_idx
+    cur_seq_kv_start_idx = tl.load(kv_indptr + cur_seq)
+    cur_seq_len_prefix = tl.load(kv_indptr + cur_seq + 1) - cur_seq_kv_start_idx
+    cur_seq_len = cur_seq_len_prefix + cur_seq_len_extend
+
+    if USE_CUSTOM_MASK:
+        cur_seq_mask_start_idx = tl.load(mask_indptr + cur_seq)
+
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_dv = tl.arange(0, BLOCK_DV)
+    offs_m = tl.arange(0, BLOCK_M)
+    mask_m = (cur_block_m * BLOCK_M + offs_m) < cur_seq_len_extend
+
+    mask_d = offs_d < Lq
+    mask_dv = offs_dv < Lv
+
+    offs_q = (
+        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+        * stride_qbs
+        + cur_head * stride_qh
+        + offs_d[None, :]
+    )
+    q = tl.load(
+        Q_Extend + offs_q, mask=(mask_m[:, None]) & (mask_d[None, :]), other=0.0
+    )
+
+    if BLOCK_DPE > 0:
+        offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
+        offs_qpe = (
+            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+            * stride_qbs
+            + cur_head * stride_qh
+            + offs_dpe[None, :]
+        )
+        qpe = tl.load(Q_Extend + offs_qpe, mask=mask_m[:, None], other=0.0)
+
+    # stage 1: compute scores with prefix
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_c = tl.arange(0, BLOCK_C)
+
+    acc = tl.zeros([BLOCK_M, BLOCK_DV], dtype=tl.float32)
+    deno = tl.zeros([BLOCK_M], dtype=tl.float32)
+    e_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+
+    offs_w_kc = (
+        cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
+    )
+
+    offs_w_vc = (
+        cur_head * stride_w_h + offs_d[None, :] * stride_w_d + offs_c[:, None] * stride_w_c
+    )
+
+    for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        mask_n = (start_n + offs_n) < cur_seq_len_prefix
+        
+        offs_kv_loc = tl.load(
+            kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
+        )
+
+        qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        
+        
+        offs_buf_k = (
+                    offs_kv_loc[None, :] * stride_buf_kbs
+                    + cur_kv_head * stride_buf_kh
+                    + offs_c[:, None]
+                    # + offs_d[:, None]
+                )
+
+
+        for c in range(0, tl.cdiv(C, BLOCK_C)):
+            w_kc_k = tl.load(W_KC + c * BLOCK_C * stride_w_c)
+            kv_k = tl.load(
+                K_Buffer + offs_buf_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+            )
+            k_k = tl.dot(w_kc_k, kv_k) # keys subset
+            qk += tl.dot(q.to(k_k.dtype), k_k)
+
+        
+        if BLOCK_DPE > 0:
+            offs_kpe = (
+                offs_kv_loc[None, :] * stride_buf_kbs
+                + cur_kv_head * stride_buf_kh
+                + offs_dpe[:, None]
+            )
+            kpe = tl.load(
+                K_Buffer + offs_kpe,
+                mask=mask_n[None, :],
+                other=0.0,
+            )
+            qk += tl.dot(qpe.to(kpe.dtype), kpe)
+        qk *= sm_scale
+
+        if logit_cap > 0:
+            qk = logit_cap * tanh(qk / logit_cap)
+
+        if USE_CUSTOM_MASK:
+            custom_mask = tl.load(
+                mask_ptr
+                + cur_seq_mask_start_idx
+                + (cur_block_m * BLOCK_M + offs_m[:, None]) * cur_seq_len
+                + start_n
+                + offs_n[None, :],
+                mask=(mask_m[:, None] & mask_n[None, :]),
+                other=0,
+            )
+            custom_mask &= mask_m[:, None] & mask_n[None, :]
+            qk = tl.where(custom_mask, qk, float("-inf"))
+        else:
+            qk = tl.where(mask_m[:, None] & mask_n[None, :], qk, float("-inf"))
+
+        n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        re_scale = tl.exp(e_max - n_e_max)
+        p = tl.exp(qk - n_e_max[:, None])
+        deno = deno * re_scale + tl.sum(p, 1)
+
+        offs_buf_v = (
+            offs_kv_loc[:, None] * stride_buf_vbs
+            + cur_kv_head * stride_buf_vh
+            + offs_c[None, :]
+            # + offs_dv[None, :]
+        )
+
+        p = p.to(v.dtype)
+        acc = acc * re_scale[:, None]
+        
+        for c in range(0, tl.cdiv(C, BLOCK_C)):
+            w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
+            kv_k = tl.load(
+                V_Buffer + offs_buf_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+            )
+            v_k = tl.dot(w_vc_k, kv_k) # keys subset
+            acc += tl.dot(p.to(v_k.dtype), v_k)
+
+        e_max = n_e_max
+
+    # stage 2: compute the triangle part
+    qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
+    for start_n in range(0, cur_block_m_end, BLOCK_N):
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        mask_n = (start_n + offs_n) < cur_block_m_end
+
+        # load k in transposed way
+        offs_k = (
+            (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
+            + cur_kv_head * stride_kh
+            + offs_c[:, None]
+        )
+        
+        for c in range(0, tl.cdiv(C, BLOCK_C)):
+            w_kc_k = tl.load(W_KC + c * BLOCK_C * stride_w_c)
+            kv_k =  tl.load(
+                K_Extend + offs_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+            )
+            k_k = tl.dot(w_kc_k, kv_k) # keys subset
+            qk += tl.dot(q.to(k_k.dtype), k_k, out_dtype=tl.float32)
+
+        if BLOCK_DPE > 0:
+            offs_kpe = (
+                (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
+                + cur_kv_head * stride_kh
+                + offs_dpe[:, None]
+            )
+            kpe = tl.load(
+                K_Extend + offs_kpe,
+                mask=mask_n[None, :],
+                other=0.0,
+            )
+            qk += tl.dot(qpe, kpe)
+
+        qk *= sm_scale
+
+        if logit_cap > 0:
+            qk = logit_cap * tanh(qk / logit_cap)
+
+        if USE_CUSTOM_MASK:
+            custom_mask = tl.load(
+                mask_ptr
+                + cur_seq_mask_start_idx
+                + (cur_block_m * BLOCK_M + offs_m[:, None]) * cur_seq_len
+                + cur_seq_len_prefix
+                + start_n
+                + offs_n[None, :],
+                mask=(mask_m[:, None] & mask_n[None, :]),
+                other=0,
+            )
+            custom_mask &= mask_m[:, None] & mask_n[None, :]
+            qk = tl.where(custom_mask, qk, float("-inf"))
+        else:
+            mask_causual = (cur_block_m * BLOCK_M + offs_m[:, None]) >= (
+                start_n + offs_n[None, :]
+            )
+            mask_causual &= mask_m[:, None] & mask_n[None, :]
+            qk = tl.where(mask_causual, qk, float("-inf"))
+
+        n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        re_scale = tl.exp(e_max - n_e_max)
+        p = tl.exp(qk - n_e_max[:, None])
+        deno = deno * re_scale + tl.sum(p, 1)
+
+        offs_v = (
+            (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
+            + cur_kv_head * stride_vh
+            + offs_c[None, :]
+        )
+
+        acc = acc * re_scale[:, None]
+        
+        for c in range(0, tl.cdiv(C, BLOCK_C)):
+            w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
+            kv_k = tl.load(
+                V_Extend + offs_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+            )
+            v_k = tl.dot(w_vc_k, kv_k) # keys subset
+            acc += tl.dot(p.to(v_k.dtype), v_k)
+
+        e_max = n_e_max
+
+    
+
+    
+    offs_o = (
+        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+        * stride_obs
+        + cur_head * stride_oh
+        + offs_dv[None, :]
+    )
+    tl.store(
+        O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None] & mask_dv[None, :]
+    )
+
+
 
 
 # def redundant_attention(
