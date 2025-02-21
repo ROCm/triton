@@ -194,7 +194,7 @@ def rms_bwd_kernel(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr
             grad_sum += tl.sum(grad_output * x * g, axis=0)
 
             # Load r_sigma
-            norm_factor = tl.load(rsigma_ptr + row_idx)
+            norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
 
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
@@ -219,7 +219,7 @@ def rms_bwd_kernel(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr
 
                 dg = grad_output * x * norm_factor
                 dg_ptrs = row_dg_ptr + cols
-                tl.store(dg_ptrs, dg)
+                tl.store(dg_ptrs, dg.to(tl.float32))
 
             # Handle remainder
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -241,7 +241,7 @@ def rms_bwd_kernel(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr
 
             dg = grad_output * x * norm_factor
             dg_ptrs = row_dg_ptr + cols
-            tl.store(dg_ptrs, dg, mask=mask)
+            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
 
     else:
         mask = col_offsets < n_cols
@@ -261,7 +261,7 @@ def rms_bwd_kernel(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr
             if (ZERO_CENTERED_GAMMA):
                 g += 1.
 
-            norm_factor = tl.load(rsigma_ptr + row_idx)
+            norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
             grad_sum = tl.sum(grad_output * x * g, axis=0)
 
             grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
@@ -269,7 +269,7 @@ def rms_bwd_kernel(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr
             tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
 
             dg = grad_output * x * norm_factor
-            tl.store(dg_ptrs, dg, mask=mask)
+            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
 
 
 @triton.jit
@@ -285,10 +285,10 @@ def _rmsnorm_bwd_dg_reduce(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, 
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < n_rows) & (cols[None, :] < n_cols)
         offs = rows[:, None] * n_cols + cols[None, :]
-        acc += tl.load(dg_in_ptr + offs, mask=mask, other=0.)
+        acc += tl.load(dg_in_ptr + offs, mask=mask, other=0.).to(tl.float32)
 
     sum_dg = tl.sum(acc, axis=0)
-    tl.store(dg_out_ptr + cols, sum_dg, mask=cols < n_cols)
+    tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
 
 class RMSNorm(torch.autograd.Function):
@@ -362,10 +362,10 @@ def torch_rmsnorm_fwd(x, g, ZERO_CENTERED_GAMMA, out_dtype=torch.float16, epsilo
 arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
 
 
-#@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
-#@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("in_dtype_str", ["fp16", "bf16"])
-@pytest.mark.parametrize("out_dtype_str", ["fp16", "bf16"])
+@pytest.mark.parametrize("in_dtype_str", ["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("out_dtype_str", ["fp32", "fp16", "bf16"])
+#@pytest.mark.parametrize("in_dtype_str", ["fp16", "bf16"])
+#@pytest.mark.parametrize("out_dtype_str", ["fp16", "bf16"])
 @pytest.mark.parametrize('ZERO_CENTERED_GAMMA', [True, False])
 @pytest.mark.parametrize('M, N', [
     (1, 4),
