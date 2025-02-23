@@ -1,4 +1,4 @@
-from utils.sglang_ref_prefill import extend_attention_fwd
+from utils.sglang_ref_prefill import extend_attention_fwd, extend_fused_attention_fwd
 
 
 import logging
@@ -44,13 +44,46 @@ def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_
     kv_indptr = torch.arange(B + 1, device=device) * prefix_length # 0, prefix_length, prefix_length*2
     kv_indices = torch.arange(B*(prefix_length), device=device)
 
+    custom_mask = None
+    mask_indptr = None
+    max_len_extend = extend_length
+
+    return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend
+
+
+def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device):
+    
+    q_extend = torch.randn(B * extend_length, H, v_head_dim + qk_rope_head_dim, dtype=dtype, device=device)
+    # kv_cache = torch.randn(B * (prefix_length + extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+
+    # extend parts
+    k_extend = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    v_extend = k_extend[..., :kv_lora_rank]
+    o_extend = torch.empty(B*extend_length, H, v_head_dim, dtype=dtype, device=device)
+
+    # extend indexing
+    qo_indptr = torch.arange(B + 1, device=device) * (extend_length) # 0, extend_length, extend_length*2
+    
+    # prefix parts
+    k_buffer = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    v_buffer = k_buffer[..., :kv_lora_rank]
+
+    # prefix indexing
+    kv_indptr = torch.arange(B + 1, device=device) * prefix_length # 0, prefix_length, prefix_length*2
+    kv_indices = torch.arange(B*(prefix_length), device=device)
+
 
 
     custom_mask = None
     mask_indptr = None
     max_len_extend = extend_length
 
-    return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend
+
+    w_kc = torch.randn(H, kv_lora_rank, v_head_dim)
+    w_vc = torch.randn(H, kv_lora_rank, v_head_dim)
+
+
+    return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 
 # def input_helper(B, H, S, kv_lora_rank, rotary_dim, qk_rope_head_dim, num_kv_splits, dtype, device, rope_base=10,
@@ -129,17 +162,17 @@ def benchmark(args):
 
     configs = []
     x_vals_list = [
-                    (1, 16, 1024, 1024, 512, 64),
+                    (1, 16, 1024, 1024, 512, 64, 128),
                     ]
     
     if args.B:
         x_vals_list = [
-                    (args.B, 16, 1024, 1024, 512, 64),
+                    (args.B, 16, 1024, 1024, 512, 64, 128),
                     ]
 
-    x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim"]
+    x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim"]
 
-    line_vals = ["ref"]
+    line_vals = ["ref", "fused"]
 
     plot_name = "MLA-decode"
 
@@ -149,17 +182,25 @@ def benchmark(args):
                                  plot_name=plot_name, args={'sm_scale': 1.0, 'logit_cap': 0.0, 'device': args.device}))
 
     @triton.testing.perf_report(configs)
-    def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, sm_scale, logit_cap, device,
+    def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, sm_scale, logit_cap, device,
                   provider):
         warmup = 25
         rep = 100
 
-        q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
-        B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
+        
 
         if "ref" in provider:
-            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend)
+            q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
+                    B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
+            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
 
+        if "fused" in provider:
+            q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
+                    B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
+            fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, w_kc, w_vc, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+        
+        
+        
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
 

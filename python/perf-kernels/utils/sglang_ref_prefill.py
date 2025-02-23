@@ -530,11 +530,11 @@ def _fwd_fused_kernel(
                     # + offs_d[:, None]
                 )
 
-
+        # stage 1
         for c in range(0, tl.cdiv(C, BLOCK_C)):
-            w_kc_k = tl.load(W_KC + c * BLOCK_C * stride_w_c)
+            w_kc_k = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c)
             kv_k = tl.load(
-                K_Buffer + offs_buf_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+                K_Buffer + offs_buf_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]), other=0.0
             )
             k_k = tl.dot(w_kc_k, kv_k) # keys subset
             qk += tl.dot(q.to(k_k.dtype), k_k)
@@ -584,15 +584,14 @@ def _fwd_fused_kernel(
             # + offs_dv[None, :]
         )
 
-        p = p.to(v.dtype)
         acc = acc * re_scale[:, None]
-        
+        # stage 1
         for c in range(0, tl.cdiv(C, BLOCK_C)):
             w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
             kv_k = tl.load(
-                V_Buffer + offs_buf_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+                V_Buffer + offs_buf_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None], other=0.0
             )
-            v_k = tl.dot(w_vc_k, kv_k) # keys subset
+            v_k = tl.dot(kv_k, w_vc_k) # keys subset
             acc += tl.dot(p.to(v_k.dtype), v_k)
 
         e_max = n_e_max
@@ -611,11 +610,11 @@ def _fwd_fused_kernel(
             + cur_kv_head * stride_kh
             + offs_c[:, None]
         )
-        
+        # stage 2
         for c in range(0, tl.cdiv(C, BLOCK_C)):
-            w_kc_k = tl.load(W_KC + c * BLOCK_C * stride_w_c)
+            w_kc_k = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c)
             kv_k =  tl.load(
-                K_Extend + offs_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+                K_Extend + offs_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]), other=0.0
             )
             k_k = tl.dot(w_kc_k, kv_k) # keys subset
             qk += tl.dot(q.to(k_k.dtype), k_k, out_dtype=tl.float32)
@@ -670,13 +669,13 @@ def _fwd_fused_kernel(
         )
 
         acc = acc * re_scale[:, None]
-        
+        # stage 2
         for c in range(0, tl.cdiv(C, BLOCK_C)):
             w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
             kv_k = tl.load(
-                V_Extend + offs_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+                V_Extend + offs_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None], other=0.0
             )
-            v_k = tl.dot(w_vc_k, kv_k) # keys subset
+            v_k = tl.dot(kv_k, w_vc_k) # keys subset
             acc += tl.dot(p.to(v_k.dtype), v_k)
 
         e_max = n_e_max
@@ -695,40 +694,116 @@ def _fwd_fused_kernel(
     )
 
 
+def extend_fused_attention_fwd(
+    q_extend,
+    k_extend,
+    v_extend,
+    o_extend,
+    k_buffer,
+    v_buffer,
+    w_kc,
+    w_vc,
+    qo_indptr,
+    kv_indptr,
+    kv_indices,
+    custom_mask,
+    mask_indptr,
+    max_len_extend,
+    sm_scale=None,
+    logit_cap=0.0,
+):
+    """
+    q_extend, k_extend, v_extend, o_extend: contiguous tensors
+
+    k_buffer, v_buffer: (prefix + extend) tensors in mem_manager
+    """
+    Lq, Lk, Lv = (
+        q_extend.shape[-1],
+        k_extend.shape[-1],
+        v_extend.shape[-1],
+    )
 
 
-# def redundant_attention(
-#     q_extend,
-#     o_extend,
-#     k_buffer,
-#     v_buffer,
-#     b_req_idx,
-#     b_start_loc,
-#     b_seq_len,
-#     b_seq_len_prefix,
-#     max_len_in_batch,
-# ):
-#     total_token_num = k_buffer.shape[0]
-#     B, H_Q, D = b_req_idx.shape[0], q_extend.shape[-2], q_extend.shape[-1]
-#     q_buffer = torch.empty(
-#         (total_token_num, H_Q, D), dtype=q_extend.dtype, device=q_extend.device
-#     )
+    assert Lq == 192, "Not passing unfused q"
+    assert is_hip_, "must be hip"
 
-#     pt = 0
-#     for i in range(B):
-#         cur_seq_len_extend = b_seq_len[i] - b_seq_len_prefix[i]
-#         pl, pr = b_start_loc[i] + b_seq_len_prefix[i], b_start_loc[i] + b_seq_len[i]
-#         q_buffer[pl:pr] = q_extend[pt : pt + cur_seq_len_extend]
-#         pt += cur_seq_len_extend
 
-#     o_buffer = torch.empty_like(q_buffer)
-#     context_attention_fwd(
-#         q_buffer, k_buffer, v_buffer, o_buffer, b_start_loc, b_seq_len, max_len_in_batch
-#     )
+    BLOCK_DMODEL = 128
+    BLOCK_DPE = 64
+    
+    C = 512
+    
+    BLOCK_C = 16
 
-#     pt = 0
-#     for i in range(B):
-#         cur_seq_len_extend = b_seq_len[i] - b_seq_len_prefix[i]
-#         pl, pr = b_start_loc[i] + b_seq_len_prefix[i], b_start_loc[i] + b_seq_len[i]
-#         o_extend[pt : pt + cur_seq_len_extend] = o_buffer[pl:pr]
-#         pt += cur_seq_len_extend
+
+    # else:
+    #     BLOCK_DMODEL = triton.next_power_of_2(Lq)
+    #     BLOCK_DPE = 0
+    BLOCK_DV = triton.next_power_of_2(Lv)
+
+    if is_hip_:
+        BLOCK_M, BLOCK_N = (16, 16)
+        num_warps = 4
+
+
+    sm_scale = sm_scale or 1.0 / (Lq**0.5)
+    batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
+    kv_group_num = q_extend.shape[1] // k_extend.shape[1]
+
+    USE_CUSTOM_MASK = custom_mask is not None
+
+    assert not USE_CUSTOM_MASK, "Do not do this"
+
+    grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
+    num_stages = 1
+
+    extra_kargs = {}
+    if is_hip_:
+        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+
+    _fwd_fused_kernel[grid](
+        q_extend,
+        k_extend,
+        v_extend,
+        o_extend,
+        k_buffer,
+        v_buffer,
+        w_kc,
+        w_vc,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        custom_mask,
+        mask_indptr,
+        sm_scale,
+        kv_group_num,
+        q_extend.stride(0),
+        q_extend.stride(1),
+        k_extend.stride(0),
+        k_extend.stride(1),
+        v_extend.stride(0),
+        v_extend.stride(1),
+        o_extend.stride(0),
+        o_extend.stride(1),
+        k_buffer.stride(0),
+        k_buffer.stride(1),
+        v_buffer.stride(0),
+        v_buffer.stride(1),
+        w_kc.stride(0),
+        w_kc.stride(1),
+        w_kc.stride(2),
+        logit_cap=logit_cap,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_DPE=BLOCK_DPE,
+        BLOCK_DV=BLOCK_DV,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        Lq=Lq,
+        Lv=Lv,
+        BLOCK_C=BLOCK_C,
+        C=C,
+        USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        **extra_kargs,
+    )
