@@ -172,8 +172,10 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         ACTIVATION=activation,
     )
 
+
 def is_cdna4():
     return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
+
 
 e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
 e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
