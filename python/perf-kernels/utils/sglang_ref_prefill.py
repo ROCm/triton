@@ -540,6 +540,14 @@ def _fwd_fused_kernel(
                 k_k = tl.dot(w_kc_k, kv_k) # keys subset
                 qk += tl.dot(q.to(k_k.dtype), k_k)
         else:
+            offs_buf_k = (
+                offs_kv_loc[None, :] * stride_buf_kbs
+                + cur_kv_head * stride_buf_kh
+                + offs_d[:, None]
+            )
+            k = tl.load(
+                K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+            )
             qk += tl.dot(q.to(k.dtype), k)
         
         if BLOCK_DPE > 0:
@@ -578,15 +586,15 @@ def _fwd_fused_kernel(
         re_scale = tl.exp(e_max - n_e_max)
         p = tl.exp(qk - n_e_max[:, None])
         deno = deno * re_scale + tl.sum(p, 1)
+        e_max = n_e_max
 
-        offs_buf_v = (
+        if FUSE_GEMMS:
+            offs_buf_v = (
             offs_kv_loc[:, None] * stride_buf_vbs
             + cur_kv_head * stride_buf_vh
             + offs_c[None, :]
             # + offs_dv[None, :]
-        )
-
-        if FUSE_GEMMS:
+            )
             acc = acc * re_scale[:, None]
             for c in range(0, tl.cdiv(C, BLOCK_C)):
                 w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
@@ -596,37 +604,53 @@ def _fwd_fused_kernel(
                 v_k = tl.dot(kv_k, w_vc_k) # keys subset
                 acc += tl.dot(p.to(v_k.dtype), v_k)
         else:
+            offs_buf_v = (
+            offs_kv_loc[:, None] * stride_buf_vbs
+            + cur_kv_head * stride_buf_vh
+            + offs_dv[None, :]
+            )       
+            v = tl.load(
+            V_Buffer + offs_buf_v, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+            )
+            p = p.to(v.dtype)
+            acc = acc * re_scale[:, None] + tl.dot(p, v)
             p = p.to(v.dtype)
             acc = acc * re_scale[:, None] + tl.dot(p, v)
 
-        e_max = n_e_max
-
     # stage 2: compute the triangle part
-    qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    
 
     cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
     for start_n in range(0, cur_block_m_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_block_m_end
 
-        # load k in transposed way
-        
+         qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
         if FUSE_GEMMS:
-            offs_k = (
-                (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
-                + cur_kv_head * stride_kh
+            offs_buf_k = (
+                offs_kv_loc[None, :] * stride_buf_kbs
+                + cur_kv_head * stride_buf_kh
                 + offs_c[:, None]
+                # + offs_d[:, None]
             )
-            
             for c in range(0, tl.cdiv(C, BLOCK_C)):
                 w_kc_k = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c)
-                kv_k =  tl.load(
-                    K_Extend + offs_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]), other=0.0
+                kv_k = tl.load(
+                    K_Buffer + offs_buf_k + c * BLOCK_C * stride_w_c, mask=(mask_n[None, :]), other=0.0
                 )
                 k_k = tl.dot(w_kc_k, kv_k) # keys subset
-                qk += tl.dot(q.to(k_k.dtype), k_k, out_dtype=tl.float32)
+                qk += tl.dot(q.to(k_k.dtype), k_k)
         else:
-
+            offs_buf_k = (
+                offs_kv_loc[None, :] * stride_buf_kbs
+                + cur_kv_head * stride_buf_kh
+                + offs_d[:, None]
+            )
+            k = tl.load(
+                K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+            )
+            qk += tl.dot(q.to(k.dtype), k)
 
 
         if BLOCK_DPE > 0:
@@ -671,24 +695,40 @@ def _fwd_fused_kernel(
         re_scale = tl.exp(e_max - n_e_max)
         p = tl.exp(qk - n_e_max[:, None])
         deno = deno * re_scale + tl.sum(p, 1)
-
-        offs_v = (
-            (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
-            + cur_kv_head * stride_vh
-            + offs_c[None, :]
-        )
-
-        acc = acc * re_scale[:, None]
-        # stage 2
-        for c in range(0, tl.cdiv(C, BLOCK_C)):
-            w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
-            kv_k = tl.load(
-                V_Extend + offs_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None], other=0.0
-            )
-            v_k = tl.dot(kv_k, w_vc_k) # keys subset
-            acc += tl.dot(p.to(v_k.dtype), v_k)
-
         e_max = n_e_max
+            
+
+        if FUSE_GEMMS:
+            offs_buf_v = (
+            offs_kv_loc[:, None] * stride_buf_vbs
+            + cur_kv_head * stride_buf_vh
+            + offs_c[None, :]
+            # + offs_dv[None, :]
+            )
+            acc = acc * re_scale[:, None]
+            for c in range(0, tl.cdiv(C, BLOCK_C)):
+                w_vc_k = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
+                kv_k = tl.load(
+                    V_Buffer + offs_buf_v + c * BLOCK_C * stride_w_c, mask=mask_n[:, None], other=0.0
+                )
+                v_k = tl.dot(kv_k, w_vc_k) # keys subset
+                acc += tl.dot(p.to(v_k.dtype), v_k)
+        else:
+            offs_buf_v = (
+            offs_kv_loc[:, None] * stride_buf_vbs
+            + cur_kv_head * stride_buf_vh
+            + offs_dv[None, :]
+            )       
+            v = tl.load(
+            V_Buffer + offs_buf_v, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
+            )
+            p = p.to(v.dtype)
+            acc = acc * re_scale[:, None] + tl.dot(p, v)
+            p = p.to(v.dtype)
+            acc = acc * re_scale[:, None] + tl.dot(p, v)
+
+        
+        
 
     
 
