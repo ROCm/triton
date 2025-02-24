@@ -41,8 +41,9 @@ from utils.benchmark_utils import get_available_models, get_model_configs
     use_cuda_graph=True,
 )
 @triton.heuristics({
-    'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
-    'GRID_MN': lambda args: triton.cdiv(args['M'], args['BLOCK_SIZE_M']) * triton.cdiv(args['N'], args['BLOCK_SIZE_N'])
+    'EVEN_K':
+    lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0, 'GRID_MN':
+    lambda args: triton.cdiv(args['M'], args['BLOCK_SIZE_M']) * triton.cdiv(args['N'], args['BLOCK_SIZE_N'])
 })
 @triton.jit
 def matmul_kernel(
