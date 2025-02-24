@@ -42,6 +42,7 @@ from utils.benchmark_utils import get_available_models, get_model_configs
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
+    'GRID_MN': lambda args: triton.cdiv(args['M'], args['BLOCK_SIZE_M']) * triton.cdiv(args['N'], args['BLOCK_SIZE_N'])
 })
 @triton.jit
 def matmul_kernel(
@@ -67,6 +68,8 @@ def matmul_kernel(
     GROUP_SIZE_M: tl.constexpr,
     APPLY_SCALE: tl.constexpr,
     ACTIVATION: tl.constexpr,
+    GRID_MN: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -86,6 +89,17 @@ def matmul_kernel(
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    if NUM_XCDS != 1:
+        ## pid remapping on xcds
+        # Number of pids per XCD in the new arrangement
+        pids_per_xcd = (GRID_MN + NUM_XCDS - 1) // NUM_XCDS
+        # Compute current XCD and local pid within the XCD
+        xcd = pid % NUM_XCDS
+        local_pid = pid // NUM_XCDS
+        # Calculate new pid based on the new grouping
+        pid = xcd * pids_per_xcd + local_pid
+
     if GROUP_SIZE_M == 1:
         pid_m = pid // num_pid_n
         pid_n = pid % num_pid_n
@@ -94,7 +108,7 @@ def matmul_kernel(
         group_id = pid // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
         group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + (pid % group_size_m)
+        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
         pid_n = (pid % num_pid_in_group) // group_size_m
 
     tl.assume(pid_m > 0)
@@ -176,6 +190,7 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         b_scale,
         APPLY_SCALE=scale_a8_b8,
         ACTIVATION=activation,
+        NUM_XCDS=8,
     )
 
 
