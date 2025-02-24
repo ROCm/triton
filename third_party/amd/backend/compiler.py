@@ -221,7 +221,8 @@ class HIPBackend(BaseBackend):
                                              "num_stages == 0. Now it will not happen anymore; "
                                              "please update to use num_stages == 2 for "
                                              "equivalent behavior in the past.")
-            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_max_depth, global_prefetch, local_prefetch)
+            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_max_depth, global_prefetch,
+                                                   local_prefetch)
             passes.common.add_canonicalizer(pm)
         if options.instruction_sched_variant.lower() != "none":
             amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.instruction_sched_variant)
@@ -266,7 +267,23 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_membar_analysis(pm)
         amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch)
         passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
+        #amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
+
+        pm.run(mod)
+        if "TRITON_MLIR_DUMP_REFINE_OPS" in os.environ.keys():
+            mod.dump()
+        if "TRITON_MLIR_INSERT_REFINE_OPS" in os.environ.keys():
+            insert_module_path = str(os.environ["TRITON_MLIR_INSERT_REFINE_OPS"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find mlir file to insert. Given: `{insert_module_path}`')
+            print('inserting new mlir module...')
+            new_mod = ir.parse_mlir_module(insert_module_path, mod.context)
+            new_mod.context = mod.context
+            mod = new_mod
+
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
         ## __HIP_FTZ is used to control the denorm flushing behavior of exp2 op as follows:
         ## 1. If __HIP_FTZ = 1, exp2 flushes denorms in input and output regardless
         ##    of the value of kernel arg `allow_flush_denorm`.
@@ -367,6 +384,15 @@ class HIPBackend(BaseBackend):
         metadata["name"] = names[0]
         # llvm -> hsaco
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', [], options.enable_fp_fusion, False)
+
+        if "AMD_INSERT_AMDGCN" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            amdgcn = ''.join(file_content)
+
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)

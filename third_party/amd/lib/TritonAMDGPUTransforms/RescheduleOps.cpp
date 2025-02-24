@@ -259,6 +259,26 @@ private:
     insertGPUBarrierEdges<Traversal::Bottomup>();
     insertGPUBarrierEdges<Traversal::Topdown>();
 
+    SmallVector<Node *> orphanBarriers;
+    SmallVector<Node *> barriers;
+    for (auto it = nodes.rbegin(); it != nodes.rend(); ++it) {
+      auto &node = (*it);
+      Operation *op = node->getOp();
+      if (auto barrier = dyn_cast<mlir::gpu::BarrierOp>(op)) {
+        if (node->hasNoChildren()) {
+          orphanBarriers.push_back(node.get());
+        } else {
+          if (!orphanBarriers.empty()) {
+            for (auto o : orphanBarriers) {
+              o->add<Node::ChildType::Artificials>(node.get());
+              node->addParent(o);
+            }
+            orphanBarriers.clear();
+          }
+        }
+      }
+    }
+
     // connect orphans with the last op in the block
     auto &lastNode = *(nodes.rbegin());
     for (auto it = std::next(nodes.rbegin()); it != nodes.rend(); ++it) {

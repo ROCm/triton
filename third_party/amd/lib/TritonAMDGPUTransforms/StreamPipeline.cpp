@@ -309,12 +309,14 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
       allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
   Operation *viewLoad;
   if (numBuffers > 1) {
-    viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+    viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc,
+                                                     loadOffsets);
     // Clean up old local caches.
     SmallVector<ttg::LocalAllocOp> allocsToErase;
     for (Operation *user : loadOp->getUsers()) {
       if (auto alloc = dyn_cast<ttg::LocalAllocOp>(user)) {
-        triton::replaceUsesAndPropagateType(builder, alloc, viewLoad->getResult(0));
+        triton::replaceUsesAndPropagateType(builder, alloc,
+                                            viewLoad->getResult(0));
         allocsToErase.push_back(alloc);
       }
     }
@@ -325,11 +327,12 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   // Prefetch load ahead of the dot stage if is used by the dot.
   auto copyVal = copy->getResult(0);
-  Operation* storeOp;
+  Operation *storeOp;
   if (numBuffers == 1) {
     storeOp = builder.create<ttg::LocalAllocOp>(loc, subviewTy, copyVal);
   } else {
-    storeOp = builder.create<ttg::LocalStoreOp>(loc, copyVal, viewLoad->getResult(0));
+    storeOp =
+        builder.create<ttg::LocalStoreOp>(loc, copyVal, viewLoad->getResult(0));
     scheduleOp(viewLoad, SCHED_LOCAL_STORE);
   }
   scheduleOp(storeOp, SCHED_LOCAL_STORE);
@@ -337,9 +340,11 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   // Create local load
   Operation *sloadOp;
   if (numBuffers == 1)
-    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), storeOp->getResult(0));
+    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(),
+                                               storeOp->getResult(0));
   else
-    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad->getResult(0));
+    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(),
+                                               viewLoad->getResult(0));
   Value result = sloadOp->getResult(0);
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
     scheduleOp(sloadOp, SCHED_LOCAL_LOAD);
@@ -979,9 +984,8 @@ private:
 };
 } // namespace
 
-std::unique_ptr<Pass>
-mlir::createTritonAMDGPUStreamPipelinePass(int numStages, int maxDepth, int globalPrefetch,
-                                           int localPrefetch) {
+std::unique_ptr<Pass> mlir::createTritonAMDGPUStreamPipelinePass(
+    int numStages, int maxDepth, int globalPrefetch, int localPrefetch) {
   return std::make_unique<PipelinePass>(numStages, maxDepth, globalPrefetch,
                                         localPrefetch);
 }
