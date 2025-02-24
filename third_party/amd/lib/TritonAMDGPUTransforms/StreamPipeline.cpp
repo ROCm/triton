@@ -307,14 +307,16 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   auto subviewTy = ttg::MemDescType::get(
       allocTy.getShape().drop_front(), allocTy.getElementType(),
       allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
-  Operation *viewLoad;
+  Value viewRes;
   if (numBuffers > 1) {
-    viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+    auto viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+    scheduleOp(viewLoad, SCHED_LOCAL_STORE);
+    viewRes = viewLoad;
     // Clean up old local caches.
     SmallVector<ttg::LocalAllocOp> allocsToErase;
     for (Operation *user : loadOp->getUsers()) {
       if (auto alloc = dyn_cast<ttg::LocalAllocOp>(user)) {
-        triton::replaceUsesAndPropagateType(builder, alloc, viewLoad->getResult(0));
+        triton::replaceUsesAndPropagateType(builder, alloc, viewRes);
         allocsToErase.push_back(alloc);
       }
     }
@@ -325,24 +327,24 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   // Prefetch load ahead of the dot stage if is used by the dot.
   auto copyVal = copy->getResult(0);
-  Operation* storeOp;
-  if (numBuffers == 1) {
-    storeOp = builder.create<ttg::LocalAllocOp>(loc, subviewTy, copyVal);
-  } else {
-    storeOp = builder.create<ttg::LocalStoreOp>(loc, copyVal, viewLoad->getResult(0));
-    scheduleOp(viewLoad, SCHED_LOCAL_STORE);
-  }
-  scheduleOp(storeOp, SCHED_LOCAL_STORE);
+  Operation* localStoreOp;
+  if (numBuffers == 1)
+    localStoreOp = builder.create<ttg::LocalAllocOp>(loc, subviewTy, copyVal);
+  else
+    localStoreOp = builder.create<ttg::LocalStoreOp>(loc, copyVal, viewRes);
+  scheduleOp(localStoreOp, SCHED_LOCAL_STORE);
 
   // Create local load
-  Operation *sloadOp;
+  Operation *localLoadOp;
   if (numBuffers == 1)
-    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), storeOp->getResult(0));
+    localLoadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(),
+                                                   localStoreOp->getResult(0));
   else
-    sloadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad->getResult(0));
-  Value result = sloadOp->getResult(0);
+    localLoadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewRes);
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
-    scheduleOp(sloadOp, SCHED_LOCAL_LOAD);
+    scheduleOp(localLoadOp, SCHED_LOCAL_LOAD);
+
+  Value result = localLoadOp->getResult(0);
 
   // If the currently processed `LoadOp` is labeled with an index regarding
   // to which `DotOp` operand the corresponding data belongs to, then label the
@@ -350,7 +352,7 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   // instruction scheduling hints to correctly count the emitted `ds_write`
   // instructions for each GEMM tile.
   if (auto attr = loadOp->getAttr(triton::amdgpu::OpIdxAttr::getMnemonic())) {
-    storeOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), attr);
+    localStoreOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), attr);
   }
 
   loadOp->replaceAllUsesWith(ValueRange{result});
