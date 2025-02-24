@@ -70,11 +70,12 @@ def matmul_kernel(
     APPLY_SCALE: tl.constexpr,
     ACTIVATION: tl.constexpr,
     GRID_MN: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
+
+    NUM_XCDS: tl.constexpr = 8
 
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
@@ -91,15 +92,14 @@ def matmul_kernel(
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
-    if NUM_XCDS != 1:
-        ## pid remapping on xcds
-        # Number of pids per XCD in the new arrangement
-        pids_per_xcd = (GRID_MN + NUM_XCDS - 1) // NUM_XCDS
-        # Compute current XCD and local pid within the XCD
-        xcd = pid % NUM_XCDS
-        local_pid = pid // NUM_XCDS
-        # Calculate new pid based on the new grouping
-        pid = xcd * pids_per_xcd + local_pid
+    ## pid remapping on xcds
+    # Number of pids per XCD in the new arrangement
+    pids_per_xcd = (GRID_MN + NUM_XCDS - 1) // NUM_XCDS
+    # Compute current XCD and local pid within the XCD
+    xcd = pid % NUM_XCDS
+    local_pid = pid // NUM_XCDS
+    # Calculate new pid based on the new grouping
+    pid = xcd * pids_per_xcd + local_pid
 
     if GROUP_SIZE_M == 1:
         pid_m = pid // num_pid_n
@@ -191,7 +191,6 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         b_scale,
         APPLY_SCALE=scale_a8_b8,
         ACTIVATION=activation,
-        NUM_XCDS=8,
     )
 
 
