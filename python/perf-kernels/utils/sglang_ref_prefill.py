@@ -689,8 +689,12 @@ def _fwd_fused_kernel(
         + cur_head * stride_oh
         + offs_dv[None, :]
     )
+
+    # tl.static_print("", O_Extend + offs_o)
+    # tl.static_print("", acc / deno[:, None]) 
+
     tl.store(
-        O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None] & mask_dv[None, :]
+        O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None]
     )
 
 
@@ -720,7 +724,7 @@ def extend_fused_attention_fwd(
     Lq, Lk, Lv = (
         q_extend.shape[-1],
         k_extend.shape[-1],
-        v_extend.shape[-1],
+        w_vc.shape[-1],
     )
 
 
@@ -732,10 +736,7 @@ def extend_fused_attention_fwd(
     BLOCK_DPE = 64
     
     C = 512
-    
-    BLOCK_C = 16
-
-
+    BLOCK_C = 128
     # else:
     #     BLOCK_DMODEL = triton.next_power_of_2(Lq)
     #     BLOCK_DPE = 0

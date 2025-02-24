@@ -174,6 +174,12 @@ def benchmark(args):
 
     line_vals = ["ref", "fused"]
 
+    if args.ref:
+        line_vals = ["ref"]
+
+    if args.fused:
+        line_vals = ["fused"]
+
     plot_name = "MLA-decode"
 
     configs.append(
@@ -219,7 +225,7 @@ def parse_args():
 
     parser.add_argument("-dtype", default='bf16')
     parser.add_argument("-device", default='cuda')
-    parser.add_argument("-persistent", action="store_true", default=False)
+    parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
     parser.add_argument("-B", type=int, default=0)

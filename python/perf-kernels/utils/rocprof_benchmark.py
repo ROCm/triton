@@ -6,8 +6,8 @@ from prettytable import PrettyTable
 def run_profiling(triton_dir, batch_size, output_file):
     command = [
         "rocprof", "--stats", "-o", output_file,
-        "python", f"{triton_dir}/python/perf-kernels/MLA_decode.py",
-        "-B", str(batch_size), "-dtype", "bf16",
+        "python", f"{triton_dir}/python/perf-kernels/MLA_extend.py",
+        "-B", str(batch_size), "-dtype", "bf16"
     ]
     subprocess.run(command, check=True)
 
@@ -31,8 +31,8 @@ def parse_profiling_output(output_file, kernel_names):
 def main():
     triton_dir = os.environ.get("TRITONDIR", "~/triton")  # Default to ~/triton if not set
     output_file = os.path.expanduser("~/profiling.csv")
-    kernel_names = ["_fwd_grouped_persistent_kernel_stage1.kd", "_fwd_grouped_kernel_stage1.kd"]
-    batch_sizes = [32, 64, 128, 256]
+    kernel_names = ["_fwd_fused_kernel.kd", "_fwd_kernel.kd"]
+    batch_sizes = [1, 4]
     
     results = {B: {} for B in batch_sizes}
     for B in batch_sizes:
