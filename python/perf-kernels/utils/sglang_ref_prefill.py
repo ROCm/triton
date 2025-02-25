@@ -510,15 +510,18 @@ def _fwd_fused_kernel(
     deno = tl.zeros([BLOCK_M], dtype=tl.float32)
     e_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
 
-    offs_c = tl.arange(0, BLOCK_C)
-    # if FUSE_GEMMS:
-    offs_w_kc = (
-        cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
-    )
-
-    offs_w_vc = (
-        cur_head * stride_w_h + offs_d[None, :] * stride_w_d + offs_c[:, None] * stride_w_c
-    )
+    if FUSE_GEMMS:
+        offs_c = tl.arange(0, BLOCK_C)
+        offs_w_kc = (
+            cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
+        )
+        offs_w_vc = (
+            cur_head * stride_w_h + offs_d[None, :] * stride_w_d + offs_c[:, None] * stride_w_c
+        )
+    else:
+        offs_c = 0
+        offs_w_kc = 0
+        offs_w_vc = 0
 
     for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -621,8 +624,6 @@ def _fwd_fused_kernel(
             acc = acc * re_scale[:, None] + tl.dot(p, v)
 
     # stage 2: compute the triangle part
-    qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
     cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
     for start_n in range(0, cur_block_m_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -635,6 +636,7 @@ def _fwd_fused_kernel(
                 + offs_c[:, None]
             )
             # stage 2
+            qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for c in range(0, tl.cdiv(C, BLOCK_C)):
                 w_kc_k = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c)
                 kv_k =  tl.load(
@@ -654,7 +656,7 @@ def _fwd_fused_kernel(
             K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
             )
 
-            qk += tl.dot(q, k, out_dtype=tl.float32)
+            qk = tl.dot(q, k, out_dtype=tl.float32)
 
 
         if BLOCK_DPE > 0:
@@ -791,15 +793,19 @@ def extend_fused_attention_fwd(
         BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
 
-    # if fuse_gemms:
-    #     # assert Lq==192 and w_kc is not None and w_vc is not None
-    BLOCK_C = 32
-    C = w_vc.shape[-2] if fuse_gemms else None
-
+    if fuse_gemms:
+        assert Lq==192 and w_kc is not None and w_vc is not None
+    
+    if fuse_gemms:
+        C = w_vc.shape[-2]
+        BLOCK_C = min(128, C)
+    else:
+        C = None
+        BLOCK_C = None
+        
     if is_hip_:
         BLOCK_M, BLOCK_N = (16, 16)
         num_warps = 4
-
     else:
         if is_cuda_available and CUDA_CAPABILITY[0] >= 9:
             if Lq <= 256:

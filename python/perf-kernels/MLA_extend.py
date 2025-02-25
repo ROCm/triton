@@ -285,7 +285,7 @@ def main():
         print_vgpr(args)
         return 0
     
-    test_op_fwd(1, 1, 1024, 1024, 512, 64, 128, torch.float16, True)
+    test_op_fwd(1, 1, 1024, 1024, 512, 64, 128, torch.float16, False)
     # run_bench(args)
 
 
