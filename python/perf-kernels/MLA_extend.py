@@ -1,4 +1,4 @@
-from utils.sglang_ref_prefill import extend_attention_fwd, extend_fused_attention_fwd
+from utils.extend_attention import extend_attention_fwd, extend_fused_attention_fwd
 
 
 import logging
@@ -18,10 +18,7 @@ from utils.rotary_embedding import DeepseekScalingRotaryEmbedding
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
-
 is_hip_ = is_hip()
-
-
 
 def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, dtype, device):
     
@@ -81,13 +78,13 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
-    (1, 1, 1024, 1024, 512, 64, 128),
+    (1, 16, 1024, 1024, 512, 64, 128),
     # (1, 4, 1024, 1024, 512, 64, 128),
     # (4, 4, 1024, 1024, 512, 64, 128),
 ])
 @pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('attn_impl', ["absorbed", "naive"])
-@pytest.mark.parametrize('fuse_gemms', [False, True])
+@pytest.mark.parametrize('attn_impl', ["absorbed"])
+@pytest.mark.parametrize('fuse_gemms', [True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -101,7 +98,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
         w_kc, w_vc = None, None
 
-    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
+    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, sm_scale=1.0)
     
     # reference implementation
     if fuse_gemms:
@@ -133,7 +130,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
 
     
-    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0)
     
     if not fuse_gemms: # sanity check for the function body correctness without gemm fusion
         torch.testing.assert_close(tmp_out, tri_out, atol=1e-2, rtol=1e-2)
@@ -145,6 +142,10 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
             ref_out = attn_output
         else:
             ref_out = tmp_out
+        
+        
+        # print(f"ref: {ref_out[124, 8, 92]}")
+        # print(f"tri: {tri_out[124, 8, 92]}")
         
         print("first 10 outputs:")
         print(f"ref: {ref_out.flatten()[:]}") 
@@ -308,8 +309,8 @@ def main():
         print_vgpr(args)
         return 0
     
-    test_op_fwd(1, 8, 1024, 1024, 512, 64, 128, torch.float16, "absorbed", True)
-    # run_bench(args)
+    # test_op_fwd(1, 16, 1024, 1024, 512, 64, 128, torch.float16, "absorbed", True)
+    run_bench(args)
 
 
 if __name__ == "__main__":

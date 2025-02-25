@@ -715,8 +715,6 @@ def _fwd_fused_kernel(
                 kv_k = tl.load(
                     V_Extend + offs_v + c * BLOCK_C, mask=mask_n[:, None], other=0.0
                 )
-                tl.static_print("kv_k", kv_k)
-                tl.static_print("w_vc_k", w_vc_k)
 
                 v_k = tl.dot(kv_k, w_vc_k) # projected values
 

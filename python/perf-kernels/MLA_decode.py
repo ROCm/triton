@@ -46,9 +46,9 @@ fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
 
 def attn_mqa(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale, logit_cap, persistent=False):
     if persistent:
-        from utils.sglang_ref import _decode_grouped_persistent_att_m_fwd as decode_attention_fwd
+        from utils.decode_attention import _decode_grouped_persistent_att_m_fwd as decode_attention_fwd
     else:
-        from utils.sglang_ref import _decode_grouped_att_m_fwd as decode_attention_fwd
+        from utils.decode_attention import _decode_grouped_att_m_fwd as decode_attention_fwd
 
     B, H = q_input.shape[0], q_input.shape[1]
     kv_lora_rank = v_input.shape[-1]
