@@ -52,9 +52,7 @@ def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_
 
 
 def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device):
-    
     q_extend = torch.randn(B * extend_length, H, v_head_dim + qk_rope_head_dim, dtype=dtype, device=device)
-    # kv_cache = torch.randn(B * (prefix_length + extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
 
     # extend parts
     k_extend = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
@@ -72,89 +70,64 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     kv_indptr = torch.arange(B + 1, device=device) * prefix_length # 0, prefix_length, prefix_length*2
     kv_indices = torch.arange(B*(prefix_length), device=device)
 
-
-
     custom_mask = None
     mask_indptr = None
     max_len_extend = extend_length
 
-
-    w_kc = torch.randn(H, kv_lora_rank, v_head_dim)
-    w_vc = torch.randn(H, kv_lora_rank, v_head_dim)
+    w_kc = torch.randn(H, kv_lora_rank, v_head_dim, dtype=dtype, device=device)
+    w_vc = torch.randn(H, kv_lora_rank, v_head_dim, dtype=dtype, device=device)
 
 
     return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 
-# def input_helper(B, H, S, kv_lora_rank, rotary_dim, qk_rope_head_dim, num_kv_splits, dtype, device, rope_base=10,
-#                  rope_max_seq_len=16324, rope_scaling=1.0, is_neox_style=True):
-#     q = torch.randn(B, H, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
-#     kv_cache = torch.randn(B * S, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+@pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
+    # (1, 16, 1024, 1024, 512, 64, 128),
+    (1, 16, 1024, 1024, 512, 64, 128),
+    # (8, 32, 1024, 2048, 512, 64, 128),
+])
+@pytest.mark.parametrize('dtype', [torch.float32])
+@pytest.mark.parametrize('fuse_gemms', [False, True])
+def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, fuse_gemms, device="cuda"):
+    torch.manual_seed(0)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+    
+    if fuse_gemms:
+        q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
+                        B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
+    else:
+        q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
+                    B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
+        w_kc, w_vc = None, None
 
-#     # interlancing [batch_start_off, batch_seq_len, batch_start_off, batch_seq_len, ...,]
-#     kv_indptr = torch.arange(B + 1, device=device) * S
-#     kv_indices = torch.arange(B*S, device=device)
+    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
+    
+    # ref
+    if fuse_gemms:
+        q_input = torch.empty((*q_extend.shape[:-1],kv_lora_rank+qk_rope_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+        q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
+        q_nope = q_extend[..., :v_head_dim]
+        q_nope = torch.bmm(q_nope.transpose(0, 1), w_kc.transpose(1,2))
+        q_input[..., :kv_lora_rank] = q_nope.transpose(0, 1)
+    else:
+        q_input = q_extend
 
-#     attn_logits = torch.empty(B, H, num_kv_splits, kv_lora_rank + 1, dtype=dtype, device=device)
-
-#     rotary_emb = DeepseekScalingRotaryEmbedding(
-#         qk_rope_head_dim,
-#         rotary_dim,
-#         rope_max_seq_len,
-#         rope_base,
-#         is_neox_style,
-#         rope_scaling,
-#         q.dtype,
-#         device=device,
-#     )
-
-#     positions = torch.tensor([S], device=device).unsqueeze(0).repeat(B, 1)  # k positions and q position as last
-
-#     return kv_indptr, kv_indices, q, kv_cache, attn_logits, rotary_emb, positions
-
-
-# @pytest.mark.parametrize('B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim', [
-#     (32, 16, 2048, 512, 128, 64),
-# ])
-# @pytest.mark.parametrize('dtype', [torch.bfloat16])
-# def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, dtype, num_kv_splits=32, sm_scale=1.0, logit_cap=0.0,
-#                 device="cuda"):
-#     torch.manual_seed(0)
-
-#     D = qk_nope_head_dim
-#     q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
-#         B, H, S, D, kv_lora_rank, qk_rope_head_dim, num_kv_splits, dtype, device)
-
-#     # k_input, v_input = ref_preprocess(kv_cache, kv_lora_rank)
-
-#     tri_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
-#                                   logit_cap, rotary_emb, positions, device="cuda", persistent=True)
-
-#     # reference
-#     ref_logits = ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale,
-#                                   logit_cap, rotary_emb, positions, device="cuda")
-
-#     print("first 10 logits:")
-#     print(f"ref: {ref_logits[:,:,-1].flatten()[:]}") # to debug the rope, check last split
-#     print(f"tri: {tri_logits[:,:,-1].flatten()[:]}")
-#     torch.testing.assert_close(ref_logits, tri_logits, atol=1e-2, rtol=1e-2)
-#     print("attn_logits from stage 1 matches with ref")
-#     # stage 2 is shared
-
-# def ref_preprocess(kv_cache, kv_lora_rank):
-#     latent_cache = kv_cache
-#     v_input = latent_cache[..., :kv_lora_rank]
-#     v_input = v_input.contiguous().unsqueeze(1)
-#     k_input = latent_cache.unsqueeze(1)
-#     k_input[..., :kv_lora_rank] = v_input
-#     return k_input, v_input
-
-# def ref_compute(q, k_input, v_input, w_kc, w_vc, Req_to_tokens, B_req_idx, B_Seqlen, num_kv_splits, sm_scale, logit_cap, rotary_emb, positions, device="cuda", persistent=False):
-#     q_input = q
-#     attn_logits = extend_attention_fwd(q_input, k_input, v_input, Req_to_tokens, B_req_idx, B_Seqlen,
-#                                             num_kv_splits, sm_scale, logit_cap, persistent=persistent)
-#     return attn_logits
-
+    tmp_out = torch.empty((*q_extend.shape[:-1],kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
+    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+    
+    if not fuse_gemms: # sanity check for the function body correctness without gemm fusion
+        torch.testing.assert_close(tmp_out, tri_out, atol=1e-2, rtol=1e-2)
+    else:
+        # tmp_out = tmp_out.view(-1, H, kv_lora_rank)
+        attn_bmm_output = torch.bmm(tmp_out.transpose(0, 1), w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1)
+        ref_out = attn_output
+        print("first 10 outputs:")
+        print(f"ref: {ref_out[608, 0, 10]}", f"tri: {tri_out[608, 0, 10]}")
+        print(f"ref: {ref_out.flatten()[:]}") 
+        print(f"tri: {tri_out.flatten()[:]}") 
+        torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 def benchmark(args):
     dtype = arg_to_torch_dtype[args.dtype]
@@ -191,21 +164,21 @@ def benchmark(args):
     def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, sm_scale, logit_cap, device,
                   provider):
         warmup = 25
-        rep = 100
-
-        
+        rep = 100        
 
         if "ref" in provider:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
-            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+            # fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+            w_kc, w_vc = None, None
+            fuse_gemms = False
 
         if "fused" in provider:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
-            fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, w_kc, w_vc, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
-        
-        
+            fuse_gemms = True
+
+        fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
         
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
@@ -312,7 +285,8 @@ def main():
         print_vgpr(args)
         return 0
     
-    run_bench(args)
+    test_op_fwd(1, 1, 1024, 1024, 512, 64, 128, torch.float16, True)
+    # run_bench(args)
 
 
 if __name__ == "__main__":
