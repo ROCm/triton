@@ -240,8 +240,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // Check that the stream pipeliner updates the resulting memory layout of transpose ops to mutable if immutable local buffers are replaced
 // CHECK-LABEL: loop_with_dot_and_transpose
-// CHECK: ttg.local_alloc {{.*}}, mutable>
-// CHECK: ttg.memdesc_trans {{.*}}, mutable> -> {{.*}}, mutable>
+// CHECK: scf.for
+// CHECK: %[[TRANS_LD:.*]] = ttg.local_alloc {{.*}}>
+// CHECK-NEXT: ttg.memdesc_trans %[[TRANS_LD]] {{.*}}> -> {{.*}}>
 
 #blocked = #ttg.blocked<{sizePerThread = [2, 2], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>

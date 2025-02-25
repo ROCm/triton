@@ -454,4 +454,10 @@ void TargetInfo::storeOpAnnotation(triton::gpu::LocalStoreOp op,
   storeOpSchedAnnotations(op, localStoreOpCount, type);
 }
 
+void TargetInfo::allocOpAnnotation(triton::gpu::LocalAllocOp op,
+                                   size_t localStoreOpCount, Type type) const {
+  if (op.getSrc())
+    storeOpSchedAnnotations(op, localStoreOpCount, type);
+}
+
 } // namespace mlir::triton::AMD
