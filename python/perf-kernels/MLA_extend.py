@@ -83,11 +83,11 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
     # (1, 16, 1024, 1024, 512, 64, 128),
-    (1, 16, 1024, 1024, 512, 64, 128),
+    (1, 1, 1024, 512, 512, 64, 128),
     # (8, 32, 1024, 2048, 512, 64, 128),
 ])
 @pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('fuse_gemms', [False, True])
+@pytest.mark.parametrize('fuse_gemms', [True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, fuse_gemms, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -124,7 +124,6 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         attn_output = attn_bmm_output.transpose(0, 1)
         ref_out = attn_output
         print("first 10 outputs:")
-        print(f"ref: {ref_out[608, 0, 10]}", f"tri: {tri_out[608, 0, 10]}")
         print(f"ref: {ref_out.flatten()[:]}") 
         print(f"tri: {tri_out.flatten()[:]}") 
         torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)

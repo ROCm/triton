@@ -20,13 +20,10 @@ import torch
 import triton
 import triton.language as tl
 
-# from sglang.srt.layers.attention.triton_ops.prefill_attention import (
-#     context_attention_fwd,
-# )
-# from sglang.srt.utils import is_hip
-
-def is_hip():
-    return triton.runtime.driver.active.get_current_target().backend == "hip"
+from sglang.srt.layers.attention.triton_ops.prefill_attention import (
+    context_attention_fwd,
+)
+from sglang.srt.utils import is_hip
 
 is_cuda_available = torch.cuda.is_available()
 if is_cuda_available:
@@ -77,6 +74,8 @@ def _fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     USE_CUSTOM_MASK: tl.constexpr,
+    SKIP_PREFIX_CUSTOM_MASK: tl.constexpr,
+    STORE_TRANSPOSE: tl.constexpr,
 ):
     cur_seq = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -130,7 +129,6 @@ def _fwd_kernel(
     for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_seq_len_prefix
-        
         offs_kv_loc = tl.load(
             kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
         )
@@ -163,7 +161,7 @@ def _fwd_kernel(
         if logit_cap > 0:
             qk = logit_cap * tanh(qk / logit_cap)
 
-        if USE_CUSTOM_MASK:
+        if USE_CUSTOM_MASK and not SKIP_PREFIX_CUSTOM_MASK:
             custom_mask = tl.load(
                 mask_ptr
                 + cur_seq_mask_start_idx
@@ -197,7 +195,6 @@ def _fwd_kernel(
         e_max = n_e_max
 
     # stage 2: compute the triangle part
-    qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
     for start_n in range(0, cur_block_m_end, BLOCK_N):
@@ -210,12 +207,11 @@ def _fwd_kernel(
             + cur_kv_head * stride_kh
             + offs_d[:, None]
         )
-        
-        k =  tl.load(
-           K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+        k = tl.load(
+            K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
         )
 
-        qk += tl.dot(q, k, out_dtype=tl.float32)
+        qk = tl.dot(q, k, out_dtype=tl.float32)
         if BLOCK_DPE > 0:
             offs_kpe = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
@@ -278,9 +274,18 @@ def _fwd_kernel(
         + cur_head * stride_oh
         + offs_dv[None, :]
     )
-    tl.store(
-        O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None] & mask_dv[None, :]
-    )
+    if STORE_TRANSPOSE:
+        tl.store(
+            O_Extend + offs_o.T,
+            (acc / deno[:, None]).T,
+            mask=(mask_m[:, None] & mask_dv[None, :]).T,
+        )
+    else:
+        tl.store(
+            O_Extend + offs_o,
+            acc / deno[:, None],
+            mask=mask_m[:, None] & mask_dv[None, :],
+        )
 
 
 def extend_attention_fwd(
@@ -298,6 +303,7 @@ def extend_attention_fwd(
     max_len_extend,
     sm_scale=None,
     logit_cap=0.0,
+    skip_prefix_custom_mask=True,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors
@@ -351,6 +357,8 @@ def extend_attention_fwd(
     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
 
     USE_CUSTOM_MASK = custom_mask is not None
+    # Skip custom mask for prefix part
+    SKIP_PREFIX_CUSTOM_MASK = skip_prefix_custom_mask
 
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
@@ -358,19 +366,6 @@ def extend_attention_fwd(
     extra_kargs = {}
     if is_hip_:
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-
-    print("extend_attention_fwd\n")
-    print(f"BLOCK_DMODEL: {BLOCK_DMODEL}")
-    print(f"BLOCK_DPE: {BLOCK_DPE}")
-    print(f"BLOCK_DV: {BLOCK_DV}")
-    print(f"BLOCK_M: {BLOCK_M}")
-    print(f"BLOCK_N: {BLOCK_N}")
-    print(f"logit_cap: {logit_cap}")
-    print(f"Lq: {Lq}")
-    print(f"Lv: {Lv}")
-    print(f"USE_CUSTOM_MASK: {USE_CUSTOM_MASK}")
-    print(f"num_warps: {num_warps}")
-    print(f"num_stages: {num_stages}")
 
     _fwd_kernel[grid](
         q_extend,
@@ -407,6 +402,8 @@ def extend_attention_fwd(
         Lq=Lq,
         Lv=Lv,
         USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+        SKIP_PREFIX_CUSTOM_MASK=SKIP_PREFIX_CUSTOM_MASK,
+        STORE_TRANSPOSE=is_hip_,
         num_warps=num_warps,
         num_stages=num_stages,
         **extra_kargs,
@@ -459,7 +456,7 @@ def _fwd_fused_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     USE_CUSTOM_MASK: tl.constexpr,
-    
+    STORE_TRANSPOSE: tl.constexpr,
 ):
     cur_seq = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -531,15 +528,13 @@ def _fwd_fused_kernel(
             kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
         )
 
-        qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
         if FUSE_GEMMS:
             offs_buf_k = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
                 + offs_c[:, None]
-                # + offs_d[:, None]
             )
+            qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for c in range(0, tl.cdiv(C, BLOCK_C)):
                 w_kc_k = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c)
                 kv_k = tl.load(
@@ -556,7 +551,7 @@ def _fwd_fused_kernel(
             k = tl.load(
                 K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
             )
-            qk += tl.dot(q.to(k.dtype), k)
+            qk = tl.dot(q.to(k.dtype), k)
         
         
         if BLOCK_DPE > 0:
@@ -653,7 +648,7 @@ def _fwd_fused_kernel(
             )
             
             k =  tl.load(
-            K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
+                K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_d[:, None]), other=0.0
             )
 
             qk = tl.dot(q, k, out_dtype=tl.float32)
@@ -736,16 +731,26 @@ def _fwd_fused_kernel(
             p = p.to(v.dtype)
             acc = acc * re_scale[:, None] + tl.dot(p, v)
 
+
     offs_o = (
         (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
         * stride_obs
         + cur_head * stride_oh
         + offs_dv[None, :]
     )
-
-    tl.store(
-        O_Extend + offs_o, acc / deno[:, None], mask=mask_m[:, None] & mask_dv[None, :]
-    )
+    
+    if STORE_TRANSPOSE:
+        tl.store(
+            O_Extend + offs_o.T,
+            (acc / deno[:, None]).T,
+            mask=(mask_m[:, None] & mask_dv[None, :]).T,
+        )
+    else:
+        tl.store(
+            O_Extend + offs_o,
+            acc / deno[:, None],
+            mask=mask_m[:, None] & mask_dv[None, :],
+        )
 
 
 def extend_fused_attention_fwd(
@@ -837,22 +842,6 @@ def extend_fused_attention_fwd(
     if is_hip_:
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    print("extend_fused_attention_fwd \n")
-    print(f"BLOCK_DMODEL: {BLOCK_DMODEL}")
-    print(f"BLOCK_DPE: {BLOCK_DPE}")
-    print(f"BLOCK_DV: {BLOCK_DV}")
-    print(f"BLOCK_M: {BLOCK_M}")
-    print(f"BLOCK_N: {BLOCK_N}")
-    print(f"BLOCK_C: {BLOCK_C}")
-    print(f"C: {C}")
-    print(f"FUSE_GEMMS: {fuse_gemms}")
-    print(f"logit_cap: {logit_cap}")
-    print(f"Lq: {Lq}")
-    print(f"Lv: {Lv}")
-    print(f"USE_CUSTOM_MASK: {USE_CUSTOM_MASK}")
-    print(f"num_warps: {num_warps}")
-    print(f"num_stages: {num_stages}")
-
 
     _fwd_fused_kernel[grid](
         q_extend,
@@ -901,5 +890,6 @@ def extend_fused_attention_fwd(
         USE_CUSTOM_MASK=USE_CUSTOM_MASK,
         num_warps=num_warps,
         num_stages=num_stages,
+        STORE_TRANSPOSE=is_hip_,
         **extra_kargs,
     )
