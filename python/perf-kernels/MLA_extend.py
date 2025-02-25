@@ -80,15 +80,15 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 
     return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
-
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
-    # (1, 16, 1024, 1024, 512, 64, 128),
-    (1, 1, 1024, 512, 512, 64, 128),
-    # (8, 32, 1024, 2048, 512, 64, 128),
+    (1, 1, 1024, 1024, 512, 64, 128),
+    # (1, 4, 1024, 1024, 512, 64, 128),
+    # (4, 4, 1024, 1024, 512, 64, 128),
 ])
 @pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('fuse_gemms', [True])
-def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, fuse_gemms, device="cuda"):
+@pytest.mark.parametrize('attn_impl', ["absorbed", "naive"])
+@pytest.mark.parametrize('fuse_gemms', [False, True])
+def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -103,30 +103,54 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
 
     extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
     
-    # ref
+    # reference implementation
     if fuse_gemms:
-        q_input = torch.empty((*q_extend.shape[:-1],kv_lora_rank+qk_rope_head_dim), dtype=q_extend.dtype, device=q_extend.device)
-        q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
-        q_nope = q_extend[..., :v_head_dim]
-        q_nope = torch.bmm(q_nope.transpose(0, 1), w_kc.transpose(1,2))
-        q_input[..., :kv_lora_rank] = q_nope.transpose(0, 1)
+        if attn_impl == "absorbed":
+            q_input = torch.empty((*q_extend.shape[:-1],kv_lora_rank+qk_rope_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+            q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
+            q_nope = q_extend[..., :v_head_dim]
+            q_nope = torch.bmm(q_nope.transpose(0, 1), w_kc.transpose(1,2))
+            q_input[..., :kv_lora_rank] = q_nope.transpose(0, 1)
+            
+            tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
+        else:
+            q_input = q_extend
+            k_extend_c = torch.einsum('zc,hcd->zhd', k_extend[..., :kv_lora_rank], w_kc)
+            k_extend_r = k_extend[..., kv_lora_rank:].unsqueeze(1).repeat(1, H, 1)
+            k_extend = torch.cat((k_extend_c, k_extend_r), dim=-1)
+            
+            k_buffer_c = torch.einsum('zc,hcd->zhd', k_buffer[..., :kv_lora_rank], w_kc)
+            k_buffer_r = k_buffer[..., kv_lora_rank:].unsqueeze(1).repeat(1, H, 1)
+            k_buffer = torch.cat((k_buffer_c, k_buffer_r), dim=-1)
+            
+            v_extend = torch.einsum('zc,hcd->zhd', v_extend, w_vc)
+            v_buffer = torch.einsum('zc,hcd->zhd', v_buffer, w_vc)
+            
+            tmp_out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
     else:
         q_input = q_extend
+        
+        tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
 
-    tmp_out = torch.empty((*q_extend.shape[:-1],kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
+    
     extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
     
     if not fuse_gemms: # sanity check for the function body correctness without gemm fusion
         torch.testing.assert_close(tmp_out, tri_out, atol=1e-2, rtol=1e-2)
+        print("Function body matches!")
     else:
-        # tmp_out = tmp_out.view(-1, H, kv_lora_rank)
-        attn_bmm_output = torch.bmm(tmp_out.transpose(0, 1), w_vc)
-        attn_output = attn_bmm_output.transpose(0, 1)
-        ref_out = attn_output
+        if attn_impl == "absorbed":
+            attn_bmm_output = torch.bmm(tmp_out.transpose(0, 1), w_vc)
+            attn_output = attn_bmm_output.transpose(0, 1)
+            ref_out = attn_output
+        else:
+            ref_out = tmp_out
+        
         print("first 10 outputs:")
         print(f"ref: {ref_out.flatten()[:]}") 
         print(f"tri: {tri_out.flatten()[:]}") 
         torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
+        print("Output matches!")
 
 def benchmark(args):
     dtype = arg_to_torch_dtype[args.dtype]
@@ -284,7 +308,7 @@ def main():
         print_vgpr(args)
         return 0
     
-    test_op_fwd(1, 1, 1024, 1024, 512, 64, 128, torch.float16, False)
+    test_op_fwd(1, 8, 1024, 1024, 512, 64, 128, torch.float16, "absorbed", True)
     # run_bench(args)
 
 
