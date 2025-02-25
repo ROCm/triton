@@ -68,8 +68,86 @@ inline bool isRowMajor(::llvm::ArrayRef<unsigned> order) {
   return order[rank - 1] == 0;
 }
 
-inline RankedTensorType rankedTType(Value tensor) {
-  return cast<RankedTensorType>(tensor.getType());
+LogicalResult rewriteLocalLoad(OpBuilder &rewriter,
+                               triton::gpu::LocalLoadOp op) {
+  auto *ctx = op->getContext();
+  auto loc = op->getLoc();
+
+  auto resultType = cast<RankedTensorType>(op.getType());
+  auto resultElementType = resultType.getElementType();
+  auto resultEncode = cast<DotOperandEncodingAttr>(resultType.getEncoding());
+  auto resultShape = resultType.getShape();
+
+  const auto rank = resultShape.size();
+  assert(rank == 2);
+
+  auto opIdx = resultEncode.getOpIdx();
+  const int kDimIdx = opIdx == 0 ? rank - 1 : rank - 2;
+  const int nonKDimIdx = opIdx == 0 ? rank - 2 : rank - 1;
+
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(resultEncode.getParent());
+  int kWidth = resultEncode.getKWidth();
+  auto numReps = mfmaLayout.getRepForOperand(resultShape, kWidth, opIdx);
+
+  // indices into 3D numReps
+  int kRepsIdx = opIdx == 0 ? 2 : 1;
+  int nonKRepsIdx = opIdx == 0 ? 1 : 2;
+  int bRepsIdx = 0;
+
+  // 2D shape which drops batch dimension.
+  SmallVector<int64_t> numReps2D = {numReps[1], numReps[2]};
+
+  auto numRepsNonK = numReps[nonKRepsIdx];
+  auto numRepsK = numReps[kRepsIdx];
+  auto numRepsB = numReps[bRepsIdx];
+
+  auto memDesc = op->getOperand(0);
+  auto memDescType = cast<ttg::MemDescType>(memDesc.getType());
+  auto memDescEncoding =
+      cast<triton::gpu::SwizzledSharedEncodingAttr>(memDescType.getEncoding());
+
+  SmallVector<int64_t> refinedShape = {resultShape[0] / numReps2D[0],
+                                       resultShape[1] / numReps2D[1]};
+  LDBG("refinedShape: " << refinedShape[0] << "x" << refinedShape[1]);
+  int64_t refinedShapeNonK = refinedShape[nonKDimIdx];
+  int64_t refinedShapeK = refinedShape[kDimIdx];
+
+  auto refinedTensorType =
+      RankedTensorType::get(refinedShape, resultElementType, resultEncode);
+
+  constexpr bool mutableMemory = true;
+  auto sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+  auto subviewType = ttg::MemDescType::get(
+      refinedShape, memDescType.getElementType(), memDescType.getEncoding(),
+      sharedMemorySpace, mutableMemory, memDescType.getAllocShape());
+
+  rewriter.setInsertionPointAfter(op);
+  SmallVector<Value> subtiles;
+  auto order = memDescEncoding.getOrder();
+  for (int32_t j = 0; j < numReps2D[1]; ++j) {   // dim[1]
+    for (int32_t i = 0; i < numReps2D[0]; ++i) { // dim[0]
+      int32_t offset0 = i * refinedShape[0];
+      int32_t offset1 = j * refinedShape[1];
+      auto offset = createOffset({}, {offset0, offset1}, rewriter, loc);
+      auto refinedView = rewriter.create<ttg::MemDescSubviewOp>(
+          loc, subviewType, memDesc, offset);
+      LDBG("RefinedLocalLoadSubvew: " << *refinedView);
+
+      auto refinedLoad = rewriter.create<ttg::LocalLoadOp>(
+          loc, refinedTensorType, refinedView);
+      // LDBG("RefinedLocalLoad: " << *refinedLoad);
+      subtiles.push_back(refinedLoad);
+    }
+  }
+
+  // concat dims is correct shape 8x1 vs 1x8, else gives wrong output shape.
+  auto concatDims = DenseI64ArrayAttr::get(ctx, numReps2D);
+  auto joinedResult = rewriter.create<triton::amdgpu::ConcatOp>(
+      loc, resultType, subtiles, concatDims);
+  LDBG("ConcatOp: " << *joinedResult);
+
+  op.replaceAllUsesWith(joinedResult.getResult());
+  return success();
 }
 
 SmallVector<int64_t> getRefinedShapePerCTATile(RankedTensorType tensorType) {
@@ -280,6 +358,8 @@ struct DotOpMFMAConverter {
 
     auto mfmasPerRep =
         getMfmasPerRep(ctaTile, warpsPerCTA, numRepShape, mfmaShape);
+    LDBG("mfmasPerRep: " << mfmasPerRep[0] << "x" << mfmasPerRep[1] << "x"
+                         << mfmasPerRep[2]);
 
     // Calculate Dot-Tiling.
     unsigned cyclesPerMfma = getCyclesPerMfma(dotOp);
@@ -547,13 +627,23 @@ struct LocalLoadOpPattern
     auto numRepsK = numReps[kRepsIdx];
     auto numRepsB = numReps[bRepsIdx];
 
-    auto memDesc = op->getOperand(0);
-    auto memDescType = cast<ttg::MemDescType>(memDesc.getType());
-    auto memDescEncoding = memDescType.getEncoding();
-    SmallVector<unsigned int> order;
-    if (auto enc = dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(
-            memDescEncoding)) {
-      order = decltype(order)(enc.getOrder());
+  RefinedBlock refinedBlock(origSrcType.getShape(),
+                            origSrcType.getElementType(), blockEncoding);
+
+  constexpr bool mutableMemory = true;
+  auto sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+
+  auto subviewType = ttg::MemDescType::get(
+      refinedBlock.refinedShape, refinedBlock.elemType, sharedEncoding,
+      sharedMemorySpace, mutableMemory, origMemViewType.getAllocShape());
+
+  rewriter.setInsertionPointAfter(loadStoreOp);
+  CoordinateAux aux(refinedBlock.numPerDims);
+  for (size_t counter = 0; counter < refinedBlock.numSubTiles; ++counter) {
+    auto coords = aux.map(counter);
+    SmallVector<int64_t> offset(refinedBlock.numDims, 0);
+    for (auto [dim, coord] : llvm::enumerate(coords)) {
+      offset[dim] = coord * refinedBlock.elementsPerWorkGroup[dim];
     }
     if (auto enc = dyn_cast<triton::gpu::AMDRotatingSharedEncodingAttr>(
             memDescEncoding)) {
