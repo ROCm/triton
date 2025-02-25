@@ -309,7 +309,8 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
       allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
   Value viewRes;
   if (numBuffers > 1) {
-    auto viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+    auto viewLoad = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc,
+                                                          loadOffsets);
     scheduleOp(viewLoad, SCHED_LOCAL_STORE);
     viewRes = viewLoad;
     // Clean up old local caches.
@@ -327,7 +328,7 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   // Prefetch load ahead of the dot stage if is used by the dot.
   auto copyVal = copy->getResult(0);
-  Operation* localStoreOp;
+  Operation *localStoreOp;
   if (numBuffers == 1)
     localStoreOp = builder.create<ttg::LocalAllocOp>(loc, subviewTy, copyVal);
   else
@@ -340,7 +341,8 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
     localLoadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(),
                                                    localStoreOp->getResult(0));
   else
-    localLoadOp = builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewRes);
+    localLoadOp =
+        builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewRes);
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
     scheduleOp(localLoadOp, SCHED_LOCAL_LOAD);
 
@@ -981,9 +983,8 @@ private:
 };
 } // namespace
 
-std::unique_ptr<Pass>
-mlir::createTritonAMDGPUStreamPipelinePass(int numStages, int maxDepth, int globalPrefetch,
-                                           int localPrefetch) {
+std::unique_ptr<Pass> mlir::createTritonAMDGPUStreamPipelinePass(
+    int numStages, int maxDepth, int globalPrefetch, int localPrefetch) {
   return std::make_unique<PipelinePass>(numStages, maxDepth, globalPrefetch,
                                         localPrefetch);
 }

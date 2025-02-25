@@ -221,7 +221,8 @@ class HIPBackend(BaseBackend):
                                              "num_stages == 0. Now it will not happen anymore; "
                                              "please update to use num_stages == 2 for "
                                              "equivalent behavior in the past.")
-            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_max_depth, global_prefetch, local_prefetch)
+            amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_max_depth, global_prefetch,
+                                                   local_prefetch)
             passes.common.add_canonicalizer(pm)
         if options.instruction_sched_variant.lower() != "none":
             amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.instruction_sched_variant)
