@@ -344,7 +344,7 @@ def print_vgpr(args):
         sys.stderr = temp_file
         
         os.environ["AMDGCN_ENABLE_DUMP"] = "1"
-        # os.environ["TRITON_ALWAYS_COMPILE"] = "1"
+        os.environ["TRITON_ALWAYS_COMPILE"] = "1"
         run_bench(args)  # Run the benchmark
         
         sys.stdout.flush()
