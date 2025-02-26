@@ -98,7 +98,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         w_kc, w_vc = None, None
 
     extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0,
-                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
+                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=False)
     
     # reference implementation
     if fuse_gemms:
@@ -106,7 +106,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
             q_input = torch.empty((*q_extend.shape[:-1],kv_lora_rank+qk_rope_head_dim), dtype=q_extend.dtype, device=q_extend.device)
             q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
             q_nope = q_extend[..., :v_head_dim]
-            q_nope = torch.bmm(q_nope.transpose(0, 1), w_kc.transpose(1,2))
+            q_nope = torch.einsum("hzd,hdc->hzc", q_nope.transpose(0, 1), w_kc.transpose(1,2))
             q_input[..., :kv_lora_rank] = q_nope.transpose(0, 1)
             
             tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
@@ -137,7 +137,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         print("Function body matches!")
     else:
         if attn_impl == "absorbed":
-            attn_bmm_output = torch.bmm(tmp_out.transpose(0, 1), w_vc)
+            attn_bmm_output = torch.einsum("hzc,hcd->hzd", tmp_out.transpose(0, 1), w_vc)
             attn_output = attn_bmm_output.transpose(0, 1)
             ref_out = attn_output
         else:

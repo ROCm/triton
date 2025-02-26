@@ -333,7 +333,7 @@ def extend_attention_fwd(
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     if is_hip_:
-        BLOCK_M, BLOCK_N = (16, 16)
+        BLOCK_M, BLOCK_N = (64, 64)
         num_warps = 4
 
     else:
@@ -843,7 +843,7 @@ def extend_fused_attention_fwd(
         DV = v_buffer.shape[-1] # no projection
 
     if is_hip_:
-        BLOCK_M, BLOCK_N = (16, 16)
+        BLOCK_M, BLOCK_N = (64, 64)
         num_warps = 4
 
     sm_scale = sm_scale or 1.0 / ((k_buffer.shape[-1])**0.5) # TODO: check that this is correct here
