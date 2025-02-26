@@ -78,9 +78,8 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     return q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
-    (1, 16, 1024, 1024, 512, 64, 128),
-    # (1, 4, 1024, 1024, 512, 64, 128),
-    # (4, 4, 1024, 1024, 512, 64, 128),
+    (2, 16, 1024, 1024, 512, 64, 128),
+    (1, 1, 1024, 1024, 256, 32, 64),
 ])
 @pytest.mark.parametrize('dtype', [torch.float32])
 @pytest.mark.parametrize('attn_impl', ["absorbed"])
@@ -98,7 +97,8 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
         w_kc, w_vc = None, None
 
-    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, sm_scale=1.0)
+    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0,
+                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=False, fuse_w_kc=True)
     
     # reference implementation
     if fuse_gemms:
@@ -193,16 +193,13 @@ def benchmark(args):
         if "ref" in provider:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
-            # fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
-            w_kc, w_vc = None, None
-            fuse_gemms = False
+            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
 
         if "fused" in provider:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
             fuse_gemms = True
-
-        fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
+            fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
         
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
