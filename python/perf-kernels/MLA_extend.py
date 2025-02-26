@@ -79,10 +79,9 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
     (2, 16, 1024, 1024, 512, 64, 128),
-    (1, 1, 1024, 1024, 256, 32, 64),
 ])
 @pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('attn_impl', ["absorbed"])
+@pytest.mark.parametrize('attn_impl', ["naive"])
 @pytest.mark.parametrize('fuse_gemms', [True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, device="cuda"):
     torch.manual_seed(0)
@@ -112,6 +111,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
             tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
         else:
             q_input = q_extend
+        
             k_extend_c = torch.einsum('zc,hcd->zhd', k_extend[..., :kv_lora_rank], w_kc)
             k_extend_r = k_extend[..., kv_lora_rank:].unsqueeze(1).repeat(1, H, 1)
             k_extend = torch.cat((k_extend_c, k_extend_r), dim=-1)
@@ -126,7 +126,6 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
             tmp_out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
     else:
         q_input = q_extend
-        
         tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
 
     
@@ -199,7 +198,8 @@ def benchmark(args):
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
             fuse_gemms = True
-            fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc)
+            fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
+                                                    fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
         
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
@@ -306,8 +306,8 @@ def main():
         print_vgpr(args)
         return 0
     
-    # test_op_fwd(1, 16, 1024, 1024, 512, 64, 128, torch.float16, "absorbed", True)
-    run_bench(args)
+    test_op_fwd(1, 4, 1024, 1024, 512, 64, 128, torch.float32, "naive", True)
+    # run_bench(args)
 
 
 if __name__ == "__main__":

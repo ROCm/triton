@@ -358,6 +358,8 @@ def extend_attention_fwd(
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
 
+    print(f"kv_group_num: {kv_group_num}") 
+
     USE_CUSTOM_MASK = custom_mask is not None
     # Skip custom mask for prefix part
     SKIP_PREFIX_CUSTOM_MASK = skip_prefix_custom_mask
@@ -439,7 +441,7 @@ def _fwd_fused_kernel(
     stride_buf_kh,
     stride_buf_vbs,
     stride_buf_vh,
-    # fuse gemms args
+    ####
     W_KC,
     W_VC,
     stride_w_h,
@@ -488,21 +490,17 @@ def _fwd_fused_kernel(
     mask_d = offs_d < D
     mask_c = offs_c < C
     mask_dv = offs_dv < DV
-
-    ABSORB: tl.constexpr = ABSORB_W_KC and FUSE_GEMMS
-
-    if not FUSE_GEMMS:
-        assert D==C and D==DV, "D == C == DV when not fusing gemms"
     
-    offs_q = (
-        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-        * stride_qbs
-        + cur_head * stride_qh
-        + offs_d[None, :]
-    )
-    q = tl.load(
-        Q_Extend + offs_q, mask=(mask_m[:, None]) & (mask_d[None, :]), other=0.0
-    )
+    if not ABSORB_W_KC:
+        offs_q = (
+            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+            * stride_qbs
+            + cur_head * stride_qh
+            + offs_d[None, :]
+        )
+        q = tl.load(
+            Q_Extend + offs_q, mask=(mask_m[:, None]) & (mask_d[None, :]), other=0.0
+        )
 
     if DPE > 0:
         offs_dpe = tl.arange(0, DPE)
@@ -525,7 +523,7 @@ def _fwd_fused_kernel(
     q_acc = tl.zeros((BLOCK_M, C), dtype=tl.float32)
 
     if FUSE_GEMMS:
-        if ABSORB: # absorb the w_kc into q
+        if ABSORB_W_KC: # absorb the w_kc into q
             # load q and w_kc in BLOCK_D parts
             offs_q_d = (
                 (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
@@ -575,7 +573,6 @@ def _fwd_fused_kernel(
                 K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
             )
             qk = tl.dot(q_acc.to(k.dtype), k)
-
         elif FUSE_GEMMS:
             offs_buf_k_c = (
                 offs_kv_loc[None, :] * stride_buf_kbs
@@ -606,7 +603,7 @@ def _fwd_fused_kernel(
             offs_kpe = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
-                + offs_dpe[:, None] + BLOCK_C
+                + offs_dpe[:, None] + C
             )
             kpe = tl.load(
                 K_Buffer + offs_kpe,
@@ -719,7 +716,7 @@ def _fwd_fused_kernel(
             offs_kpe = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
                 + cur_kv_head * stride_kh
-                + offs_dpe[:, None] + BLOCK_C
+                + offs_dpe[:, None] + C
             )
             kpe = tl.load(
                 K_Extend + offs_kpe,
@@ -827,7 +824,7 @@ def extend_fused_attention_fwd(
     fuse_gemms=False,
     w_kc=None,
     w_vc=None,
-    absorb_w_kc=True,
+    absorb_w_kc=False,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors
@@ -839,21 +836,21 @@ def extend_fused_attention_fwd(
     DPE = k_buffer.shape[-1] - C
     D = q_extend.shape[-1] - DPE
 
+    BLOCK_C = min(32, C)
+    BLOCK_D = min(32, D)
+
     if fuse_gemms:
         assert w_kc is not None and w_vc is not None, "w_kc and w_vc must be provided when fusing gemms"
         DV = w_vc.shape[-1]
-        BLOCK_C = min(32, C)
-        BLOCK_D = min(32, D)
+
     else:
         DV = v_buffer.shape[-1] # no projection
-        BLOCK_C = None
-        BLOCK_D = None
-        
+
     if is_hip_:
         BLOCK_M, BLOCK_N = (16, 16)
         num_warps = 4
 
-    sm_scale = sm_scale or 1.0 / (D**0.5)
+    sm_scale = sm_scale or 1.0 / ((k_buffer.shape[-1])**0.5) # TODO: check that this is correct here
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
 
@@ -906,7 +903,7 @@ def extend_fused_attention_fwd(
         DV=DV,
         DPE=DPE,
         FUSE_GEMMS=fuse_gemms,
-        ABSORB_W_KC=absorb_w_kc,
+        ABSORB_W_KC=absorb_w_kc and fuse_gemms,
         ##################
         logit_cap=logit_cap,
         BLOCK_M=BLOCK_M,
