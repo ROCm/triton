@@ -358,8 +358,6 @@ def extend_attention_fwd(
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
 
-    print(f"kv_group_num: {kv_group_num}") 
-
     USE_CUSTOM_MASK = custom_mask is not None
     # Skip custom mask for prefix part
     SKIP_PREFIX_CUSTOM_MASK = skip_prefix_custom_mask
@@ -519,9 +517,6 @@ def _fwd_fused_kernel(
     deno = tl.zeros([BLOCK_M], dtype=tl.float32)
     e_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
 
-
-    q_acc = tl.zeros((BLOCK_M, C), dtype=tl.float32)
-
     if FUSE_GEMMS:
         if ABSORB_W_KC: # absorb the w_kc into q
             # load q and w_kc in BLOCK_D parts
@@ -534,14 +529,15 @@ def _fwd_fused_kernel(
             offs_w_kc_d = (
                 cur_head * stride_w_h + offs_block_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
             )
-            
+            q_acc = tl.zeros((BLOCK_M, C), dtype=tl.float32)
             for d in range(0, tl.cdiv(D, BLOCK_D)):
                 w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_d)
                 q_d = tl.load(
                     Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
                 )
                 q_acc += tl.dot(q_d, w_kc_d)        
-          
+            q_acc = q_acc.to(qpe.dtype)
+
         # load w_kc and w_vc in BLOCK_C parts
         offs_w_kc = (
             cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_block_c[None, :] * stride_w_c
@@ -611,6 +607,7 @@ def _fwd_fused_kernel(
                 other=0.0,
             )
             qk += tl.dot(qpe.to(kpe.dtype), kpe)
+        
         qk *= sm_scale
 
         if logit_cap > 0:
@@ -681,7 +678,7 @@ def _fwd_fused_kernel(
                 K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
             )
 
-            qk = tl.dot(q_acc.to(k.dtype), k, out_dtype=tl.float32)
+            qk = tl.dot(q_acc, k, out_dtype=tl.float32)
         elif FUSE_GEMMS:
             offs_k_c = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
@@ -836,13 +833,12 @@ def extend_fused_attention_fwd(
     DPE = k_buffer.shape[-1] - C
     D = q_extend.shape[-1] - DPE
 
-    BLOCK_C = min(32, C)
+    BLOCK_C = min(128, C)
     BLOCK_D = min(32, D)
 
     if fuse_gemms:
         assert w_kc is not None and w_vc is not None, "w_kc and w_vc must be provided when fusing gemms"
         DV = w_vc.shape[-1]
-
     else:
         DV = v_buffer.shape[-1] # no projection
 

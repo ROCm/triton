@@ -21,7 +21,7 @@ def is_hip():
 is_hip_ = is_hip()
 
 def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, dtype, device):
-    
+    torch.manual_seed(0)
     q_extend = torch.randn(B * extend_length, H, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
     # kv_cache = torch.randn(B * (prefix_length + extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
 
@@ -49,6 +49,7 @@ def input_helper(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_
 
 
 def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device):
+    torch.manual_seed(0)
     q_extend = torch.randn(B * extend_length, H, v_head_dim + qk_rope_head_dim, dtype=dtype, device=device)
 
     # extend parts
@@ -80,8 +81,8 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
     (2, 16, 1024, 1024, 512, 64, 128),
 ])
-@pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('attn_impl', ["naive"])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('attn_impl', ["absorbed"])
 @pytest.mark.parametrize('fuse_gemms', [True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, device="cuda"):
     torch.manual_seed(0)
@@ -97,7 +98,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         w_kc, w_vc = None, None
 
     extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0,
-                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=False)
+                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
     
     # reference implementation
     if fuse_gemms:
@@ -142,7 +143,6 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         else:
             ref_out = tmp_out
         
-        
         # print(f"ref: {ref_out[124, 8, 92]}")
         # print(f"tri: {tri_out[124, 8, 92]}")
         
@@ -151,6 +151,55 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         print(f"tri: {tri_out.flatten()[:]}") 
         torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
         print("Output matches!")
+
+
+def ref_forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, 
+                       fuse_gemms, w_kc, w_vc, attn_impl, kv_lora_rank, qk_rope_head_dim, v_head_dim, H):
+    if fuse_gemms:
+        if attn_impl == "absorbed":
+            q_input = torch.empty((*q_extend.shape[:-1],kv_lora_rank+qk_rope_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+            q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
+            q_nope = q_extend[..., :v_head_dim]
+            q_nope = torch.bmm(q_nope.transpose(0, 1), w_kc.transpose(1,2))
+            q_input[..., :kv_lora_rank] = q_nope.transpose(0, 1)
+            
+            tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
+        else:
+            q_input = q_extend
+        
+            k_extend_c = torch.einsum('zc,hcd->zhd', k_extend[..., :kv_lora_rank], w_kc)
+            k_extend_r = k_extend[..., kv_lora_rank:].unsqueeze(1).repeat(1, H, 1)
+            k_extend = torch.cat((k_extend_c, k_extend_r), dim=-1)
+            
+            k_buffer_c = torch.einsum('zc,hcd->zhd', k_buffer[..., :kv_lora_rank], w_kc)
+            k_buffer_r = k_buffer[..., kv_lora_rank:].unsqueeze(1).repeat(1, H, 1)
+            k_buffer = torch.cat((k_buffer_c, k_buffer_r), dim=-1)
+            
+            v_extend = torch.einsum('zc,hcd->zhd', v_extend, w_vc)
+            v_buffer = torch.einsum('zc,hcd->zhd', v_buffer, w_vc)
+            
+            tmp_out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+    else:
+        q_input = q_extend
+        tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
+
+    
+    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+    
+    if not fuse_gemms: # sanity check for the function body correctness without gemm fusion
+        return tmp_out
+    else:
+        if attn_impl == "absorbed":
+            attn_bmm_output = torch.bmm(tmp_out.transpose(0, 1), w_vc)
+            attn_output = attn_bmm_output.transpose(0, 1)
+            ref_out = attn_output
+        else:
+            ref_out = tmp_out
+
+    return ref_out
+
+
+
 
 def benchmark(args):
     dtype = arg_to_torch_dtype[args.dtype]
@@ -187,24 +236,36 @@ def benchmark(args):
     def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, sm_scale, logit_cap, device,
                   provider):
         warmup = 25
-        rep = 100        
+        rep = 100
+        do_gemms = args.do_gemms
 
-        if "ref" in provider:
+        if do_gemms:
+            q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
+                B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
+        else:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend = input_helper(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
-            fn = lambda: extend_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend)
+            w_kc, w_vc = None, None
+        
+        if "ref" in provider:
+            # print(q_extend.flatten()[:10])
+            fn = lambda: ref_forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
+                               fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, attn_impl="absorbed", kv_lora_rank=kv_lora_rank, qk_rope_head_dim=qk_rope_head_dim, v_head_dim=v_head_dim, H=H)
+            # ret = fn()
+            # print(ret.flatten()[:10])
+            # print(args.do_gemms)
 
         if "fused" in provider:
-            q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
-                    B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
-            fuse_gemms = True
+            # print(q_extend.flatten()[:10])
             fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
-                                                    fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
-        
+                                                    fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
+            # fn()
+            # print(o_extend.flatten()[:10])
+
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
 
-    bench_MLA.run(save_path=".", print_data=True, show_plots=False)
+    bench_MLA.run(save_path=None, print_data=True, show_plots=False)
     return x_vals_list, x_names, line_vals
 
 
@@ -217,11 +278,12 @@ def parse_args():
         allow_abbrev=False,
     )
 
-    parser.add_argument("-dtype", default='bf16')
+    parser.add_argument("-dtype", default='fp16')
     parser.add_argument("-device", default='cuda')
     parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
+    parser.add_argument("-do_gemms", type=bool, default=True)
     parser.add_argument("-B", type=int, default=0)
     return parser.parse_args()
 
@@ -306,8 +368,7 @@ def main():
         print_vgpr(args)
         return 0
     
-    test_op_fwd(1, 4, 1024, 1024, 512, 64, 128, torch.float32, "naive", True)
-    # run_bench(args)
+    run_bench(args)
 
 
 if __name__ == "__main__":

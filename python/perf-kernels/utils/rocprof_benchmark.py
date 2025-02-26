@@ -7,7 +7,7 @@ def run_profiling(triton_dir, batch_size, output_file):
     command = [
         "rocprof", "--stats", "-o", output_file,
         "python", f"{triton_dir}/python/perf-kernels/MLA_extend.py",
-        "-B", str(batch_size), "-dtype", "bf16"
+        "-B", str(batch_size), "-dtype", "fp16"
     ]
     subprocess.run(command, check=True)
 
