@@ -453,7 +453,6 @@ def _fwd_fused_kernel(
     FUSE_GEMMS: tl.constexpr,
     ABSORB_W_KC: tl.constexpr,
     DPE: tl.constexpr,
-    FUSE_W_KC: tl.constexpr,
     ####
     logit_cap: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -544,7 +543,6 @@ def _fwd_fused_kernel(
                     Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
                 )
                 q_acc += tl.dot(q_d, w_kc_d)        
-            FUSE_W_KC = False # no need to load w_kc again
           
         # load w_kc and w_vc in BLOCK_C parts
         offs_w_kc = (
@@ -567,7 +565,18 @@ def _fwd_fused_kernel(
             kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
         )
 
-        if FUSE_W_KC:
+        if ABSORB_W_KC:
+            offs_buf_k = (
+                offs_kv_loc[None, :] * stride_buf_kbs
+                + cur_kv_head * stride_buf_kh
+                + offs_c[:, None]
+            )
+            k = tl.load(
+                K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
+            )
+            qk = tl.dot(q_acc.to(k.dtype), k)
+
+        elif FUSE_GEMMS:
             offs_buf_k_c = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -581,16 +590,6 @@ def _fwd_fused_kernel(
                 )
                 k_c = tl.dot(w_kc_c, kv_c) # projected keys
                 qk += tl.dot(q, k_c.to(kv_c.dtype))
-        elif ABSORB_W_KC:
-            offs_buf_k = (
-                offs_kv_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_c[:, None]
-            )
-            k = tl.load(
-                K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
-            )
-            qk = tl.dot(q_acc.to(k.dtype), k)
         else:
             offs_buf_k = (
                 offs_kv_loc[None, :] * stride_buf_kbs
@@ -673,7 +672,20 @@ def _fwd_fused_kernel(
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_block_m_end
 
-        if FUSE_W_KC:
+        if ABSORB_W_KC:
+            # load k in transposed way
+            offs_k = (
+                (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
+                + cur_kv_head * stride_kh
+                + offs_c[:, None]
+            )
+            
+            k =  tl.load(
+                K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
+            )
+
+            qk = tl.dot(q_acc.to(k.dtype), k, out_dtype=tl.float32)
+        elif FUSE_GEMMS:
             offs_k_c = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
                 + cur_kv_head * stride_kh
@@ -688,19 +700,6 @@ def _fwd_fused_kernel(
                 )
                 k_c = tl.dot(w_kc_c, kv_c) # projected keys
                 qk += tl.dot(q, k_c.to(kv_c.dtype), out_dtype=tl.float32)
-        elif ABSORB_W_KC:
-            # load k in transposed way
-            offs_k = (
-                (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
-                + cur_kv_head * stride_kh
-                + offs_c[:, None]
-            )
-            
-            k =  tl.load(
-                K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
-            )
-
-            qk = tl.dot(q_acc.to(k.dtype), k, out_dtype=tl.float32)
         else:
             # load k in transposed way
             offs_k = (
@@ -796,18 +795,18 @@ def _fwd_fused_kernel(
         + offs_dv[None, :]
     )
 
-    # if STORE_TRANSPOSE:
-    #     tl.store(
-    #         O_Extend + offs_o.T,
-    #         (acc / deno[:, None]).T,
-    #         mask=(mask_m[:, None] & mask_dv[None, :]).T,
-    #     )
-    # else:
-    tl.store(
-        O_Extend + offs_o,
-        acc / deno[:, None],
-        mask=mask_m[:, None] & mask_dv[None, :],
-    )
+    if STORE_TRANSPOSE:
+        tl.store(
+            O_Extend + offs_o.T,
+            (acc / deno[:, None]).T,
+            mask=(mask_m[:, None] & mask_dv[None, :]).T,
+        )
+    else:
+        tl.store(
+            O_Extend + offs_o,
+            acc / deno[:, None],
+            mask=mask_m[:, None] & mask_dv[None, :],
+        )
 
 
 def extend_fused_attention_fwd(
@@ -829,7 +828,6 @@ def extend_fused_attention_fwd(
     w_kc=None,
     w_vc=None,
     absorb_w_kc=True,
-    fuse_w_kc=True,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors
@@ -908,7 +906,6 @@ def extend_fused_attention_fwd(
         DV=DV,
         DPE=DPE,
         FUSE_GEMMS=fuse_gemms,
-        FUSE_W_KC=fuse_w_kc,
         ABSORB_W_KC=absorb_w_kc,
         ##################
         logit_cap=logit_cap,
