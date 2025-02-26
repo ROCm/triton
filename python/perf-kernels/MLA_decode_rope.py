@@ -170,7 +170,7 @@ def _fwd_grouped_kernel_stage1_rope(Q,  # Holds [Q_NOPE; Q_PE], b x h x (d+r)
                 other=0.0,
             )  # positional embedding part of keys
 
-            if USE_ROPE and start_n >= cur_batch_seq_len - BLOCK_N:
+            if (USE_ROPE and LAST_SPLIT) and start_n >= cur_batch_seq_len - BLOCK_N:
                 k_pe = tl.where(offs_n[None, :] != (split_kv_end - 1), k_pe, k_pe_last_token[:, None])
 
             # (16, 64) x (64, 32)
@@ -476,6 +476,8 @@ def test_op_fwd_rope_neox(B, H, S, kv_lora_rank, qk_rope_head_dim, rotary_dim, d
 
 
 @pytest.mark.parametrize('B, H, S, kv_lora_rank, qk_rope_head_dim, rotary_dim', [
+    (1, 128, 2, 512, 64, 64),
+    (1, 128, 32, 512, 64, 64),
     (1, 128, 2048, 512, 64, 64),
     (1, 128, 2048, 512, 128, 64),
     (1, 128, 2048, 512, 127, 64),
