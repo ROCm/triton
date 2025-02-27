@@ -328,7 +328,7 @@
   # Local Store V
 	; sched_barrier mask(0x00000000)
 	.loc	1 191 25                        ; flash-attention.py:191:25
-	s_barrier
+	s_barrier // done reading K from LDS, store V to LDS
 	s_waitcnt vmcnt(3)
 	ds_write_b128 v139, v[128:131]
 	s_waitcnt vmcnt(2)
@@ -338,7 +338,7 @@
 	s_waitcnt vmcnt(0)
 	ds_write_b128 v139, v[206:209] offset:12288
 	s_waitcnt lgkmcnt(0)
-	s_barrier
+	s_barrier // done storing 
 	s_waitcnt lgkmcnt(0)
 
 
@@ -402,7 +402,6 @@
 	ds_swizzle_b32 v222, v172 offset:swizzle(SWAP,16)
 
 
-
 	v_max_f32_e32 v173, v118, v119
 	v_max3_f32 v173, v173, v212, v213
 	v_max3_f32 v173, v173, v210, v211
@@ -416,9 +415,6 @@
 	v_max_f32_e32 v223, v223, v223
 	v_max_f32_e32 v173, v173, v223
 	ds_swizzle_b32 v223, v173 offset:swizzle(SWAP,16)
-
-  
-
 
 
 
