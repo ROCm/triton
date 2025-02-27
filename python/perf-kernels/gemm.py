@@ -177,8 +177,10 @@ def leaky_relu(x):
 def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions!!!"
-    assert (a.element_size() >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
-    assert (a.is_floating_point() == b.is_floating_point()), "GEMMs between float and integer type tensors are not supported!!!"
+    assert (a.element_size()
+            >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
+    assert (a.is_floating_point() == b.is_floating_point()
+            ), "GEMMs between float and integer type tensors are not supported!!!"
     M, K = a.shape
     K, N = b.shape
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
@@ -264,25 +266,17 @@ def get_x_vals():
 
 # Unit tests
 #TODO(vgokhale): Test activation.
-@pytest.mark.parametrize(
-    "M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b",
-    [(*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
-     for shape in get_x_vals()
-     for in_dtype_a, in_dtype_b, out_dtype in [
-        ('fp16', 'fp16', 'fp16'),
-        ('bf16', 'bf16', 'bf16'),
-        ('fp32', 'fp32', 'fp32'),
-        ('fp8e4', 'fp8e4', 'fp16'),
-        ('fp8e5', 'fp8e5', 'fp16'),
-        ('fp16', 'fp8e4', 'fp16'),
-        ('fp16', 'fp8e5', 'fp16'),
-        ('bf16', 'fp8e4', 'bf16'),
-        ('bf16', 'fp8e5', 'bf16'),
-        ('int8', 'int8', 'int8'),
-        ('int8', 'int8', 'int8')]
-     # Defines if a matrix is row or column major.
-     for col_a in [True, False]
-     for col_b in [True, False]])
+@pytest.mark.parametrize("M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b", [
+    (*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
+    for shape in get_x_vals()
+    for in_dtype_a, in_dtype_b, out_dtype in [('fp16', 'fp16', 'fp16'), (
+        'bf16', 'bf16', 'bf16'), ('fp32', 'fp32', 'fp32'), ('fp8e4', 'fp8e4', 'fp16'), (
+            'fp8e5', 'fp8e5', 'fp16'), ('fp16', 'fp8e4', 'fp16'), ('fp16', 'fp8e5', 'fp16'), (
+                'bf16', 'fp8e4', 'bf16'), ('bf16', 'fp8e5', 'bf16'), ('int8', 'int8', 'int8'), ('int8', 'int8', 'int32')]
+    # Defines if a matrix is row or column major.
+    for col_a in [True, False]
+    for col_b in [True, False]
+])
 def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
     torch_in_dtype_a = name_to_torch_types[in_dtype_a]
     torch_in_dtype_b = name_to_torch_types[in_dtype_b]
