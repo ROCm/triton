@@ -319,12 +319,11 @@ def get_type(provider):
         line_arg='provider',
         line_vals=[
             'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)',
-            'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)',
-            'triton(fp16/fp8e4)', 'triton(fp16/fp8e4)'
+            'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)', 'triton(fp16/fp8e4)',
+            'triton(fp16/fp8e4)'
         ],
         line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16",
-            "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
+            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
             "Triton.Fp16.Fp8E4", "Triton.Fp16.Fp8E5"
         ],
         ylabel="TFLOPS",
