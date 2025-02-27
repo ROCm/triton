@@ -309,7 +309,7 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
 
 def get_type(provider):
     res = re.findall(r'\(.*?\)', provider)
-    return res[0][1:-1]
+    return res[0][1:-1].split('/', 1)
 
 
 @triton.testing.perf_report(
@@ -318,35 +318,40 @@ def get_type(provider):
         x_vals=get_x_vals(),
         line_arg='provider',
         line_vals=[
-            'hipblaslt(fp16)', 'hipblaslt(bf16)', 'triton(fp16)', 'triton(bf16)', 'triton(int8)', 'triton(fp8e4)',
-            'triton(fp8e5)'
+            'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)',
+            'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)',
+            'triton(fp16/fp8e4)', 'triton(fp16/fp8e4)'
         ],
         line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5"
+            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16",
+            "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
+            "Triton.Fp16.Fp8E4", "Triton.Fp16.Fp8E5"
         ],
         ylabel="TFLOPS",
         plot_name="matmul-performance",
         args={},
     ))
 def benchmark(M, N, K, provider, model=None):
-    in_dtype = name_to_torch_types[get_type(provider)]
-    out_dtype = in_dtype
+    in_dtype_a, in_dtype_b = [name_to_torch_types[x] for x in get_type(provider)]
+    out_dtype = in_dtype_a
 
     quantiles = [0.5, 0.2, 0.8]
     if 'hipblaslt' in provider:
-        a = torch.randn((M, K), dtype=in_dtype, device='cuda')
-        b = torch.randn((N, K), dtype=in_dtype, device='cuda')
+        a = torch.randn((M, K), dtype=in_dtype_a, device='cuda')
+        b = torch.randn((N, K), dtype=in_dtype_b, device='cuda')
         b = b.T
 
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     else:  # triton, different data types
         assert "triton" in provider
-        a, _, a_scale = gen_input(M, K, in_dtype, False, 1, device='cuda')
-        b, _, b_scale = gen_input(K, N, in_dtype, True, 2, device='cuda')
+        a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, device='cuda')
+        b, _, b_scale = gen_input(K, N, in_dtype_b, True, 2, device='cuda')
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
-        if dtype_is_8_bit(in_dtype):
+        if dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b):
+            a_scale = a_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
+            b_scale = b_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
             a_scale = a_scale.item()
             b_scale = b_scale.item()
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c, a_scale, b_scale, activation=""),
