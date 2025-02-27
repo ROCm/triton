@@ -288,13 +288,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %_131 = ttg.memdesc_subview %_101[%_c16_i32, %_c16_i32] : !ttg.memdesc<128x64xf16, #shared1, #smem, mutable> -> !ttg.memdesc<16x16xf16, #shared1, #smem, mutable, 128x64> loc(#loc130)
     %_132 = ttg.local_load %_131 : !ttg.memdesc<16x16xf16, #shared1, #smem, mutable, 128x64> -> tensor<16x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>> loc(#loc130)
     %_213 = tt.dot %_187, %_130, %_207, inputPrecision = tf32 {DotTile = #amdgpu<DotTile<0, 0, 0> [0], <1, 1, 0> [3]>} : tensor<64x16xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 4}>> * tensor<16x16xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 4}>> -> tensor<64x16xf32, #mma> loc(#loc109)
-    //rocdl.sched.group.barrier   8, 1, 0 // mfma
-    //rocdl.sched.group.barrier 256, 1, 0 // ds_read
-    //rocdl.sched.group.barrier   8, 1, 0 // mfma
-    //rocdl.sched.group.barrier  32, 1, 0 // global_load
-    //rocdl.sched.group.barrier   8, 1, 0 // mfma
-    //rocdl.sched.group.barrier 256, 1, 0 // ds_read
-    //rocdl.sched.group.barrier   8, 1, 0 // mfma
     rocdl.sched.barrier 1030 // mfma+lds+global
 
     // DotTile[1]
@@ -477,18 +470,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // SoftMax
     ////////////////////////////////////////////////////////////////////////////////
 
-#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 16], warpsPerCTA = [4, 1], order = [1, 0]}>
-#blocked1 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
-#blocked2 = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [16, 4], warpsPerCTA = [1, 4], order = [0, 1]}>
-#mma = #ttg.amd_mfma<{warpsPerCTA = [4, 1], instrShape = [16, 16], isTransposed = true}>
-#shared = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 16, order = [1, 0]}>
-#shared1 = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 16, order = [0, 1]}>
-#shared2 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
-
-
     // D=<128x64> is split among 4 waves; each wave has piece of the 128.
-    // D of wave is <32x64>; 64 lanes * 32 vgprs per thread.
-    // each thread has 8*4=32 vgprs of D f32 values.
+    // D of wave is <32x64>; 64 lanes * 32 vgprs per thread; not sure how arranged.
 
     ////////////////////////////////////////////////////////////////////////////////
     // P = func(Q*K) <128x64>
@@ -497,13 +480,56 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %_276 = arith.addf %_275, %_cst : tensor<128x64xf32, #mma> loc(#loc111)
     rocdl.sched.barrier 0 // BB
 
+
+ Is FA Pipelineable?
+
+    dot <128x64x128>
+softmax <   x64    >
+    dot <128x128x64>
+
+ T
+ 0  dotQK[0]
+ 1            sftmx[0]
+ 2                      dotPV[0]
+
+
+ s_barrier - start reading K
+ 0  dotQK[0]
+ 1  dotQK[1]  sftmx[0]
+ 2  dotQK[2]  sftmx[1]
+ s_barrier - start storing V
+ 3  dotQK[3]  sftmx[2]
+ s_barrier - start reading V
+ 4            sftmx[3]  dotPV[0]
+ 5                      dotPV[1]
+ 6                      dotPV[2]
+ s_barrier - start storing K
+ 7                      dotPV[3]
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 16], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked1 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
+#blocked2 = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [16, 4], warpsPerCTA = [1, 4], order = [0, 1]}>
+#mma = #ttg.amd_mfma<{warpsPerCTA = [4, 1], instrShape = [16, 16], isTransposed = true}>
+#shared = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 16, order = [1, 0]}>
+#shared1 = #ttg.swizzled_shared<{vec = 4, perPhase = 1, maxPhase = 16, order = [0, 1]}>
+#shared2 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+
     ////////////////////////////////////////////////////////////////////////////////
-    // asm=v_max_f32 x16, ds_bpermute_b32, v_max_f32m, ds_swizzle_b32
-    // find max along axiz=1 of <32x64>
-    // How many independent reduces per thread.
-    //   - 2 independent reductions; how is this calculated?
-    // How many elements per reduce within thread? - 16 within thread, 
-    // How many cross-lane reduces? - 4 (permute + swizzle) to reach 64.
+    // 128 reductions (of 64 elements) for 256 threads means fewer reduction than threads.
+    // However asm shows each thread doing 2 independent reductions.
+    //  - 16 elements within lane.
+    //  - 4 across lanes.
+    // Questions:
+    // (1) How can we determine shape of reductions (independent, intra-lane, inter-lane) from layouts?
+    // (2) How can we increase this to more independent reductions?
+
+    <128x64>
+    < 32x64> ; 32 isn't contiguous
+    4x redundant 
+    blue colums are 1 reduction
+    thread 0 talks to 16, 32, 48 Inot 1,2,3); b/c swizzle distance is 16
+
+
 
     %_277 = "tt.reduce"(%_276) <{axis = 1 : i32}> ({
       ^bb0(%_arg27: f32 loc(callsite(#loc113 at #loc37)), %_arg28: f32 loc(callsite(#loc113 at #loc37))):
@@ -511,6 +537,15 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
         tt.reduce.return %_488 : f32 loc(#loc132)
       }) : (tensor<128x64xf32, #mma>) -> tensor<128xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc132)
     rocdl.sched.barrier 0 // BB
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // asm=v_max_f32 x16, ds_bpermute_b32, v_max_f32m, ds_swizzle_b32
+    // find max along axis=1 of <32x64>
+    // How many independent reduces per thread.
+    //   - 2 independent reductions; how is this calculated?
+    // How many elements per reduce within thread? - 16 within thread, 
+    // How many cross-lane reduces? - 4 (permute + swizzle) to reach 64.
+
 
     ////////////////////////////////////////////////////////////////////////////////
     // %_98 is loop carried
