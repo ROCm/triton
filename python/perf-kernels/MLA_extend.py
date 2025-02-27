@@ -258,7 +258,7 @@ def benchmark(args):
         if "fused" in provider:
             # print(q_extend.flatten()[:10])
             fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
-                                                    fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
+                                                    fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=False)
             # fn()
             # print(o_extend.flatten()[:10])
 
