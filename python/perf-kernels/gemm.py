@@ -12,6 +12,16 @@ from utils.benchmark_utils import get_available_models, get_model_configs
 @triton.autotune(
     configs=[
         triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'kpack': 2, 'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0,
+                'kpack': 1, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant': 'none'
+            }, num_warps=8, num_stages=2),
+        triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
             num_warps=8, num_stages=2),
         triton.Config(
@@ -320,7 +330,7 @@ def get_type(provider):
         line_vals=[
             'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)',
             'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)', 'triton(fp16/fp8e4)',
-            'triton(fp16/fp8e4)'
+            'triton(fp16/fp8e5)'
         ],
         line_names=[
             "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
