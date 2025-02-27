@@ -143,6 +143,7 @@ def matmul_kernel(
         else:
             a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = b.to(a_ptr.type.element_ty)
         accumulator += tl.dot(a, b, input_precision="ieee")
 
         # Advance the ptrs to the next K block.
@@ -176,7 +177,8 @@ def leaky_relu(x):
 def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions!!!"
-    assert a.dtype == b.dtype, "Mixed dtype GEMMs are not supported!!!"
+    assert (a.element_size() >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
+    assert (a.is_floating_point() == b.is_floating_point()), "GEMMs between float and integer type tensors are not supported!!!"
     M, K = a.shape
     K, N = b.shape
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
@@ -263,31 +265,46 @@ def get_x_vals():
 # Unit tests
 #TODO(vgokhale): Test activation.
 @pytest.mark.parametrize(
-    "M, N, K, in_dtype, out_dtype, col_a, col_b",
-    [(*shape, in_dtype, out_dtype, col_a, col_b)
+    "M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b",
+    [(*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
      for shape in get_x_vals()
-     for in_dtype, out_dtype in [('fp16', 'fp16'), ('bf16', 'bf16'), ('fp32', 'fp32'), (
-         'fp8e4', 'fp16'), ('fp8e5', 'fp16'), ('int8', 'int8'), ('int8', 'int32')]
+     for in_dtype_a, in_dtype_b, out_dtype in [
+        ('fp16', 'fp16', 'fp16'),
+        ('bf16', 'bf16', 'bf16'),
+        ('fp32', 'fp32', 'fp32'),
+        ('fp8e4', 'fp8e4', 'fp16'),
+        ('fp8e5', 'fp8e5', 'fp16'),
+        ('fp16', 'fp8e4', 'fp16'),
+        ('fp16', 'fp8e5', 'fp16'),
+        ('bf16', 'fp8e4', 'bf16'),
+        ('bf16', 'fp8e5', 'bf16'),
+        ('int8', 'int8', 'int8'),
+        ('int8', 'int8', 'int8')]
      # Defines if a matrix is row or column major.
      for col_a in [True, False]
      for col_b in [True, False]])
-def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype):
-    torch_in_dtype = name_to_torch_types[in_dtype]
-    a, a_fp32, a_scale = gen_input(M, K, torch_in_dtype, col_a, 1, device='cuda')
-    b, b_fp32, b_scale = gen_input(K, N, torch_in_dtype, col_b, 2, device='cuda')
+def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
+    torch_in_dtype_a = name_to_torch_types[in_dtype_a]
+    torch_in_dtype_b = name_to_torch_types[in_dtype_b]
+    a, a_fp32, a_scale = gen_input(M, K, torch_in_dtype_a, col_a, 1, device='cuda')
+    b, b_fp32, b_scale = gen_input(K, N, torch_in_dtype_b, col_b, 2, device='cuda')
     torch_out_dtype = name_to_torch_types[out_dtype]
     c = torch.empty((M, N), device=a.device, dtype=torch_out_dtype)
     # For 8-bit, we have scaled to the dynamic range of the data type.
     # This requires us to compute in fp32 because for e5m2, the range is same as fp16 (e5m10).
     # If we use fp16 it is possible to return infs from the torch.matmul call.
-    if dtype_is_8_bit(torch_in_dtype):
+    if dtype_is_8_bit(torch_in_dtype_a) or dtype_is_8_bit(torch_in_dtype_b):
+        # If one of the input tensors is not fp8, then its scale will not be set
+        # Set scale to 1.0 if it is not set
+        a_scale = a_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
+        b_scale = b_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
         matmul(a, b, c, a_scale, b_scale, scale_a8_b8=True, activation="")
         torch_output = torch.matmul(a_fp32, b_fp32)
         torch_output = torch_output * a_scale * b_scale
     # For other dtypes, use the same torch matmul as the dtype.
     else:
         matmul(a, b, c, a_scale=None, b_scale=None, scale_a8_b8=False, activation="")
-        torch_output = torch.matmul(a.to(torch_in_dtype), b.to(torch_in_dtype))
+        torch_output = torch.matmul(a.to(torch_in_dtype_a), b.to(torch_in_dtype_b))
     if out_dtype == 'int8':
         torch.testing.assert_close(c.to(torch.float32),
                                    torch_output.to(torch.int8).to(torch.float32), atol=1e-3, rtol=1e-2)
