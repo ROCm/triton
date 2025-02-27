@@ -24,11 +24,17 @@ import argparse
 import subprocess
 import pytest
 import sys
+import os
+import yaml
 import torch
 
 import triton
 import triton.language as tl
 from utils.benchmark_utils import get_available_models, get_model_configs
+
+
+dump_ir_type=None
+curr_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 class MetaData():
@@ -379,21 +385,50 @@ def is_rdna():
 
 
 def get_cdna_autotune_configs():
-    return [
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
+    if "FA_CONFIG" in os.environ.keys():
+        kernel_config_path = str(os.environ['FA_CONFIG'])
+        if not os.path.exists(kernel_config_path):
+            print(f'ERROR: cannot open provided config file (e.g., {kernel_config_path})')
+            sys.exit(-1)
 
-    ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+        with open(kernel_config_path, 'r') as file:
+            kernel_config = yaml.safe_load(file)
+
+        print(f'INFO: running a single config given from a file')
+        return [
+            triton.Config({'BLOCK_M': kernel_config['BLOCK_M'],
+                           'BLOCK_N': kernel_config['BLOCK_N'],
+                           'waves_per_eu': kernel_config['waves_per_eu'],
+                           'PRE_LOAD_V': kernel_config['PRE_LOAD_V'],
+                           'GRID_CU_MULTIP': kernel_config['GRID_CU_MULTIP'],
+                           'matrix_instr_nonkdim': kernel_config['matrix_instr_nonkdim'],
+                           'kpack': kernel_config['kpack'],
+                           'instruction_sched_variant':kernel_config['sched_opt']},
+                            num_stages=kernel_config['num_stages'],
+                            num_warps=kernel_config['num_warps'])], ['IS_CAUSAL',
+                                                                     'dropout_p',
+                                                                     'MAX_SEQLENS_Q',
+                                                                     'MAX_SEQLENS_K',
+                                                                     'ACTUAL_BLOCK_DMODEL',
+                                                                     'VARLEN',
+                                                                     'HQ',
+                                                                     'HK']
+    else:
+        #sched_opt = 'refine_ops'
+        sched_opt = 'none'
+        num_stages=2
+        return [
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+        ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 
 
 def get_rdna_autotune_configs():
@@ -434,9 +469,15 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz,
-             stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh,
-             stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, Q_descale,
+def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out,
+        stride_qz, stride_qh, stride_qm, stride_qk,
+        stride_kz, stride_kh, stride_kn, stride_kk,
+        stride_vz, stride_vh, stride_vk, stride_vn,
+        stride_oz, stride_oh,
+        stride_om, stride_on, stride_bz,
+        stride_bh, stride_bm, stride_bn,
+        stride_az, stride_ah,
+        Q_descale,
              K_descale, P_scale, P_descale, V_descale, cu_seqlens_q, cu_seqlens_k, dropout_p, philox_seed,
              PERSISTENT: tl.constexpr, PERSISTENT_DYNAMIC: tl.constexpr, atomic_counter, NUM_CU: tl.constexpr,
              GRID_CU_MULTIP: tl.constexpr, B: tl.constexpr, philox_offset_base, encoded_softmax, alibi_slopes,
@@ -1122,7 +1163,7 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+        handle = attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
                        *bias_strides, *alibi_strides, q_descale, k_descale, p_scale, p_descale, v_descale,
                        metadata.cu_seqlens_q, metadata.cu_seqlens_k, dropout_p=metadata.dropout_p,
                        philox_seed=philox_seed, philox_offset_base=philox_offset, encoded_softmax=encoded_softmax,
@@ -1135,6 +1176,13 @@ class _attention(torch.autograd.Function):
                        USE_P_SCALE=metadata.int8 and metadata.use_p_scale, INT8_KV=metadata.int8 and metadata.int8_kv,
                        PERSISTENT=metadata.persistent is not None, PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
                        NUM_CU=NUM_CU, atomic_counter=atomic_counter, B=batch)
+
+        global dump_ir_type
+        if dump_ir_type:
+            filename = f'{handle.name}.{dump_ir_type}'
+            with open(os.path.join(curr_dir, filename), "w") as file:
+                file.write(handle.asm[dump_ir_type])
+            dump_ir_type = None
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -2047,6 +2095,9 @@ def parse_args():
     parser.add_argument("-dtype", default='fp16')
     parser.add_argument("-return_time", action='store_true', default=False)
     parser.add_argument("-layout", type=str, default='bhsd', help=supported_layouts())
+    parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir','llir', 'amdgcn'],
+                        default="none",
+                        help="dump IR format")
     parser.add_argument(
         "-persistent", nargs='?', const='fixed', choices=['fixed', 'dynamic'], default=None,
         help="Enable persistent kernels. Use '-persistent dynamic' for dynamic scheduling of the tiles.")
@@ -2075,8 +2126,11 @@ def main():
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
 
+    if args.dump_ir != 'none':
+        global dump_ir_type
+        dump_ir_type = args.dump_ir
+
     run_benchmark(custom_config, args)
-    #test_op_fwd()
 
 
 if __name__ == '__main__':
