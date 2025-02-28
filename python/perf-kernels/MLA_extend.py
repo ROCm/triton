@@ -1,4 +1,6 @@
-from utils.extend_attention import extend_attention_fwd, extend_fused_attention_fwd
+from utils.extend_attention import extend_attention_fwd
+
+from MLA_flash import extend_fused_attention_fwd
 
 
 import logging
@@ -255,7 +257,8 @@ def benchmark(args):
         if "fused" in provider:
             fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
                                                     fuse_gemms=args.do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=args.absorb_wkc)
-
+            fn()
+            print(o_extend)
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
