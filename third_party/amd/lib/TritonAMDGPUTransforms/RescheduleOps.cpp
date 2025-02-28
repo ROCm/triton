@@ -93,23 +93,83 @@ struct BasicDotWeightStrategy : public NodeWeightStrategy {
   void set(llvm::SmallVector<std::unique_ptr<Node>> &nodes) override {
     SmallVector<Node *> dots;
     SmallVector<Node *> loads;
+
+    struct DotInfo {
+      int32_t maxTileM{1};
+      int32_t maxTileN{1};
+      int32_t maxTileK{1};
+      uint32_t maxTileSerial{1};
+      int32_t maxElementM{1};
+      int32_t maxElementN{1};
+      int32_t maxElementK{1};
+      uint32_t maxElementSerial{1};
+      uint32_t baseWeight{0};
+      void update(triton::amdgpu::DotTileAttr attr) {
+        maxTileM = std::max(maxTileM, attr.getTileM() + 1);
+        maxTileN = std::max(maxTileN, attr.getTileN() + 1);
+        maxTileK = std::max(maxTileK, attr.getTileK() + 1);
+        maxTileSerial = std::max(maxTileSerial, attr.getTileSerial() + 1);
+        maxElementM = std::max(maxElementM, attr.getElementM()) + 1;
+        maxElementN = std::max(maxElementN, attr.getElementN() + 1);
+        maxElementK = std::max(maxElementK, attr.getElementK() + 1);
+        maxElementSerial =
+            std::max(maxElementSerial, attr.getElementSerial() + 1);
+      }
+      int32_t weight() { return maxTileSerial * maxElementSerial; }
+    };
+
+    int32_t maxDotIndex = 1;
+    DenseMap<int32_t, DotInfo> dotInfos;
     for (auto &node : nodes) {
-      if (dyn_cast<triton::DotOp>(node->getOp()))
+      if (dyn_cast<triton::DotOp>(node->getOp())) {
         dots.push_back(node.get());
+        if (auto attr =
+                node->getOp()->getAttrOfType<triton::amdgpu::DotTileAttr>(
+                    triton::amdgpu::DotTileAttr::getMnemonic())) {
+          auto currDotIndex = attr.getDotIndex();
+          if (!dotInfos.contains(currDotIndex)) {
+            dotInfos.insert({currDotIndex, DotInfo{}});
+          }
+          dotInfos[currDotIndex].update(attr);
+          maxDotIndex = std::max(maxDotIndex, currDotIndex + 1);
+        }
+      }
       if (dyn_cast<triton::LoadOp>(node->getOp()))
         loads.push_back(node.get());
     }
 
     // Make sure that prio is never equal to `0` for dotOps
     constexpr int32_t extraDefaultWeight = 10;
+    int64_t totalDotsWeight = extraDefaultWeight;
+    for (auto dotInfo : dotInfos) {
+      totalDotsWeight += dotInfo.second.weight();
+    }
+
     int32_t dotWeight = dots.size() + extraDefaultWeight;
-    const int32_t loadWeight = dotWeight + extraDefaultWeight;
+    const int32_t loadWeight = totalDotsWeight + extraDefaultWeight;
     for (auto loadNode : loads) {
       propagate(loadNode, loadWeight);
     }
 
+    for (int index = 1; index < maxDotIndex; ++index) {
+      auto &currInfo = dotInfos[index];
+      auto &prevInfo = dotInfos[index - 1];
+      currInfo.baseWeight = prevInfo.weight();
+    }
+
+    int64_t currDotWeight = extraDefaultWeight;
     for (auto dotNode : dots) {
-      propagate(dotNode, dotWeight--);
+      if (auto attr =
+              dotNode->getOp()->getAttrOfType<triton::amdgpu::DotTileAttr>(
+                  triton::amdgpu::DotTileAttr::getMnemonic())) {
+        auto &info = dotInfos[attr.getDotIndex()];
+        auto weight = attr.getElementSerial() +
+                      attr.getTileSerial() * info.maxElementSerial;
+        weight = info.baseWeight + info.weight() + extraDefaultWeight - weight;
+        propagate(dotNode, weight);
+      } else {
+        propagate(dotNode, totalDotsWeight--);
+      }
     }
   }
 

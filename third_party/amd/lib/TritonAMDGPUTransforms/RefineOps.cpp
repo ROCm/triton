@@ -185,13 +185,15 @@ LogicalResult rewriteLocalLoad(OpBuilder &rewriter,
 struct DotOpMFMAConverter {
   AMDMfmaEncodingAttr mfmaLayout;
   OpBuilder &rewriter;
+  int32_t dotIndex;
   Location loc;
   MLIRContext *ctx{};
 
   explicit DotOpMFMAConverter(AMDMfmaEncodingAttr mfmaLayout,
-                              OpBuilder &rewriter, Location loc)
-      : mfmaLayout(mfmaLayout), rewriter(rewriter), loc(loc),
-        ctx(mfmaLayout.getContext()) {}
+                              OpBuilder &rewriter, int32_t dotIndex,
+                              Location loc)
+      : mfmaLayout(mfmaLayout), rewriter(rewriter), dotIndex(dotIndex),
+        loc(loc), ctx(mfmaLayout.getContext()) {}
 
   LogicalResult convert(DotOp dotOp, DotOpAdaptor adaptor) const {
     InputPrecisionAttr precisionAttr = dotOp.getInputPrecisionAttr();
@@ -339,8 +341,8 @@ struct DotOpMFMAConverter {
         int32_t elementSerial =
             elementM * tileShapeN; // dots are n-major within tile
         auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
+            ctx, dotIndex, tileM, tileN, tileK, tileSerial, elementM, elementN,
+            elementK, elementSerial);
         extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
                          dotTileAttr);
         subtilesK.push_back(extract);
@@ -377,8 +379,8 @@ struct DotOpMFMAConverter {
         int32_t elementK = k % tileShapeK;
         int32_t elementSerial = elementN; // dots are n-major within tile
         auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
+            ctx, dotIndex, tileM, tileN, tileK, tileSerial, elementM, elementN,
+            elementK, elementSerial);
         extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
                          dotTileAttr);
         subtilesK.push_back(extract);
@@ -437,8 +439,8 @@ struct DotOpMFMAConverter {
                 int32_t elementN = n - tileStartN;
                 int32_t elementK = 0;
                 auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-                    ctx, tileM, tileN, tileK, tileSerial, elementM, elementN,
-                    elementK, elementSerial);
+                    ctx, dotIndex, tileM, tileN, tileK, tileSerial, elementM,
+                    elementN, elementK, elementSerial);
                 dotOp->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
                                dotTileAttr);
                 refinedDotValues[int32_t(m * numRepN + n)] = dotOp;
@@ -468,7 +470,8 @@ inline RankedTensorType rankedTType(Value tensor) {
   return cast<RankedTensorType>(tensor.getType());
 };
 
-LogicalResult rewriteMFMA(OpBuilder &rewriter, triton::DotOp op) {
+LogicalResult rewriteMFMA(OpBuilder &rewriter, triton::DotOp op,
+                          int32_t dotIndex) {
   if (!(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()))) {
     LDBG("Both $a and %b should be DotOperand layout");
@@ -492,7 +495,7 @@ LogicalResult rewriteMFMA(OpBuilder &rewriter, triton::DotOp op) {
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
       cast<RankedTensorType>(op.getResult().getType()).getEncoding());
 
-  DotOpMFMAConverter converter(mfmaLayout, rewriter, loc);
+  DotOpMFMAConverter converter(mfmaLayout, rewriter, dotIndex, loc);
   return converter.convert(op, DotOpAdaptor(op));
 }
 
@@ -668,12 +671,14 @@ struct TritonAMDGPURefineOps
         }
       });
 
+      int32_t dotIndex = 0;
       block->walk([&](triton::DotOp dotOp) {
         OpBuilder rewriter(dotOp->getContext());
         // TODO: extend to WMMA instructions
-        if (failed(rewriteMFMA(rewriter, dotOp))) {
+        if (failed(rewriteMFMA(rewriter, dotOp, dotIndex))) {
           LDBG("failed to refine tt.dotOp: " << *dotOp);
-        }
+        } else
+          ++dotIndex;
       });
 
       block->walk([&](triton::LoadOp loadOp) {

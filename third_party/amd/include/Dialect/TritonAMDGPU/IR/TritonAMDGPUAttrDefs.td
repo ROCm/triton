@@ -101,8 +101,8 @@ def TritonAMDGPU_DotTile : TritonAMDGPU_Attr<"DotTile"> {
     while the element{M,N,K,Serial} refer to the element's id within the dot-tile.
 
   }];
-  let parameters = (ins "int32_t":$tileM, "int32_t":$tileN, "int32_t":$tileK, "uint32_t":$tileSerial, "int32_t":$elementM, "int32_t":$elementN, "int32_t":$elementK, "uint32_t":$elementSerial );
-  let assemblyFormat = "`<` $tileM `,` $tileN `,` $tileK `>` `[` $tileSerial `]` `,` `<` $elementM `,` $elementN `,` $elementK `>` `[` $elementSerial `]`";
+  let parameters = (ins "int32_t":$dotIndex, "int32_t":$tileM, "int32_t":$tileN, "int32_t":$tileK, "uint32_t":$tileSerial, "int32_t":$elementM, "int32_t":$elementN, "int32_t":$elementK, "uint32_t":$elementSerial );
+  let assemblyFormat = "`<` `[` $dotIndex `]` $tileM `,` $tileN `,` $tileK `>` `[` $tileSerial `]` `,` `<` $elementM `,` $elementN `,` $elementK `>` `[` $elementSerial `]`";
 }
 
 #endif
