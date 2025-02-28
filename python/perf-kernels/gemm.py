@@ -16,30 +16,6 @@ from utils.benchmark_utils import get_available_models, get_model_configs
                 'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
                 'kpack': 2, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0,
-                'kpack': 1, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant': 'none'
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2,
-                'kpack': 2, 'matrix_instr_nonkdim': 16
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
-                'kpack': 1
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
     ],
     key=['M', 'N', 'K'],
     use_cuda_graph=True,
@@ -328,13 +304,10 @@ def get_type(provider):
         x_vals=get_x_vals(),
         line_arg='provider',
         line_vals=[
-            'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)',
-            'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)', 'triton(fp16/fp8e4)',
             'triton(fp16/fp8e5)'
         ],
         line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
-            "Triton.Fp16.Fp8E4", "Triton.Fp16.Fp8E5"
+            "Triton.Fp16.Fp8E5"
         ],
         ylabel="TFLOPS",
         plot_name="matmul-performance",
