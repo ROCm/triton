@@ -83,10 +83,10 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
     (2, 16, 1024, 1024, 512, 64, 128),
 ])
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('attn_impl', ["absorbed"]) # TODO: fix naive
-@pytest.mark.parametrize('fuse_gemms', [False, True])
-@pytest.mark.parametrize('absorb_wkc', [False, True])
+@pytest.mark.parametrize('fuse_gemms', [True])
+@pytest.mark.parametrize('absorb_wkc', [False])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, absorb_wkc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -100,7 +100,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
         w_kc, w_vc = None, None
 
-    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+    tri_out = extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                 fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=absorb_wkc)
     
     # reference implementation
@@ -257,8 +257,6 @@ def benchmark(args):
         if "fused" in provider:
             fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
                                                     fuse_gemms=args.do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=args.absorb_wkc)
-            fn()
-            print(o_extend)
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms

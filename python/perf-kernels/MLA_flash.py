@@ -828,11 +828,8 @@ def extend_fused_attention_fwd(
     # if is_hip_:
     #     extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    metadata = MetaData()
-    metadata.bias = None
-    metadata.layout = "bhsd"
     
-    B, H, S = qo_indptr.shape[0]-1, head_num, max_len_extend
+    B, H = qo_indptr.shape[0]-1, head_num
 
     q_nope = q_extend[..., :D].view(B, -1, H, D).transpose(1,2)
     q_pe = q_extend[..., D:].view(B, -1, H, DPE).transpose(1,2)
@@ -841,6 +838,14 @@ def extend_fused_attention_fwd(
     kv = kv[..., :C]
     wkv_b = torch.concatenate((w_kc, w_vc), dim=-1).transpose(1,2)
     o = o_extend.view(B, -1, H, D).transpose(1,2)
+
+    metadata = MetaData(sm_scale=sm_scale)
+    metadata.max_seqlens_q = q_nope.shape[2]
+    metadata.max_seqlens_k = kv.shape[1]
+    metadata.layout = "bhsd"
+    metadata.causal = True
+    # metadata.set_persistent("dynamic")
+
 
     if (metadata.bias is not None):
         assert (metadata.bias.numel() < 2**31)
@@ -888,16 +893,6 @@ def extend_fused_attention_fwd(
         grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
 
     atomic_counter = torch.zeros([1], device=q_nope.device, dtype=torch.int32)
-    # print("q_nope:", q_nope)
-    print("q_nope shape:", q_nope.shape)
-    # print("q_pe:", q_pe)
-    print("q_pe shape:", q_pe.shape)
-    # print("kv:", kv)
-    print("kv shape:", kv.shape)
-    # print("k_pe:", k_pe)
-    print("k_pe shape:", k_pe.shape)
-    # print("wkv_b:", wkv_b)
-    print("wkv_b shape:", wkv_b.shape)
 
     attn_fwd[grid](
             q_nope, q_pe, kv, k_pe, wkv_b, metadata.bias, metadata.sm_scale, M, o, *q_nope_strides, *q_pe_strides, *kv_strides,
@@ -915,6 +910,7 @@ def extend_fused_attention_fwd(
             is not None, PERSISTENT_DYNAMIC=metadata.persistent == "dynamic", NUM_CU=NUM_CU, LATENT_ATTENTION=True,
             atomic_counter=atomic_counter, B=batch)
     
+    return o.transpose(1,2).flatten(0,1)
     
 
 
