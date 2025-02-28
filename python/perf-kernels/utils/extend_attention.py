@@ -489,18 +489,19 @@ def _fwd_fused_kernel(
     mask_c = offs_c < C
     mask_dv = offs_dv < DV
 
-    
-    # if not ABSORB_W_KC:
+    TILE_D: tl.constexpr = BLOCK_D < D
+
     if FUSE_GEMMS:
-        offs_q_d = (
-            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-            * stride_qbs
-            + cur_head * stride_qh
-            + offs_block_d[None, :]
-        )
-        # q = tl.load(
-        #     Q_Extend + offs_q, mask=(mask_m[:, None]), other=0.0
-        # )
+        if not TILE_D: # if not tiling along D, load q only once outside the inner loop
+            offs_q_d = (
+                (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+                * stride_qbs
+                + cur_head * stride_qh
+                + offs_block_d[None, :]
+            )
+            q_d = tl.load(
+                Q_Extend + offs_q, mask=(mask_m[:, None]), other=0.0
+            )
     else:
         offs_q = (
             (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
@@ -532,21 +533,23 @@ def _fwd_fused_kernel(
     if FUSE_GEMMS:
         if ABSORB_W_KC: # absorb the w_kc into q
             # load q and w_kc in BLOCK_D parts
-            offs_q_d = (
-                (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-                * stride_qbs
-                + cur_head * stride_qh
-                + offs_block_d[None, :]
-            )
+            if TILE_D:
+                offs_q_d = (
+                    (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+                    * stride_qbs
+                    + cur_head * stride_qh
+                    + offs_block_d[None, :]
+                )
             offs_w_kc_d = (
                 cur_head * stride_w_h + offs_block_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
             )
             q_acc = tl.zeros((BLOCK_M, C), dtype=tl.float32)
             for d in range(0, tl.cdiv(D, BLOCK_D)):
                 w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_d)
-                q_d = tl.load(
-                    Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
-                )
+                if TILE_D:
+                    q_d = tl.load(
+                        Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
+                    )
                 q_acc += tl.dot(q_d, w_kc_d)        
             q_acc = q_acc.to(qpe.dtype)
 
@@ -587,18 +590,20 @@ def _fwd_fused_kernel(
                 + cur_kv_head * stride_buf_kh
                 + offs_block_c[:, None]
             )
-            offs_q_d = (
-                (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-                * stride_qbs
-                + cur_head * stride_qh
-                + offs_block_d[None, :]
-            )
+            if TILE_D:
+                offs_q_d = (
+                    (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+                    * stride_qbs
+                    + cur_head * stride_qh
+                    + offs_block_d[None, :]
+                )
             qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for d in range(0, tl.cdiv(D, BLOCK_D)):
                 for c in range(0, tl.cdiv(C, BLOCK_C)):
-                    q_d = tl.load(
-                        Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
-                    )
+                    if TILE_D:
+                        q_d = tl.load(
+                            Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
+                        )
                     w_kc_c = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c + d * BLOCK_D * stride_w_d)
                     kv_c = tl.load(
                         K_Buffer + offs_buf_k_c + c * BLOCK_C, mask=(mask_n[None, :]), other=0.0
@@ -708,19 +713,21 @@ def _fwd_fused_kernel(
                 + cur_kv_head * stride_kh
                 + offs_block_c[:, None]
             )
-            offs_q_d = (
-                (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-                * stride_qbs
-                + cur_head * stride_qh
-                + offs_block_d[None, :]
-            )
+            if TILE_D:
+                offs_q_d = (
+                    (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+                    * stride_qbs
+                    + cur_head * stride_qh
+                    + offs_block_d[None, :]
+                )
             # stage 2
             qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for d in range(0, tl.cdiv(D, BLOCK_D)):
                 for c in range(0, tl.cdiv(C, BLOCK_C)):
-                    q_d = tl.load(
-                        Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
-                    )
+                    if TILE_D:
+                        q_d = tl.load(
+                            Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]), other=0.0
+                        )
                     w_kc_c = tl.load(W_KC + offs_w_kc + c * BLOCK_C * stride_w_c + d * BLOCK_D * stride_w_d)
                     kv_c =  tl.load(
                         K_Extend + offs_k_c + c * BLOCK_C, mask=(mask_n[None, :]), other=0.0
@@ -867,7 +874,7 @@ def extend_fused_attention_fwd(
     DPE = k_buffer.shape[-1] - C
     D = q_extend.shape[-1] - DPE
 
-    BLOCK_C = min(128, C)
+    BLOCK_C = min(256, C)
     BLOCK_D = min(64, D)
     # tl.dots inside the kernel are of size
     # first gemm

@@ -82,9 +82,10 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     (2, 16, 1024, 1024, 512, 64, 128),
 ])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('attn_impl', ["absorbed"])
-@pytest.mark.parametrize('fuse_gemms', [True])
-def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, device="cuda"):
+@pytest.mark.parametrize('attn_impl', ["absorbed"]) # TODO: fix naive
+@pytest.mark.parametrize('fuse_gemms', [False, True])
+@pytest.mark.parametrize('absorb_wkc', [False, True])
+def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, absorb_wkc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -97,8 +98,8 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
         w_kc, w_vc = None, None
 
-    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0,
-                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=True)
+    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+                                fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=absorb_wkc)
     
     # reference implementation
     if fuse_gemms:
@@ -130,7 +131,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
         tmp_out = torch.empty((*q_extend.shape[:-1], kv_lora_rank), dtype=q_extend.dtype, device=q_extend.device)
 
     
-    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=1.0)
+    extend_attention_fwd(q_input, k_extend, v_extend, tmp_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     
     if not fuse_gemms: # sanity check for the function body correctness without gemm fusion
         torch.testing.assert_close(tmp_out, tri_out, atol=1e-2, rtol=1e-2)
@@ -237,9 +238,8 @@ def benchmark(args):
                   provider):
         warmup = 2
         rep = 10
-        do_gemms = args.do_gemms
 
-        if do_gemms:
+        if args.do_gemms:
             q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
                 B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
         else:
@@ -248,19 +248,14 @@ def benchmark(args):
             w_kc, w_vc = None, None
         
         if "ref" in provider:
-            # print(q_extend.flatten()[:10])
             fn = lambda: ref_forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
-                               fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, attn_impl="absorbed", kv_lora_rank=kv_lora_rank, qk_rope_head_dim=qk_rope_head_dim, v_head_dim=v_head_dim, H=H)
-            # ret = fn()
-            # print(ret.flatten()[:10])
-            # print(args.do_gemms)
+                               fuse_gemms=args.do_gemms, w_kc=w_kc, w_vc=w_vc, attn_impl="absorbed", kv_lora_rank=kv_lora_rank, qk_rope_head_dim=qk_rope_head_dim, v_head_dim=v_head_dim, H=H)
+
 
         if "fused" in provider:
-            # print(q_extend.flatten()[:10])
             fn = lambda: extend_fused_attention_fwd(q_extend, k_extend, v_extend, o_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend,
-                                                    fuse_gemms=do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=False)
-            # fn()
-            # print(o_extend.flatten()[:10])
+                                                    fuse_gemms=args.do_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=args.absorb_wkc)
+
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         return ms
@@ -284,6 +279,7 @@ def parse_args():
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
     parser.add_argument("-do_gemms", type=bool, default=True)
+    parser.add_argument("-absorb_wkc", type=bool, default=True)
     parser.add_argument("-B", type=int, default=0)
     return parser.parse_args()
 
