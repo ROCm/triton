@@ -7,6 +7,11 @@
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#undef DEBUG_TYPE
+#define DEBUG_TYPE "tritonamdgpu-extract-slice-to-llvm"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+
 using namespace mlir;
 using namespace mlir::triton;
 
@@ -121,10 +126,8 @@ struct ExtractSliceOpConversion
   }
 
 
-  
   LogicalResult processLayout1d(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
-    llvm::outs() << "\n\nprocessExtractSlice1d(): " << op << "\n";
     Location loc = op->getLoc();
     auto srcTy = cast<RankedTensorType>(op.getSource().getType());
     auto srcLayout = srcTy.getEncoding();
@@ -140,20 +143,20 @@ struct ExtractSliceOpConversion
     auto order = triton::gpu::getOrder(srcLayout);
     auto offsets = op.getStaticOffsets();
 
-    llvm::outs() << "dim: " << dim << "\n";
-    llvm::outs() << "srcShape: " << srcShape[0] << "x" << "!" << "\n";
-    llvm::outs() << "elemsPerThread: " << elemsPerThread[0] << "x" << "!" << "\n";
-    llvm::outs() << "sizePerThread: " << sizePerThread[0] << "x" << "!" << "\n";
-    llvm::outs() << "totalSizePerThread: " << totalSizePerThread << "\n";
-    llvm::outs() << "order: " << order[0] << "x" << "!" << "\n";
-    llvm::outs() << "offsets: " << offsets[0] << "x" << "!" << "\n";
+    LDBG("dim: " << dim);
+    LDBG("srcShape: " << srcShape[0] << "x" << "!");
+    LDBG("elemsPerThread: " << elemsPerThread[0] << "x" << "!");
+    LDBG("sizePerThread: " << sizePerThread[0] << "x" << "!");
+    LDBG("totalSizePerThread: " << totalSizePerThread);
+    LDBG("order: " << order[0] << "x" << "!");
+    LDBG("offsets: " << offsets[0] << "x" << "!");
 
     // Calculate valid total number of workers in each dimension
     auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcLayout);
     for (auto i = 0; i < shapePerCTATile.size(); ++i) {
       shapePerCTATile[i] = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
     }
-    llvm::outs() << "shapePerCTATile: " << shapePerCTATile[0] << "x" << "!" << "\n";
+    LDBG("shapePerCTATile: " << shapePerCTATile[0] << "x" << "!");
 
     SmallVector<int64_t> sizes;
     SmallVector<int64_t> CTAOffsets;
@@ -167,28 +170,19 @@ struct ExtractSliceOpConversion
       CTASizes.push_back(sizes[i] / shapePerCTATile[i]);
       CTAPerShape.push_back(srcShape[i] / shapePerCTATile[i]);
     }
-    llvm::outs() << "sizes: " << sizes[0] << "x" << "!" << "\n";
+    LDBG("sizes: " << sizes[0] << "x" << "!");
+    LDBG("CTAOffsets: " << CTAOffsets[0] << "x" << "!");
+    LDBG("CTASizes: " << CTASizes[0] << "x" << "!");
+    LDBG("CTAPerShape: " << CTAPerShape[0] << "x" << "!");
 
-
-
-
-/*
-    std::array<int64_t, 2> CTAOffsets{
-      offsets[0] / shapePerCTATile[0],
-      offsets[1] / shapePerCTATile[1]};
-    std::array<int64_t, 2> CTASizes{sizes[0] / shapePerCTATile[0],
-              sizes[1] / shapePerCTATile[1]};
-    std::array<int64_t, 2> CTAPerShape{srcShape[0] / shapePerCTATile[0],
-                srcShape[1] / shapePerCTATile[1]};
-*/
-    llvm::outs() << "CTAOffsets: " << CTAOffsets[0] << "x" << "!" << "\n";
-    llvm::outs() << "CTASizes: " << CTASizes[0] << "x" << "!" << "\n";
-    llvm::outs() << "CTAPerShape: " << CTAPerShape[0] << "x" << "!" << "\n";
-
+    // TODO(dtanner) - how to incorporate dim into strides?
+    // ttg.slice dim=0 vs 1 would change strides.
+    // The below appears to be correct for the simplest dim=1 case from FA.
+    // Need much more debugging here.
 
     // The diagram above illustrates the graphical representation of the
     // skipElems, tensorStride, and lastIdx variables.
-    auto skipElems = 
+    auto skipElems =
         // CTAOffsets[order[1]] * (elemsPerThread[order[0]] * sizePerThread[order[1]]) +
         CTAOffsets[order[0]] * totalSizePerThread;
     auto tensorStride =
@@ -197,9 +191,9 @@ struct ExtractSliceOpConversion
         //(CTAOffsets[order[1]] + CTASizes[order[1]] - 1) *
         //elemsPerThread[order[0]] * sizePerThread[order[1]] +
         (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalSizePerThread;
-    llvm::outs() << "skipElems: " << skipElems << "\n";
-    llvm::outs() << "tensorStride: " << tensorStride << "\n";
-    llvm::outs() << "lastIdx: " << lastIdx << "\n";
+    LDBG("skipElems: " << skipElems);
+    LDBG("tensorStride: " << tensorStride);
+    LDBG("lastIdx: " << lastIdx);
 
     assert(lastIdx <= vals.size());
 
@@ -207,7 +201,7 @@ struct ExtractSliceOpConversion
     for (int i = skipElems; i < lastIdx; i += tensorStride) {
       for (int j = 0; j < totalSizePerThread * CTASizes[order[0]]; ++j, ++i) {
         assert(i < lastIdx);
-        llvm::outs() << "i: " << i << "\n";
+        LDBG("i: " << i);
         resultVals.push_back(vals[i]);
       }
     }
@@ -224,10 +218,13 @@ struct ExtractSliceOpConversion
     auto srcTy = op.getSource().getType();
     auto encoding = srcTy.getEncoding();
     if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(
-            op.getSource().getType().getEncoding())) {
+            encoding)) {
       return processLayout2d(op, adaptor, rewriter);
-    } else if (isa<SliceEncodingAttr>(encoding)) {
-      return processLayout1d(op, adaptor, rewriter);
+    } else if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(encoding)) {
+      auto parentEncoding = sliceLayout.getParent();
+      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parentEncoding)) {
+        return processLayout1d(op, adaptor, rewriter);
+      }
     }
     return failure();
   }
