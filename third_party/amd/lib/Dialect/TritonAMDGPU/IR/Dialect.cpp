@@ -59,6 +59,7 @@ void mlir::triton::amdgpu::TritonAMDGPUDialect::initialize() {
 namespace mlir::triton::amdgpu {
 
 LogicalResult ExtractSliceOp::verify() {
+  //llvm::outs() << "ExtractSliceOp::verify()\n";
   auto srcTy = getSource().getType();
   auto srcLayout = srcTy.getEncoding();
   auto srcElementType = getElementTypeOrSelf(srcTy);
@@ -75,23 +76,21 @@ LogicalResult ExtractSliceOp::verify() {
   if (srcTy.getRank() != resultTy.getRank()) {
     return emitError("result rank must be equal to source rank");
   }
-  if (srcTy.getRank() != 2) {
-    return emitError("currently only 2D tensors are supported");
-  }
+  int64_t rank = srcTy.getRank();
 
   auto srcShape = srcTy.getShape();
+  auto shapePerCTATile = mlir::triton::gpu::getShapePerCTATile(srcLayout);
 
   // ExtractSlice only supports slicing where offsets and sizes are multiples of
   // shapePerCTATile. This condition ensures that slice has the same layout as
   // the original tensor.
 
   auto offsets = getStaticOffsets();
-  if (offsets.size() != 2) {
-    return emitError("invalid offset shape ") << offsets;
+  //llvm::outs() << "offsets.size() " << offsets.size() << "\n";
+  if (offsets.size() != rank) {
+    return emitError("offsets rank must equal source rank ") << offsets;
   }
-
-  SmallVector<int64_t, 2> sizes;
-  for (auto i = 0; i < 2; ++i) {
+  for (auto i = 0; i < rank; ++i) {
     auto resultDimSize = resultTy.getDimSize(i);
     auto srcDimSize = srcTy.getDimSize(i);
     if (resultDimSize == 0) {
@@ -109,28 +108,21 @@ LogicalResult ExtractSliceOp::verify() {
       return emitError("invalid offset ")
              << offsets[i] << " at dimension " << i;
     }
-    sizes.push_back(resultDimSize);
-  }
+    int64_t size = resultDimSize;
 
-  auto shapePerCTATile = mlir::triton::gpu::getShapePerCTATile(srcTy);
-  shapePerCTATile[0] =
-      std::min(static_cast<unsigned>(srcShape[0]), shapePerCTATile[0]);
-  shapePerCTATile[1] =
-      std::min(static_cast<unsigned>(srcShape[1]), shapePerCTATile[1]);
-  if (sizes[0] % shapePerCTATile[0] != 0 ||
-      sizes[1] % shapePerCTATile[1] != 0) {
-    return emitError() << "sizes [" << sizes
+    int64_t dimSizePerCTATile = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
+    if (size % dimSizePerCTATile != 0) {
+      return emitError() << "size [" << size
                        << "] must be a multiple of shapePerCTATile ["
-                       << shapePerCTATile << "]";
-  }
+                       << dimSizePerCTATile << "]";
+    }
 
-  if (offsets[0] % shapePerCTATile[0] != 0 ||
-      offsets[1] % shapePerCTATile[1] != 0) {
-    return emitError() << "offset [" << offsets
+    if (offsets[i] % dimSizePerCTATile != 0) {
+      return emitError() << "offset [" << offsets
                        << "] must be a multiple of shapePerCTATile ["
-                       << shapePerCTATile << "]";
+                       << dimSizePerCTATile << "]";
+    }
   }
-
   return success();
 }
 
@@ -312,7 +304,6 @@ LogicalResult ConcatOp::verify() {
                          << scaledSrcDim << "` after concatenation";
     }
   }
-
   return success();
 }
 
