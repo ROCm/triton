@@ -1980,7 +1980,7 @@ def run_benchmark(custom, args):
                     # If seqlen_q != seqlen_k then the causal mask ignores computation
                     # depending on which seqlen is larger. Either the lower triangle, or right triangle
                     correction = seqlen_k if seqlen_q > seqlen_k else seqlen_q
-                    flops_per_matmul += (seqlen_q * seqlen_k - (correction**2)/2) * HQ * D_HEAD * 2
+                    flops_per_matmul += (seqlen_q * seqlen_k - (correction**2) / 2) * HQ * D_HEAD * 2
                 else:
                     flops_per_matmul += seqlen_q * seqlen_k * HQ * D_HEAD * 2
         else:
