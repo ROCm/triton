@@ -1,7 +1,7 @@
 from utils.extend_attention import extend_attention_fwd
 
-from MLA_flash import extend_fused_attention_fwd
-
+# from MLA_flash import extend_fused_attention_fwd
+from utils.extend_attention import extend_fused_attention_fwd
 
 import logging
 import time
@@ -85,8 +85,8 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 ])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('attn_impl', ["absorbed"]) # TODO: fix naive
-@pytest.mark.parametrize('fuse_gemms', [True])
-@pytest.mark.parametrize('absorb_wkc', [False])
+@pytest.mark.parametrize('fuse_gemms', [False])
+@pytest.mark.parametrize('absorb_wkc', [True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, attn_impl, fuse_gemms, absorb_wkc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -100,7 +100,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, dtype, device)
         w_kc, w_vc = None, None
 
-    tri_out = extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+    extend_fused_attention_fwd(q_extend, k_extend, v_extend, tri_out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                 fuse_gemms=fuse_gemms, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=absorb_wkc)
     
     # reference implementation
@@ -145,9 +145,6 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
             ref_out = attn_output
         else:
             ref_out = tmp_out
-        
-        # print(f"ref: {ref_out[124, 8, 92]}")
-        # print(f"tri: {tri_out[124, 8, 92]}")
         
         print("first 10 outputs:")
         print(f"ref: {ref_out.flatten()[:]}") 
@@ -202,15 +199,13 @@ def ref_forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indp
     return ref_out
 
 
-
-
 def benchmark(args):
     dtype = arg_to_torch_dtype[args.dtype]
     torch.set_default_dtype(dtype)
 
     configs = []
     x_vals_list = [
-                    (1, 16, 1024, 1024, 512, 64, 128),
+                    (2, 16, 1024, 1024, 512, 64, 128),
                     ]
     
     if args.B:
@@ -299,6 +294,12 @@ def parse_vgpr_usage(file_path):
     in_table = False
 
     for line in lines:
+        # Parse autotuning outputs
+        if re.search(r"Autotuning kernel", line):
+            vgpr_info.append(line.strip())
+        if re.search(r"Triton autotuning for function", line):
+            vgpr_info.append(line.strip())
+
         if re.search(r"\.name:", line):
             vgpr_info.append(line.strip())
         if re.search(r"\.vgpr_count:", line) or re.search(r"\.vgpr_spill_count:", line):
@@ -341,7 +342,8 @@ def print_vgpr(args):
         sys.stderr = temp_file
         
         os.environ["AMDGCN_ENABLE_DUMP"] = "1"
-        # os.environ["TRITON_ALWAYS_COMPILE"] = "1"
+        os.environ["TRITON_ALWAYS_COMPILE"] = "1"
+        os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
         run_bench(args)  # Run the benchmark
         
         sys.stdout.flush()

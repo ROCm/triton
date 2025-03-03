@@ -17,6 +17,10 @@ def is_hip():
 is_hip_ = is_hip()
 
 
+@triton.jit
+def tanh(x):
+    # Tanh is just a scaled sigmoid
+    return 2 * tl.sigmoid(2 * x) - 1
 
 class MetaData():
     cu_seqlens_q = None
@@ -32,6 +36,8 @@ class MetaData():
     int8 = False
     layout = None
     dropout_p, return_encoded_softmax = 0.0, False
+    logit_cap = 0.0
+    sm_scale = 1.0
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -154,7 +160,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q_nope, q_pe, kv_ptrs, k_pe_ptrs, bias_ptrs,
                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, K: tl.constexpr, EVEN_K: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, 
-                    QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr,
+                    QK_SCALE: tl.constexpr, logit_cap: tl.constexpr, INT8_GEMM: tl.constexpr,
                     USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr, LATENT_ATTENTION: tl.constexpr):
 
     assert LATENT_ATTENTION, "This kernel is only planned to work with the latent attention"
@@ -212,6 +218,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q_nope, q_pe, kv_ptrs, k_pe_ptrs, bias_ptrs,
         qk += tl.dot(q_pe, k_pe)
         qk *= QK_SCALE
 
+        if logit_cap > 0:
+            qk = logit_cap * tanh(qk / logit_cap)
+
         # softmax
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk = qk - m_ij[:, None]
@@ -263,13 +272,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q_nope, q_pe, kv_ptrs, k_pe_ptrs, bias_ptrs,
 
 def get_cdna_autotune_configs():
     return [
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 32, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1},
                       num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1},
                       num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 256, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1},
                       num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 1},
                       num_stages=1, num_warps=4),
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
         'kv_lora_rank', "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim",
@@ -289,7 +298,7 @@ autotune_configs, autotune_keys = get_cdna_autotune_configs()
     'EVEN_K': lambda args: args['kv_lora_rank'] % args['BLOCK_K'] == 0,
 })
 @triton.jit
-def attn_fwd(Q_NOPE, Q_PE, KV, K_PE, WKV_B, bias, SM_SCALE: tl.constexpr, L, Out,
+def attn_fwd(Q_NOPE, Q_PE, KV, K_PE, WKV_B, bias, logit_cap: tl.constexpr, SM_SCALE: tl.constexpr, L, Out,
             stride_q_nope_b, stride_q_nope_h, stride_q_nope_s, stride_q_nope_d,  # strides for Q_NOPE: bhsd
             stride_q_pe_b, stride_q_pe_h, stride_q_pe_s, stride_q_pe_r,  # strides for Q_PE: bhsr
             stride_kv_b, stride_kv_t, stride_kv_c,  # strides for KV: btc
@@ -301,7 +310,7 @@ def attn_fwd(Q_NOPE, Q_PE, KV, K_PE, WKV_B, bias, SM_SCALE: tl.constexpr, L, Out
             kv_lora_rank: tl.constexpr, qk_nope_head_dim: tl.constexpr, qk_rope_head_dim: tl.constexpr, v_head_dim: tl.constexpr,
             Q_descale, K_descale, P_scale, P_descale, V_descale, cu_seqlens_q, cu_seqlens_k,
             dropout_p, philox_seed, PERSISTENT: tl.constexpr, PERSISTENT_DYNAMIC: tl.constexpr, atomic_counter,
-            NUM_CU: tl.constexpr, GRID_CU_MULTIP: tl.constexpr, B: tl.constexpr, philox_offset_base, encoded_softmax,
+            NUM_CU: tl.constexpr, GRID_CU_MULTIP: tl.constexpr, B, philox_offset_base, encoded_softmax,
             alibi_slopes, HQ: tl.constexpr, HK: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr, MAX_SEQLENS_K: tl.constexpr,
             VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, 
             BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, EVEN_K: tl.constexpr,
@@ -543,7 +552,7 @@ def attn_fwd(Q_NOPE, Q_PE, KV, K_PE, WKV_B, bias, SM_SCALE: tl.constexpr, L, Out
                         BLOCK_K, kv_lora_rank, EVEN_K,
                         offs_m, offs_n,
                         # _, MASK_STEPS, ...
-                        PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, QK_SCALE, INT8_GEMM, USE_P_SCALE, INT8_KV,
+                        PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, QK_SCALE, logit_cap, INT8_GEMM, USE_P_SCALE, INT8_KV,
                         True)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
@@ -571,7 +580,7 @@ def attn_fwd(Q_NOPE, Q_PE, KV, K_PE, WKV_B, bias, SM_SCALE: tl.constexpr, L, Out
                         BLOCK_K, kv_lora_rank, EVEN_K,
                         offs_m, offs_n,
                         # _, MASK_STEPS, ...
-                        PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, QK_SCALE, INT8_GEMM, USE_P_SCALE, INT8_KV,
+                        PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, QK_SCALE, logit_cap, INT8_GEMM, USE_P_SCALE, INT8_KV,
                         True)
 
                 if INT8 and not INT8_KV:
@@ -640,13 +649,11 @@ def get_shape_from_layout(q, k, metadata):
         batch = metadata.num_contexts
     elif metadata.layout == 'bhsd':
         batch, nheads_q, _, head_size = q.shape
-        nheads_k = k.shape[1]
     elif metadata.layout == 'bshd':
         batch, _, nheads_q, head_size = q.shape
-        nheads_k = k.shape[2]
     else:
         assert False, "Got unsupported layout."
-    return batch, nheads_q, nheads_k, head_size
+    return batch, nheads_q, 1, head_size
 
 
 # TODO: This can probably optimized to have fewer lines of code.
@@ -741,7 +748,7 @@ class _attention(torch.autograd.Function):
         atomic_counter = torch.zeros([1], device=q_nope.device, dtype=torch.int32)
 
         attn_fwd[grid](
-            q_nope, q_pe, kv, k_pe, wkv_b, metadata.bias, metadata.sm_scale, M, o, *q_nope_strides, *q_pe_strides, *kv_strides,
+            q_nope, q_pe, kv, k_pe, wkv_b, metadata.bias, metadata.logit_cap, metadata.sm_scale, M, o, *q_nope_strides, *q_pe_strides, *kv_strides,
             *k_pe_strides, *o_strides, *wkv_b_strides, *bias_strides, *alibi_strides, 
             kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim,
             q_descale, k_descale, p_scale, p_descale, v_descale, metadata.cu_seqlens_q,
@@ -811,25 +818,8 @@ def extend_fused_attention_fwd(
     else:
         DV = v_buffer.shape[-1] # no projection
 
-    # if is_hip_:
-    #     BLOCK_M, BLOCK_N = (64, 64)
-    #     num_warps = 4
-
     sm_scale = sm_scale or 1.0 / ((k_buffer.shape[-1])**0.5) # TODO: check that this is correct here
-    batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
-    kv_group_num = q_extend.shape[1] // k_extend.shape[1]
-
-    USE_CUSTOM_MASK = custom_mask is not None
-
-    # grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
-    # num_stages = 1
-
-    # extra_kargs = {}
-    # if is_hip_:
-    #     extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-
-    
-    B, H = qo_indptr.shape[0]-1, head_num
+    B, H = qo_indptr.shape[0]-1, q_extend.shape[1]
 
     q_nope = q_extend[..., :D].view(B, -1, H, D).transpose(1,2)
     q_pe = q_extend[..., D:].view(B, -1, H, DPE).transpose(1,2)
@@ -840,6 +830,7 @@ def extend_fused_attention_fwd(
     o = o_extend.view(B, -1, H, D).transpose(1,2)
 
     metadata = MetaData(sm_scale=sm_scale)
+    metadata.logit_cap = logit_cap
     metadata.max_seqlens_q = q_nope.shape[2]
     metadata.max_seqlens_k = kv.shape[1]
     metadata.layout = "bhsd"
@@ -858,6 +849,8 @@ def extend_fused_attention_fwd(
 
     assert metadata.layout=="bhsd"
     batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q_nope, kv, metadata)
+
+    assert nheads_k==1
 
     q_nope_strides, q_pe_strides, kv_strides, k_pe_strides, o_strides, wkv_b_strides = get_strides_from_layout_latent(
         q_nope, q_pe, kv, k_pe, o, wkv_b, metadata)
@@ -895,7 +888,7 @@ def extend_fused_attention_fwd(
     atomic_counter = torch.zeros([1], device=q_nope.device, dtype=torch.int32)
 
     attn_fwd[grid](
-            q_nope, q_pe, kv, k_pe, wkv_b, metadata.bias, metadata.sm_scale, M, o, *q_nope_strides, *q_pe_strides, *kv_strides,
+            q_nope, q_pe, kv, k_pe, wkv_b, metadata.bias, metadata.logit_cap, metadata.sm_scale, M, o, *q_nope_strides, *q_pe_strides, *kv_strides,
             *k_pe_strides, *o_strides, *wkv_b_strides, *bias_strides, *alibi_strides, 
             kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim,
             q_descale, k_descale, p_scale, p_descale, v_descale, metadata.cu_seqlens_q,
@@ -910,23 +903,17 @@ def extend_fused_attention_fwd(
             is not None, PERSISTENT_DYNAMIC=metadata.persistent == "dynamic", NUM_CU=NUM_CU, LATENT_ATTENTION=True,
             atomic_counter=atomic_counter, B=batch)
     
-    return o.transpose(1,2).flatten(0,1)
+    o_extend = o
     
 
-
-
-
-
-
-
-def input_helper_MLA(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, dtype, layout, requires_grad=False):
+def input_helper_MLA(B, H, prefill, extend, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, dtype, layout, requires_grad=False):
     torch.manual_seed(20)
 
-    q_nope_tensor_shape = (B, H, S, qk_nope_head_dim)
-    q_pe_tensor_shape = (B, H, S, qk_rope_head_dim)
-    kv_tensor_shape = (B, S, kv_lora_rank)
-    k_pe_tensor_shape = (B, 1, S, qk_rope_head_dim)
-    v_tensor_shape = (B, H, S, v_head_dim)
+    q_nope_tensor_shape = (B, H, extend, qk_nope_head_dim)
+    q_pe_tensor_shape = (B, H, extend, qk_rope_head_dim)
+    kv_tensor_shape = (B, prefill + extend, kv_lora_rank)
+    k_pe_tensor_shape = (B, 1, prefill + extend, qk_rope_head_dim)
+    v_tensor_shape = (B, H, prefill + extend, v_head_dim)
 
     wkv_b_tensor_shape = (H, qk_nope_head_dim + v_head_dim, kv_lora_rank)
 
@@ -940,8 +927,8 @@ def input_helper_MLA(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, 
 
     sm_scale = qk_nope_head_dim**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = S
-    input_metadata.max_seqlens_k = S
+    input_metadata.max_seqlens_q = extend
+    input_metadata.max_seqlens_k = prefill + extend
     input_metadata.layout = layout
     return q_nope, q_pe, kv, k_pe, v, wkv_b, input_metadata
 
@@ -977,17 +964,17 @@ def sanity_check(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_he
     torch.testing.assert_close(naive_out, absorb_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim', [
-    (8, 16, 128, 512, 128, 64, 128),
+@pytest.mark.parametrize('B, H, prefill, extend, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim', [
+    (2, 4, 256, 128, 512, 128, 64, 128),
 ])
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [True])
 @pytest.mark.parametrize('use_alibi', [False])
 @pytest.mark.parametrize('layout', ['bhsd'])
 @pytest.mark.parametrize('ref_impl', ['naive', 'absorb'])
-def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, causal, use_alibi, layout, ref_impl, dtype=torch.float32):
+def test_op_fwd(B, H, prefill, extend, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, causal, use_alibi, layout, ref_impl, dtype=torch.float32):
     import time
     torch.manual_seed(20)
-    q_nope, q_pe, kv, k_pe, v, wkv_b, input_metadata = input_helper_MLA(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, dtype, layout)
+    q_nope, q_pe, kv, k_pe, v, wkv_b, input_metadata = input_helper_MLA(B, H, prefill, extend, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, dtype, layout)
     if causal:
         input_metadata.need_causal()
 
@@ -996,24 +983,15 @@ def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_hea
     for x, x_name in zip([q_nope, q_pe, kv, k_pe, v, wkv_b], ["q_nope", "q_pe", "kv", "k_pe", "v", "wkv_b"]):
         print(f"{x_name}: {x.shape}")
 
-    # warmup (let autotuning happen)
-    attention(q_nope, q_pe, kv, k_pe.squeeze(1), o, wkv_b, input_metadata)
-
     # triton implementation
-    torch.cuda.synchronize()
-    start = time.time()
     tri_out, _, _ = attention(q_nope, q_pe, kv, k_pe.squeeze(1), o, wkv_b, input_metadata)
-    torch.cuda.synchronize()
-    print(f"time for triton: {time.time()-start}")
 
-    torch.cuda.synchronize()
-    start = time.time()
     # ref implementation    
     if ref_impl=="naive":
         q = torch.cat([q_nope, q_pe], dim=-1)
         # kv = self.wkv_b(self.kv_norm(kv))
         kv = torch.einsum("hdc,btc->bhtd", wkv_b, kv)
-        kv = kv.view(B, H, S, qk_nope_head_dim + v_head_dim)
+        kv = kv.view(B, H, prefill + extend, qk_nope_head_dim + v_head_dim)
         k_nope, v = torch.split(kv, [qk_nope_head_dim, v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, H, -1, -1)], dim=-1)
         scores = torch.einsum("bhsd,bhtd->bhst", q, k) * input_metadata.sm_scale
@@ -1023,6 +1001,12 @@ def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_hea
         scores = (torch.einsum("bhsc,btc->bhst", q_nope, kv) +
                     torch.einsum("bhsr,btr->bhst", q_pe, k_pe.squeeze(1))) * input_metadata.sm_scale
 
+    # Apply bottom-right aligned triangular mask
+    if causal:
+        s, t = scores.shape[-2], scores.shape[-1]
+        mask = torch.triu(torch.ones(s, t, device=scores.device, dtype=scores.dtype), diagonal=t-s).unsqueeze(0).unsqueeze(0)
+        scores = torch.where(mask == 0, scores, float("-inf"))
+
     scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(q_nope)
 
     if ref_impl=="naive":
@@ -1030,10 +1014,6 @@ def test_op_fwd(B, H, S, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_hea
     else:
         x = torch.einsum("bhst,btc->bhsc", scores, kv)
         ref_out = torch.einsum("bhsc,hdc->bhsd", x, wkv_b[:, -v_head_dim:])
-
-    torch.cuda.synchronize()
-    print(f"time for ref: {time.time()-start}")
-
 
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -1094,7 +1074,7 @@ def main():
 
     # sanity_check(8, 16, 128, 512, 128, 64, 128, False, False, "bhsd")
 
-    test_op_fwd(8, 16, 4096, 512, 128, 64, 128, False, False, "bhsd", ref_impl="absorb")
+    test_op_fwd(8, 16, 2048, 2048, 512, 128, 64, 128, False, False, "bhsd", ref_impl="absorb")
 
 
 if __name__ == '__main__':

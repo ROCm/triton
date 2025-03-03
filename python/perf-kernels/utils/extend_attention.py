@@ -40,6 +40,49 @@ def tanh(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
 
+fused_autotune_configs =  [
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_C': 32, 'BLOCK_D': 32, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_C': 64, 'BLOCK_D': 64, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_C': 128, 'BLOCK_D': 32, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_C': 256, 'BLOCK_D': 128, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+    ], 
+
+autotune_keys = [
+        'logit_cap',
+        'Lq',
+        'Lv',
+        'BLOCK_DMODEL',
+        'BLOCK_DPE',
+        'BLOCK_DV',
+        'BLOCK_M',
+        'BLOCK_N',
+        'USE_CUSTOM_MASK',
+        'SKIP_PREFIX_CUSTOM_MASK',
+        'STORE_TRANSPOSE',
+    ]
+
+autotune_configs = [
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1},
+                      num_stages=1, num_warps=4),
+    ]
+
+
+
+# @triton.autotune(
+#     configs=autotune_configs,
+#     key=autotune_keys,
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def _fwd_kernel(
     Q_Extend,
@@ -412,6 +455,11 @@ def extend_attention_fwd(
     )
 
 
+# @triton.autotune(
+#     configs=fused_autotune_configs,
+#     key=autotune_keys,
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def _fwd_fused_kernel(
     Q_Extend,
@@ -500,7 +548,7 @@ def _fwd_fused_kernel(
                 + offs_block_d[None, :]
             )
             q_d = tl.load(
-                Q_Extend + offs_q, mask=(mask_m[:, None]), other=0.0
+                Q_Extend + offs_q_d, mask=(mask_m[:, None]), other=0.0
             )
     else:
         offs_q = (
@@ -874,18 +922,21 @@ def extend_fused_attention_fwd(
     DPE = k_buffer.shape[-1] - C
     D = q_extend.shape[-1] - DPE
 
-    BLOCK_C = min(256, C)
-    BLOCK_D = min(64, D)
-    # tl.dots inside the kernel are of size
-    # first gemm
-    # (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C) # accumulate over BLOCK_D. With absorb_w_kc 
-    # or
-    # (BLOCK_M, BLOCK_D) x (BLOCK_D, BLOCK_C) x (BLOCK_C, BLOCK_N) = (BLOCK_M, BLOCK_N) # accumulate over BLOCK_D and BLOCK_C. With absorb_w_kc = False.
-    # second gemm
-    # (BLOCK_M, BLOCK_N) x (BLOCK_N, BLOCK_C) x (BLOCK_C, DV) = (BLOCK_M, DV) # accumulate over BLOCK_C
+    BLOCK_C = min(64, C)
+    BLOCK_D = min(128, D)
+    # tl.dots inside the kernel
+    # first gemm: q * w_kc * kv : (BLOCK_M, D) x (D, C) x (C, BLOCK_N) = (BLOCK_M, BLOCK_N)
+    
+    # option 1: absorb w_kc into q
+    # outside loop: q * w_kc: (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C) # tile across D
+    # inside the loop: (BLOCK_M, C) x (C, BLOCK_N) = (BLOCK_M, BLOCK_N). This is the same as in ref.
+    
+    # option 2 (inside the loop)
+    # (BLOCK_M, BLOCK_D) x (BLOCK_D, BLOCK_C) x (BLOCK_C, BLOCK_N) = (BLOCK_M, BLOCK_N) # tile along D and C
+    
+    # second gemm (inside the loop)
+    # (BLOCK_M, BLOCK_N) x (BLOCK_N, BLOCK_C) x (BLOCK_C, DV) = (BLOCK_M, DV) # tile across C
 
-    # We could probably do 
-    # (BLOCK_M, BLOCK_N) x (BLOCK_N, BLOCK_C) x (BLOCK_C, BLOCK_D) = (BLOCK_M, BLOCK_D) # accumulate for BLOCK_C, and some partial store for BLOCK_D
 
     if fuse_gemms:
         assert w_kc is not None and w_vc is not None, "w_kc and w_vc must be provided when fusing gemms"
