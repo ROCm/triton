@@ -1979,13 +1979,17 @@ def run_benchmark(custom, args):
                 if causal:
                     # If seqlen_q != seqlen_k then the causal mask ignores computation
                     # depending on which seqlen is larger. Either the lower triangle, or right triangle
-                    correction = seqlen_k if seqlen_q > seqlen_k else seqlen_q
-                    flops_per_matmul += (seqlen_q * seqlen_k - (correction**2) / 2) * HQ * D_HEAD * 2
+                    causal_correction = seqlen_k if seqlen_q > seqlen_k else seqlen_q
+                    flops_per_matmul += (seqlen_q * seqlen_k - (causal_correction**2) / 2) * HQ * D_HEAD * 2
                 else:
                     flops_per_matmul += seqlen_q * seqlen_k * HQ * D_HEAD * 2
         else:
             q, k, v, input_metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout)
-            flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
+            if causal:
+                causal_correction = N_CTX_K if N_CTX_Q > N_CTX_K else N_CTX_Q
+                flops_per_matmul = 2.0 * BATCH * HQ * (N_CTX_Q * N_CTX_K - (causal_correction**2) / 2) * D_HEAD
+            else:
+                flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
         if causal:
             input_metadata.need_causal()
 
