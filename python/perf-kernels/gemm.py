@@ -383,18 +383,16 @@ def main():
         config_file = args.model_configs
         configs = get_model_configs(config_path=config_file, model_families=["llama3"], model=args.model)
         mnk_list = []
-        batch_size = args.b if args.b else 1
 
         for model_name, config in configs.items():
-            seq_len = args.sq if args.sq else 4096
-            M, N, K = batch_size * seq_len, config["hidden_size"], config["intermediate_size"]
+            M, N, K = args.M or 8192, config["hidden_size"], config["intermediate_size"]
             mnk_list.append((model_name, M, N, K))
 
         benchmark.benchmarks.x_names = ['model', 'M', 'N', 'K']
         benchmark.benchmarks.x_vals = mnk_list
 
-    if args.M or args.N or args.K:
-        assert args.model is None, "Providing both -model and -M/N/K is not compatible! -model already fixes -M/N/K."
+    if args.N or args.K:
+        assert args.model is None, "Providing both -model and N/K is not compatible! -model already fixes N/K."
 
     if args.M and args.N and args.K:
         x_vals = [(args.M, args.N, args.K)]
