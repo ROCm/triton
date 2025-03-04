@@ -316,21 +316,18 @@ def get_type(provider):
         plot_name="matmul-performance",
         args={},
     ))
-def benchmark(M, N, K, provider, model=None):
+def benchmark(M, N, K, provider, model=None, args=None):
     in_dtype = name_to_torch_types[get_type(provider)]
     out_dtype = in_dtype
 
     quantiles = [0.5, 0.2, 0.8]
+    layout_tn = args.layout == 'tn'
+    a, _, a_scale = gen_input(M, K, in_dtype, False, 1, device='cuda')
+    b, _, b_scale = gen_input(K, N, in_dtype, layout_tn, 2, device='cuda')
     if 'hipblaslt' in provider:
-        a = torch.randn((M, K), dtype=in_dtype, device='cuda')
-        b = torch.randn((N, K), dtype=in_dtype, device='cuda')
-        b = b.T
-
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     else:  # triton, different data types
         assert "triton" in provider
-        a, _, a_scale = gen_input(M, K, in_dtype, False, 1, device='cuda')
-        b, _, b_scale = gen_input(K, N, in_dtype, True, 2, device='cuda')
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
@@ -339,16 +336,15 @@ def benchmark(M, N, K, provider, model=None):
             b_scale = b_scale.item()
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c, a_scale, b_scale, activation=""),
                                                      quantiles=quantiles)
-        global verbose
-        if verbose:
-            print(f'SIZE: {M},{N},{K}   Best tuning config: ({matmul_kernel.best_config()})')
+        if args.v:
+            print(f'Best tuning config for M={M}, N={N}, K={K}, dtype={in_dtype} / {out_dtype}: \n({matmul_kernel.best_config})\n')
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        prog="GEMM tutorial example",
+        prog="AMD Triton GEMM kernel",
         allow_abbrev=False,
     )
 
@@ -366,18 +362,29 @@ def parse_args():
     parser.add_argument("-M", type=int, default=0)
     parser.add_argument("-N", type=int, default=0)
     parser.add_argument("-K", type=int, default=0)
+    parser.add_argument("-layout", type=str, default='tn')
+    parser.add_argument("-dtype", type=str, default=None)
 
     args = parser.parse_args()
 
     return args
 
+def get_line_vals_names(dtype=None):
+    line_vals=[
+        'hipblaslt(fp16)', 'hipblaslt(bf16)', 'triton(fp16)', 'triton(bf16)', 'triton(int8)', 'triton(fp8e4)',
+        'triton(fp8e5)'
+    ]
+    line_names=[
+        "hipblaslt.Fp16", "hipblaslt.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5"
+    ]
+    if dtype is not None:
+        line_vals=['triton('+dtype+')']
+        line_names=['Triton.'+dtype]
+    return line_vals, line_names
+
 
 def main():
-    # assign to a global verbose var to indicate whether print
-    # best tuning config
-    global verbose
     args = parse_args()
-    verbose = args.v
 
     if args.model:
         config_file = args.model_configs
@@ -391,6 +398,7 @@ def main():
         benchmark.benchmarks.x_names = ['model', 'M', 'N', 'K']
         benchmark.benchmarks.x_vals = mnk_list
 
+    benchmark.benchmarks.line_vals, benchmark.benchmarks.line_names = get_line_vals_names(args.dtype)
     if args.N or args.K:
         assert args.model is None, "Providing both -model and N/K is not compatible! -model already fixes N/K."
 
@@ -398,7 +406,7 @@ def main():
         x_vals = [(args.M, args.N, args.K)]
         benchmark.benchmarks.x_vals = x_vals
 
-    benchmark.run(show_plots=True, print_data=True)
+    benchmark.run(show_plots=True, print_data=True, args=args)
 
 
 if __name__ == '__main__':
