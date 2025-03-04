@@ -753,7 +753,7 @@ def _fwd_fused_kernel(
             k =  tl.load(
                 K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
             )
-
+            # (BLOCK_M, C) * (C, BLOCK_N)
             qk = tl.dot(q_acc, k, out_dtype=tl.float32)
         elif FUSE_GEMMS:
             offs_k_c = (
@@ -869,7 +869,10 @@ def _fwd_fused_kernel(
             p = p.to(v.dtype)
             acc = acc * re_scale[:, None] + tl.dot(p, v)
 
+    
+    # (BLOCK_M, C) * (C, D)
 
+    
 
     offs_o = (
         (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
@@ -922,8 +925,8 @@ def extend_fused_attention_fwd(
     DPE = k_buffer.shape[-1] - C
     D = q_extend.shape[-1] - DPE
 
-    BLOCK_C = min(64, C)
-    BLOCK_D = min(128, D)
+    BLOCK_C = min(128, C)
+    BLOCK_D = min(32, D)
     # tl.dots inside the kernel
     # first gemm: q * w_kc * kv : (BLOCK_M, D) x (D, C) x (C, BLOCK_N) = (BLOCK_M, BLOCK_N)
     
