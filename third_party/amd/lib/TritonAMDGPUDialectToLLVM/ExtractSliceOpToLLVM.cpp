@@ -125,7 +125,10 @@ struct ExtractSliceOpConversion
     return success();
   }
 
-
+  // This handles extract_slice when the layout is ttg.slice.
+  // For this case, the offsets, strides and sizes are only 1d,
+  // and the sizePerThread is takes from the parentLayout.
+  // ShapePerCTATile already examines the parentLayout for sliceLayout.
   LogicalResult processLayout1d(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
     Location loc = op->getLoc();
@@ -138,9 +141,8 @@ struct ExtractSliceOpConversion
     auto resultTy = cast<RankedTensorType>(op.getType());
     auto vals = unpackLLElements(loc, adaptor.getSource(), rewriter);
     auto elemsPerThread = triton::gpu::getElemsPerThread(srcTy);
-    auto sizePerThread = triton::gpu::getSizePerThread(srcLayout);
+    auto sizePerThread = triton::gpu::getSizePerThread(parent);
     auto totalSizePerThread = product<unsigned>(sizePerThread);
-    auto order = triton::gpu::getOrder(srcLayout);
     auto offsets = op.getStaticOffsets();
 
     LDBG("dim: " << dim);
@@ -148,7 +150,6 @@ struct ExtractSliceOpConversion
     LDBG("elemsPerThread: " << elemsPerThread[0] << "x" << "!");
     LDBG("sizePerThread: " << sizePerThread[0] << "x" << "!");
     LDBG("totalSizePerThread: " << totalSizePerThread);
-    LDBG("order: " << order[0] << "x" << "!");
     LDBG("offsets: " << offsets[0] << "x" << "!");
 
     // Calculate valid total number of workers in each dimension
@@ -175,22 +176,12 @@ struct ExtractSliceOpConversion
     LDBG("CTASizes: " << CTASizes[0] << "x" << "!");
     LDBG("CTAPerShape: " << CTAPerShape[0] << "x" << "!");
 
-    // TODO(dtanner) - how to incorporate dim into strides?
-    // ttg.slice dim=0 vs 1 would change strides.
-    // The below appears to be correct for the simplest dim=1 case from FA.
-    // Need much more debugging here.
-
-    // The diagram above illustrates the graphical representation of the
-    // skipElems, tensorStride, and lastIdx variables.
     auto skipElems =
-        // CTAOffsets[order[1]] * (elemsPerThread[order[0]] * sizePerThread[order[1]]) +
-        CTAOffsets[order[0]] * totalSizePerThread;
+        CTAOffsets[0] * totalSizePerThread;
     auto tensorStride =
-        (CTAPerShape[order[0]] - CTASizes[order[0]]) * totalSizePerThread;
+        (CTAPerShape[0] - CTASizes[0]) * totalSizePerThread;
     auto lastIdx =
-        //(CTAOffsets[order[1]] + CTASizes[order[1]] - 1) *
-        //elemsPerThread[order[0]] * sizePerThread[order[1]] +
-        (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalSizePerThread;
+        (CTAOffsets[0] + CTASizes[0]) * totalSizePerThread;
     LDBG("skipElems: " << skipElems);
     LDBG("tensorStride: " << tensorStride);
     LDBG("lastIdx: " << lastIdx);
@@ -199,7 +190,7 @@ struct ExtractSliceOpConversion
 
     SmallVector<Value> resultVals;
     for (int i = skipElems; i < lastIdx; i += tensorStride) {
-      for (int j = 0; j < totalSizePerThread * CTASizes[order[0]]; ++j, ++i) {
+      for (int j = 0; j < totalSizePerThread * CTASizes[0]; ++j, ++i) {
         assert(i < lastIdx);
         LDBG("i: " << i);
         resultVals.push_back(vals[i]);
@@ -221,8 +212,8 @@ struct ExtractSliceOpConversion
             encoding)) {
       return processLayout2d(op, adaptor, rewriter);
     } else if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(encoding)) {
-      auto parentEncoding = sliceLayout.getParent();
-      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parentEncoding)) {
+      auto parent = sliceLayout.getParent();
+      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parent)) {
         return processLayout1d(op, adaptor, rewriter);
       }
     }
