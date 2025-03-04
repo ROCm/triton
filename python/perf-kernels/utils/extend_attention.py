@@ -498,8 +498,10 @@ def _fwd_fused_kernel(
     BLOCK_D: tl.constexpr,
     D: tl.constexpr,
     DV: tl.constexpr,
-    FUSE_GEMMS: tl.constexpr,
+    FUSE_W_KC: tl.constexpr,
+    FUSE_W_VC: tl.constexpr,
     ABSORB_W_KC: tl.constexpr,
+    ABSORB_W_VC: tl.constexpr,
     DPE: tl.constexpr,
     ####
     logit_cap: tl.constexpr,
@@ -508,6 +510,34 @@ def _fwd_fused_kernel(
     USE_CUSTOM_MASK: tl.constexpr,
     STORE_TRANSPOSE: tl.constexpr,
 ):
+    """
+    Q_Extend: [T, H, D+DPE]
+    K_Extend: [T, C+DPE]
+    V_Extend: [T, C]
+    O_Extend: [T, H, DV]
+    K_Buffer: [T_, H, C+DPE]
+    V_Buffer: [T_, H, C]
+    
+    
+    T: B * extend_len, note that they can be varlen
+    T_: B * prefix_len, note that they can be varlen
+
+    index pointers to access correct sequences in above tensors:
+    qo_indptr: [B+1]
+    kv_indptr: [B+1]
+
+    gemms: 
+    Q_Extend[..., :D] * W_KC * K_Buffer/Extend[..., :C]
+    P * V_Buffer/Extend * W_VC
+    
+    W_KC: [H, D, C]
+    W_VC: [H, C, DV]
+    FUSE_W_KC: do we fuse the gemm with w_kc
+    FUSE_W_VC: do we fuse the gemm with w_vc
+    ABSORB_W_KC: do we absorb the w_kc into q
+    ABSORB_W_VC: do we absorb the w_vc outside the loop
+    
+    """
     cur_seq = tl.program_id(0)
     cur_head = tl.program_id(1)
     cur_block_m = tl.program_id(2)
@@ -539,7 +569,7 @@ def _fwd_fused_kernel(
 
     TILE_D: tl.constexpr = BLOCK_D < D
 
-    if FUSE_GEMMS:
+    if FUSE_W_KC:
         if not TILE_D: # if not tiling along D, load q only once outside the inner loop
             offs_q_d = (
                 (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
@@ -578,7 +608,7 @@ def _fwd_fused_kernel(
     e_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
 
 
-    if FUSE_GEMMS:
+    if FUSE_W_KC:
         if ABSORB_W_KC: # absorb the w_kc into q
             # load q and w_kc in BLOCK_D parts
             if TILE_D:
@@ -601,17 +631,12 @@ def _fwd_fused_kernel(
                 q_acc += tl.dot(q_d, w_kc_d)        
             q_acc = q_acc.to(qpe.dtype)
 
-        # load w_kc and w_vc in BLOCK_C parts
-        offs_w_kc = (
-            cur_head * stride_w_h + offs_block_d[:, None] * stride_w_d + offs_block_c[None, :] * stride_w_c
-        )
-        offs_w_vc = (
-            cur_head * stride_w_h + offs_d[None, :] * stride_w_d + offs_block_c[:, None] * stride_w_c
-        )
-    else:
-        offs_w_kc = 0
-        offs_w_vc = 0
-
+    # load w_kc and w_vc in BLOCK_C parts
+    offs_w_kc = (
+        cur_head * stride_w_h + offs_block_d[:, None] * stride_w_d + offs_block_c[None, :] * stride_w_c
+    )
+    
+    
 
     # stage 1: compute scores with prefix
     for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
@@ -622,7 +647,7 @@ def _fwd_fused_kernel(
             kv_indices + cur_seq_kv_start_idx + start_n + offs_n, mask=mask_n, other=0
         )
 
-        if ABSORB_W_KC:
+        if ABSORB_W_KC: # absorb
             offs_buf_k = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -632,7 +657,7 @@ def _fwd_fused_kernel(
                 K_Buffer + offs_buf_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
             )
             qk = tl.dot(q_acc.to(k.dtype), k)
-        elif FUSE_GEMMS:
+        elif FUSE_W_KC: # naive
             offs_buf_k_c = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -658,7 +683,7 @@ def _fwd_fused_kernel(
                     )
                     k_c = tl.dot(w_kc_c, kv_c) # projected keys
                     qk += tl.dot(q_d, k_c.to(kv_c.dtype))
-        else:
+        else: # non fused
             offs_buf_k = (
                 offs_kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -709,21 +734,41 @@ def _fwd_fused_kernel(
         deno = deno * re_scale + tl.sum(p, 1)
         e_max = n_e_max
 
-        if FUSE_GEMMS:
+        if ABSORB_W_VC: # absorb
+            offs_buf_v = (
+                offs_kv_loc[:, None] * stride_buf_vbs
+                + cur_kv_head * stride_buf_vh
+                + offs_c[None, :]
+            )       
+            v = tl.load(
+                V_Buffer + offs_buf_v, mask=mask_n[:, None] & mask_c[None, :], other=0.0
+            )
+            p = p.to(v.dtype)
+            acc = acc * re_scale[:, None] + tl.dot(p, v)
+        
+        elif FUSE_W_VC: # naive
             offs_buf_v_c = (
                 offs_kv_loc[:, None] * stride_buf_vbs
                 + cur_kv_head * stride_buf_vh
                 + offs_block_c[None, :]
             )
+            offs_w_vc = (
+                cur_head * stride_w_h + offs_d[None, :] * stride_w_d + offs_block_c[:, None] * stride_w_c
+            )
+
             acc = acc * re_scale[:, None]
             for c in range(0, tl.cdiv(C, BLOCK_C)):
                 w_vc_c = tl.load(W_VC + offs_w_vc + c * BLOCK_C * stride_w_c)
                 kv_c = tl.load(
                     V_Buffer + offs_buf_v_c + c * BLOCK_C, mask=mask_n[:, None], other=0.0
                 )
+
                 v_c = tl.dot(kv_c, w_vc_c) # projected values
+                tl.static_print("", w_vc_c)
+                tl.static_print("", acc)
                 acc += tl.dot(p.to(kv_c.dtype), v_c.to(kv_c.dtype))
-        else:
+
+        else: # non-fused
             offs_buf_v = (
                 offs_kv_loc[:, None] * stride_buf_vbs
                 + cur_kv_head * stride_buf_vh
@@ -735,14 +780,13 @@ def _fwd_fused_kernel(
             p = p.to(v.dtype)
             acc = acc * re_scale[:, None] + tl.dot(p, v)
 
-
     # stage 2: compute the triangle part
     cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
     for start_n in range(0, cur_block_m_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_block_m_end
 
-        if ABSORB_W_KC:
+        if ABSORB_W_KC: # absorb
             # load k in transposed way
             offs_k = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
@@ -755,7 +799,7 @@ def _fwd_fused_kernel(
             )
             # (BLOCK_M, C) * (C, BLOCK_N)
             qk = tl.dot(q_acc, k, out_dtype=tl.float32)
-        elif FUSE_GEMMS:
+        elif FUSE_W_KC: # naive
             offs_k_c = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
                 + cur_kv_head * stride_kh
@@ -780,9 +824,11 @@ def _fwd_fused_kernel(
                     kv_c =  tl.load(
                         K_Extend + offs_k_c + c * BLOCK_C, mask=(mask_n[None, :]), other=0.0
                     )
+                    # (BLOCK_D, BLOCK_C) * (BLOCK_C, BLOCK_N)
                     k_c = tl.dot(w_kc_c, kv_c) # projected keys
+                    # (BLOCK_M, BLOCK_D) * (BLOCK_D, BLOCK_N)
                     qk += tl.dot(q_d, k_c.to(kv_c.dtype), out_dtype=tl.float32)
-        else:
+        else:  # non-fused
             # load k in transposed way
             offs_k = (
                 (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
@@ -793,7 +839,7 @@ def _fwd_fused_kernel(
             k =  tl.load(
                 K_Extend + offs_k, mask=(mask_n[None, :]) & (mask_c[:, None]), other=0.0
             )
-
+            # (BLOCK_M, C) * (C, BLOCK_N)
             qk = tl.dot(q, k, out_dtype=tl.float32)
 
 
@@ -841,7 +887,18 @@ def _fwd_fused_kernel(
         deno = deno * re_scale + tl.sum(p, 1)
         e_max = n_e_max
         
-        if FUSE_GEMMS:
+        if ABSORB_W_VC:
+            offs_v = (
+            (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
+            + cur_kv_head * stride_vh
+            + offs_c[None, :]
+            )
+            v = tl.load(
+                V_Extend + offs_v, mask=mask_n[:, None] & mask_c[None, :], other=0.0
+            )
+            p = p.to(v.dtype)
+            acc = acc * re_scale[:, None] + tl.dot(p, v) # (BLOCK_M, BLOCK_N) * (BLOCK_N, C)
+        elif FUSE_W_VC: # naive
             offs_v_c = (
                 (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
                 + cur_kv_head * stride_vh
@@ -853,11 +910,11 @@ def _fwd_fused_kernel(
                 kv_c = tl.load(
                     V_Extend + offs_v_c + c * BLOCK_C, mask=mask_n[:, None], other=0.0
                 )
-                
+                # (BLOCK_N, BLOCK_C) * (BLOCK_C, D)
                 v_c = tl.dot(kv_c, w_vc_c) # projected values
-
+                # (BLOCK_M, BLOCK_N) * (BLOCK_N, D)
                 acc += tl.dot(p.to(kv_c.dtype), v_c.to(kv_c.dtype))
-        else:
+        else: # non-fused and absorb
             offs_v = (
             (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
             + cur_kv_head * stride_vh
@@ -867,32 +924,61 @@ def _fwd_fused_kernel(
                 V_Extend + offs_v, mask=mask_n[:, None] & mask_c[None, :], other=0.0
             )
             p = p.to(v.dtype)
-            acc = acc * re_scale[:, None] + tl.dot(p, v)
+            acc = acc * re_scale[:, None] + tl.dot(p, v) # (BLOCK_M, BLOCK_N) * (BLOCK_N, C)
 
     
-    # (BLOCK_M, C) * (C, D)
-
     
-
-    offs_o = (
-        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-        * stride_obs
-        + cur_head * stride_oh
-        + offs_dv[None, :]
-    )
-
-    if STORE_TRANSPOSE:
-        tl.store(
-            O_Extend + offs_o.T,
-            (acc / deno[:, None]).T,
-            mask=(mask_m[:, None] & mask_dv[None, :]).T,
+    
+    
+    if ABSORB_W_VC: # absorb
+        # acc_d = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        offs_w_vc_d = (
+            cur_head * stride_w_h + offs_block_d[None, :] * stride_w_d + offs_c[:, None] * stride_w_c
         )
+        
+        for d in range(0, tl.cdiv(D, BLOCK_D)):
+            offs_o_block = offs_block_d + d * BLOCK_D
+            w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_D * stride_w_d)
+            # (BLOCK_M, C) * (C, BLOCK_D)
+            acc_d = tl.dot(acc.to(w_vc_d.dtype), w_vc_d)
+            offs_o_d = (
+            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+            * stride_obs
+            + cur_head * stride_oh
+            + offs_o_block[None, :]
+            )
+            if STORE_TRANSPOSE:
+                tl.store(
+                    O_Extend + offs_o_d.T,
+                    (acc_d / deno[:, None]).T,
+                    mask=((mask_m[:, None] & (offs_o_block[None, :] < D))).T,
+                )
+            else:
+                tl.store(
+                    O_Extend + offs_o_d,
+                    acc_d / deno[:, None],
+                    mask=(mask_m[:, None] & (offs_o_block[None, :] < D)),
+                )
     else:
-        tl.store(
-            O_Extend + offs_o,
-            acc / deno[:, None],
-            mask=mask_m[:, None] & mask_dv[None, :],
+        offs_o = (
+            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+            * stride_obs
+            + cur_head * stride_oh
+            + offs_dv[None, :]
         )
+
+        if STORE_TRANSPOSE:
+            tl.store(
+                O_Extend + offs_o.T,
+                (acc / deno[:, None]).T,
+                mask=(mask_m[:, None] & mask_dv[None, :]).T,
+            )
+        else:
+            tl.store(
+                O_Extend + offs_o,
+                acc / deno[:, None],
+                mask=mask_m[:, None] & mask_dv[None, :],
+            )
 
 
 def extend_fused_attention_fwd(
@@ -910,10 +996,12 @@ def extend_fused_attention_fwd(
     max_len_extend,
     sm_scale=None,
     logit_cap=0.0,
-    fuse_gemms=False,
+    fuse_w_kc=False,
+    fuse_w_vc=False,
     w_kc=None,
     w_vc=None,
     absorb_w_kc=False,
+    absorb_w_vc=False,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors
@@ -939,16 +1027,19 @@ def extend_fused_attention_fwd(
     
     # second gemm (inside the loop)
     # (BLOCK_M, BLOCK_N) x (BLOCK_N, BLOCK_C) x (BLOCK_C, DV) = (BLOCK_M, DV) # tile across C
+    
+    DV = v_buffer.shape[-1] # no projection
 
+    if fuse_w_kc:
+        assert w_kc is not None, "w_kc must be provided"
 
-    if fuse_gemms:
-        assert w_kc is not None and w_vc is not None, "w_kc and w_vc must be provided when fusing gemms"
-        DV = w_vc.shape[-1]
-    else:
-        DV = v_buffer.shape[-1] # no projection
+    if fuse_w_vc:
+        assert w_vc is not None, "w_vc must be provided"
+        if not absorb_w_vc:
+            DV = w_vc.shape[-1]
 
     if is_hip_:
-        BLOCK_M, BLOCK_N = (64, 64)
+        BLOCK_M, BLOCK_N = (16, 16)
         num_warps = 4
 
     sm_scale = sm_scale or 1.0 / ((k_buffer.shape[-1])**0.5) # TODO: check that this is correct here
@@ -964,6 +1055,13 @@ def extend_fused_attention_fwd(
     if is_hip_:
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
 
+    if fuse_w_kc:
+        w_strides = (w_kc.stride(0), w_kc.stride(1), w_kc.stride(2))
+    elif fuse_w_vc:
+        w_strides = (w_vc.stride(0), w_vc.stride(1), w_vc.stride(2))
+    else:
+        w_strides = (0, 0, 0)
+    
 
     _fwd_fused_kernel[grid](
         q_extend,
@@ -992,19 +1090,19 @@ def extend_fused_attention_fwd(
         v_buffer.stride(0),
         v_buffer.stride(1),
         # FUSE_GEMMS arguments
-        w_kc if fuse_gemms else None,
-        w_vc if fuse_gemms else None,
-        w_kc.stride(0) if fuse_gemms else None,
-        w_kc.stride(1) if fuse_gemms else None,
-        w_kc.stride(2) if fuse_gemms else None,
+        w_kc if fuse_w_kc else None,
+        w_vc if fuse_w_vc else None,
+        *w_strides,
         BLOCK_C=BLOCK_C,
         C=C,
         BLOCK_D=BLOCK_D,
         D=D,
         DV=DV,
         DPE=DPE,
-        FUSE_GEMMS=fuse_gemms,
-        ABSORB_W_KC=absorb_w_kc and fuse_gemms,
+        FUSE_W_KC=fuse_w_kc,
+        FUSE_W_VC=fuse_w_vc,
+        ABSORB_W_KC=absorb_w_kc and fuse_w_kc,
+        ABSORB_W_VC=absorb_w_vc and fuse_w_vc,
         ##################
         logit_cap=logit_cap,
         BLOCK_M=BLOCK_M,
