@@ -12,12 +12,17 @@ from utils.benchmark_utils import get_available_models, get_model_configs
 @triton.autotune(
     configs=[
         triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'kpack': 2, 'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
+        triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
             num_warps=8, num_stages=2),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2,
-                'kpack': 2, 'matrix_instr_nonkdim': 16
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
         triton.Config(
             {
@@ -128,7 +133,7 @@ def matmul_kernel(
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     if APPLY_SCALE:
-        a_scale = tl.load(a_scale_ptr)
+        a_scale = tl.load(a_scale_ptr) if (a_scale_ptr) else 1.0
         b_scale = tl.load(b_scale_ptr)
 
     acc_dtype = tl.float32 if c_ptr.type.element_ty != tl.int8 else tl.int32
@@ -143,6 +148,8 @@ def matmul_kernel(
         else:
             a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # Type conversion to support mixed precision GEMMs where b is lower precision than a
+        b = b.to(a_ptr.type.element_ty)
         accumulator += tl.dot(a, b, input_precision="ieee")
 
         # Advance the ptrs to the next K block.
@@ -176,7 +183,10 @@ def leaky_relu(x):
 def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions!!!"
-    assert a.dtype == b.dtype, "Mixed dtype GEMMs are not supported!!!"
+    assert (a.element_size()
+            >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
+    assert (a.is_floating_point() == b.is_floating_point()
+            ), "GEMMs between float and integer type tensors are not supported!!!"
     M, K = a.shape
     K, N = b.shape
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
@@ -262,32 +272,39 @@ def get_x_vals():
 
 # Unit tests
 #TODO(vgokhale): Test activation.
+# yapf: disable
 @pytest.mark.parametrize(
-    "M, N, K, in_dtype, out_dtype, col_a, col_b",
-    [(*shape, in_dtype, out_dtype, col_a, col_b)
+    "M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b",
+    [(*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
      for shape in get_x_vals()
-     for in_dtype, out_dtype in [('fp16', 'fp16'), ('bf16', 'bf16'), ('fp32', 'fp32'), (
-         'fp8e4', 'fp16'), ('fp8e5', 'fp16'), ('int8', 'int8'), ('int8', 'int32')]
+     for in_dtype_a, in_dtype_b, out_dtype in [
+        ('fp16', 'fp16', 'fp16'),   ('bf16', 'bf16', 'bf16'),   ('fp32', 'fp32', 'fp32'),
+        ('fp8e4', 'fp8e4', 'fp16'), ('fp8e5', 'fp8e5', 'fp16'), ('fp16', 'fp8e4', 'fp16'),
+        ('fp16', 'fp8e5', 'fp16'),  ('bf16', 'fp8e4', 'bf16'),  ('bf16', 'fp8e5', 'bf16'),
+        ('int8', 'int8', 'int8'),   ('int8', 'int8', 'int32')]
      # Defines if a matrix is row or column major.
      for col_a in [True, False]
      for col_b in [True, False]])
-def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype):
-    torch_in_dtype = name_to_torch_types[in_dtype]
-    a, a_fp32, a_scale = gen_input(M, K, torch_in_dtype, col_a, 1, device='cuda')
-    b, b_fp32, b_scale = gen_input(K, N, torch_in_dtype, col_b, 2, device='cuda')
+# yapf: enable
+def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
+    torch_in_dtype_a = name_to_torch_types[in_dtype_a]
+    torch_in_dtype_b = name_to_torch_types[in_dtype_b]
+    a, a_fp32, a_scale = gen_input(M, K, torch_in_dtype_a, col_a, 1, device='cuda')
+    b, b_fp32, b_scale = gen_input(K, N, torch_in_dtype_b, col_b, 2, device='cuda')
     torch_out_dtype = name_to_torch_types[out_dtype]
     c = torch.empty((M, N), device=a.device, dtype=torch_out_dtype)
     # For 8-bit, we have scaled to the dynamic range of the data type.
     # This requires us to compute in fp32 because for e5m2, the range is same as fp16 (e5m10).
     # If we use fp16 it is possible to return infs from the torch.matmul call.
-    if dtype_is_8_bit(torch_in_dtype):
+    if dtype_is_8_bit(torch_in_dtype_a) or dtype_is_8_bit(torch_in_dtype_b):
         matmul(a, b, c, a_scale, b_scale, scale_a8_b8=True, activation="")
         torch_output = torch.matmul(a_fp32, b_fp32)
-        torch_output = torch_output * a_scale * b_scale
+        # Set a_scale to 1.0 if it is not set
+        torch_output = torch_output * (a_scale or 1.0) * b_scale
     # For other dtypes, use the same torch matmul as the dtype.
     else:
         matmul(a, b, c, a_scale=None, b_scale=None, scale_a8_b8=False, activation="")
-        torch_output = torch.matmul(a.to(torch_in_dtype), b.to(torch_in_dtype))
+        torch_output = torch.matmul(a.to(torch_in_dtype_a), b.to(torch_in_dtype_b))
     if out_dtype == 'int8':
         torch.testing.assert_close(c.to(torch.float32),
                                    torch_output.to(torch.int8).to(torch.float32), atol=1e-3, rtol=1e-2)
@@ -297,7 +314,7 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype):
 
 def get_type(provider):
     res = re.findall(r'\(.*?\)', provider)
-    return res[0][1:-1]
+    return res[0][1:-1].split('/', 1)
 
 
 @triton.testing.perf_report(
@@ -306,24 +323,26 @@ def get_type(provider):
         x_vals=get_x_vals(),
         line_arg='provider',
         line_vals=[
-            'hipblaslt(fp16)', 'hipblaslt(bf16)', 'triton(fp16)', 'triton(bf16)', 'triton(int8)', 'triton(fp8e4)',
-            'triton(fp8e5)'
+            'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)',
+            'triton(int8/int8)', 'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)', 'triton(fp16/fp8e4)',
+            'triton(fp16/fp8e5)'
         ],
         line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5"
+            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
+            "Triton.Fp16.Fp8E4", "Triton.Fp16.Fp8E5"
         ],
         ylabel="TFLOPS",
         plot_name="matmul-performance",
         args={},
     ))
 def benchmark(M, N, K, provider, model=None, args=None):
-    in_dtype = name_to_torch_types[get_type(provider)]
-    out_dtype = in_dtype
+    in_dtype_a, in_dtype_b = [name_to_torch_types[x] for x in get_type(provider)]
+    out_dtype = in_dtype_a
 
     quantiles = [0.5, 0.2, 0.8]
     layout_tn = args.layout == 'tn'
-    a, _, a_scale = gen_input(M, K, in_dtype, False, 1, device='cuda')
-    b, _, b_scale = gen_input(K, N, in_dtype, layout_tn, 2, device='cuda')
+    a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, device='cuda')
+    b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, device='cuda')
     if 'hipblaslt' in provider:
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     else:  # triton, different data types
@@ -331,15 +350,12 @@ def benchmark(M, N, K, provider, model=None, args=None):
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
-        if dtype_is_8_bit(in_dtype):
-            a_scale = a_scale.item()
-            b_scale = b_scale.item()
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c, a_scale, b_scale, activation=""),
-                                                     quantiles=quantiles)
+        scale_a8_b8 = dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b)
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: matmul(a, b, c, a_scale, b_scale, scale_a8_b8=scale_a8_b8, activation=""), quantiles=quantiles)
         if args.v:
-            print(
-                f'Best tuning config for M={M}, N={N}, K={K}, dtype={in_dtype} / {out_dtype}: \n({matmul_kernel.best_config})\n'
-            )
+            print(f'Best tuning config for M={M}, N={N}, K={K}, '
+                  f'dtype={in_dtype_a} / {in_dtype_b} / {out_dtype}: \n({matmul_kernel.best_config})\n')
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
@@ -362,24 +378,35 @@ def parse_args():
     parser.add_argument("-N", type=int, default=0)
     parser.add_argument("-K", type=int, default=0)
     parser.add_argument("-layout", type=str, default='tn')
-    parser.add_argument("-dtype", type=str, default=None)
+    parser.add_argument("-dtype", type=str, default=None, help="Data type of inputs and outputs")
+    parser.add_argument("-b_dtype", type=str, default=None,
+                        help="Data type of B operand, if specified (else same as dtype)")
 
     args = parser.parse_args()
 
     return args
 
 
-def get_line_vals_names(dtype=None):
+def get_line_vals_names(a_dtype=None, b_dtype=None):
     line_vals = [
-        'hipblaslt(fp16)', 'hipblaslt(bf16)', 'triton(fp16)', 'triton(bf16)', 'triton(int8)', 'triton(fp8e4)',
-        'triton(fp8e5)'
+        'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)', 'triton(int8/int8)',
+        'triton(fp8e4/fp8e4)', 'triton(fp8e5/fp8e5)', 'triton(fp16/fp8e4)', 'triton(fp16/fp8e5)'
     ]
     line_names = [
-        "hipblaslt.Fp16", "hipblaslt.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5"
+        "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16", "Triton.Int8", "Triton.Fp8E4", "Triton.Fp8E5",
+        "Triton.Fp16.Fp8E4", "Triton.Fp16.Fp8E5"
     ]
-    if dtype is not None:
-        line_vals = ['triton(' + dtype + ')']
-        line_names = ['Triton.' + dtype]
+    assert not ((a_dtype is None) ^ (b_dtype is None))
+    if a_dtype is not None:
+        line_vals_suffix_str = '(' + a_dtype + '/' + b_dtype + ')'
+        line_names_suffix_str = '.' + a_dtype + '.' + b_dtype
+        line_vals = ['triton' + line_vals_suffix_str]
+        line_names = ['Triton' + line_names_suffix_str]
+    if not dtype_is_8_bit(name_to_torch_types[a_dtype]) and \
+       not dtype_is_8_bit(name_to_torch_types[b_dtype]):
+        line_vals += ['hipblaslt' + line_vals_suffix_str]
+        line_names += ['hipblaslt' + line_names_suffix_str]
+
     return line_vals, line_names
 
 
@@ -398,9 +425,13 @@ def main():
         benchmark.benchmarks.x_names = ['model', 'M', 'N', 'K']
         benchmark.benchmarks.x_vals = mnk_list
 
-    benchmark.benchmarks.line_vals, benchmark.benchmarks.line_names = get_line_vals_names(args.dtype)
+    a_dtype = args.dtype
+    b_dtype = args.b_dtype or args.dtype
+    benchmark.benchmarks.line_vals, benchmark.benchmarks.line_names = get_line_vals_names(a_dtype, b_dtype)
     if args.N or args.K:
         assert args.model is None, "Providing both -model and N/K is not compatible! -model already fixes N/K."
+    assert a_dtype is None or a_dtype in name_to_torch_types, f"Unsupported dtype {a_dtype}"
+    assert b_dtype is None or b_dtype in name_to_torch_types, f"Unsupported dtype {b_dtype}"
 
     if args.M and args.N and args.K:
         x_vals = [(args.M, args.N, args.K)]
