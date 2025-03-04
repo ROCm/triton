@@ -277,18 +277,20 @@ def get_x_vals():
 
 # Unit tests
 #TODO(vgokhale): Test activation.
+# yapf: disable
 @pytest.mark.parametrize(
     "M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b",
     [(*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
      for shape in get_x_vals()
-     for in_dtype_a, in_dtype_b, out_dtype in [('fp16', 'fp16', 'fp16'), (
-         'bf16', 'bf16', 'bf16'), ('fp32', 'fp32', 'fp32'), ('fp8e4', 'fp8e4', 'fp16'), (
-             'fp8e5', 'fp8e5', 'fp16'), ('fp16', 'fp8e4', 'fp16'), ('fp16', 'fp8e5', 'fp16'), (
-                 'bf16', 'fp8e4', 'bf16'), ('bf16', 'fp8e5', 'bf16'), ('int8', 'int8', 'int8'), ('int8', 'int8',
-                                                                                                 'int32')]
+     for in_dtype_a, in_dtype_b, out_dtype in [
+        ('fp16', 'fp16', 'fp16'),   ('bf16', 'bf16', 'bf16'),   ('fp32', 'fp32', 'fp32'),
+        ('fp8e4', 'fp8e4', 'fp16'), ('fp8e5', 'fp8e5', 'fp16'), ('fp16', 'fp8e4', 'fp16'),
+        ('fp16', 'fp8e5', 'fp16'),  ('bf16', 'fp8e4', 'bf16'),  ('bf16', 'fp8e5', 'bf16'),
+        ('int8', 'int8', 'int8'),   ('int8', 'int8', 'int32')]
      # Defines if a matrix is row or column major.
      for col_a in [True, False]
      for col_b in [True, False]])
+# yapf: enable
 def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
     torch_in_dtype_a = name_to_torch_types[in_dtype_a]
     torch_in_dtype_b = name_to_torch_types[in_dtype_b]
