@@ -138,7 +138,7 @@ def matmul_kernel(
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     if APPLY_SCALE:
-        a_scale = tl.load(a_scale_ptr)
+        a_scale = tl.load(a_scale_ptr) if (a_scale_ptr) else 1.0
         b_scale = tl.load(b_scale_ptr)
 
     acc_dtype = tl.float32 if c_ptr.type.element_ty != tl.int8 else tl.int32
@@ -153,6 +153,7 @@ def matmul_kernel(
         else:
             a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # Type conversion to support mixed precision GEMMs where b is lower precision than a
         b = b.to(a_ptr.type.element_ty)
         accumulator += tl.dot(a, b, input_precision="ieee")
 
@@ -299,13 +300,10 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
     # This requires us to compute in fp32 because for e5m2, the range is same as fp16 (e5m10).
     # If we use fp16 it is possible to return infs from the torch.matmul call.
     if dtype_is_8_bit(torch_in_dtype_a) or dtype_is_8_bit(torch_in_dtype_b):
-        # If one of the input tensors is not fp8, then its scale will not be set
-        # Set scale to 1.0 if it is not set
-        a_scale = a_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
-        b_scale = b_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
         matmul(a, b, c, a_scale, b_scale, scale_a8_b8=True, activation="")
         torch_output = torch.matmul(a_fp32, b_fp32)
-        torch_output = torch_output * a_scale * b_scale
+        # Set a_scale to 1.0 if it is not set
+        torch_output = torch_output * (a_scale or 1.0) * b_scale
     # For other dtypes, use the same torch matmul as the dtype.
     else:
         matmul(a, b, c, a_scale=None, b_scale=None, scale_a8_b8=False, activation="")
@@ -357,14 +355,9 @@ def benchmark(M, N, K, provider, model=None):
         b, _, b_scale = gen_input(K, N, in_dtype_b, True, 2, device='cuda')
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
-
-        if dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b):
-            a_scale = a_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
-            b_scale = b_scale or torch.tensor([1.0], dtype=torch.float32, device='cuda')
-            a_scale = a_scale.item()
-            b_scale = b_scale.item()
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, c, a_scale, b_scale, activation=""),
-                                                     quantiles=quantiles)
+        scale_a8_b8 = dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b)
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: matmul(a, b, c, a_scale, b_scale, scale_a8_b8=scale_a8_b8, activation=""), quantiles=quantiles)
         global verbose
         if verbose:
             print(f'SIZE: {M},{N},{K}   Best tuning config: ({matmul_kernel.best_config()})')
