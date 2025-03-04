@@ -303,6 +303,7 @@ LogicalResult ConcatOp::verify() {
                          << scaledSrcDim << "` after concatenation";
     }
   }
+
   return success();
 }
 
