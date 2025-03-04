@@ -355,9 +355,6 @@ def parse_args():
         "Model name to benchmark. Select from: [" + ", ".join(available_models) +
         "]. Use 'all' to benchmark all models. Not providing runs the default benchmark script with custom configs.")
     parser.add_argument('-model', type=str, default=None, help=model_help)
-    parser.add_argument('-b', type=int, default=0, help="Batch size used together with model.")
-    parser.add_argument('-sq', type=int, default=0, help="Sequence length used together with model.")
-
     parser.add_argument("-v", action='store_true', default=False, help="Print out the best tuning config")
     parser.add_argument("-M", type=int, default=0)
     parser.add_argument("-N", type=int, default=0)
