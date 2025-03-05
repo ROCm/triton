@@ -32,7 +32,7 @@ def main():
     triton_dir = os.environ.get("TRITONDIR", "~/triton")  # Default to ~/triton if not set
     output_file = os.path.expanduser("~/profiling.csv")
     kernel_names = ["_fwd_fused_kernel.kd", "_fwd_kernel.kd"]
-    batch_sizes = [2]
+    batch_sizes = [1]
     
     results = {B: {} for B in batch_sizes}
     for B in batch_sizes:
