@@ -427,11 +427,11 @@ def main():
 
     a_dtype = args.dtype
     b_dtype = args.b_dtype or args.dtype
+    assert a_dtype is None or a_dtype in name_to_torch_types, f"Unsupported dtype {a_dtype}"
+    assert b_dtype is None or b_dtype in name_to_torch_types, f"Unsupported dtype {b_dtype}"
     benchmark.benchmarks.line_vals, benchmark.benchmarks.line_names = get_line_vals_names(a_dtype, b_dtype)
     if args.N or args.K:
         assert args.model is None, "Providing both -model and N/K is not compatible! -model already fixes N/K."
-    assert a_dtype is None or a_dtype in name_to_torch_types, f"Unsupported dtype {a_dtype}"
-    assert b_dtype is None or b_dtype in name_to_torch_types, f"Unsupported dtype {b_dtype}"
 
     if args.M and args.N and args.K:
         x_vals = [(args.M, args.N, args.K)]
