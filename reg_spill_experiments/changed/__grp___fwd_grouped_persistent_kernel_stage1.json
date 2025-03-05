@@ -1,0 +1,10 @@
+{
+  "child_paths": {
+    "_fwd_grouped_persistent_kernel_stage1.ttir": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.ttir",
+    "_fwd_grouped_persistent_kernel_stage1.ttgir": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.ttgir",
+    "_fwd_grouped_persistent_kernel_stage1.llir": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.llir",
+    "_fwd_grouped_persistent_kernel_stage1.amdgcn": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.amdgcn",
+    "_fwd_grouped_persistent_kernel_stage1.hsaco": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.hsaco",
+    "_fwd_grouped_persistent_kernel_stage1.json": "/home/kwang102/.triton/cache/MDSDB5MWXRXDWLUHUKVL2YPOOWPDQQX5ZS77I62VTPD4S3CGWOIQ/_fwd_grouped_persistent_kernel_stage1.json"
+  }
+}
