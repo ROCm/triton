@@ -57,7 +57,7 @@ struct ExtractSliceOpConversion
   }
 
   LogicalResult processLayout(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
-                              ConversionPatternRewriter &rewriter) const {
+                                ConversionPatternRewriter &rewriter) const {
     Location loc = op->getLoc();
     auto srcTy = cast<RankedTensorType>(op.getSource().getType());
     auto srcLayout = srcTy.getEncoding();
@@ -65,56 +65,60 @@ struct ExtractSliceOpConversion
     auto resultTy = cast<RankedTensorType>(op.getType());
     auto vals = unpackLLElements(loc, adaptor.getSource(), rewriter);
     auto elemsPerThread = triton::gpu::getElemsPerThread(srcTy);
-    auto sizePerThread = triton::gpu::getSizePerThread(srcLayout);
+    auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(srcLayout);
+    auto sizePerThread = triton::gpu::getSizePerThread(
+      sliceLayout ? sliceLayout.getParent() : srcLayout);
     auto totalSizePerThread = product<unsigned>(sizePerThread);
     auto order = triton::gpu::getOrder(srcLayout);
+    auto offsets = op.getStaticOffsets();
 
     // Calculate valid total number of workers in each dimension
     auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcLayout);
-    shapePerCTATile[0] =
-        std::min(static_cast<unsigned>(srcShape[0]), shapePerCTATile[0]);
-    shapePerCTATile[1] =
-        std::min(static_cast<unsigned>(srcShape[1]), shapePerCTATile[1]);
-
-    // Rank == 2 checked in the verifier
-    SmallVector<int64_t, 2> sizes;
-    for (auto i = 0; i < 2; ++i) {
-      sizes.push_back(resultTy.getDimSize(i));
+    for (auto i = 0; i < shapePerCTATile.size(); ++i) {
+      shapePerCTATile[i] = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
     }
 
-    auto offsets = op.getStaticOffsets();
-
     // Calculate offsets and sizes in terms of CTA units.
-    std::array<int64_t, 2> CTAOffsets{offsets[0] / shapePerCTATile[0],
-                                      offsets[1] / shapePerCTATile[1]};
-    std::array<int64_t, 2> CTASizes{sizes[0] / shapePerCTATile[0],
-                                    sizes[1] / shapePerCTATile[1]};
-    std::array<int64_t, 2> CTAPerShape{srcShape[0] / shapePerCTATile[0],
-                                       srcShape[1] / shapePerCTATile[1]};
+    SmallVector<int64_t> sizes;
+    SmallVector<int64_t> CTAOffsets;
+    SmallVector<int64_t> CTASizes;
+    SmallVector<int64_t> CTAPerShape;
+    for (auto i = 0; i < resultTy.getRank(); ++i) {
+      sizes.push_back(resultTy.getDimSize(i));
+      CTAOffsets.push_back(offsets[i] / shapePerCTATile[i]);
+      CTASizes.push_back(sizes[i] / shapePerCTATile[i]);
+      CTAPerShape.push_back(srcShape[i] / shapePerCTATile[i]);
+    }
 
-    // The diagram above illustrates the graphical representation of the
-    // skipElems, tensorStride, and lastIdx variables.
-    auto skipElems = CTAOffsets[order[1]] *
-                         (elemsPerThread[order[0]] * sizePerThread[order[1]]) +
-                     CTAOffsets[order[0]] * totalSizePerThread;
-    auto tensorStride =
-        (CTAPerShape[order[0]] - CTASizes[order[0]]) * totalSizePerThread;
-    auto lastIdx =
-        (CTAOffsets[order[1]] + CTASizes[order[1]] - 1) *
-            elemsPerThread[order[0]] * sizePerThread[order[1]] +
-        (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalSizePerThread;
-
+    // SliceLayout uses 1d offsets.
+    auto skipElems = CTAOffsets[0] * totalSizePerThread;
+    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * totalSizePerThread;
+    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * totalSizePerThread;
+    auto numElemsPerVec = totalSizePerThread * CTASizes[0];
+    if(!sliceLayout) {
+      // Non-SliceLayouts use 2d offsets (based on order).
+      skipElems = CTAOffsets[order[1]] *
+          (elemsPerThread[order[0]] * sizePerThread[order[1]]) +
+          CTAOffsets[order[0]] * totalSizePerThread;
+      tensorStride =
+          (CTAPerShape[order[0]] - CTASizes[order[0]]) * totalSizePerThread;
+      lastIdx =
+          (CTAOffsets[order[1]] + CTASizes[order[1]] - 1) *
+          elemsPerThread[order[0]] * sizePerThread[order[1]] +
+          (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalSizePerThread;
+      numElemsPerVec = totalSizePerThread * CTASizes[order[0]];
+    }
     assert(lastIdx <= vals.size());
 
     SmallVector<Value> resultVals;
     for (int i = skipElems; i < lastIdx; i += tensorStride) {
-      for (int j = 0; j < totalSizePerThread * CTASizes[order[0]]; ++j, ++i) {
+      for (int j = 0; j < numElemsPerVec; ++j, ++i) {
         assert(i < lastIdx);
         resultVals.push_back(vals[i]);
       }
     }
     Value ret = packLLElements(loc, this->getTypeConverter(), resultVals,
-                               rewriter, resultTy);
+        rewriter, resultTy);
 
     rewriter.replaceOp(op, ret);
     return success();
@@ -124,9 +128,15 @@ struct ExtractSliceOpConversion
   matchAndRewrite(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto srcTy = op.getSource().getType();
+    auto encoding = srcTy.getEncoding();
     if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(
-            op.getSource().getType().getEncoding())) {
+            encoding)) {
       return processLayout(op, adaptor, rewriter);
+    } else if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(encoding)) {
+      auto parent = sliceLayout.getParent();
+      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parent)) {
+        return processLayout(op, adaptor, rewriter);
+      }
     }
     return failure();
   }
