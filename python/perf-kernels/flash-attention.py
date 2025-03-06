@@ -2083,8 +2083,8 @@ arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': tor
 def main():
     args = parse_args()
     custom_config = False
-    assert args.layout == 'thd' or not args.equal_seqlens, \
-           "Equal sequence lengths arg must be used with the thd layout."
+    assert args.layout == 'thd' or not args.equal_seqlens or args.model, \
+           "Equal sequence lengths arg must be used with the thd layout or a model config."
     if args.hq or args.hk or args.d:
         custom_config = True
         assert args.b and args.hq and args.sq and args.d, \
@@ -2098,6 +2098,9 @@ def main():
 
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
+
+    if args.model:
+        print("Note: Model config sets causal masking and THD layout (varlen) by default.")
 
     run_benchmark(custom_config, args)
 
