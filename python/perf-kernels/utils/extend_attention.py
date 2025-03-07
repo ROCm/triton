@@ -376,27 +376,27 @@ def extend_attention_fwd(
         BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
 
-    if is_hip_:
-        BLOCK_M, BLOCK_N = (64, 64)
-        num_warps = 4
+    # if is_hip_:
+    BLOCK_M, BLOCK_N = (64, 64)
+    num_warps = 4
 
-    else:
-        if is_cuda_available and CUDA_CAPABILITY[0] >= 9:
-            if Lq <= 256:
-                BLOCK_M, BLOCK_N = (128, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 64)
-        elif is_cuda_available and CUDA_CAPABILITY[0] >= 8:
-            if Lq <= 128:
-                BLOCK_M, BLOCK_N = (128, 128)
-            elif Lq <= 256:
-                BLOCK_M, BLOCK_N = (64, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 64)
-        else:
-            BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
+    # else:
+    #     if is_cuda_available and CUDA_CAPABILITY[0] >= 9:
+    #         if Lq <= 256:
+    #             BLOCK_M, BLOCK_N = (128, 64)
+    #         else:
+    #             BLOCK_M, BLOCK_N = (32, 64)
+    #     elif is_cuda_available and CUDA_CAPABILITY[0] >= 8:
+    #         if Lq <= 128:
+    #             BLOCK_M, BLOCK_N = (128, 128)
+    #         elif Lq <= 256:
+    #             BLOCK_M, BLOCK_N = (64, 64)
+    #         else:
+    #             BLOCK_M, BLOCK_N = (32, 64)
+    #     else:
+    #         BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
 
-        num_warps = 4 if Lk <= 64 else 8
+    #     num_warps = 4 if Lk <= 64 else 8
 
     sm_scale = sm_scale or 1.0 / (Lq**0.5)
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
@@ -1049,8 +1049,8 @@ def extend_fused_attention_fwd(
 
     DK = k_buffer.shape[-1] - DPE
     
-    BLOCK_C = min(128, C)
-    BLOCK_D = min(32, D)
+    BLOCK_C = min(256, C)
+    BLOCK_D = min(64, D)
 
     if fuse_w_kc:
         assert w_kc is not None, "w_kc must be provided"
@@ -1065,9 +1065,9 @@ def extend_fused_attention_fwd(
         DACC = v_buffer.shape[-1] # no projection
         DO = v_buffer.shape[-1] # no projection
             
-    if is_hip_:
-        BLOCK_M, BLOCK_N = (64, 64)
-        num_warps = 4
+    # if is_hip_:
+    BLOCK_M, BLOCK_N = (64, 64)
+    num_warps = 4
 
     sm_scale = sm_scale or 1.0 / ((k_buffer.shape[-1])**0.5) # TODO: check that this is correct here
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
@@ -1091,27 +1091,27 @@ def extend_fused_attention_fwd(
     else:
         w_strides = (0, 0, 0)
     
-    print("k buffer", k_buffer.shape)
-    print("v buffer", v_buffer.shape)
-    print("q extend", q_extend.shape)
-    print("k extend", k_extend.shape)
-    print("v extend", v_extend.shape)
+    # print("k buffer", k_buffer.shape)
+    # print("v buffer", v_buffer.shape)
+    # print("q extend", q_extend.shape)
+    # print("k extend", k_extend.shape)
+    # print("v extend", v_extend.shape)
 
-    print("DQ", DQ)
-    print("DK", DK)
-    print("DV", DV)
-    print("DACC", DACC)
-    print("DO", DO)
+    # print("DQ", DQ)
+    # print("DK", DK)
+    # print("DV", DV)
+    # print("DACC", DACC)
+    # print("DO", DO)
 
-    print("D", D)
-    print("C", C)
+    # print("D", D)
+    # print("C", C)
 
-    print("fuse wkc", fuse_w_kc)
-    print("fuse wvc", fuse_w_vc)
-    print("absorb wkc", absorb_w_kc)
-    print("absorb wvc", absorb_w_vc)
+    # print("fuse wkc", fuse_w_kc)
+    # print("fuse wvc", fuse_w_vc)
+    # print("absorb wkc", absorb_w_kc)
+    # print("absorb wvc", absorb_w_vc)
 
-    print("kv_group_num", kv_group_num)
+    # print("kv_group_num", kv_group_num)
 
     _fwd_fused_kernel[grid](
         q_extend,
