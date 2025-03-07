@@ -60,6 +60,12 @@ def matmul_kernel(
     stride_cn,
     a_scale_ptr,
     b_scale_ptr,
+    group_k,
+    group_n,
+    stride_ascale_m,
+    stride_ascale_k,
+    stride_bscale_k,
+    stride_bscale_n,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -82,6 +88,10 @@ def matmul_kernel(
     tl.assume(stride_bn > 0)
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
+    tl.assume(stride_ascale_m > 0)
+    tl.assume(stride_ascale_k > 0)
+    tl.assume(stride_bscale_k > 0)
+    tl.assume(stride_bscale_n > 0)
 
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -132,9 +142,13 @@ def matmul_kernel(
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    if APPLY_SCALE:
+    if APPLY_SCALE == 1:
         a_scale = tl.load(a_scale_ptr) if (a_scale_ptr) else 1.0
         b_scale = tl.load(b_scale_ptr)
+    elif APPLY_SCALE == 2:
+        a_scale_ptrs =  None if a_scale_ptr is None else (a_scale_ptr + offs_am * stride_ascale_m)
+        offs_bsn = offs_bn // group_n
+        b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bscale_n
 
     acc_dtype = tl.float32 if c_ptr.type.element_ty != tl.int8 else tl.int32
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
@@ -150,13 +164,25 @@ def matmul_kernel(
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # Type conversion to support mixed precision GEMMs where b is lower precision than a
         b = b.to(a_ptr.type.element_ty)
-        accumulator += tl.dot(a, b, input_precision="ieee")
+
+        if APPLY_SCALE == 2:
+            k_start = k * BLOCK_SIZE_K
+            offs_ks = k_start // group_k
+            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bscale_k)
+            if a_scale_ptrs is not None:
+                a_scale = tl.load(a_scale_ptrs + offs_ks * stride_ascale_k)
+                accumulator += tl.dot(a, b, input_precision="ieee") * a_scale[:, None] * b_scale[None, :]
+            else:
+                accumulator += tl.dot(a, b, input_precision="ieee") * b_scale[None, :]
+        else:
+            accumulator += tl.dot(a, b, input_precision="ieee")
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
     # Apply scale to recover dynamic range reduced due to lower precision inputs.
-    if APPLY_SCALE:
+    if APPLY_SCALE == 1:
         accumulator = accumulator * a_scale * b_scale
     # Apply activation function, if specified.
     # TODO(vgokhale): Add different types of activations.
@@ -205,6 +231,12 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         c.stride(1),
         a_scale,
         b_scale,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
         APPLY_SCALE=scale_a8_b8,
         ACTIVATION=activation,
     )
@@ -243,7 +275,36 @@ def dtype_is_8_bit(dtype):
            (dtype is torch.int8)
 
 
-def gen_input(M, N, dtype, needTrans, seed, device='cuda'):
+def ceil_div(x, y):
+    return (x + y - 1) // y
+
+
+def per_token_cast_to_fp8(x):
+    assert x.dim() == 2 and x.size(1) % 128 == 0
+    m, n = x.shape
+    x_view = x.view(m, -1, 128)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
+        m, n
+    ), (x_amax / 448.0).view(m, -1)
+
+
+def per_block_cast_to_fp8(x):
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (ceil_div(m, 128) * 128, ceil_div(n, 128) * 128), dtype=x.dtype, device=x.device
+    )
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(
+        x_view.size(0), x_view.size(2)
+    )
+
+
+def gen_input(M, N, dtype, needTrans, seed, cast_type=None, device='cuda'):
     torch.manual_seed(seed)
 
     if needTrans:
@@ -252,9 +313,17 @@ def gen_input(M, N, dtype, needTrans, seed, device='cuda'):
         raw_data = torch.randn((M, N), dtype=torch.float32, device='cuda')
     scale = None
     if dtype_is_8_bit(dtype):
-        max_val = torch.max(torch.abs(raw_data))
-        scale = max_val / dtype_max[dtype]
-        raw_data = raw_data / scale
+        if cast_type == "token":
+            raw_data, scale = per_token_cast_to_fp8(raw_data)
+            print("Cast type token")
+        elif cast_type == "block":
+            raw_data, scale = per_block_cast_to_fp8(raw_data)
+            print("Cast type block")
+        else:
+            max_val = torch.max(torch.abs(raw_data))
+            scale = max_val / dtype_max[dtype]
+            raw_data = raw_data / scale
+            print("Cast type tensor")
 
     input = raw_data.to(dtype)
     input_f32 = input.to(torch.float32)
@@ -341,8 +410,14 @@ def benchmark(M, N, K, provider, model=None, args=None):
 
     quantiles = [0.5, 0.2, 0.8]
     layout_tn = args.layout == 'tn'
-    a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, device='cuda')
-    b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, device='cuda')
+
+    if args.fp8_scaling_mode == "tensor" or in_dtype_b == torch.int8:
+        a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, device='cuda')
+        b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, device='cuda')
+    else:
+        a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, cast_type="token", device='cuda')
+        b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, cast_type="block", device='cuda')
+
     if 'hipblaslt' in provider:
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     else:  # triton, different data types
@@ -351,6 +426,8 @@ def benchmark(M, N, K, provider, model=None, args=None):
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
         scale_a8_b8 = dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b)
+        if scale_a8_b8 and args.fp8_scaling_mode == "block":
+            scale_a8_b8 = 1 if in_dtype_b == torch.int8 else 2
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: matmul(a, b, c, a_scale, b_scale, scale_a8_b8=scale_a8_b8, activation=""), quantiles=quantiles)
         if args.v:
@@ -381,6 +458,8 @@ def parse_args():
     parser.add_argument("-dtype", type=str, default=None, help="Data type of inputs and outputs")
     parser.add_argument("-b_dtype", type=str, default=None,
                         help="Data type of B operand, if specified (else same as dtype)")
+    parser.add_argument("-fp8_scaling_mode", type=str, default='tensor', choices=['tensor', 'block'],
+                        help="Type of scaling to apply when either or both inputs are fp8")
 
     args = parser.parse_args()
 
