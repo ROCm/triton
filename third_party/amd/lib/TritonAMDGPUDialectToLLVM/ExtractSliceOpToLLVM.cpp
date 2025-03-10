@@ -62,7 +62,7 @@ struct ExtractSliceOpConversion
   }
 
   LogicalResult processLayout2d(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
-                              ConversionPatternRewriter &rewriter) const {
+                                ConversionPatternRewriter &rewriter) const {
     Location loc = op->getLoc();
     auto srcTy = cast<RankedTensorType>(op.getSource().getType());
     auto srcLayout = srcTy.getEncoding();
@@ -155,7 +155,8 @@ struct ExtractSliceOpConversion
     // Calculate valid total number of workers in each dimension
     auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcLayout);
     for (auto i = 0; i < shapePerCTATile.size(); ++i) {
-      shapePerCTATile[i] = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
+      shapePerCTATile[i] =
+          std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
     }
     LDBG("shapePerCTATile: " << shapePerCTATile[0] << "x" << "!");
 
@@ -176,12 +177,9 @@ struct ExtractSliceOpConversion
     LDBG("CTASizes: " << CTASizes[0] << "x" << "!");
     LDBG("CTAPerShape: " << CTAPerShape[0] << "x" << "!");
 
-    auto skipElems =
-        CTAOffsets[0] * totalSizePerThread;
-    auto tensorStride =
-        (CTAPerShape[0] - CTASizes[0]) * totalSizePerThread;
-    auto lastIdx =
-        (CTAOffsets[0] + CTASizes[0]) * totalSizePerThread;
+    auto skipElems = CTAOffsets[0] * totalSizePerThread;
+    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * totalSizePerThread;
+    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * totalSizePerThread;
     LDBG("skipElems: " << skipElems);
     LDBG("tensorStride: " << tensorStride);
     LDBG("lastIdx: " << lastIdx);
@@ -197,7 +195,7 @@ struct ExtractSliceOpConversion
       }
     }
     Value ret = packLLElements(loc, this->getTypeConverter(), resultVals,
-        rewriter, resultTy);
+                               rewriter, resultTy);
 
     rewriter.replaceOp(op, ret);
     return success();
@@ -213,7 +211,8 @@ struct ExtractSliceOpConversion
       return processLayout2d(op, adaptor, rewriter);
     } else if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(encoding)) {
       auto parent = sliceLayout.getParent();
-      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parent)) {
+      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(
+              parent)) {
         return processLayout1d(op, adaptor, rewriter);
       }
     }
