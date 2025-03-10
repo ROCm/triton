@@ -130,9 +130,11 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
 
     return out
 
-def forward_normal(q_extend, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
+def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                     fuse_wkc, fuse_wvc, w_kc, w_vc, absorb_wkc, absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused):
     
+    out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+
     if not fused:  # aka reference
         fuse_wkc = False
         fuse_wvc = False
@@ -204,34 +206,28 @@ def benchmark(args):
         q_extend, k_extend, v_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
             B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
         
-        out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
+        
 
         # Define the function to benchmark based on provider
         if "fused" in provider:
             def fn():
-                return forward(q_extend, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
+                return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                                      args.fuse_wkc, args.fuse_wvc, w_kc, w_vc, args.absorb_wkc, args.absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True)
-            # warmup
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                for _ in range(3):
-                    fn()
-            torch.cuda.current_stream().wait_stream(s)
         
         elif "ref" in provider:
             def fn():
-                return forward(q_extend, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
+                return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                                      False, False, w_kc, w_vc, False, False, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
-            # warmup
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                for _ in range(3):
-                    fn()
-            torch.cuda.current_stream().wait_stream(s)
+        
+        # warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                fn()
+        torch.cuda.current_stream().wait_stream(s)
         
         # Use CUDA graph for benchmarking
         torch.cuda.synchronize()  # Synchronize before capturing
