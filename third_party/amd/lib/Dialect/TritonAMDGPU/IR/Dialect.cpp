@@ -108,17 +108,18 @@ LogicalResult ExtractSliceOp::verify() {
     }
     int64_t size = resultDimSize;
 
-    int64_t dimSizePerCTATile = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
+    int64_t dimSizePerCTATile =
+        std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
     if (size % dimSizePerCTATile != 0) {
       return emitError() << "size [" << size
-                       << "] must be a multiple of shapePerCTATile ["
-                       << dimSizePerCTATile << "]";
+                         << "] must be a multiple of shapePerCTATile ["
+                         << dimSizePerCTATile << "]";
     }
 
     if (offsets[i] % dimSizePerCTATile != 0) {
       return emitError() << "offset [" << offsets
-                       << "] must be a multiple of shapePerCTATile ["
-                       << dimSizePerCTATile << "]";
+                         << "] must be a multiple of shapePerCTATile ["
+                         << dimSizePerCTATile << "]";
     }
   }
 
