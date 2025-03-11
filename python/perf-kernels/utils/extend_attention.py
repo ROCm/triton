@@ -875,7 +875,7 @@ def extend_fused_attention_fwd(
     fuse_w_vc=False,
     w_kc=None,
     w_vc=None,
-    persistent=False,
+    persistent=True,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors

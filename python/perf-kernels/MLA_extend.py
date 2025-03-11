@@ -264,7 +264,7 @@ def parse_args():
     parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
-    parser.add_argument("-fuse_wkc", type=bool, default=True)
+    parser.add_argument("-fuse_wkc", type=bool, default=False)
     parser.add_argument("-fuse_wvc", type=bool, default=False)
     parser.add_argument("-attn_impl", type=str, default="")
     parser.add_argument("-cuda_graph", action="store_true", default=False)
@@ -299,8 +299,8 @@ def parse_vgpr_usage(file_path):
             vgpr_info.append(line.strip())
         # Detect start of table
         if re.match(r"^\s*MLA-decode", line):
+            vgpr_info.append(line.strip())
             in_table = True
-            # table_lines.append(line.strip())
         elif in_table:
             table_lines.append(line.strip())
 
