@@ -52,12 +52,13 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     return q_extend, k_extend, v_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
-    (2, 16, 2048, 2048, 512, 64, 128),
+    (2, 16, 2048, 512, 512, 64, 128),
+    (2, 16, 0, 2048, 512, 64, 128),
 ])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('ref_attn_impl', ["absorb"])
-@pytest.mark.parametrize('fuse_wkc', [False])
-@pytest.mark.parametrize('fuse_wvc', [False])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.parametrize('ref_attn_impl', ["absorb", "normal"])
+@pytest.mark.parametrize('fuse_wkc', [False, True])
+@pytest.mark.parametrize('fuse_wvc', [False, True])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, ref_attn_impl, fuse_wkc, fuse_wvc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -174,12 +175,12 @@ def benchmark(args):
     configs = []
     x_vals_list = [
         (16, 16, 0, 4096, 512, 64, 128, "normal"),
-        (2, 16, 2048, 512, 512, 64, 128, "absorb"),
+        (2, 16, 4096, 512, 512, 64, 128, "absorb"),
     ]
     
-    if args.B > 1:
+    if args.B > 1 or args.attn_impl != "":
         x_vals_list = [
-            (args.B, 16, 128, 2048, 512, 64, 128, "absorb"),
+            (args.B, 16, 128, 2048, 512, 64, 128, args.attn_impl),
         ]
 
     x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim", "attn_impl"]
@@ -225,22 +226,26 @@ def benchmark(args):
                                      False, False, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
         
         # warmup
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
-                fn()
-        torch.cuda.current_stream().wait_stream(s)
-        
-        # Use CUDA graph for benchmarking
-        torch.cuda.synchronize()  # Synchronize before capturing
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            fn()  # Capture the function execution
-        torch.cuda.synchronize()  # Synchronize after capturing
+        if args.cuda_graph:
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):
+                    fn()
+            torch.cuda.current_stream().wait_stream(s)
+            
+            # Use CUDA graph for benchmarking
+            torch.cuda.synchronize()  # Synchronize before capturing
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                fn()  # Capture the function execution
+            torch.cuda.synchronize()  # Synchronize after capturing
+            func = g.replay
+        else:
+            func = fn
 
         # Replay the graph for benchmarking
-        ms = triton.testing.do_bench(lambda: g.replay(), warmup=warmup, rep=rep)
+        ms = triton.testing.do_bench(func, warmup=warmup, rep=rep)
         return ms
 
     bench_MLA.run(save_path=None, print_data=True, show_plots=False)
@@ -259,9 +264,10 @@ def parse_args():
     parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
-    parser.add_argument("-fuse_wkc", type=bool, default=False)
+    parser.add_argument("-fuse_wkc", type=bool, default=True)
     parser.add_argument("-fuse_wvc", type=bool, default=False)
-    parser.add_argument("-attn_impl", type=str, default="normal")
+    parser.add_argument("-attn_impl", type=str, default="")
+    parser.add_argument("-cuda_graph", action="store_true", default=False)
     parser.add_argument("-B", type=int, default=1)
 
     return parser.parse_args()
@@ -292,7 +298,7 @@ def parse_vgpr_usage(file_path):
         if re.search(r"\.vgpr_count:", line) or re.search(r"\.vgpr_spill_count:", line):
             vgpr_info.append(line.strip())
         # Detect start of table
-        if re.match(r"^\s*MLA-decode:", line):
+        if re.match(r"^\s*MLA-decode", line):
             in_table = True
             # table_lines.append(line.strip())
         elif in_table:
