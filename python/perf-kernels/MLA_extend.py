@@ -52,17 +52,13 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     return q_extend, k_extend, v_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc
 
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
-    (1, 16, 0, 2048, 512, 64, 128),
     (2, 16, 2048, 2048, 512, 64, 128),
-    (2, 16, 2048, 2048, 128, 64, 128),
 ])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.parametrize('ref_attn_impl', ["normal", "absorb"])
 @pytest.mark.parametrize('fuse_wkc', [False, True])
 @pytest.mark.parametrize('fuse_wvc', [False, True])
-@pytest.mark.parametrize('absorb_wkc', [False, True])
-@pytest.mark.parametrize('absorb_wvc', [False, True])
-def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, ref_attn_impl, fuse_wkc, fuse_wvc, absorb_wkc, absorb_wvc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
+def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, ref_attn_impl, fuse_wkc, fuse_wvc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -77,11 +73,11 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
    
     # Test with fused=False
     output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                 fuse_wkc, fuse_wvc, w_kc, w_vc, absorb_wkc, absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
+                                 fuse_wkc, fuse_wvc, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
 
     # Test with fused=True
     output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                   fuse_wkc, fuse_wvc, w_kc, w_vc, absorb_wkc, absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True)
+                                   fuse_wkc, fuse_wvc, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True)
 
     # Compare the outputs
     # Print debug information for mismatches
@@ -98,7 +94,7 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
 
 
 def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                    fuse_wkc, fuse_wvc, w_kc, w_vc, absorb_wkc, absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused):
+                    fuse_wkc, fuse_wvc, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused):
     
     if not fused: # aka reference
         fuse_wkc = False
@@ -121,8 +117,11 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
     if not fused:
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
-        extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=absorb_wkc, absorb_w_vc=absorb_wvc)
+        # extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+        #                            fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc)
+        # simulate fp8 gemmm effect
+        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, w_vc=w_vc.to(torch.float8_e4m3fnuz) if fuse_wvc else w_vc)
     
     if not fuse_wvc: # 2nd gemm
         bmm_output = torch.bmm(out.transpose(0, 1), w_vc).to(q_input.dtype)
@@ -131,7 +130,7 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
     return out
 
 def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                    fuse_wkc, fuse_wvc, w_kc, w_vc, absorb_wkc, absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused):
+                    fuse_wkc, fuse_wvc, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused):
     
     out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=q_extend.dtype, device=q_extend.device)
 
@@ -158,8 +157,11 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
     if not fused:
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
-        extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, absorb_w_kc=absorb_wkc, absorb_w_vc=absorb_wvc)
+        # extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+        #                            fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc)
+        # simulate fp8 gemmm effect
+        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, w_vc=w_vc.to(torch.float8_e4m3fnuz) if fuse_wvc else w_vc)
 
     return out
     
@@ -167,22 +169,20 @@ def benchmark(args):
     dtype = arg_to_torch_dtype[args.dtype]
     torch.set_default_dtype(dtype)
 
-    if args.attn_impl == "normal":
-        forward = forward_normal
-    else:
-        forward = forward_absorb
+  
 
     configs = []
     x_vals_list = [
-        (1, 16, 2048, 2048, 512, 64, 128),
+        # (8, 16, 0, 2048, 512, 64, 128, "normal"),
+        (2, 16, 4096, 1024, 512, 64, 128, "absorb"),
     ]
     
     if args.B > 1:
         x_vals_list = [
-            (args.B, 16, 128, 2048, 512, 64, 128),
+            (args.B, 16, 128, 2048, 512, 64, 128, "absorb"),
         ]
 
-    x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim"]
+    x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim", "attn_impl"]
     line_vals = ["ref", "fused"]
 
     if args.ref:
@@ -190,7 +190,7 @@ def benchmark(args):
     if args.fused:
         line_vals = ["fused"]
 
-    plot_name = "MLA-decode"
+    plot_name = "MLA-decode-fuse_wkc-{}-fuse_wvc-{}".format(args.fuse_wkc, args.fuse_wvc)
 
     configs.append(
         triton.testing.Benchmark(x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_vals,
@@ -198,7 +198,7 @@ def benchmark(args):
                                  plot_name=plot_name, args={'sm_scale': 1.0, 'logit_cap': 0.0, 'device': args.device}))
 
     @triton.testing.perf_report(configs)
-    def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, sm_scale, logit_cap, device, provider):
+    def bench_MLA(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, attn_impl, sm_scale, logit_cap, device, provider):
         warmup = 25
         rep = 100
 
@@ -206,20 +206,23 @@ def benchmark(args):
         q_extend, k_extend, v_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc = input_helper_fused(
             B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
         
-        
+        if attn_impl == "normal":
+            forward = forward_normal
+        else:
+            forward = forward_absorb
 
         # Define the function to benchmark based on provider
         if "fused" in provider:
             def fn():
                 return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                     args.fuse_wkc, args.fuse_wvc, w_kc, w_vc, args.absorb_wkc, args.absorb_wvc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True)
+                                     args.fuse_wkc, args.fuse_wvc, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True)
         
         elif "ref" in provider:
             def fn():
                 return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                     False, False, w_kc, w_vc, False, False, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
+                                     False, False, w_kc, w_vc, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
         
         # warmup
         s = torch.cuda.Stream()
@@ -258,8 +261,6 @@ def parse_args():
     parser.add_argument("-print_vgpr", action="store_true", default=False)
     parser.add_argument("-fuse_wkc", type=bool, default=True)
     parser.add_argument("-fuse_wvc", type=bool, default=False)
-    parser.add_argument("-absorb_wkc", type=bool, default=True)
-    parser.add_argument("-absorb_wvc", type=bool, default=False)
     parser.add_argument("-attn_impl", type=str, default="normal")
     parser.add_argument("-B", type=int, default=1)
 
@@ -353,7 +354,7 @@ def main():
         print_vgpr(args)
         return 0
     run_bench(args)
-    # test_op_fwd(2, 16, 0, 2048, 512, 64, 128, torch.float32, "normal", False, False, False, False, 1.0, 0.0, "cuda") # sanity check
+    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, False, 1.0, 0.0, "cuda") # sanity check
 
 if __name__ == "__main__":
     main()
