@@ -98,10 +98,10 @@ struct ExtractSliceOpConversion
     LDBG("CTAPerShape: " << CTAPerShape[0] << "x" << "!");
 
     // SliceLayout uses 1d offsets.
-    auto skipElems = CTAOffsets[0] * contigPerThread;
-    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * contigPerThread;
-    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * contigPerThread;
-    auto numElemsPerVec = contigPerThread * CTASizes[0];
+    auto skipElems = CTAOffsets[0] * totalContigPerThread;
+    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * totalContigPerThread;
+    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * totalContigPerThread;
+    auto numElemsPerVec = totalContigPerThread * CTASizes[0];
 
     if(!sliceLayout) {
       // Non-SliceLayouts use 2d offsets (based on order).
