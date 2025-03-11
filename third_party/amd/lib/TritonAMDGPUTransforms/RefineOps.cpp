@@ -636,6 +636,64 @@ LogicalResult rewriteLocalStoreOp(OpBuilder &rewriter,
   return success();
 }
 
+// Reduce ops have different intput and output shapes and produce
+// sliced layouts.
+// This currently only supports 2d inputs.
+LogicalResult rewriteReduceOp(OpBuilder &rewriter, triton::ReduceOp op) {
+  auto ctx = op->getContext();
+  auto loc = op.getLoc();
+  uint32_t axisReduce = op.getAxis();
+  uint32_t axisNonReduce = (axisReduce + 1) % 2;
+  if (op.getNumOperands() != 1)
+    return failure();
+
+  // Calculate refined shape.
+  auto src = op->getOperand(0);
+  auto srcType = rankedTType(src);
+  if (srcType.getRank() != 2)
+    return failure();
+  auto srcShape = srcType.getShape();
+  auto srcEncoding = srcType.getEncoding();
+  auto srcShapePerCtaTile = triton::gpu::getShapePerCTATile(srcEncoding);
+  SmallVector<int64_t> repShape = {srcShape[0] / srcShapePerCtaTile[0],
+                                   srcShape[1] / srcShapePerCtaTile[1]};
+  int numReps = repShape[axisNonReduce];
+  SmallVector<int64_t> refinedSrcShape = {srcShape[0], srcShape[1]};
+  refinedSrcShape[axisNonReduce] /= numReps;
+  int64_t elementsPerRep = refinedSrcShape[axisNonReduce];
+  auto elemTy = srcType.getElementType();
+  auto refinedTensorType =
+      RankedTensorType::get(refinedSrcShape, elemTy, srcEncoding);
+
+  // Create refined ops.
+  rewriter.setInsertionPointAfter(op);
+  SmallVector<Value> refinedReduces;
+  for (int i = 0; i < numReps; ++i) {
+    SmallVector<int64_t> offset(refinedSrcShape.size(), 0);
+    offset[axisReduce] = 0;
+    offset[axisNonReduce] = i * elementsPerRep;
+    auto sliceOp = rewriter.create<triton::amdgpu::ExtractSliceOp>(
+        loc, Type{refinedTensorType}, Value{src}, offset);
+    auto reduceOp =
+        rewriter.create<triton::ReduceOp>(loc, ValueRange{sliceOp}, axisReduce);
+    IRMapping mapping;
+    mapping.map(reduceOp.getOperand(0), sliceOp);
+    op.getCombineOp().cloneInto(&reduceOp->getRegion(0), mapping);
+    refinedReduces.push_back(reduceOp->getResult(0));
+  }
+
+  // Concat reduce slices.
+  auto reduceResultType = op.getResultTypes()[0];
+  SmallVector<int64_t> concatDimShape = {numReps};
+  auto concatDims = DenseI64ArrayAttr::get(ctx, concatDimShape);
+  auto concatOp = rewriter.create<triton::amdgpu::ConcatOp>(
+      loc, reduceResultType, refinedReduces, concatDims);
+  auto origOpResult = op.getResult();
+  origOpResult.replaceAllUsesWith(concatOp);
+  op.erase();
+  return success();
+}
+
 struct TritonAMDGPURefineOps
     : public TritonAMDGPURefineOpsBase<TritonAMDGPURefineOps> {
   explicit TritonAMDGPURefineOps(StringRef targetArch) {
@@ -691,6 +749,14 @@ struct TritonAMDGPURefineOps
           }
         }
       });
+
+      block->walk([&](triton::ReduceOp reduceOp) {
+        OpBuilder rewriter(reduceOp->getContext());
+        if (failed(rewriteReduceOp(rewriter, reduceOp))) {
+          LDBG("failed to refine tt.reduce: " << *reduceOp);
+        }
+      });
+
       return WalkResult::advance();
     });
   }

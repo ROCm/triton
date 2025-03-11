@@ -75,7 +75,8 @@ struct ExtractSliceOpConversion
     // Calculate valid total number of workers in each dimension
     auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcLayout);
     for (auto i = 0; i < shapePerCTATile.size(); ++i) {
-      shapePerCTATile[i] = std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
+      shapePerCTATile[i] =
+          std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
     }
 
     // Calculate offsets and sizes in terms of CTA units.
@@ -118,7 +119,7 @@ struct ExtractSliceOpConversion
       }
     }
     Value ret = packLLElements(loc, this->getTypeConverter(), resultVals,
-        rewriter, resultTy);
+                               rewriter, resultTy);
 
     rewriter.replaceOp(op, ret);
     return success();
