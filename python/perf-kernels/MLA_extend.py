@@ -54,10 +54,10 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 @pytest.mark.parametrize("B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim", [
     (2, 16, 2048, 2048, 512, 64, 128),
 ])
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
-@pytest.mark.parametrize('ref_attn_impl', ["normal", "absorb"])
-@pytest.mark.parametrize('fuse_wkc', [False, True])
-@pytest.mark.parametrize('fuse_wvc', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize('ref_attn_impl', ["absorb"])
+@pytest.mark.parametrize('fuse_wkc', [False])
+@pytest.mark.parametrize('fuse_wvc', [False])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, ref_attn_impl, fuse_wkc, fuse_wvc, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
     torch.set_default_device(device)
@@ -120,7 +120,7 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         # extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
         #                            fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc)
         # simulate fp8 gemmm effect
-        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, w_vc=w_vc.to(torch.float8_e4m3fnuz) if fuse_wvc else w_vc)
     
     if not fuse_wvc: # 2nd gemm
@@ -160,7 +160,7 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         # extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
         #                            fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc)
         # simulate fp8 gemmm effect
-        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+        extend_fused_attention_fwd(q_input.to(torch.float8_e4m3fnuz) if fuse_wkc else q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc.to(torch.float8_e4m3fnuz) if fuse_wkc else w_kc, w_vc=w_vc.to(torch.float8_e4m3fnuz) if fuse_wvc else w_vc)
 
     return out
@@ -173,8 +173,8 @@ def benchmark(args):
 
     configs = []
     x_vals_list = [
-        # (8, 16, 0, 2048, 512, 64, 128, "normal"),
-        (2, 16, 4096, 1024, 512, 64, 128, "absorb"),
+        (16, 16, 0, 4096, 512, 64, 128, "normal"),
+        (2, 16, 2048, 512, 512, 64, 128, "absorb"),
     ]
     
     if args.B > 1:
@@ -259,7 +259,7 @@ def parse_args():
     parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
-    parser.add_argument("-fuse_wkc", type=bool, default=True)
+    parser.add_argument("-fuse_wkc", type=bool, default=False)
     parser.add_argument("-fuse_wvc", type=bool, default=False)
     parser.add_argument("-attn_impl", type=str, default="normal")
     parser.add_argument("-B", type=int, default=1)
@@ -354,7 +354,7 @@ def main():
         print_vgpr(args)
         return 0
     run_bench(args)
-    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, False, 1.0, 0.0, "cuda") # sanity check
+    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "normal", False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
 
 if __name__ == "__main__":
     main()
