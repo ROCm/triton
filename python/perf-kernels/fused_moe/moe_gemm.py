@@ -233,6 +233,7 @@ def moe_gemm_kernel(
     BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix
     multiplication across different blocks processed by the same expert.
     """
+    # TODO NUM_XCD
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
