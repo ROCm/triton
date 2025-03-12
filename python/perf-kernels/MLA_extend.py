@@ -175,12 +175,13 @@ def benchmark(args):
     configs = []
     x_vals_list = [
         (16, 16, 0, 4096, 512, 64, 128, "normal"),
-        (2, 16, 4096, 512, 512, 64, 128, "absorb"),
+        (1, 16, 4096, 2048, 512, 64, 128, "absorb"),
+        # (2, 16, 4096, 1024, 512, 64, 128, "absorb"), # OOMs if run with other
     ]
     
-    if args.B > 1 or args.attn_impl != "":
+    if args.B or args.attn_impl != "":
         x_vals_list = [
-            (args.B, 16, 128, 2048, 512, 64, 128, args.attn_impl),
+            (args.B, 16, args.prefix_len, args.extend_len, 512, 64, 128, args.attn_impl),
         ]
 
     x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim", "attn_impl"]
@@ -246,6 +247,7 @@ def benchmark(args):
 
         # Replay the graph for benchmarking
         ms = triton.testing.do_bench(func, warmup=warmup, rep=rep)
+        torch.cuda.empty_cache()
         return ms
 
     bench_MLA.run(save_path=None, print_data=True, show_plots=False)
@@ -259,16 +261,18 @@ def parse_args():
         allow_abbrev=False,
     )
 
-    parser.add_argument("-dtype", default='fp16')
+    parser.add_argument("-dtype", default='bf16')
     parser.add_argument("-device", default='cuda')
     parser.add_argument("-fused", action="store_true", default=False)
     parser.add_argument("-ref", action="store_true", default=False)
     parser.add_argument("-print_vgpr", action="store_true", default=False)
-    parser.add_argument("-fuse_wkc", type=bool, default=False)
-    parser.add_argument("-fuse_wvc", type=bool, default=False)
+    parser.add_argument("-fuse_wkc", action="store_true", default=False)
+    parser.add_argument("-fuse_wvc", action="store_true", default=False)
     parser.add_argument("-attn_impl", type=str, default="")
     parser.add_argument("-cuda_graph", action="store_true", default=False)
-    parser.add_argument("-B", type=int, default=1)
+    parser.add_argument("-B", type=int, default=0)
+    parser.add_argument("-prefix_len", type=int, default=0)
+    parser.add_argument("-extend_len", type=int, default=4096)
 
     return parser.parse_args()
 

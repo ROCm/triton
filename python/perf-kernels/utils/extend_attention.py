@@ -372,27 +372,27 @@ def extend_attention_fwd(
         BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
 
-    # if is_hip_:
-    BLOCK_M, BLOCK_N = (64, 64)
-    num_warps = 4
+    if is_hip_:
+        BLOCK_M, BLOCK_N = (64, 64)
+        num_warps = 4
 
-    # else:
-    #     if is_cuda_available and CUDA_CAPABILITY[0] >= 9:
-    #         if Lq <= 256:
-    #             BLOCK_M, BLOCK_N = (128, 64)
-    #         else:
-    #             BLOCK_M, BLOCK_N = (32, 64)
-    #     elif is_cuda_available and CUDA_CAPABILITY[0] >= 8:
-    #         if Lq <= 128:
-    #             BLOCK_M, BLOCK_N = (128, 128)
-    #         elif Lq <= 256:
-    #             BLOCK_M, BLOCK_N = (64, 64)
-    #         else:
-    #             BLOCK_M, BLOCK_N = (32, 64)
-    #     else:
-    #         BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
+    else:
+        if is_cuda_available and CUDA_CAPABILITY[0] >= 9:
+            if Lq <= 256:
+                BLOCK_M, BLOCK_N = (128, 64)
+            else:
+                BLOCK_M, BLOCK_N = (32, 64)
+        elif is_cuda_available and CUDA_CAPABILITY[0] >= 8:
+            if Lq <= 128:
+                BLOCK_M, BLOCK_N = (128, 128)
+            elif Lq <= 256:
+                BLOCK_M, BLOCK_N = (64, 64)
+            else:
+                BLOCK_M, BLOCK_N = (32, 64)
+        else:
+            BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
 
-    #     num_warps = 4 if Lk <= 64 else 8
+        num_warps = 4 if Lk <= 64 else 8
 
     sm_scale = sm_scale or 1.0 / (Lq**0.5)
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
@@ -521,8 +521,8 @@ def _fwd_fused_kernel(
     K_Buffer: [T_, H, C+DPE]
     V_Buffer: [T_, H, C]
     
-    T: B * extend_len, note that they can be varlen
-    T_: B * prefix_len, note that they can be varlen
+    T: B * extend_lens, note that they can be varlen
+    T_: B * prefix_lens, note that they can be varlen
 
     index pointers to access correct sequences in above tensors:
     qo_indptr: [B+1]
@@ -853,7 +853,7 @@ def _fwd_fused_kernel(
         if PERSISTENT:
             pid = atomic_counter.atomic_add(1)
         else:
-            pid = num_pids_total
+            pid = num_pids_total # break the while loop
 
 
 def extend_fused_attention_fwd(
@@ -889,6 +889,8 @@ def extend_fused_attention_fwd(
     inside the loop: (BLOCK_M, C) x (C, BLOCK_N) = (BLOCK_M, BLOCK_N). This is the same as in ref.
 
     """
+
+    persistent = False if (kv_indptr[1:] - kv_indptr[:-1]).sum() > 0 else persistent # TODO: find a better heuristic
 
     DV = v_buffer.shape[-1]
 
@@ -926,6 +928,7 @@ def extend_fused_attention_fwd(
         DO = v_extend.shape[-1] # no projection
             
     # if is_hip_:
+    assert is_hip_, "Fused attention is only supported on ROCM platform."
     BLOCK_M, BLOCK_N = (64, 64)
     num_warps = 4
 
