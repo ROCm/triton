@@ -13,6 +13,11 @@ from utils.benchmark_utils import get_available_models, get_model_configs
     configs=[
         triton.Config(
             {
+                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'kpack': 2, 'matrix_instr_nonkdim': 16
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
                 'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
                 'kpack': 2, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
@@ -60,13 +65,13 @@ def matmul_kernel(
     stride_cn,
     a_scale_ptr,
     b_scale_ptr,
-    group_k,
-    group_n,
     stride_ascale_m,
     stride_ascale_k,
     stride_bscale_k,
     stride_bscale_n,
     # Meta-parameters
+    group_k: tl.constexpr,
+    group_n: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -146,9 +151,11 @@ def matmul_kernel(
         a_scale = tl.load(a_scale_ptr) if (a_scale_ptr) else 1.0
         b_scale = tl.load(b_scale_ptr)
     elif APPLY_SCALE == 2:
-        a_scale_ptrs =  None if a_scale_ptr is None else (a_scale_ptr + offs_am * stride_ascale_m)
+        k_start = 0
+        offs_ks = k_start // group_k
+        a_scale_ptrs =  None if a_scale_ptr is None else (a_scale_ptr + offs_am * stride_ascale_m + offs_ks * stride_ascale_k)
         offs_bsn = offs_bn // group_n
-        b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bscale_n
+        b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bscale_n + offs_ks * stride_bscale_k
 
     acc_dtype = tl.float32 if c_ptr.type.element_ty != tl.int8 else tl.int32
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
@@ -162,15 +169,17 @@ def matmul_kernel(
         else:
             a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+
+        if APPLY_SCALE == 2:
+            b_scale = tl.load(b_scale_ptrs)
+            if a_scale_ptrs is not None:
+                a_scale = tl.load(a_scale_ptrs)
+
         # Type conversion to support mixed precision GEMMs where b is lower precision than a
         b = b.to(a_ptr.type.element_ty)
 
         if APPLY_SCALE == 2:
-            k_start = k * BLOCK_SIZE_K
-            offs_ks = k_start // group_k
-            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bscale_k)
             if a_scale_ptrs is not None:
-                a_scale = tl.load(a_scale_ptrs + offs_ks * stride_ascale_k)
                 accumulator += tl.dot(a, b, input_precision="ieee") * a_scale[:, None] * b_scale[None, :]
             else:
                 accumulator += tl.dot(a, b, input_precision="ieee") * b_scale[None, :]
@@ -180,6 +189,14 @@ def matmul_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+        if APPLY_SCALE == 2:
+            k_cur = (k)*BLOCK_SIZE_K // group_k
+            k_nxt = (k+1)*BLOCK_SIZE_K // group_k
+            offs_ks = k_nxt - k_cur
+            b_scale_ptrs += offs_ks * stride_bscale_k
+            if a_scale_ptrs is not None:
+                a_scale_ptrs += offs_ks * stride_ascale_k
 
     # Apply scale to recover dynamic range reduced due to lower precision inputs.
     if APPLY_SCALE == 1:
@@ -231,12 +248,12 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         c.stride(1),
         a_scale,
         b_scale,
-        1,
-        1,
-        0,
-        0,
-        0,
-        0,
+        a_scale.stride(0) if a_scale.ndim else 0,
+        a_scale.stride(1) if a_scale.ndim else 0,
+        b_scale.stride(0) if b_scale.ndim else 0,
+        b_scale.stride(1) if b_scale.ndim else 0,
+        group_k=128,
+        group_n=128,
         APPLY_SCALE=scale_a8_b8,
         ACTIVATION=activation,
     )
@@ -279,31 +296,6 @@ def ceil_div(x, y):
     return (x + y - 1) // y
 
 
-def per_token_cast_to_fp8(x):
-    assert x.dim() == 2 and x.size(1) % 128 == 0
-    m, n = x.shape
-    x_view = x.view(m, -1, 128)
-    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
-        m, n
-    ), (x_amax / 448.0).view(m, -1)
-
-
-def per_block_cast_to_fp8(x):
-    assert x.dim() == 2
-    m, n = x.shape
-    x_padded = torch.zeros(
-        (ceil_div(m, 128) * 128, ceil_div(n, 128) * 128), dtype=x.dtype, device=x.device
-    )
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(
-        x_view.size(0), x_view.size(2)
-    )
-
-
 def gen_input(M, N, dtype, needTrans, seed, cast_type=None, device='cuda'):
     torch.manual_seed(seed)
 
@@ -314,10 +306,23 @@ def gen_input(M, N, dtype, needTrans, seed, cast_type=None, device='cuda'):
     scale = None
     if dtype_is_8_bit(dtype):
         if cast_type == "token":
-            raw_data, scale = per_token_cast_to_fp8(raw_data)
+            assert raw_data.size(1) % 128 == 0
+            raw_data = raw_data.view(M, -1, 128)
+            max_val = raw_data.abs().float().amax(dim=2).view(M, -1).clamp(1e-4)
+            scale = max_val.unsqueeze(2) / dtype_max[dtype]
+            raw_data = (raw_data / scale).view(M, N)
+            scale = scale.view(M, -1)
             print("Cast type token")
         elif cast_type == "block":
-            raw_data, scale = per_block_cast_to_fp8(raw_data)
+            x_padded = torch.zeros(
+                (ceil_div(N, 128) * 128, ceil_div(M, 128) * 128), dtype=raw_data.dtype, device=raw_data.device
+            ).T
+            x_padded[:M, :N] = raw_data
+            x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+            x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+            x_scaled = x_view * (dtype_max[dtype] / x_amax)
+            raw_data = x_scaled.view_as(x_padded)[:M, :N].T.contiguous().T
+            scale = (x_amax / dtype_max[dtype]).view(x_view.size(0), x_view.size(2))
             print("Cast type block")
         else:
             max_val = torch.max(torch.abs(raw_data))
