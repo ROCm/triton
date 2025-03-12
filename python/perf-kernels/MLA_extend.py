@@ -105,7 +105,7 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
 @pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.parametrize('ref_attn_impl', ["absorb"])
 @pytest.mark.parametrize('fuse_wkc', [False, True])
-@pytest.mark.parametrize('fuse_wvc', [False])
+@pytest.mark.parametrize('fuse_wvc', [False, True])
 @pytest.mark.parametrize('fp8', [False])
 def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, ref_attn_impl, fuse_wkc, fuse_wvc, fp8, sm_scale=1.0, logit_cap=0.0, device="cuda"):
     torch.manual_seed(0)
@@ -120,18 +120,18 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
     q_extend, k_extend, v_extend, k_buffer, v_buffer, kv_indptr, kv_indices, qo_indptr, custom_mask, mask_indptr, max_len_extend, w_kc, w_vc, q_descale, w_kc_descale, w_vc_descale = input_helper_fused(
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device, fp8=fp8)
    
-    if fp8:
-        w_vc = (w_vc.to(torch.float32)*w_vc_descale).to(dtype) # TODO: w_vc fp8 not yet implemented
-
     # Reference
     # torch.bmm does not support fp8 so scale back to dtype outside
     output_ref = forward(((q_extend.to(torch.float32)) * q_descale).to(dtype) if fp8 else q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                fuse_wkc, fuse_wvc, (w_kc.to(torch.float32)*w_kc_descale).to(dtype) if fp8 else w_kc, w_vc, None, None, None, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False)
+                                fuse_wkc, fuse_wvc, (w_kc.to(torch.float32)*w_kc_descale).to(dtype) if fp8 else w_kc, (w_vc.to(torch.float32)*w_vc_descale).to(dtype) if fp8 else w_vc, None, None, None, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False, fp8=False)
 
     # Fused
-    if fp8 and not fuse_wkc:
-        w_kc = (w_kc.to(torch.float32)*w_kc_descale).to(dtype)
-        q_extend = ((q_extend.to(torch.float32)) * q_descale).to(dtype)
+    if fp8:
+        if not fuse_wkc:
+            w_kc = (w_kc.to(torch.float32)*w_kc_descale).to(dtype)
+            q_extend = ((q_extend.to(torch.float32)) * q_descale).to(dtype)
+        if not fuse_wvc:
+            w_vc = (w_vc.to(torch.float32)*w_vc_descale).to(dtype)
 
     output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                                    fuse_wkc, fuse_wvc, w_kc, w_vc, q_descale, w_kc_descale, w_vc_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True, fp8=fp8)
@@ -420,8 +420,8 @@ def main():
     if args.print_vgpr:
         print_vgpr(args)
         return 0
-    run_bench(args)
-    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
+    # run_bench(args)
+    test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, True, True, 1.0, 0.0, "cuda") # sanity check for function body correctness
 
 if __name__ == "__main__":
     main()

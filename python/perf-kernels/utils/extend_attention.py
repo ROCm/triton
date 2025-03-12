@@ -594,7 +594,9 @@ def _fwd_fused_kernel(
         offs_dk = tl.arange(0, BLOCK_DK)
         offs_dv = tl.arange(0, BLOCK_DV)
 
-        # TODO: use masks properly
+        offs_do = tl.arange(0, BLOCK_DO)
+        mask_do = offs_do < DO
+
         mask_d = offs_d < D
         mask_c = offs_c < C
         mask_dq = offs_dq < DQ
@@ -820,12 +822,22 @@ def _fwd_fused_kernel(
             offs_w_vc_d = (
                 cur_head * stride_w_h + offs_c[:, None] * stride_w_c + offs_do[None, :] * stride_w_d 
             )
+            if FP8:
+                max_val = tl.max(tl.abs(acc)).to(tl.float32)
+                if max_val==0:
+                    max_val = 1e-8
+                scale = 448.0 / max_val
+                acc = acc * scale
             acc = acc.to(W_VC.type.element_ty)
             for d in range(0, tl.cdiv(DO, BLOCK_DO)):
                 offs_o_block = offs_do + d * BLOCK_DO
-                w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_DO * stride_w_d, mask= mask_c & ((offs_w_vc_d + d * BLOCK_DO)[:, None] < DO), other=0.0)
+                w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_DO * stride_w_d, mask= mask_c[:, None] & (offs_o_block[None, :] < DO), other=0.0)
                 # (BLOCK_M, C) * (C, BLOCK_D)
-                acc_d = tl.dot(acc, w_vc_d).to(O_Extend.type.element_ty)
+                acc_d = tl.dot(acc, w_vc_d)
+                if FP8:
+                    acc_d = acc_d * 1 / scale * W_VC_descale
+                acc_d = acc_d.to(O_Extend.type.element_ty)
+                
                 offs_o_d = (
                     (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
                     * stride_obs
@@ -845,8 +857,6 @@ def _fwd_fused_kernel(
                         mask=(mask_m[:, None] & (offs_o_block[None, :] < DO)),
                     )
         else:
-            offs_do = tl.arange(0, BLOCK_DO)
-            mask_do = offs_do < DO
             offs_o = (
                 (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
                 * stride_obs
