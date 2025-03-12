@@ -1007,15 +1007,15 @@ def extend_fused_attention_fwd(
         q_extend.stride(0),
         q_extend.stride(1),
         k_extend.stride(0),
-        k_extend.stride(1) if not fuse_w_kc else 0, # only 1 head for latent cache
-        v_extend.stride(0) ,
-        v_extend.stride(1) if not fuse_w_vc else 0,
+        k_extend.stride(1), # only 1 head for latent cache
+        v_extend.stride(0),
+        v_extend.stride(1),
         o_extend.stride(0),
         o_extend.stride(1),
         k_buffer.stride(0),
-        k_buffer.stride(1) if not fuse_w_kc else 0, 
+        k_buffer.stride(1), 
         v_buffer.stride(0),
-        v_buffer.stride(1) if not fuse_w_vc else 0,
+        v_buffer.stride(1),
         # fuse gemm arguments
         w_kc,
         w_vc,
