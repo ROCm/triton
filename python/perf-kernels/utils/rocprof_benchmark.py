@@ -8,7 +8,7 @@ def run_profiling(triton_dir, batch_size, prefix_len, extend_len, output_file):
         "rocprof", "--stats", "-o", output_file,
         "python", f"{triton_dir}/python/perf-kernels/MLA_extend.py",
         "-B", str(batch_size), "-prefix_len", str(prefix_len), "-extend_len", str(extend_len), "-dtype", "fp16",
-        "-attn_impl", "normal" if prefix_len==0 else "absorb", "-fuse_wkc", "fuse_wvc"
+        "-attn_impl", "absorb" # if prefix_len==0 else "absorb"
     ]
     subprocess.run(command, check=True)
 
