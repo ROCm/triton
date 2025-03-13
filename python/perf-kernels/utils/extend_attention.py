@@ -19,6 +19,7 @@ It supports page size = 1 and prefill with KV cache (i.e. extend).
 import torch
 import triton
 import triton.language as tl
+from typing import Tuple
 
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
@@ -29,6 +30,19 @@ if is_cuda_available:
 
 is_hip_ = is_hip()
 
+def input_to_float8(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """This function quantizes input values to float8 values with tensor-wise quantization."""
+    finfo = torch.finfo(dtype)
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
+    fp8_max = finfo.max
+    if is_hip_:
+        fp8_max = 224.0
+    scale = fp8_max / amax
+    x_scl_sat = (x * scale).clamp(min=-fp8_max, max=fp8_max)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 @triton.jit
 def tanh(x):
@@ -460,7 +474,8 @@ def extend_attention_fwd(
 # )
 @triton.jit
 def _fwd_fused_kernel(
-    Q_Extend,
+    Q_NOPE,
+    Q_PE,
     K_Extend,
     V_Extend,
     O_Extend,
@@ -475,6 +490,8 @@ def _fwd_fused_kernel(
     kv_group_num,
     stride_qbs,
     stride_qh,
+    stride_qpe_bs,
+    stride_qpe_h,
     stride_kbs,
     stride_kh,
     stride_vbs,
@@ -492,9 +509,9 @@ def _fwd_fused_kernel(
     stride_w_c,
     stride_w_d,
     Q_descale,
-    W_KC_descale,
-    W_VC_descale,
+    W_descale,
     FP8: tl.constexpr,
+    FP8_max,
     BLOCK_C: tl.constexpr,
     C: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -524,7 +541,8 @@ def _fwd_fused_kernel(
     atomic_counter,
 ):
     """
-    Q_Extend: [T, H, D+DPE]
+    Q_NOPE: [T, H, D]
+    Q_PE: [T, H, DPE]
     K_Extend: [T, C+DPE]
     V_Extend: [T, C]
     O_Extend: [T, H, DV]
@@ -543,14 +561,13 @@ def _fwd_fused_kernel(
     P * V_Buffer/Extend * W_VC
     
     W_KC: [H, D, C]
-    W_VC: [H, C, DV]
+    W_VC: [H, C, D]
     FUSE_W_KC: do we fuse the gemm with w_kc
     FUSE_W_VC: do we fuse the gemm with w_vc
-    ABSORB_W_KC: do we absorb the w_kc into q
-    ABSORB_W_VC: do we absorb the w_vc outside the loop
     """
 
     TILE_D: tl.constexpr = BLOCK_D < DQ # do we tile the w_kc fusion along D?
+    tl.static_print("TILE_D", TILE_D)
 
     if PERSISTENT: # if persistent, kernel loops over multiple pids (tiles along Q)
         pid = atomic_counter.atomic_add(1)
@@ -593,6 +610,7 @@ def _fwd_fused_kernel(
         offs_dq = tl.arange(0, BLOCK_DQ)
         offs_dk = tl.arange(0, BLOCK_DK)
         offs_dv = tl.arange(0, BLOCK_DV)
+        offs_dpe = tl.arange(0, DPE)
 
         offs_do = tl.arange(0, BLOCK_DO)
         mask_do = offs_do < DO
@@ -619,28 +637,28 @@ def _fwd_fused_kernel(
             offs_w_kc_d = (
                 cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
             )
-
+            
             if TILE_D:
                 q = tl.zeros((BLOCK_M, C), dtype=tl.float32)
-                for d in range(0, tl.cdiv(DQ, BLOCK_D)):
-                    w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_d, mask= ((offs_d + d * BLOCK_D)[:, None] < D) & mask_c[None,:], other=0.0)
+                for d in range(0, tl.cdiv(D, BLOCK_D)):
+                    w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_d) # , mask= ((offs_d + d * BLOCK_D)[:, None] < D) & mask_c[None,:], other=0.0)
                     q_d = tl.load(
-                        Q_Extend + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]) & ( (offs_d + d * BLOCK_D)[None, :] < D), other=0.0
+                        Q_NOPE + offs_q_d + d * BLOCK_D  #, mask=(mask_m[:, None]) & ( (offs_d + d * BLOCK_D)[None, :] < D), other=0.0
                     )
                     # (BLOCK_M, BLOCK_D) * (BLOCK_D, C)
                     q += tl.dot(q_d, w_kc_d)
                 
             else: # no tiling along d
                 w_kc_d = tl.load(W_KC + offs_w_kc_d, mask=mask_d[:, None] & mask_c[None, :], other=0.0)
-                
+                tl.static_print("offsets", offs_q_d, offs_w_kc_d)
                 q_d = tl.load(
-                    Q_Extend + offs_q_d, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
+                    Q_NOPE + offs_q_d, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
                 )
                 # (BLOCK_M, D) * (D, C)
                 q = tl.dot(q_d, w_kc_d)       
             
             if FP8:
-                q = q * Q_descale * W_KC_descale
+                q = q * Q_descale * W_descale
 
             q = q.to(K_Extend.type.element_ty) 
 
@@ -652,20 +670,20 @@ def _fwd_fused_kernel(
                 + offs_dq[None, :]
             )
             q = tl.load(
-                Q_Extend + offs_q, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
+                Q_NOPE + offs_q, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
             )
-
         
         if DPE > 0:
-            offs_dpe = tl.arange(0, DPE)
             offs_qpe = (
                 (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
-                * stride_qbs
-                + cur_head * stride_qh
-                + offs_dpe[None, :] + DQ
+                * stride_qpe_bs
+                + cur_head * stride_qpe_h
+                + offs_dpe[None, :]
             )
-            qpe = tl.load(Q_Extend + offs_qpe, mask=mask_m[:, None], other=0.0)
+            qpe = tl.load(Q_PE + offs_qpe, mask=mask_m[:, None], other=0.0)
             qpe = qpe.to(K_Extend.type.element_ty)
+
+        
 
         # stage 1: compute scores with prefix
         for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
@@ -740,7 +758,7 @@ def _fwd_fused_kernel(
             p = p.to(v.dtype)
             acc = acc * re_scale[:, None] + tl.dot(p, v) # (BLOCK_M, BLOCK_N) * (BLOCK_N, C if ref (absorb) or FUSE_W_VC else D)
 
-        
+
         # stage 2: compute the triangle part
         cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
         for start_n in range(0, cur_block_m_end, BLOCK_N):
@@ -759,6 +777,7 @@ def _fwd_fused_kernel(
             # (BLOCK_M, 512) * (512, BLOCK_N)
             # else
             # (BLOCK_M, 128) * (128, BLOCK_N)
+
             qk = tl.dot(q, k, out_dtype=tl.float32)
 
             if DPE > 0:
@@ -824,10 +843,11 @@ def _fwd_fused_kernel(
             )
             if FP8:
                 max_val = tl.max(tl.abs(acc)).to(tl.float32)
-                if max_val==0:
-                    max_val = 1e-8
-                scale = 448.0 / max_val
-                acc = acc * scale
+                max_val = tl.clamp(max_val, 1e-12, max_val)
+                scale = FP8_max / max_val
+                descale = max_val / FP8_max
+                acc = tl.clamp(acc * scale, -FP8_max, FP8_max)
+            
             acc = acc.to(W_VC.type.element_ty)
             for d in range(0, tl.cdiv(DO, BLOCK_DO)):
                 offs_o_block = offs_do + d * BLOCK_DO
@@ -835,7 +855,7 @@ def _fwd_fused_kernel(
                 # (BLOCK_M, C) * (C, BLOCK_D)
                 acc_d = tl.dot(acc, w_vc_d)
                 if FP8:
-                    acc_d = acc_d * 1 / scale * W_VC_descale
+                    acc_d = acc_d * descale * W_descale
                 acc_d = acc_d.to(O_Extend.type.element_ty)
                 
                 offs_o_d = (
@@ -875,7 +895,7 @@ def _fwd_fused_kernel(
                     acc / deno[:, None],
                     mask=mask_m[:, None] & mask_do[None, :],
                 )
-
+        
         if PERSISTENT:
             pid = atomic_counter.atomic_add(1)
         else:
@@ -901,11 +921,9 @@ def extend_fused_attention_fwd(
     fuse_w_vc=False,
     w_kc=None,
     w_vc=None,
-    q_descale=None,
-    w_kc_descale=None,
-    w_vc_descale=None,
+    w_descale=None,
     fp8=True,
-    persistent=True,
+    persistent=False,
 ):
     """
     q_extend, k_extend, v_extend, o_extend: contiguous tensors
@@ -922,8 +940,8 @@ def extend_fused_attention_fwd(
     # persistent only when all the sequences are prefill
     persistent = False if (kv_indptr[1:] - kv_indptr[:-1]).sum() > 0 else persistent # TODO: find a better heuristic
 
-    TILE_D = 128 if fp8 else 64 # q = q * w_kc = (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C)
-    TILE_DO = 128 if fp8 else 64 # acc = acc * w_vc = (BLOCK_M, C) x (C, BLOCK_DO) = (BLOCK_M, BLOCK_DO) -> store
+    TILE_D = 64 if fp8 else 32 # q = q * w_kc = (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C)
+    TILE_DO = 64 if fp8 else 16 # acc = acc * w_vc = (BLOCK_M, C) x (C, BLOCK_DO) = (BLOCK_M, BLOCK_DO) -> store
     
     DV = v_buffer.shape[-1]
 
@@ -999,9 +1017,56 @@ def extend_fused_attention_fwd(
     else:
         w_strides = (0, 0, 0)
 
+    fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
+
+    q_nope = q_extend[..., :DQ]
+    q_pe = q_extend[..., DQ:]
+
+    q_descale = None
+
+    if fp8 and fuse_w_kc: # quantize q_nope part
+        q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
+        q_descale = q_descale.item()
+    
+    if not fp8 and fuse_w_kc: # descale w_kc
+        w_kc = w_kc.to(q_nope.dtype) * w_descale
+           
+    if not fp8 and fuse_w_vc: # descale w_vc
+        w_vc = w_vc.to(q_nope.dtype) * w_descale
+
+
+    print(f"Input shapes:")
+    print(f"- q_nope: {q_nope.shape}, {q_nope.dtype}")
+    print(f"- q_pe: {q_pe.shape}, {q_pe.dtype}")
+    print(f"- k_extend: {k_extend.shape}, {k_extend.dtype}")
+    print(f"- v_extend: {v_extend.shape}, {v_extend.dtype}")
+    print(f"- w_kc: {w_kc.shape}, {w_kc.dtype}")
+    print(f"- w_vc: {w_vc.shape}, {w_vc.dtype}")
+
+    print("DQ", DQ)
+    print("DK", DK)
+    print("DV", DV)
+    print("DPE", DPE)
+    print("DO", DO)
+    print("DACC", DACC)
+    print("D", D)
+    print("C", C)
+    print("BLOCK_DQ", BLOCK_DQ)
+    print("BLOCK_DK", BLOCK_DK)
+    print("BLOCK_DV", BLOCK_DV)
+    print("BLOCK_DO", BLOCK_DO)
+    print("BLOCK_C", BLOCK_C)
+    print("BLOCK_D", BLOCK_D)
+    print("fp8", fp8)
+    print("TILE_D", TILE_D)
+    print("TILE_DO", TILE_DO)
+    print("w_descale", w_descale)
+    print("q_descale", q_descale)
+
 
     _fwd_fused_kernel[grid](
-        q_extend,
+        q_nope,
+        q_pe,
         k_extend,
         v_extend,
         o_extend,
@@ -1014,10 +1079,12 @@ def extend_fused_attention_fwd(
         mask_indptr,
         sm_scale,
         kv_group_num,
-        q_extend.stride(0),
-        q_extend.stride(1),
+        q_nope.stride(0),
+        q_nope.stride(1),
+        q_pe.stride(0),
+        q_pe.stride(1),
         k_extend.stride(0),
-        k_extend.stride(1), # only 1 head for latent cache
+        k_extend.stride(1),
         v_extend.stride(0),
         v_extend.stride(1),
         o_extend.stride(0),
@@ -1031,9 +1098,9 @@ def extend_fused_attention_fwd(
         w_vc,
         *w_strides,
         q_descale,
-        w_kc_descale,
-        w_vc_descale,
+        w_descale,
         FP8=fp8,
+        FP8_max=fp8_e4m3fnuz_max,
         FUSE_W_KC=fuse_w_kc,
         FUSE_W_VC=fuse_w_vc,
         C=C,
