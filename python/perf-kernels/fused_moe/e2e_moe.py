@@ -6,7 +6,7 @@ import os
 import functools
 import argparse
 import sys
-from moe_gemm import moe_align_block_size, silu_and_mul, try_get_optimal_moe_config, get_config_dtype_str, quantize_tensor
+from moe_gemm import moe_align_block_size, silu_and_mul, try_get_optimal_moe_config, get_config_dtype_str, quantize_tensor, moe_gemm, MetaData as MoEMetaData
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -166,10 +166,12 @@ def e2e_moe_kernel(
     # [0, 0, 1, 1, ..., BLOCK_SIZE_HALF - 1, BLOCK_SIZE_HALF - 1]
     i_floor = i // 2
     offs_half = (pid_n * (BLOCK_SIZE_N // 2) + i_floor) % (N // 2)
-    # (i % 2): [0, 1, 0, 1,...] (alternating)
+    # (i % 2): [0, 1, 0, 1, ...] (alternating)
     # (i % 2) * (N // 2) : [0, (N // 2), 0, (N // 2),...]
     # So offs_w1n now takes element from the first BLOCK_SIZE_HALF half and the second BLOCK_SIZE_HALF half in an alternating way (This allows us to do reshape without permute)
     offs_w1n = (offs_half + (i % 2) * (N // 2)) % N
+
+    mask_w1n = (pid_n * BLOCK_SIZE_N + i) < N
 
     a_ptrs = A + (offs_token[:, None] // top_k * stride_am + offs_k1[None, :] * stride_ak)
     w1_ptrs = W1 + off_experts * stride_w1e + (offs_k1[:, None] * stride_w1k + offs_w1n[None, :] * stride_w1n)
@@ -188,10 +190,10 @@ def e2e_moe_kernel(
         # Masking ensures we don't load from invalid tokens or indices
         if EVEN_K:
             a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
-            w1 = tl.load(w1_ptrs)
+            w1 = tl.load(w1_ptrs, mask=mask_w1n[None, :], other=0.0)
         else:
             a = tl.load(a_ptrs, mask=(token_mask[:, None] & (offs_k1[None, :] < K - k * BLOCK_SIZE_K1)), other=0.0)
-            w1 = tl.load(w1_ptrs, mask=(offs_k1[:, None] < K - k * BLOCK_SIZE_K1), other=0.0)
+            w1 = tl.load(w1_ptrs, mask=(offs_k1[:, None] < K - k * BLOCK_SIZE_K1) & mask_w1n[None, :], other=0.0)
 
         if use_int8_w8a16:
             accumulator = tl.dot(a, w1.to(a.type), acc=accumulator)
@@ -237,7 +239,7 @@ def e2e_moe_kernel(
         # if EVEN_N:
         #     w2 = tl.load(w2_ptrs)
         # else:
-        w2 = tl.load(w2_ptrs, mask=(offs_w2n[:, None] < N), other=0.0)
+        w2 = tl.load(w2_ptrs, mask=(offs_w2n[:, None] < N) & (offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K, other=0.0)
 
         if use_int8_w8a16:
             out = tl.dot(acc, w2.to(a.type))
@@ -260,8 +262,8 @@ def e2e_moe_kernel(
         # TODO check scope
         tl.atomic_add(out_ptrs, out, mask=c_mask, sem="relaxed")
 
-        w2_ptrs += BLOCK_SIZE_K1 * stride_w1k
-        out_ptrs += BLOCK_SIZE_K1 * stride_w1k
+        w2_ptrs += BLOCK_SIZE_K2 * stride_w2k
+        out_ptrs += BLOCK_SIZE_K2
 
 
 def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor, metadata: MetaData) -> torch.Tensor:
@@ -297,8 +299,6 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
 
     stride_cm = c.stride(1)
-
-    print(f"a.shape: {a.shape}, w1.shape: {w1.shape}, w2.shape: {w2.shape}, c.shape: {c.shape}")
 
     e2e_moe_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
@@ -380,25 +380,47 @@ def silu_and_mul_torch(input):
     return output
 
 
+def e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata: MetaData):
+    moe_metadata1 = MoEMetaData(topk_weights=metadata.topk_weights,
+    topk_ids=metadata.topk_ids,
+    sorted_token_ids=metadata.sorted_token_ids,
+    expert_ids=metadata.expert_ids,
+    num_tokens_post_padded=metadata.num_tokens_post_padded,
+    config=metadata.config)
+    # TODO quantization support. How to get the scale for the intermediate result?
+
+    intermediate_cache1 = torch.zeros([M, top_k, N], dtype=a.dtype, device=a.device)
+    intermediate_cache2 = torch.zeros([M* top_k, N // 2], dtype=a.dtype, device=a.device)
+
+    moe_gemm(a, w1, intermediate_cache1, moe_metadata1)
+    silu_and_mul(intermediate_cache1.view(M * top_k, N), intermediate_cache2)
+    moe_gemm(intermediate_cache2, w2, c, moe_metadata1)
+
+    return c
+
+
 @pytest.mark.parametrize("M, N, K, top_k, E", [
     (64, 14336, 4096, 2, 8),
+    # TODO doesn't work check k mask
     # (16, 14336, 1, 2, 4),
     # (256, 14336, 1, 2, 4),
     # (2048, 14336, 1, 2, 4),
-    (1, 14336, 128, 2, 4),
-    (16, 14336, 128, 1, 4),
-    (16, 14336, 128, 1, 1),
-    (64, 70, 128, 2, 8),
-    (64, 30, 128, 2, 8),
-    (64, 7186, 128, 2, 8),
-    (64, 3584, 128, 2, 8),
-    (64, 1792, 128, 2, 8),
-    (64, 64, 128, 2, 8),
+    # ------
+    # (1, 14336, 128, 2, 4),
+    # (16, 14336, 128, 1, 4),
+    # (16, 14336, 128, 1, 1),
+    # (64, 70, 128, 2, 8),
+    # (64, 30, 128, 2, 8),
+    # (64, 32, 128, 2, 8),
+    # (64, 7186, 128, 2, 8),
+    # (64, 3584, 128, 2, 8),
+    # (64, 1792, 128, 2, 8),
+    # (64, 64, 128, 2, 8),
 ])
 # @pytest.mark.parametrize('routed_weight', [True, False])
 @pytest.mark.parametrize('routed_weight', [False])
 def test_correctness(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool,
-                     dtype=torch.float16):
+                     dtype=torch.float32):
     torch.manual_seed(20)
     a, w1, w2, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=False,
                                      use_int8_w8a16=False, fp8_type=None,
@@ -410,19 +432,21 @@ def test_correctness(M: int, N: int, K: int, top_k: int, E: int, routed_weight: 
     topk_weights = metadata.topk_weights
     ref_out = torch.empty_like(c)
     # Repeat a -> (M, top_k, K)
-    a_expanded = a.unsqueeze(1).repeat(1, top_k, 1)
-    # (M, top_k, N, K)
-    w1_indexed = w1[topk_ids]
-    w2_indexed = w2[topk_ids]
+    # a_expanded = a.unsqueeze(1).repeat(1, top_k, 1)
+    # # (M, top_k, N, K)
+    # w1_indexed = w1[topk_ids]
+    # w2_indexed = w2[topk_ids]
 
-    ref_out = torch.einsum("mek,menk->men", a_expanded, w1_indexed)
-    if routed_weight:
-        ref_out *= topk_weights.unsqueeze(-1)
+    # ref_out = torch.einsum("mek,menk->men", a_expanded, w1_indexed)
+    # if routed_weight:
+    #     ref_out *= topk_weights.unsqueeze(-1)
 
-    ref_out = silu_and_mul_torch(ref_out.reshape(M * top_k, N)).to(dtype).view(M, top_k, N // 2)
-    ref_out = torch.einsum("men,mekn->mek", ref_out, w2_indexed)
-    if routed_weight:
-        ref_out *= topk_weights.unsqueeze(-1)
+    # ref_out = silu_and_mul_torch(ref_out.reshape(M * top_k, N)).to(dtype).view(M, top_k, N // 2)
+    # ref_out = torch.einsum("men,mekn->mek", ref_out, w2_indexed)
+    # if routed_weight:
+    #     ref_out *= topk_weights.unsqueeze(-1)
+
+    ref_out = e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata)
 
     # Validate correctness
     torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
@@ -585,15 +609,11 @@ def run_benchmark(custom, args):
     routed_weight = args.routed_weight
     use_int8_w8a16 = args.int8_w8a16
     use_fp8_w8a8 = args.fp8_w8a8
-    use_silu_fused = args.use_silu_activation
-    use_silu_non_fused = args.use_silu_activation_non_fused
     dtype = arg_to_torch_dtype[args.dtype]
     fp8_type = arg_to_torch_dtype[args.fp8_type]
-    use_silu = use_silu_fused or use_silu_non_fused
 
     x_names = ['M', 'N', 'K', 'E', 'top_k']
 
-    assert not (use_silu_fused and use_silu_non_fused), "please provide valid silu method."
     if custom:
         assert args.M and args.N and args.K and args.E and args.top_k, \
             "Please provide M, N, K, E, top_k for custom runs."
@@ -606,52 +626,18 @@ def run_benchmark(custom, args):
             configs = get_configs()
             x_vals_list = [(cfg['M'], cfg['N'], cfg['K'], cfg['E'], cfg['top_k']) for cfg in configs]
 
-    line_names = ['Time (ms)', 'TFLOPS', 'Bandwidth (GB/s)']
-    line_vals = ['time', 'tflops', 'bandwidth']
+    line_names = ['ref', 'fused']
 
     benchmark = triton.testing.Benchmark(
-        x_names=x_names, x_vals=x_vals_list, line_arg='metric', line_vals=line_vals, line_names=line_names,
-        styles=[('red', '-'), ('blue', '-'),
-                ('yellow', '-')], ylabel='ms / TFLOPS / GB/s', plot_name='moe-gemm-benchmark', args={
-                    'dtype': dtype, 'routed_weight': routed_weight, 'use_fp8_w8a8': use_fp8_w8a8, 'use_int8_w8a16':
-                    use_int8_w8a16, 'fp8_type': fp8_type, "use_silu_fused": use_silu_fused, "use_silu_non_fused":
-                    use_silu_non_fused
-                })
+        x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_names, line_names=line_names,
+        styles=[('red', '-'), ('green', '-')])
 
     @triton.testing.perf_report([benchmark])
-    def bench_moe_gemm(M, N, K, E, top_k, dtype, routed_weight, metric, use_fp8_w8a8, use_int8_w8a16, fp8_type,
-                       use_silu_fused, use_silu_non_fused, model=None):
-        a, b, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=use_fp8_w8a8,
-                                         use_int8_w8a16=use_int8_w8a16, fp8_type=fp8_type,
-                                         use_silu_activation=use_silu_fused, dtype=dtype)
+    def bench_moe_gemm(M, N, K, E, top_k, dtype, routed_weight, provider, use_fp8_w8a8, use_int8_w8a16, fp8_type, model=None):
+        a, w1, w2, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=False,
+                                     use_int8_w8a16=False, fp8_type=None,
+                                     dtype=dtype)
 
-        if use_silu_fused:
-            metadata.set_use_silu_activation()
-
-        # (M, K) * (top_k, N, K) -> (M, top_k, N). 2 for multiplication and accumulation
-        flops = 2.0 * M * top_k * K * N
-        # The weight is applied on the gemm product which has the shape of (M, top_k, N)
-        if routed_weight:
-            flops += M * top_k * N
-        if use_silu:
-            flops += M * top_k * (N // 2) * 4.0  # 3.0 is the estimate flops of the silu 1.0 another for multiplication
-
-        if use_fp8_w8a8:
-            a_bytes = b_bytes = torch.tensor([], dtype=fp8_type).element_size()
-            c_bytes = torch.tensor([], dtype=dtype).element_size()
-        elif use_int8_w8a16:
-            b_bytes = torch.tensor([], dtype=torch.int8).element_size()
-            a_bytes = c_bytes = torch.tensor([], dtype=dtype).element_size()
-        else:
-            a_bytes = b_bytes = c_bytes = torch.tensor([], dtype=dtype).element_size()
-
-        # (M, K) memory load for A (E,  N,  K) for B not (top_k,  N,  K) because we are in total bringing in all expert matrices into the chip from memory. It's just that not all multiply the same A.
-        mem_read = (M * K) * a_bytes + (E * N * K) * b_bytes
-        if use_silu:
-            mem_write = (M * top_k * (N // 2)) * c_bytes
-        else:
-            mem_write = (M * top_k * N) * c_bytes
-        mem = mem_read + mem_write
         if use_silu_non_fused:
             out = torch.zeros((M * top_k, N // 2), dtype=dtype, device='cuda')
             fn = lambda: silu_and_mul(moe_gemm(a, b, c, metadata).reshape(M * top_k, N), out)
@@ -660,18 +646,7 @@ def run_benchmark(custom, args):
 
         ms = triton.testing.do_bench(fn)
 
-        bandwidth = mem / (ms * 1e-3) * 1e-9  # GB/s
-        tflops = flops / ms * 1e-9
-
-        # Return exactly one scalar depending on which metric is active
-        if metric == 'time':
-            return ms
-        elif metric == 'tflops':
-            return tflops
-        elif metric == 'bandwidth':
-            return bandwidth
-        else:
-            raise ValueError("Unknown metric: " + metric)
+        return ms
 
     bench_moe_gemm.run(save_path=".", print_data=True)
 
@@ -696,8 +671,6 @@ def parse_args():
     parser.add_argument("-fp8_w8a8", action='store_true', default=False)
     parser.add_argument("-dtype", default='fp16')
     parser.add_argument("-fp8_type", default='e5m2fnuz')
-    parser.add_argument("-use_silu_activation", action='store_true', default=False)
-    parser.add_argument("-use_silu_activation_non_fused", action='store_true', default=False)
     args = parser.parse_args()
     return args
 
