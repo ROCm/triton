@@ -1989,9 +1989,8 @@ def run_benchmark(custom, args):
                     # zero elements and so on until the second last row has 1 zero element
                     # Total zero elements are 1+2+...+(seqlen_q-1) = seqlen_q*(seqlen_q-1)/2
                     # Total non zero elements are seqlen_q*seqlen_k - (seqlen_q*(seqlen_q-1)/2)
-                    valid_out_elements = ((seqlen_k**2 + seqlen_k) /
-                                          2) if seqlen_q > seqlen_k else (seqlen_q * seqlen_k -
-                                                                          ((seqlen_q**2 - seqlen_q) / 2))
+                    valid_out_elements = ((seqlen_k**2 + seqlen_k) / 2) if seqlen_q > seqlen_k else \
+                            (seqlen_q * seqlen_k - ((seqlen_q**1 - seqlen_q) / 2))
                     flops_per_matmul += valid_out_elements * HQ * D_HEAD * 2
                 else:
                     flops_per_matmul += seqlen_q * seqlen_k * HQ * D_HEAD * 2
@@ -1999,8 +1998,8 @@ def run_benchmark(custom, args):
             q, k, v, input_metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout)
             if causal:
                 # Same calculation as if varlen/if causal above
-                valid_out_elements = ((N_CTX_K**2 + N_CTX_K) /
-                                      2) if N_CTX_Q > N_CTX_K else (N_CTX_Q * N_CTX_K - ((N_CTX_Q**2 - N_CTX_Q) / 2))
+                valid_out_elements = ((N_CTX_K**2 + N_CTX_K) / 2) if N_CTX_Q > N_CTX_K else \
+                        (N_CTX_Q * N_CTX_K - ((N_CTX_Q**2 - N_CTX_Q) / 2))
                 flops_per_matmul = 2.0 * BATCH * HQ * valid_out_elements * D_HEAD
             else:
                 flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
