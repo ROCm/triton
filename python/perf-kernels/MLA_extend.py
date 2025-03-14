@@ -389,8 +389,8 @@ def main():
     if args.print_vgpr:
         print_vgpr(args)
         return 0
-    # run_bench(args)
-    test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", True, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
+    run_bench(args)
+    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
 
 if __name__ == "__main__":
     main()

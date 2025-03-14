@@ -505,9 +505,12 @@ def _fwd_fused_kernel(
     ####
     W_KC,
     W_VC,
-    stride_w_h,
-    stride_w_c,
-    stride_w_d,
+    stride_w_kc_h,
+    stride_w_kc_c,
+    stride_w_kc_d,
+    stride_w_vc_h,
+    stride_w_vc_c,
+    stride_w_vc_d,
     Q_descale,
     W_descale,
     FP8: tl.constexpr,
@@ -567,7 +570,6 @@ def _fwd_fused_kernel(
     """
 
     TILE_D: tl.constexpr = BLOCK_D < DQ # do we tile the w_kc fusion along D?
-    tl.static_print("TILE_D", TILE_D)
 
     if PERSISTENT: # if persistent, kernel loops over multiple pids (tiles along Q)
         pid = atomic_counter.atomic_add(1)
@@ -635,22 +637,21 @@ def _fwd_fused_kernel(
                 + offs_d[None, :]
             )
             offs_w_kc_d = (
-                cur_head * stride_w_h + offs_d[:, None] * stride_w_d + offs_c[None, :] * stride_w_c
+                cur_head * stride_w_kc_h + offs_d[:, None] * stride_w_kc_d + offs_c[None, :] * stride_w_kc_c
             )
             
             if TILE_D:
                 q = tl.zeros((BLOCK_M, C), dtype=tl.float32)
                 for d in range(0, tl.cdiv(D, BLOCK_D)):
-                    w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_d) # , mask= ((offs_d + d * BLOCK_D)[:, None] < D) & mask_c[None,:], other=0.0)
+                    w_kc_d = tl.load(W_KC + offs_w_kc_d + d * BLOCK_D * stride_w_kc_d, mask= ((offs_d + d * BLOCK_D)[:, None] < D) & mask_c[None,:], other=0.0)                        
                     q_d = tl.load(
-                        Q_NOPE + offs_q_d + d * BLOCK_D  #, mask=(mask_m[:, None]) & ( (offs_d + d * BLOCK_D)[None, :] < D), other=0.0
+                        Q_NOPE + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]) & ( (offs_d + d * BLOCK_D)[None, :] < D), other=0.0
                     )
                     # (BLOCK_M, BLOCK_D) * (BLOCK_D, C)
                     q += tl.dot(q_d, w_kc_d)
                 
             else: # no tiling along d
                 w_kc_d = tl.load(W_KC + offs_w_kc_d, mask=mask_d[:, None] & mask_c[None, :], other=0.0)
-                tl.static_print("offsets", offs_q_d, offs_w_kc_d)
                 q_d = tl.load(
                     Q_NOPE + offs_q_d, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
                 )
@@ -839,7 +840,7 @@ def _fwd_fused_kernel(
         # We can absorb the w_vc outside the loop
         if FUSE_W_VC:
             offs_w_vc_d = (
-                cur_head * stride_w_h + offs_c[:, None] * stride_w_c + offs_do[None, :] * stride_w_d 
+                cur_head * stride_w_vc_h + offs_c[:, None] * stride_w_vc_c + offs_do[None, :] * stride_w_vc_d 
             )
             if FP8:
                 max_val = tl.max(tl.abs(acc)).to(tl.float32)
@@ -851,7 +852,7 @@ def _fwd_fused_kernel(
             acc = acc.to(W_VC.type.element_ty)
             for d in range(0, tl.cdiv(DO, BLOCK_DO)):
                 offs_o_block = offs_do + d * BLOCK_DO
-                w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_DO * stride_w_d, mask= mask_c[:, None] & (offs_o_block[None, :] < DO), other=0.0)
+                w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_DO * stride_w_vc_d, mask= mask_c[:, None] & (offs_o_block[None, :] < DO), other=0.0)
                 # (BLOCK_M, C) * (C, BLOCK_D)
                 acc_d = tl.dot(acc, w_vc_d)
                 if FP8:
@@ -922,7 +923,7 @@ def extend_fused_attention_fwd(
     w_kc=None,
     w_vc=None,
     w_descale=None,
-    fp8=True,
+    fp8=False,
     persistent=False,
 ):
     """
@@ -940,8 +941,8 @@ def extend_fused_attention_fwd(
     # persistent only when all the sequences are prefill
     persistent = False if (kv_indptr[1:] - kv_indptr[:-1]).sum() > 0 else persistent # TODO: find a better heuristic
 
-    TILE_D = 64 if fp8 else 32 # q = q * w_kc = (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C)
-    TILE_DO = 64 if fp8 else 16 # acc = acc * w_vc = (BLOCK_M, C) x (C, BLOCK_DO) = (BLOCK_M, BLOCK_DO) -> store
+    TILE_D = 128 if fp8 else 32 # q = q * w_kc = (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C)
+    TILE_DO = 128 if fp8 else 16 # acc = acc * w_vc = (BLOCK_M, C) x (C, BLOCK_DO) = (BLOCK_M, BLOCK_DO) -> store
     
     DV = v_buffer.shape[-1]
 
@@ -1010,59 +1011,23 @@ def extend_fused_attention_fwd(
     if is_hip_:
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    if fuse_w_kc:
-        w_strides = (w_kc.stride(0), w_kc.stride(1), w_kc.stride(2))
-    elif fuse_w_vc:
-        w_strides = (w_vc.stride(0), w_vc.stride(1), w_vc.stride(2))
-    else:
-        w_strides = (0, 0, 0)
-
-    fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
-
     q_nope = q_extend[..., :DQ]
     q_pe = q_extend[..., DQ:]
 
     q_descale = None
 
+    # FP8
+    if not fp8 and fuse_w_kc: # descale w_kc
+        w_kc = (w_kc.to(torch.bfloat16) * w_descale).to(q_nope.dtype)
+           
+    if not fp8 and fuse_w_vc: # descale w_vc
+        w_vc = (w_vc.to(torch.bfloat16) * w_descale).to(q_nope.dtype) 
+
     if fp8 and fuse_w_kc: # quantize q_nope part
         q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
         q_descale = q_descale.item()
-    
-    if not fp8 and fuse_w_kc: # descale w_kc
-        w_kc = w_kc.to(q_nope.dtype) * w_descale
-           
-    if not fp8 and fuse_w_vc: # descale w_vc
-        w_vc = w_vc.to(q_nope.dtype) * w_descale
 
-
-    print(f"Input shapes:")
-    print(f"- q_nope: {q_nope.shape}, {q_nope.dtype}")
-    print(f"- q_pe: {q_pe.shape}, {q_pe.dtype}")
-    print(f"- k_extend: {k_extend.shape}, {k_extend.dtype}")
-    print(f"- v_extend: {v_extend.shape}, {v_extend.dtype}")
-    print(f"- w_kc: {w_kc.shape}, {w_kc.dtype}")
-    print(f"- w_vc: {w_vc.shape}, {w_vc.dtype}")
-
-    print("DQ", DQ)
-    print("DK", DK)
-    print("DV", DV)
-    print("DPE", DPE)
-    print("DO", DO)
-    print("DACC", DACC)
-    print("D", D)
-    print("C", C)
-    print("BLOCK_DQ", BLOCK_DQ)
-    print("BLOCK_DK", BLOCK_DK)
-    print("BLOCK_DV", BLOCK_DV)
-    print("BLOCK_DO", BLOCK_DO)
-    print("BLOCK_C", BLOCK_C)
-    print("BLOCK_D", BLOCK_D)
-    print("fp8", fp8)
-    print("TILE_D", TILE_D)
-    print("TILE_DO", TILE_DO)
-    print("w_descale", w_descale)
-    print("q_descale", q_descale)
-
+    fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
 
     _fwd_fused_kernel[grid](
         q_nope,
@@ -1096,7 +1061,12 @@ def extend_fused_attention_fwd(
         # fuse gemm arguments
         w_kc,
         w_vc,
-        *w_strides,
+        w_kc.stride(0) if w_kc is not None else 0,
+        w_kc.stride(1) if w_kc is not None else 0,
+        w_kc.stride(2) if w_kc is not None else 0,
+        w_vc.stride(0) if w_vc is not None else 0,
+        w_vc.stride(1) if w_vc is not None else 0,
+        w_vc.stride(2) if w_vc is not None else 0,
         q_descale,
         w_descale,
         FP8=fp8,
