@@ -260,6 +260,7 @@ def e2e_moe_kernel(
         c_mask = token_mask[:, None] & ((offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K)
 
         # TODO check scope
+        # tl.store(out_ptrs, out, mask=c_mask)
         tl.atomic_add(out_ptrs, out, mask=c_mask, sem="relaxed")
 
         w2_ptrs += BLOCK_SIZE_K2 * stride_w2k
@@ -599,8 +600,6 @@ def model_benchmark_configs(args):
         top_k = 2
 
         moe_configs.append((model_name, M, N1, K1, E, top_k))
-        if not (args.use_silu_activation or args.use_silu_activation_non_fused):
-            moe_configs.append((model_name, M, N2, K2, E, top_k))
 
     return moe_configs
 
@@ -630,7 +629,10 @@ def run_benchmark(custom, args):
 
     benchmark = triton.testing.Benchmark(
         x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_names, line_names=line_names,
-        styles=[('red', '-'), ('green', '-')])
+        styles=[('red', '-'), ('green', '-')], plot_name='e2e-moe-benchmark', args={
+                    'dtype': dtype, 'routed_weight': routed_weight, 'use_fp8_w8a8': use_fp8_w8a8, 'use_int8_w8a16':
+                    use_int8_w8a16, 'fp8_type': fp8_type}
+                )
 
     @triton.testing.perf_report([benchmark])
     def bench_moe_gemm(M, N, K, E, top_k, dtype, routed_weight, provider, use_fp8_w8a8, use_int8_w8a16, fp8_type, model=None):
@@ -638,12 +640,11 @@ def run_benchmark(custom, args):
                                      use_int8_w8a16=False, fp8_type=None,
                                      dtype=dtype)
 
-        if use_silu_non_fused:
-            out = torch.zeros((M * top_k, N // 2), dtype=dtype, device='cuda')
-            fn = lambda: silu_and_mul(moe_gemm(a, b, c, metadata).reshape(M * top_k, N), out)
-        else:
-            fn = lambda: moe_gemm(a, b, c, metadata)
+        if "fused" in provider:
+            fn = lambda: e2e_moe(a, w1, w2, c, metadata)
 
+        if "ref" in provider:
+            fn = lambda: e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata)
         ms = triton.testing.do_bench(fn)
 
         return ms
