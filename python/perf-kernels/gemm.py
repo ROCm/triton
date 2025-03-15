@@ -9,11 +9,15 @@ import re
 from utils.benchmark_utils import get_available_models, get_model_configs
 
 
+# TODO(azaidy): Make this an argument, Benchmarking, testing code and kernel helper need to change for it.
+SCALE_BLOCK_SIZE = 128
+
+
 @triton.autotune(
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
                 'kpack': 2, 'matrix_instr_nonkdim': 16
             }, num_warps=4, num_stages=2),
         triton.Config(
@@ -248,12 +252,12 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         c.stride(1),
         a_scale,
         b_scale,
-        a_scale.stride(0) if a_scale.ndim else 0,
-        a_scale.stride(1) if a_scale.ndim else 0,
-        b_scale.stride(0) if b_scale.ndim else 0,
-        b_scale.stride(1) if b_scale.ndim else 0,
-        group_k=128,
-        group_n=128,
+        a_scale.stride(0) if (a_scale != None) and a_scale.ndim else 0,
+        a_scale.stride(1) if (a_scale != None) and a_scale.ndim else 0,
+        b_scale.stride(0) if (b_scale != None) and b_scale.ndim else 0,
+        b_scale.stride(1) if (b_scale != None) and b_scale.ndim else 0,
+        group_k=SCALE_BLOCK_SIZE,
+        group_n=SCALE_BLOCK_SIZE,
         APPLY_SCALE=scale_a8_b8,
         ACTIVATION=activation,
     )
@@ -296,7 +300,7 @@ def ceil_div(x, y):
     return (x + y - 1) // y
 
 
-def gen_input(M, N, dtype, needTrans, seed, cast_type=None, device='cuda'):
+def gen_input(M, N, dtype, needTrans, seed, fp8_scaling_mode=None, device='cuda'):
     torch.manual_seed(seed)
 
     if needTrans:
@@ -305,30 +309,28 @@ def gen_input(M, N, dtype, needTrans, seed, cast_type=None, device='cuda'):
         raw_data = torch.randn((M, N), dtype=torch.float32, device='cuda')
     scale = None
     if dtype_is_8_bit(dtype):
-        if cast_type == "token":
-            assert raw_data.size(1) % 128 == 0
-            raw_data = raw_data.view(M, -1, 128)
+        if fp8_scaling_mode == "token":
+            assert raw_data.size(1) % SCALE_BLOCK_SIZE == 0
+            raw_data = raw_data.view(M, -1, SCALE_BLOCK_SIZE)
             max_val = raw_data.abs().float().amax(dim=2).view(M, -1).clamp(1e-4)
             scale = max_val.unsqueeze(2) / dtype_max[dtype]
             raw_data = (raw_data / scale).view(M, N)
             scale = scale.view(M, -1)
-            print("Cast type token")
-        elif cast_type == "block":
+            scale = scale.T.contiguous().T
+        elif fp8_scaling_mode == "block":
             x_padded = torch.zeros(
-                (ceil_div(N, 128) * 128, ceil_div(M, 128) * 128), dtype=raw_data.dtype, device=raw_data.device
+                (ceil_div(N, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE, ceil_div(M, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE), dtype=raw_data.dtype, device=raw_data.device
             ).T
             x_padded[:M, :N] = raw_data
-            x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+            x_view = x_padded.view(-1, SCALE_BLOCK_SIZE, x_padded.size(1) // SCALE_BLOCK_SIZE, SCALE_BLOCK_SIZE)
             x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
             x_scaled = x_view * (dtype_max[dtype] / x_amax)
             raw_data = x_scaled.view_as(x_padded)[:M, :N].T.contiguous().T
             scale = (x_amax / dtype_max[dtype]).view(x_view.size(0), x_view.size(2))
-            print("Cast type block")
         else:
             max_val = torch.max(torch.abs(raw_data))
             scale = max_val / dtype_max[dtype]
             raw_data = raw_data / scale
-            print("Cast type tensor")
 
     input = raw_data.to(dtype)
     input_f32 = input.to(torch.float32)
@@ -386,6 +388,67 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
         torch.testing.assert_close(c, torch_output.to(torch_out_dtype), atol=5e-3, rtol=1e-2)
 
 
+# yapf: disable
+@pytest.mark.parametrize(
+    "M, N, K, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b",
+    [(*shape, in_dtype_a, in_dtype_b, out_dtype, col_a, col_b)
+     for shape in [(8192, 8192, 8192)] #get_x_vals()
+     for in_dtype_a, in_dtype_b, out_dtype in [
+        ('fp8e4', 'fp8e4', 'fp16'), ('fp8e5', 'fp8e5', 'fp16'), ('fp16', 'fp8e4', 'fp16'),
+        ('fp16', 'fp8e5', 'fp16'),  ('bf16', 'fp8e4', 'bf16'),  ('bf16', 'fp8e5', 'bf16')]
+     # Defines if a matrix is row or column major.
+     for col_a in [True, False]
+     for col_b in [True, False]])
+def test_correctness_scaling(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
+    # Generate Inputs
+    torch_in_dtype_a = name_to_torch_types[in_dtype_a]
+    torch_in_dtype_b = name_to_torch_types[in_dtype_b]
+    a, a_fp32, a_scale = gen_input(M, K, torch_in_dtype_a, col_a, 1, fp8_scaling_mode="token", device='cuda')
+    b, b_fp32, b_scale = gen_input(K, N, torch_in_dtype_b, col_b, 2, fp8_scaling_mode="block", device='cuda')
+    # Create output tensor
+    torch_out_dtype = name_to_torch_types[out_dtype]
+    c = torch.empty((M, N), device=a.device, dtype=torch_out_dtype)
+    # For 8-bit, we have scaled to the dynamic range of the data type.
+    # This requires us to compute in fp32 because for e5m2, the range is same as fp16 (e5m10).
+    # If we use fp16 it is possible to return infs from the torch.matmul call.
+    matmul(a, b, c, a_scale, b_scale, scale_a8_b8=2, activation="")
+    # Reference Implementation
+    block_k = SCALE_BLOCK_SIZE
+    block_n = SCALE_BLOCK_SIZE
+    k_tiles = (K + block_k - 1) // block_k
+    n_tiles = (N + block_n - 1) // block_n
+    c_ref = torch.zeros((M, N), device=a_fp32.device, dtype=torch.float32)
+
+    A_tiles = [
+        a_fp32[
+            :, i * block_k : min((i + 1) * block_k, K)
+        ]
+        for i in range(k_tiles)
+    ]
+    B_tiles = [
+        [
+            b_fp32[
+                i * block_k : min((i + 1) * block_k, K),
+                j * block_n : min((j + 1) * block_n, N),
+            ]
+            for j in range(n_tiles)
+        ]
+        for i in range(k_tiles)
+    ]
+    C_tiles = [c_ref[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)]
+    As_tiles = [a_scale[:, i : i + 1] for i in range(k_tiles)] if (a_scale != None) else None
+
+    for i in range(k_tiles):
+        for j in range(n_tiles):
+            a_tile = A_tiles[i]
+            b_tile = B_tiles[i][j]
+            c_tile = C_tiles[j]
+            s_tile = (As_tiles[i] * b_scale[i][j]) if dtype_is_8_bit(torch_in_dtype_a) else b_scale[i][j]
+            c_tile[:, :] += torch.matmul(a_tile, b_tile) * s_tile
+
+    torch.testing.assert_close(c, c_ref.to(torch_out_dtype), atol=5e-3, rtol=1e-2)
+
+
 def get_type(provider):
     res = re.findall(r'\(.*?\)', provider)
     return res[0][1:-1].split('/', 1)
@@ -420,8 +483,8 @@ def benchmark(M, N, K, provider, model=None, args=None):
         a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, device='cuda')
         b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, device='cuda')
     else:
-        a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, cast_type="token", device='cuda')
-        b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, cast_type="block", device='cuda')
+        a, _, a_scale = gen_input(M, K, in_dtype_a, False, 1, fp8_scaling_mode="token", device='cuda')
+        b, _, b_scale = gen_input(K, N, in_dtype_b, layout_tn, 2, fp8_scaling_mode="block", device='cuda')
 
     if 'hipblaslt' in provider:
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
@@ -430,7 +493,11 @@ def benchmark(M, N, K, provider, model=None, args=None):
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
+        # Enable scaling if data type is 8 bit
         scale_a8_b8 = dtype_is_8_bit(in_dtype_a) or dtype_is_8_bit(in_dtype_b)
+        # If data type is 8 bit and scaling mode is block
+        #   Default to tensor scaling for int8
+        #   Use token/block scaling for fp8
         if scale_a8_b8 and args.fp8_scaling_mode == "block":
             scale_a8_b8 = 1 if in_dtype_b == torch.int8 else 2
         ms, min_ms, max_ms = triton.testing.do_bench(
