@@ -8,7 +8,6 @@ import re
 
 from utils.benchmark_utils import get_available_models, get_model_configs
 
-
 # TODO(azaidy): Make this an argument, Benchmarking, testing code and kernel helper need to change for it.
 SCALE_BLOCK_SIZE = 128
 
@@ -157,7 +156,8 @@ def matmul_kernel(
     elif APPLY_SCALE == 2:
         k_start = 0
         offs_ks = k_start // group_k
-        a_scale_ptrs =  None if a_scale_ptr is None else (a_scale_ptr + offs_am * stride_ascale_m + offs_ks * stride_ascale_k)
+        a_scale_ptrs = None if a_scale_ptr is None else (a_scale_ptr + offs_am * stride_ascale_m +
+                                                         offs_ks * stride_ascale_k)
         offs_bsn = offs_bn // group_n
         b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bscale_n + offs_ks * stride_bscale_k
 
@@ -195,8 +195,8 @@ def matmul_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
         if APPLY_SCALE == 2:
-            k_cur = (k)*BLOCK_SIZE_K // group_k
-            k_nxt = (k+1)*BLOCK_SIZE_K // group_k
+            k_cur = (k) * BLOCK_SIZE_K // group_k
+            k_nxt = (k + 1) * BLOCK_SIZE_K // group_k
             offs_ks = k_nxt - k_cur
             b_scale_ptrs += offs_ks * stride_bscale_k
             if a_scale_ptrs is not None:
@@ -252,10 +252,10 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=False, activation=""):
         c.stride(1),
         a_scale,
         b_scale,
-        a_scale.stride(0) if (a_scale != None) and a_scale.ndim else 0,
-        a_scale.stride(1) if (a_scale != None) and a_scale.ndim else 0,
-        b_scale.stride(0) if (b_scale != None) and b_scale.ndim else 0,
-        b_scale.stride(1) if (b_scale != None) and b_scale.ndim else 0,
+        a_scale.stride(0) if (a_scale is not None) and a_scale.ndim else 0,
+        a_scale.stride(1) if (a_scale is not None) and a_scale.ndim else 0,
+        b_scale.stride(0) if (b_scale is not None) and b_scale.ndim else 0,
+        b_scale.stride(1) if (b_scale is not None) and b_scale.ndim else 0,
         group_k=SCALE_BLOCK_SIZE,
         group_n=SCALE_BLOCK_SIZE,
         APPLY_SCALE=scale_a8_b8,
@@ -319,8 +319,8 @@ def gen_input(M, N, dtype, needTrans, seed, fp8_scaling_mode=None, device='cuda'
             scale = scale.T.contiguous().T
         elif fp8_scaling_mode == "block":
             x_padded = torch.zeros(
-                (ceil_div(N, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE, ceil_div(M, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE), dtype=raw_data.dtype, device=raw_data.device
-            ).T
+                (ceil_div(N, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE, ceil_div(M, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE),
+                dtype=raw_data.dtype, device=raw_data.device).T
             x_padded[:M, :N] = raw_data
             x_view = x_padded.view(-1, SCALE_BLOCK_SIZE, x_padded.size(1) // SCALE_BLOCK_SIZE, SCALE_BLOCK_SIZE)
             x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -436,7 +436,7 @@ def test_correctness_scaling(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_
         for i in range(k_tiles)
     ]
     C_tiles = [c_ref[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)]
-    As_tiles = [a_scale[:, i : i + 1] for i in range(k_tiles)] if (a_scale != None) else None
+    As_tiles = [a_scale[:, i : i + 1] for i in range(k_tiles)] if (a_scale is not None) else None
 
     for i in range(k_tiles):
         for j in range(n_tiles):
