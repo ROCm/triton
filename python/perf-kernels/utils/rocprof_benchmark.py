@@ -7,8 +7,8 @@ def run_profiling(triton_dir, batch_size, prefix_len, extend_len, output_file):
     command = [
         "rocprof", "--stats", "-o", output_file,
         "python", f"{triton_dir}/python/perf-kernels/MLA_extend.py",
-        "-B", str(batch_size), "-prefix_len", str(prefix_len), "-extend_len", str(extend_len), "-dtype", "fp16",
-        "-attn_impl", "normal" if prefix_len==0 else "absorb"
+        "-B", str(batch_size), "-prefix_len", str(prefix_len), "-extend_len", str(extend_len),
+        "-attn_impl", "normal" if prefix_len==0 else "absorb", "-fuse_wkc", "-fp8"
     ]
     subprocess.run(command, check=True)
 
@@ -33,9 +33,9 @@ def main():
     triton_dir = os.environ.get("TRITONDIR", "~/triton")  # Default to ~/triton if not set
     output_file = os.path.expanduser("~/profiling.csv")
     kernel_names = ["_fwd_fused_kernel.kd", "_fwd_kernel.kd"]
-    batch_sizes = [16, 1]
-    prefix_len = [0, 8192]
-    extend_len = [4096, 2048]
+    batch_sizes = [8, 16]
+    prefix_len = [0, 16324]
+    extend_len = [8192, 1024]
     
     results = {B: {} for B in batch_sizes}
     for B, p, e in zip(batch_sizes, prefix_len, extend_len):

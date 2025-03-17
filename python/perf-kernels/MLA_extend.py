@@ -47,7 +47,7 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     qo_indptr = torch.arange(B + 1, device=device) * (extend_length) # 0, extend_length, extend_length*2
     
     # prefix parts
-    k_buffer = torch.randn(B * (extend_length), 1, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    k_buffer = torch.randn(B * (prefix_length), 1, kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
     v_buffer = k_buffer[..., :kv_lora_rank]
 
     # prefix indexing
@@ -74,7 +74,7 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     (2, 16, 0, 2048, 512, 64, 128),
 ])
 @pytest.mark.parametrize('dtype', [torch.bfloat16])
-@pytest.mark.parametrize('ref_attn_impl', ["absorb"])
+@pytest.mark.parametrize('ref_attn_impl', ["absorb", "normal"])
 @pytest.mark.parametrize('fuse_wkc', [False, True])
 @pytest.mark.parametrize('fuse_wvc', [False, True])
 @pytest.mark.parametrize('fp8', [False, True])
@@ -95,10 +95,10 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
     output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                                 fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False, fp8=fp8)
 
+    # print(output_ref)
     # Fused
     output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
                                    fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True, fp8=fp8)
-
 
     # Compare the outputs
     # Print debug information for mismatches
@@ -129,7 +129,12 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         q_input = torch.empty((*q_extend.shape[:-1], kv_lora_rank + qk_rope_head_dim), dtype=dtype, device=device)
         q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
         q_nope = q_extend[..., :v_head_dim]
-        q_nope_out = torch.bmm(q_nope.to(torch.bfloat16).transpose(0, 1), w_kc.transpose(1,2).to(torch.bfloat16) * w_descale).to(dtype)
+        # if fp8: # mostly to check numerical stability
+        #     q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
+        #     q_descale = q_descale.item()
+        #     q_nope_out = (torch.bmm(q_nope.to(torch.bfloat16).transpose(0, 1), w_kc.transpose(1,2).to(torch.bfloat16)) * q_descale * w_descale).to(dtype)
+        # else:
+        q_nope_out = torch.bmm(q_nope.to(dtype).transpose(0, 1), w_kc.transpose(1,2).to(dtype) * w_descale).to(dtype)
         q_input[..., :kv_lora_rank] = q_nope_out.transpose(0, 1)
     else:
         q_input = q_extend
@@ -143,12 +148,13 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
         extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8)
+                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
+                                   qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
 
     if not fuse_wvc: # 2nd gemm
         attn_bmm_output = torch.bmm(
-                out.to(torch.bfloat16).transpose(0, 1),
-                w_vc.to(torch.bfloat16) * w_descale,
+                out.to(dtype).transpose(0, 1),
+                w_vc.to(dtype) * w_descale,
             ).to(dtype)
         out = attn_bmm_output.transpose(0, 1)
 
@@ -189,7 +195,8 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
         extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8)
+                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
+                                   qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
 
     return out
     
@@ -200,8 +207,7 @@ def benchmark(args):
     configs = []
     x_vals_list = [
         (16, 16, 0, 8192, 512, 64, 128, "normal"),
-        (1, 16, 4096, 2048, 512, 64, 128, "absorb"),
-        # (2, 16, 4096, 1024, 512, 64, 128, "absorb"), # OOMs if run with other
+        (16, 16, 16324, 1024, 512, 64, 128, "absorb"),
     ]
     
     if args.B or args.attn_impl != "":
@@ -390,7 +396,7 @@ def main():
         print_vgpr(args)
         return 0
     run_bench(args)
-    # test_op_fwd(2, 16, 2048, 2048, 512, 64, 128, torch.bfloat16, "absorb", False, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
+    # test_op_fwd(16, 16, 0, 8192, 512, 64, 128, torch.bfloat16, "absorb", True, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
 
 if __name__ == "__main__":
     main()
