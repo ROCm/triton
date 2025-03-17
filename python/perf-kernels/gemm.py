@@ -90,10 +90,8 @@ def matmul_kernel(
 
     NUM_XCDS: tl.constexpr = 8
 
-    tl.static_assert(
-        ((APPLY_SCALE == None) or (APPLY_SCALE == 'tensor')) or (APPLY_SCALE == 'block'),
-        f"Scaling mode {APPLY_SCALE} is not supported!!!"
-    )
+    tl.static_assert(((APPLY_SCALE is None) or (APPLY_SCALE == 'tensor')) or (APPLY_SCALE == 'block'),
+                     f"Scaling mode {APPLY_SCALE} is not supported!!!")
 
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
@@ -239,8 +237,7 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=None, activation=""):
             >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
     assert (a.is_floating_point() == b.is_floating_point()
             ), "GEMMs between float and integer type tensors are not supported!!!"
-    assert (scale_a8_b8 in [None, 'tensor', 'block']
-            ), f"Scaling mode {scale_a8_b8} is not supported!!!"
+    assert (scale_a8_b8 in [None, 'tensor', 'block']), f"Scaling mode {scale_a8_b8} is not supported!!!"
     M, K = a.shape
     K, N = b.shape
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
@@ -321,9 +318,9 @@ def gen_input(M, N, dtype, needTrans, seed=0, fp8_scaling_mode='tensor', device=
             scale = scale.view(M, -1)
             scale = scale.T.contiguous().T
         elif fp8_scaling_mode == 'block':
-            x_padded = torch.zeros(
-                (triton.cdiv(N, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE, triton.cdiv(M, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE),
-                dtype=raw_data.dtype, device=raw_data.device).T
+            x_padded = torch.zeros((triton.cdiv(M, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE,
+                                    triton.cdiv(N, SCALE_BLOCK_SIZE) * SCALE_BLOCK_SIZE), dtype=raw_data.dtype,
+                                   device=raw_data.device)
             x_padded[:M, :N] = raw_data
             x_view = x_padded.view(-1, SCALE_BLOCK_SIZE, x_padded.size(1) // SCALE_BLOCK_SIZE, SCALE_BLOCK_SIZE)
             x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -425,24 +422,15 @@ def test_correctness_block_scaling(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b
     n_tiles = triton.cdiv(N, block_n)
     c_ref = torch.zeros((M, N), device=a_fp32.device, dtype=torch.float32)
 
-    A_tiles = [
-        a_fp32[
-            :, i * block_k : min((i + 1) * block_k, K)
-        ]
-        for i in range(k_tiles)
-    ]
-    B_tiles = [
-        [
-            b_fp32[
-                i * block_k : min((i + 1) * block_k, K),
-                j * block_n : min((j + 1) * block_n, N),
-            ]
-            for j in range(n_tiles)
-        ]
-        for i in range(k_tiles)
-    ]
-    C_tiles = [c_ref[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)]
-    As_tiles = [a_scale[:, i : i + 1] for i in range(k_tiles)] if (a_scale is not None) else None
+    A_tiles = [a_fp32[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)]
+    B_tiles = [[
+        b_fp32[
+            i * block_k:min((i + 1) * block_k, K),
+            j * block_n:min((j + 1) * block_n, N),
+        ] for j in range(n_tiles)
+    ] for i in range(k_tiles)]
+    C_tiles = [c_ref[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)]
+    As_tiles = [a_scale[:, i:i + 1] for i in range(k_tiles)] if (a_scale is not None) else None
 
     for i in range(k_tiles):
         for j in range(n_tiles):
