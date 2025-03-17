@@ -57,7 +57,7 @@ struct ExtractSliceOpConversion
   }
 
   LogicalResult processLayout(amdgpu::ExtractSliceOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const {
+                              ConversionPatternRewriter &rewriter) const {
     Location loc = op->getLoc();
     auto srcTy = cast<RankedTensorType>(op.getSource().getType());
     auto srcLayout = srcTy.getEncoding();
@@ -65,15 +65,13 @@ struct ExtractSliceOpConversion
     auto resultTy = cast<RankedTensorType>(op.getType());
     auto vals = unpackLLElements(loc, adaptor.getSource(), rewriter);
     auto elemsPerThread = triton::gpu::getElemsPerThread(srcTy);
-    auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(srcLayout);
-    auto sizePerThread = triton::gpu::getSizePerThread(
-      sliceLayout ? sliceLayout.getParent() : srcLayout);
-    auto totalSizePerThread = product<unsigned>(sizePerThread);
-    auto order = triton::gpu::getOrder(srcLayout);
-    auto offsets = op.getStaticOffsets();
+    auto contigPerThread = triton::gpu::getContigPerThread(srcTy);
+
+    auto totalContigPerThread = product<unsigned>(contigPerThread);
+    auto order = triton::gpu::getOrder(srcTy);
 
     // Calculate valid total number of workers in each dimension
-    auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcLayout);
+    auto shapePerCTATile = triton::gpu::getShapePerCTATile(srcTy);
     for (auto i = 0; i < shapePerCTATile.size(); ++i) {
       shapePerCTATile[i] =
           std::min(static_cast<unsigned>(srcShape[i]), shapePerCTATile[i]);
@@ -86,29 +84,33 @@ struct ExtractSliceOpConversion
     SmallVector<int64_t> CTAPerShape;
     for (auto i = 0; i < resultTy.getRank(); ++i) {
       sizes.push_back(resultTy.getDimSize(i));
-      CTAOffsets.push_back(offsets[i] / shapePerCTATile[i]);
+      CTAOffsets.push_back(sizes[i] / shapePerCTATile[i]);
       CTASizes.push_back(sizes[i] / shapePerCTATile[i]);
       CTAPerShape.push_back(srcShape[i] / shapePerCTATile[i]);
     }
 
     // SliceLayout uses 1d offsets.
-    auto skipElems = CTAOffsets[0] * totalSizePerThread;
-    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * totalSizePerThread;
-    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * totalSizePerThread;
-    auto numElemsPerVec = totalSizePerThread * CTASizes[0];
-    if(!sliceLayout) {
-      // Non-SliceLayouts use 2d offsets (based on order).
+    auto skipElems = CTAOffsets[0] * totalContigPerThread;
+    auto tensorStride = (CTAPerShape[0] - CTASizes[0]) * totalContigPerThread;
+    auto lastIdx = (CTAOffsets[0] + CTASizes[0]) * totalContigPerThread;
+    auto numElemsPerVec = totalContigPerThread * CTASizes[0];
+
+    auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(srcLayout);
+    if (!sliceLayout) {
+      // The diagram above illustrates the graphical representation of the
+      // skipElems, tensorStride, and lastIdx variables.
       skipElems = CTAOffsets[order[1]] *
-          (elemsPerThread[order[0]] * sizePerThread[order[1]]) +
-          CTAOffsets[order[0]] * totalSizePerThread;
+                      (elemsPerThread[order[0]] * contigPerThread[order[1]]) +
+                  CTAOffsets[order[0]] * totalContigPerThread;
       tensorStride =
-          (CTAPerShape[order[0]] - CTASizes[order[0]]) * totalSizePerThread;
+          (CTAPerShape[order[0]] - CTASizes[order[0]]) * totalContigPerThread;
       lastIdx =
           (CTAOffsets[order[1]] + CTASizes[order[1]] - 1) *
-          elemsPerThread[order[0]] * sizePerThread[order[1]] +
-          (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalSizePerThread;
-      numElemsPerVec = totalSizePerThread * CTASizes[order[0]];
+              elemsPerThread[order[0]] * contigPerThread[order[1]] +
+          (CTAOffsets[order[0]] + CTASizes[order[0]]) * totalContigPerThread;
+      numElemsPerVec = totalContigPerThread * CTASizes[order[0]];
     }
+
     assert(lastIdx <= vals.size());
 
     SmallVector<Value> resultVals;
@@ -135,7 +137,8 @@ struct ExtractSliceOpConversion
       return processLayout(op, adaptor, rewriter);
     } else if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(encoding)) {
       auto parent = sliceLayout.getParent();
-      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(parent)) {
+      if (isa<BlockedEncodingAttr, AMDMfmaEncodingAttr, DotOperandEncodingAttr>(
+              parent)) {
         return processLayout(op, adaptor, rewriter);
       }
     }

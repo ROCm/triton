@@ -78,7 +78,7 @@ LogicalResult ExtractSliceOp::verify() {
   int64_t rank = srcTy.getRank();
 
   auto srcShape = srcTy.getShape();
-  auto shapePerCTATile = mlir::triton::gpu::getShapePerCTATile(srcLayout);
+  auto shapePerCTATile = mlir::triton::gpu::getShapePerCTATile(srcTy);
 
   // ExtractSlice only supports slicing where offsets and sizes are multiples of
   // shapePerCTATile. This condition ensures that slice has the same layout as
