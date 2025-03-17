@@ -89,13 +89,13 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
    
     # Reference
-    output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False, fp8=fp8)
+    output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
+                               w_kc, w_vc, w_descale, ref=True, fuse_wkc=False, fuse_wvc=False, fp8=fp8)
 
     # print(output_ref)
     # Fused
-    output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                   fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True, fp8=fp8)
+    output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
+                               w_kc, w_vc, w_descale, ref=True, fuse_wkc=fuse_wkc, fuse_wvc=fuse_wvc, fp8=fp8)
 
     # Compare the outputs
     # Print debug information for mismatches
@@ -112,13 +112,13 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
     torch.testing.assert_close(output_ref, output_fused, rtol=1e-2, atol=1e-2)
 
 
-def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                    fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused, fp8=False):
+def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
+                    w_kc, w_vc, w_descale, ref=True, persistent=False, fuse_wkc=False, fuse_wvc=False, fp8=False):
     
     dtype = v_extend.dtype
     device = v_extend.device
     
-    if not fused: # aka reference
+    if ref:
         fuse_wkc = False
         fuse_wvc = False
 
@@ -126,7 +126,7 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         q_input = torch.empty((*q_extend.shape[:-1], kv_lora_rank + qk_rope_head_dim), dtype=dtype, device=device)
         q_input[..., kv_lora_rank:] = q_extend[..., v_head_dim:]
         q_nope = q_extend[..., :v_head_dim]
-        # if fp8: # mostly to check numerical stability
+        # if fp8: # to check numerical stability
         #     q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
         #     q_descale = q_descale.item()
         #     q_nope_out = (torch.bmm(q_nope.to(torch.bfloat16).transpose(0, 1), w_kc.transpose(1,2).to(torch.bfloat16)) * q_descale * w_descale).to(dtype)
@@ -141,13 +141,14 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
     else:
         out = torch.empty( (*q_extend.shape[:-1], kv_lora_rank), dtype=dtype, device=device)
 
-    if not fused:
+    if ref:
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
-        extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
-                                   qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
-        # extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
+        if persistent:
+            extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
+        else:
+            extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8, qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
 
     if not fuse_wvc: # 2nd gemm
         attn_bmm_output = torch.bmm(
@@ -159,15 +160,15 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
 
     return out
 
-def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                    fuse_wkc, fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused, fp8=False):
+def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
+                    w_kc, w_vc, w_descale, ref=True, persistent=False, fuse_wkc=False, fuse_wvc=False, fp8=False):
     
     dtype = v_extend.dtype
     device = v_extend.device
     
     out = torch.empty((*q_extend.shape[:-1], v_head_dim), dtype=dtype, device=device)
 
-    if not fused:  # aka reference
+    if ref:
         fuse_wkc = False
         fuse_wvc = False
 
@@ -189,13 +190,15 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         v_buffer = torch.einsum('zc,hcd->zhd', v_buffer.squeeze().to(dtype), w_vc.to(dtype) * w_descale)
 
 
-    if not fused:
+    if ref:
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     else:
-        extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
-                                   fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
-                                   qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
-        # extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
+        if persistent:
+            extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
+        else:
+            extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
+                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8, qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
+
     return out
     
 def benchmark(args):
@@ -214,7 +217,7 @@ def benchmark(args):
         ]
 
     x_names = ["B", "H", "prefix", "extend", "kv_lora_rank", "qk_rope_head_dim", "v_head_dim", "attn_impl"]
-    line_vals = ["ref", "fused"]
+    line_vals = ["ref", "fused", "persistent"]
 
     if args.ref:
         line_vals = ["ref"]
@@ -225,7 +228,7 @@ def benchmark(args):
 
     configs.append(
         triton.testing.Benchmark(x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_vals,
-                                 line_names=line_vals, styles=[('red', '-'), ('green', '-')], ylabel='ms',
+                                 line_names=line_vals, styles=[('red', '-'), ('green', '-'), ('blue', '-')], ylabel='ms',
                                  plot_name=plot_name, args={'sm_scale': 1.0, 'logit_cap': 0.0, 'device': args.device}))
 
     @triton.testing.perf_report(configs)
@@ -247,13 +250,20 @@ def benchmark(args):
             def fn():
                 return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                     args.fuse_wkc, args.fuse_wvc, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=True, fp8=args.fp8)
+                                     kv_lora_rank, qk_rope_head_dim, v_head_dim, w_kc, w_vc, w_descale, ref=False, fuse_wkc=args.fuse_wkc, fuse_wvc=args.fuse_wvc, fp8=args.fp8)
+        
+        if "persistent" in provider:
+            def fn():
+                return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
+                                     custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
+                                     kv_lora_rank, qk_rope_head_dim, v_head_dim, w_kc, w_vc, w_descale, ref=False, persistent=True, fuse_wkc=False, fuse_wvc=False, fp8=False)
+        
         
         elif "ref" in provider:
             def fn():
                 return forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, 
                                      custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap,
-                                     False, False, w_kc, w_vc, w_descale, kv_lora_rank, qk_rope_head_dim, v_head_dim, fused=False, fp8=args.fp8)
+                                     kv_lora_rank, qk_rope_head_dim, v_head_dim, w_kc, w_vc, w_descale, ref=True, fp8=False)
         
         # warmup
         if args.cuda_graph:
@@ -276,7 +286,6 @@ def benchmark(args):
 
         # Replay the graph for benchmarking
         ms = triton.testing.do_bench(func, warmup=warmup, rep=rep)
-        torch.cuda.empty_cache()
         return ms
 
     bench_MLA.run(save_path=None, print_data=True, show_plots=False)

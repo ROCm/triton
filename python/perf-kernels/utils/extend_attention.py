@@ -956,8 +956,9 @@ def extend_fused_attention_fwd(
     """
 
     # persistent only when all the sequences are prefill
-    # persistent = False if (kv_indptr[1:] - kv_indptr[:-1]).sum() > 0 else persistent # TODO: find a better heuristic
-
+    # persistent = False if (kv_indptr[1:] - kv_indptr[:-1]).sum() > 0 else persistent # TODO: find a better heuristic    
+    
+    # tiling for gemm fusion
     TILE_D = 128 if fp8 else 32 # q = q * w_kc = (BLOCK_M, BLOCK_D) x (BLOCK_D, C) = (BLOCK_M, C)
     TILE_DO = 128 if fp8 else 16 # o = o * w_vc = (BLOCK_M, C) x (C, BLOCK_DO) = (BLOCK_M, BLOCK_DO)
     
@@ -967,6 +968,8 @@ def extend_fused_attention_fwd(
 
     DQ = q_extend.shape[-1] - DPE
     DK = k_extend.shape[-1] - DPE
+
+    DACC = v_extend.shape[-1]
     
     BLOCK_DQ = triton.next_power_of_2(DQ)
     BLOCK_DK = triton.next_power_of_2(DK)
@@ -978,16 +981,12 @@ def extend_fused_attention_fwd(
     if fuse_w_kc:
         assert w_kc is not None, "w_kc must be provided"
         BLOCK_D = min(TILE_D, BLOCK_D)
-    else:
-        BLOCK_D = min(BLOCK_D, DV)
 
     if fuse_w_vc:
         assert w_vc is not None, "w_vc must be provided"
-        DACC = v_extend.shape[-1]
         DO = w_vc.shape[-1] 
         BLOCK_DO = min(TILE_DO, triton.next_power_of_2(DO))
     else:
-        DACC = v_extend.shape[-1] # no projection
         DO = v_extend.shape[-1] # no projection
         BLOCK_DO = triton.next_power_of_2(DO)
             
@@ -998,6 +997,7 @@ def extend_fused_attention_fwd(
     sm_scale = sm_scale or 1.0 / ((k_extend.shape[-1])**0.5) # TODO: check that this is correct here
     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
     
+    # TODO: this can be made simpler
     # k heads can be num heads or 1, v heads can be num heads or 1 (depending on if they are projected or not)
     kv_heads = v_extend.shape[1] if fuse_w_kc else k_extend.shape[1]
     kv_group_num = q_extend.shape[1] // kv_heads
@@ -1012,6 +1012,7 @@ def extend_fused_attention_fwd(
         NUM_WG = 0
         atomic_counter = None
         grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
+    
     num_stages = 1
 
     extra_kargs = {}
@@ -1025,10 +1026,10 @@ def extend_fused_attention_fwd(
 
     # FP8
     if not fp8 and fuse_w_kc: # descale w_kc
-        w_kc = (w_kc.to(torch.bfloat16) * w_descale).to(q_nope.dtype)
+        w_kc = (w_kc.to(torch.float32) * w_descale).to(q_nope.dtype)
            
     if not fp8 and fuse_w_vc: # descale w_vc
-        w_vc = (w_vc.to(torch.bfloat16) * w_descale).to(q_nope.dtype) 
+        w_vc = (w_vc.to(torch.float32) * w_descale).to(q_nope.dtype) 
 
     if fp8 and fuse_w_kc: # quantize q_nope part
         q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
@@ -1058,6 +1059,7 @@ def extend_fused_attention_fwd(
         q_pe.stride(0),
         q_pe.stride(1),
         k_extend.stride(0),
+        # need to have this because k heads and v heads can be different
         0 if fuse_w_kc else k_extend.stride(1),
         v_extend.stride(0),
         0 if fuse_w_vc else v_extend.stride(1),
