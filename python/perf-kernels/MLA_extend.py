@@ -1,7 +1,4 @@
-from utils.extend_attention import extend_attention_fwd
-
-# from MLA_flash import extend_fused_attention_fwd
-from utils.extend_attention import extend_fused_attention_fwd
+from utils.extend_attention import extend_attention_fwd, extend_fused_attention_fwd, extend_persistent_attention_fwd
 
 import logging
 import time
@@ -150,6 +147,7 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
                                    qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
+        # extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
 
     if not fuse_wvc: # 2nd gemm
         attn_bmm_output = torch.bmm(
@@ -197,7 +195,7 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                    fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8,
                                    qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
-
+        # extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
     return out
     
 def benchmark(args):
