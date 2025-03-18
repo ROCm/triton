@@ -369,12 +369,62 @@ bool emitTransferBetweenRegistersAndShared(
   auto vecTy = vec_ty(elemLlvmTy, vecElems);
   Value zero = i32_val(0);
   SmallVector<Value> ret;
-  for (int i = 0; i < numElems / vecElems; i++) {
-    auto regId = i32_val(i * vecElems);
-    auto vecAddr = getSmemVecAddr(
-        regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-        sharedTy, elemLlvmTy, regId, laneId, warpId, blockId, loc, rewriter);
-    perVectorCallback(vecTy, vecAddr);
+  auto sharedEnc =
+      dyn_cast<triton::gpu::SharedEncodingAttr>(sharedTy.getEncoding());
+  // hack: only apply fix2 for Q and K tensor
+  if (sharedEnc.getMaxPhase() > 1) {
+    // compute offset for vec0
+    auto vec0Offset =
+        getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                         smemObj, sharedTy, elemLlvmTy, i32_val(0), laneId,
+                         warpId, blockId, loc, rewriter);
+    // compute offset for vec1
+    auto vec1Offset =
+        getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                         smemObj, sharedTy, elemLlvmTy, i32_val(4), laneId,
+                         warpId, blockId, loc, rewriter);
+
+    // compute offsets of vec2,4,6,... based on offset of vec0
+    for (int i = 0; i < numElems / vecElems; i += 2) {
+      auto regId = i32_val(i * vecElems);
+      auto vecBaseOffset = getSmemVecOffset(
+          regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
+          sharedTy, elemLlvmTy, regId, i32_val(0), i32_val(0), i32_val(0), loc,
+          rewriter);
+      Value vecOffset = xor_(vec0Offset, vecBaseOffset);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
+
+    // compute offsets of vec1,3,5,... based on offset of vec1
+    for (int i = 0; i < numElems / vecElems; i += 2) {
+      auto regId = i32_val(i * vecElems);
+      auto vecBaseOffset = getSmemVecOffset(
+          regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
+          sharedTy, elemLlvmTy, regId, i32_val(0), i32_val(0), i32_val(0), loc,
+          rewriter);
+      Value vecOffset = xor_(vec1Offset, vecBaseOffset);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
+  } else {
+    for (int i = 0; i < numElems / vecElems; i++) {
+      auto regId = i32_val(i * vecElems);
+      auto vecOffset = getSmemVecOffset(
+          regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
+          sharedTy, elemLlvmTy, regId, laneId, warpId, blockId, loc, rewriter);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
   }
   return true;
 }
