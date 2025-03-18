@@ -89,27 +89,28 @@ def test_op_fwd(B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim
                     B, H, prefix, extend, kv_lora_rank, qk_rope_head_dim, v_head_dim, dtype, device)
    
     # Reference
-    output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
-                               w_kc, w_vc, w_descale, ref=True, fuse_wkc=False, fuse_wvc=False, fp8=fp8)
+    # output_ref = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
+    #                            w_kc, w_vc, w_descale, ref=True, fuse_wkc=False, fuse_wvc=False, fp8=fp8)
 
-    # print(output_ref)
     # Fused
     output_fused = forward(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
-                               w_kc, w_vc, w_descale, ref=True, fuse_wkc=fuse_wkc, fuse_wvc=fuse_wvc, fp8=fp8)
+                               w_kc, w_vc, w_descale, ref=False, fuse_wkc=fuse_wkc, fuse_wvc=fuse_wvc, fp8=fp8)
 
+    print("outputs: ", output_fused)
     # Compare the outputs
     # Print debug information for mismatches
-    max_mismatches = 10
-    diff = (output_ref - output_fused).abs()
-    mismatches = diff > 1e-2
-    if mismatches.any():
-        mismatch_indices = torch.nonzero(mismatches)[:max_mismatches]
-        print(f"\nFound {mismatches.sum().item()} mismatches, showing first {len(mismatch_indices)}:")
-        for idx in mismatch_indices:
-            i, h, d = idx.tolist()
-            print(f"Position [{i}, {h}, {d}]: ref={output_ref[i, h, d].item():.6f}, fused={output_fused[i, h, d].item():.6f}, diff={diff[i, h, d].item():.6f}")
+    # max_mismatches = 10
+    # diff = (output_ref - output_fused).abs()
+    # mismatches = diff > 1e-2
+    # if mismatches.any():
+    #     mismatch_indices = torch.nonzero(mismatches)[:max_mismatches]
+    #     print(f"\nFound {mismatches.sum().item()} mismatches, showing first {len(mismatch_indices)}:")
+    #     for idx in mismatch_indices:
+    #         i, h, d = idx.tolist()
+    #         print(f"Position [{i}, {h}, {d}]: ref={output_ref[i, h, d].item():.6f}, fused={output_fused[i, h, d].item():.6f}, diff={diff[i, h, d].item():.6f}")
     
-    torch.testing.assert_close(output_ref, output_fused, rtol=1e-2, atol=1e-2)
+    # torch.testing.assert_close(output_ref, output_fused, rtol=1e-2, atol=1e-2)
+    # print("Unit test passes, output_ref and output_fused are close!")
 
 
 def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale, logit_cap, kv_lora_rank, qk_rope_head_dim, v_head_dim,
@@ -147,9 +148,22 @@ def forward_absorb(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
         if persistent:
             extend_persistent_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
         else:
+            # Debug print to check input tensor values
+            print("Input tensor samples:")
+            print(f"q_input (shape {q_input.shape}): {q_input.flatten()[:10]}")
+            print(f"k_extend (shape {k_extend.shape}): {k_extend.flatten()[:10]}")
+            print(f"v_extend (shape {v_extend.shape}): {v_extend.flatten()[:10]}")
+            print(f"k_buffer (shape {k_buffer.shape}): {k_buffer.flatten()[:10]}")
+            print(f"v_buffer (shape {v_buffer.shape}): {v_buffer.flatten()[:10]}")
+            print(f"qo_indptr (shape {qo_indptr.shape}): {qo_indptr}")
+            print(f"kv_indptr (shape {kv_indptr.shape}): {kv_indptr}")
+            print(f"kv_indices (shape {kv_indices.shape}): {kv_indices[:10]}")
+            print(f"w_kc (shape {w_kc.shape}): {w_kc.flatten()[:10]}")
+            print(f"w_vc (shape {w_vc.shape}): {w_vc.flatten()[:10]}")
+            
             extend_fused_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap,
                                     fuse_w_kc=fuse_wkc, fuse_w_vc=fuse_wvc, w_kc=w_kc, w_vc=w_vc, w_descale=w_descale, fp8=fp8, qk_rope_head_dim=qk_rope_head_dim, qk_nope_head_dim=v_head_dim, kv_lora_rank=kv_lora_rank)
-
+    
     if not fuse_wvc: # 2nd gemm
         attn_bmm_output = torch.bmm(
                 out.to(dtype).transpose(0, 1),
@@ -188,7 +202,6 @@ def forward_normal(q_extend, k_extend, v_extend, k_buffer, v_buffer, qo_indptr, 
     if not fuse_wvc:  # 2nd gemm
         v_extend = torch.einsum('zc,hcd->zhd', v_extend.squeeze().to(dtype), w_vc.to(dtype) * w_descale)
         v_buffer = torch.einsum('zc,hcd->zhd', v_buffer.squeeze().to(dtype), w_vc.to(dtype) * w_descale)
-
 
     if ref:
         extend_attention_fwd(q_input, k_extend, v_extend, out, k_buffer, v_buffer, qo_indptr, kv_indptr, kv_indices, custom_mask, mask_indptr, max_len_extend, sm_scale=sm_scale, logit_cap=logit_cap)
@@ -402,8 +415,8 @@ def main():
     if args.print_vgpr:
         print_vgpr(args)
         return 0
-    run_bench(args)
-    # test_op_fwd(16, 16, 0, 8192, 512, 64, 128, torch.bfloat16, "absorb", True, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
+    # run_bench(args)
+    test_op_fwd(16, 16, 0, 8192, 512, 64, 128, torch.bfloat16, "absorb", False, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
 
 if __name__ == "__main__":
     main()

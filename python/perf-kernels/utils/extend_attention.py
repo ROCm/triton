@@ -691,7 +691,7 @@ def _fwd_fused_kernel(
             qpe = tl.load(Q_PE + offs_qpe, mask=mask_m[:, None], other=0.0)
             qpe = qpe.to(K_Extend.type.element_ty)
 
-        
+        # tl.device_print("q", q)
 
         # stage 1: compute scores with prefix
         for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
@@ -770,7 +770,7 @@ def _fwd_fused_kernel(
                 p = p.to(v.dtype)
                 acc = acc * re_scale[:, None] + tl.dot(p, v)
                 
-
+        # tl.device_print("acc after stage 1", acc)
 
         # stage 2: compute the triangle part
         cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
@@ -850,6 +850,8 @@ def _fwd_fused_kernel(
                 v = tl.load(
                     V_Extend + offs_v, mask=mask_n[:, None] & mask_dv[None, :], other=0.0
                 )
+                p = p.to(v.dtype)
+                acc = acc * re_scale[:, None] + tl.dot(p, v) 
 
         # We can absorb the w_vc outside the loop
         if FUSE_W_VC:
@@ -898,6 +900,8 @@ def _fwd_fused_kernel(
                 + cur_head * stride_oh
                 + offs_do[None, :]
             )
+
+            tl.device_print("acc after stage 2", acc)
             if STORE_TRANSPOSE:
                 tl.store(
                     O_Extend + offs_o.T,
@@ -1036,6 +1040,32 @@ def extend_fused_attention_fwd(
         q_descale = q_descale.item()
 
     fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
+
+    # Print out tensor shapes and shape parameters 
+    print(f"Tensor shapes:")
+    print(f" - q_nope: {q_nope.shape} - [BatchSize * ExtendLens, HeadNum, DimModel]")
+    print(f" - q_pe: {q_pe.shape} - [BatchSize * ExtendLens, HeadNum, DimPE]")
+    print(f" - k_extend: {k_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimKey+DimPE]")
+    print(f" - v_extend: {v_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimValue]")
+    print(f" - o_extend: {o_extend.shape} - [BatchSize * ExtendLens, HeadNum, DimOut]")
+    print(f" - k_buffer: {k_buffer.shape} - [PrefixSize, KVHeadNum, DimKey+DimPE]")
+    print(f" - v_buffer: {v_buffer.shape} - [PrefixSize, KVHeadNum, DimValue]")
+
+    if fuse_w_kc:
+        print(f" - w_kc: {w_kc.shape} - [HeadNum, DimModel, LoraRank]")
+
+    if fuse_w_vc:
+        print(f" - w_vc: {w_vc.shape} - [HeadNum, LoraRank, DimOut]")
+
+    print(f"\nShape parameters:")
+    print(f" - DQ: {DQ} (Query non-PE dimension)")
+    print(f" - DK: {DK} (Key non-PE dimension)")
+    print(f" - DV: {DV} (Value dimension)")
+    print(f" - DO: {DO} (Output dimension)")
+    print(f" - DPE: {DPE} (Position embedding dimension)")
+    print(f" - DACC: {DACC} (Accumulator dimension)")
+    print(f" - C: {C} (LoRa rank)")
+    print(f" - D: {D} (Model dimension)")
 
     _fwd_fused_kernel[grid](
         # input tensors
