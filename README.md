@@ -58,6 +58,8 @@ pip install ninja cmake wheel pybind11; # build-time dependencies
 pip install -e python
 ```
 
+If you're running out of memory, specify the MAX_JOBS environment variable (in the last command) to limit the number of jobs
+
 # Building with a custom LLVM
 
 Triton uses LLVM to generate code for GPUs and CPUs.  Normally, the Triton build
