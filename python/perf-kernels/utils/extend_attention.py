@@ -655,7 +655,7 @@ def _fwd_fused_kernel(
                         Q_NOPE + offs_q_d + d * BLOCK_D, mask=(mask_m[:, None]) & ( (offs_d + d * BLOCK_D)[None, :] < D), other=0.0
                     )
                     # (BLOCK_M, BLOCK_D) * (BLOCK_D, C)
-                    q += tl.dot(q_d, w_kc_d, out_dtype=tl.float32)
+                    q += tl.dot(q_d, w_kc_d.to(q_d.dtype))
                 
             else: # no tiling along d
                 w_kc_d = tl.load(W_KC + offs_w_kc_d, mask=mask_d[:, None] & mask_c[None, :], other=0.0)
@@ -663,10 +663,12 @@ def _fwd_fused_kernel(
                     Q_NOPE + offs_q_d, mask=(mask_m[:, None]) & (mask_dq[None, :]), other=0.0
                 )
                 # (BLOCK_M, D) * (D, C)
-                q = tl.dot(q_d, w_kc_d, out_dtype=tl.float32)       
+                q = tl.dot(q_d, w_kc_d.to(q_d.dtype))       
             
             if FP8:
                 q = q * Q_descale * W_descale
+            else:
+                q = q * W_descale
 
             q = q.to(K_Extend.type.element_ty) 
 
@@ -691,7 +693,6 @@ def _fwd_fused_kernel(
             qpe = tl.load(Q_PE + offs_qpe, mask=mask_m[:, None], other=0.0)
             qpe = qpe.to(K_Extend.type.element_ty)
 
-        # tl.device_print("q", q)
 
         # stage 1: compute scores with prefix
         for start_n in range(0, cur_seq_len_prefix, BLOCK_N):
@@ -770,8 +771,6 @@ def _fwd_fused_kernel(
                 p = p.to(v.dtype)
                 acc = acc * re_scale[:, None] + tl.dot(p, v)
                 
-        # tl.device_print("acc after stage 1", acc)
-
         # stage 2: compute the triangle part
         cur_block_m_end = tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
         for start_n in range(0, cur_block_m_end, BLOCK_N):
@@ -870,9 +869,11 @@ def _fwd_fused_kernel(
                 offs_o_block = offs_do + d * BLOCK_DO
                 w_vc_d = tl.load(W_VC + offs_w_vc_d + d * BLOCK_DO * stride_w_vc_d, mask= mask_c[:, None] & (offs_o_block[None, :] < DO), other=0.0)
                 # (BLOCK_M, C) * (C, BLOCK_D)
-                acc_d = tl.dot(acc, w_vc_d)
+                acc_d = tl.dot(acc, w_vc_d.to(acc.dtype))
                 if FP8:
                     acc_d = acc_d * descale * W_descale
+                else:
+                    acc_d = acc_d * W_descale
                 acc_d = acc_d.to(O_Extend.type.element_ty)
                 
                 offs_o_d = (
@@ -901,7 +902,6 @@ def _fwd_fused_kernel(
                 + offs_do[None, :]
             )
 
-            tl.device_print("acc after stage 2", acc)
             if STORE_TRANSPOSE:
                 tl.store(
                     O_Extend + offs_o.T,
@@ -1029,11 +1029,11 @@ def extend_fused_attention_fwd(
     q_descale = None
 
     # FP8
-    if not fp8 and fuse_w_kc: # descale w_kc
-        w_kc = (w_kc.to(torch.float32) * w_descale).to(q_nope.dtype)
+    # if not fp8 and fuse_w_kc: # descale w_kc
+    #     w_kc = (w_kc.to(torch.bfloat16) * w_descale).to(q_nope.dtype)
            
-    if not fp8 and fuse_w_vc: # descale w_vc
-        w_vc = (w_vc.to(torch.float32) * w_descale).to(q_nope.dtype) 
+    # if not fp8 and fuse_w_vc: # descale w_vc
+    #     w_vc = (w_vc.to(torch.bfloat16) * w_descale).to(q_nope.dtype) 
 
     if fp8 and fuse_w_kc: # quantize q_nope part
         q_nope, q_descale = input_to_float8(q_nope, w_kc.dtype)
@@ -1042,17 +1042,17 @@ def extend_fused_attention_fwd(
     fp8_e4m3fnuz_max = torch.finfo(torch.float8_e4m3fnuz).max
 
     # Print out tensor shapes and shape parameters 
-    print(f"Tensor shapes:")
+    # print(f"Tensor shapes:")
     print(f" - q_nope: {q_nope.shape} - [BatchSize * ExtendLens, HeadNum, DimModel]")
     print(f" - q_pe: {q_pe.shape} - [BatchSize * ExtendLens, HeadNum, DimPE]")
     print(f" - k_extend: {k_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimKey+DimPE]")
     print(f" - v_extend: {v_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimValue]")
     print(f" - o_extend: {o_extend.shape} - [BatchSize * ExtendLens, HeadNum, DimOut]")
-    print(f" - k_buffer: {k_buffer.shape} - [PrefixSize, KVHeadNum, DimKey+DimPE]")
-    print(f" - v_buffer: {v_buffer.shape} - [PrefixSize, KVHeadNum, DimValue]")
+    print(f" - k_buffer: {k_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimKey+DimPE]")
+    print(f" - v_buffer: {v_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimValue]")
 
     if fuse_w_kc:
-        print(f" - w_kc: {w_kc.shape} - [HeadNum, DimModel, LoraRank]")
+        print(f" - w_kc: {w_kc.shape} - [HeadNum, LoraRank, DimModel]")
 
     if fuse_w_vc:
         print(f" - w_vc: {w_vc.shape} - [HeadNum, LoraRank, DimOut]")
@@ -1088,8 +1088,8 @@ def extend_fused_attention_fwd(
         q_nope.stride(1),
         q_pe.stride(0),
         q_pe.stride(1),
-        k_extend.stride(0),
         # need to have this because k heads and v heads can be different
+        k_extend.stride(0),
         0 if fuse_w_kc else k_extend.stride(1),
         v_extend.stride(0),
         0 if fuse_w_vc else v_extend.stride(1),
