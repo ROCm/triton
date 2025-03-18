@@ -35,7 +35,8 @@ class MetaData():
     use_fp8_w8a8 = False
     use_int8_w8a16 = False
 
-    def __init__(self, topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded, config):
+    def __init__(self, top_k, topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded, config):
+        self.top_k = top_k
         self.topk_weights = topk_weights
         self.topk_ids = topk_ids
         self.sorted_token_ids = sorted_token_ids
@@ -97,7 +98,6 @@ def e2e_moe_kernel(
     N: tl.constexpr,
     K: tl.constexpr,
     EVEN_K: tl.constexpr,
-    EVEN_N: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
@@ -106,8 +106,6 @@ def e2e_moe_kernel(
     BLOCK_SIZE_K1: tl.constexpr, # original block_size_k
     BLOCK_SIZE_K2: tl.constexpr, # outputs (EM, BLOCK_SIZE_K2)
     GROUP_SIZE_M: tl.constexpr,
-    # NUM_XCDS: tl.constexpr,
-    # GRID_MN: tl.constexpr
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -204,10 +202,6 @@ def e2e_moe_kernel(
         a_ptrs += BLOCK_SIZE_K1 * stride_ak
         w1_ptrs += BLOCK_SIZE_K1 * stride_w1k
 
-    if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
-        accumulator = accumulator * moe_weight[:, None]
-
     if use_int8_w8a16:
         accumulator = (accumulator * w1_scale)
     elif use_fp8_w8a8:
@@ -230,16 +224,21 @@ def e2e_moe_kernel(
     if use_fp8_w8a8:
         w2_scale = tl.load(W2_scale + off_experts)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K2)):
+    # minus if pid_m is even otherwise positive
+    # k_sign = (pid_m % 2) * 2 - 1
+    for _k in range(0, tl.cdiv(K, BLOCK_SIZE_K2)):
+        # k = (K + (_k + pid_n) * k_sign) % K
+        # k = ((_k + pid_n)) % K
+        k = _k
+
         if use_int8_w8a16:
             w2_scale_ptrs = W2_scale + off_experts * stride_w2se + (offs_k2 + k * BLOCK_SIZE_K2)[None, :] * stride_w2sk
             w2_scale = tl.load(w2_scale_ptrs)
 
-        # TODO can we do mask free load?????
-        # if EVEN_N:
-        #     w2 = tl.load(w2_ptrs)
-        # else:
-        w2 = tl.load(w2_ptrs, mask=(offs_w2n[:, None] < N) & (offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K, other=0.0)
+        if EVEN_K:
+            w2 = tl.load(w2_ptrs + k * BLOCK_SIZE_K2 * stride_w2k, mask=(offs_w2n[:, None] < N), other=0.0)
+        else:
+            w2 = tl.load(w2_ptrs + k * BLOCK_SIZE_K2 * stride_w2k, mask=((offs_w2n[:, None] < N) & ((offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K)), other=0.0)
 
         if use_int8_w8a16:
             out = tl.dot(acc, w2.to(a.type))
@@ -257,15 +256,14 @@ def e2e_moe_kernel(
             out = (out * acc_scale * w2_scale)
 
         # # atomic add
-        c_mask = token_mask[:, None] & ((offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K)
+        if EVEN_K:
+            c_mask = token_mask[:, None]
+        else:
+            c_mask = token_mask[:, None] & ((offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K)
 
         # TODO check scope
         # tl.store(out_ptrs, out, mask=c_mask)
-        tl.atomic_add(out_ptrs, out, mask=c_mask, sem="relaxed")
-
-        w2_ptrs += BLOCK_SIZE_K2 * stride_w2k
-        out_ptrs += BLOCK_SIZE_K2
-
+        tl.atomic_add(out_ptrs + k * BLOCK_SIZE_K2, out, mask=c_mask, sem="relaxed")
 
 def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor, metadata: MetaData) -> torch.Tensor:
     metadata.check_args(a, w1, w2, c)
@@ -293,17 +291,16 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
 
     BLOCK_SIZE_K1 = config["BLOCK_SIZE_K"]
     # TODO tune
-    BLOCK_SIZE_K2 = 128
+    BLOCK_SIZE_K2 = config["BLOCK_SIZE_K"]
 
     EVEN_K = K % BLOCK_SIZE_K1 == 0
-    EVEN_N = N % config["BLOCK_SIZE_N"] == 0
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
 
     stride_cm = c.stride(1)
 
     e2e_moe_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
-                          sorted_token_ids, expert_ids, EM, N, K, EVEN_K, EVEN_N, MUL_ROUTED_WEIGHT=topk_weights is not None,
+                          sorted_token_ids, expert_ids, EM, N, K, EVEN_K, MUL_ROUTED_WEIGHT=topk_weights is not None,
                           use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, BLOCK_SIZE_M=config["BLOCK_SIZE_M"], BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
                           BLOCK_SIZE_K1=BLOCK_SIZE_K1, BLOCK_SIZE_K2=BLOCK_SIZE_K2, GROUP_SIZE_M=config["GROUP_SIZE_M"]
                           )
@@ -350,7 +347,7 @@ def input_helper(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool
     config = get_config_func(M)
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'], E)
 
-    metadata = MetaData(topk_weights if routed_weight else None, topk_ids, sorted_token_ids, expert_ids,
+    metadata = MetaData(top_k, topk_weights if routed_weight else None, topk_ids, sorted_token_ids, expert_ids,
                         num_tokens_post_padded, config)
 
     if use_fp8_w8a8 or use_int8_w8a16:
@@ -382,41 +379,55 @@ def silu_and_mul_torch(input):
 
 
 def e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata: MetaData):
-    moe_metadata1 = MoEMetaData(topk_weights=metadata.topk_weights,
-    topk_ids=metadata.topk_ids,
-    sorted_token_ids=metadata.sorted_token_ids,
-    expert_ids=metadata.expert_ids,
-    num_tokens_post_padded=metadata.num_tokens_post_padded,
-    config=metadata.config)
+    moe_metadata1 = MoEMetaData(
+        top_k=metadata.top_k,
+        topk_weights=None,
+        topk_ids=metadata.topk_ids,
+        sorted_token_ids=metadata.sorted_token_ids,
+        expert_ids=metadata.expert_ids,
+        num_tokens_post_padded=metadata.num_tokens_post_padded,
+        config=metadata.config
+    )
+    moe_metadata2 = MoEMetaData(
+        top_k=1,
+        topk_weights=metadata.topk_weights,
+        topk_ids=metadata.topk_ids,
+        sorted_token_ids=metadata.sorted_token_ids,
+        expert_ids=metadata.expert_ids,
+        num_tokens_post_padded=metadata.num_tokens_post_padded,
+        config=metadata.config
+    )
+
     # TODO quantization support. How to get the scale for the intermediate result?
 
     intermediate_cache1 = torch.zeros([M, top_k, N], dtype=a.dtype, device=a.device)
-    intermediate_cache2 = torch.zeros([M* top_k, N // 2], dtype=a.dtype, device=a.device)
+    intermediate_cache2 = torch.zeros([M * top_k, N // 2], dtype=a.dtype, device=a.device)
 
     moe_gemm(a, w1, intermediate_cache1, moe_metadata1)
     silu_and_mul(intermediate_cache1.view(M * top_k, N), intermediate_cache2)
-    moe_gemm(intermediate_cache2, w2, c, moe_metadata1)
+
+    moe_gemm(intermediate_cache2, w2, c, moe_metadata2)
 
     return c
 
 
 @pytest.mark.parametrize("M, N, K, top_k, E", [
-    (64, 14336, 4096, 2, 8),
+    (1, 14336, 4096, 2, 8),
     # TODO doesn't work check k mask
-    # (16, 14336, 1, 2, 4),
-    # (256, 14336, 1, 2, 4),
-    # (2048, 14336, 1, 2, 4),
+    (16, 14336, 1, 2, 4),
+    (256, 14336, 1, 2, 4),
+    (2048, 14336, 1, 2, 4),
     # ------
-    # (1, 14336, 128, 2, 4),
-    # (16, 14336, 128, 1, 4),
-    # (16, 14336, 128, 1, 1),
-    # (64, 70, 128, 2, 8),
-    # (64, 30, 128, 2, 8),
-    # (64, 32, 128, 2, 8),
-    # (64, 7186, 128, 2, 8),
-    # (64, 3584, 128, 2, 8),
-    # (64, 1792, 128, 2, 8),
-    # (64, 64, 128, 2, 8),
+    (1, 14336, 128, 2, 4),
+    (16, 14336, 128, 1, 4),
+    (16, 14336, 128, 1, 1),
+    (64, 70, 128, 2, 8),
+    (64, 30, 128, 2, 8),
+    (64, 32, 128, 2, 8),
+    (64, 7186, 128, 2, 8),
+    (64, 3584, 128, 2, 8),
+    (64, 1792, 128, 2, 8),
+    (64, 64, 128, 2, 8),
 ])
 # @pytest.mark.parametrize('routed_weight', [True, False])
 @pytest.mark.parametrize('routed_weight', [False])
@@ -432,22 +443,8 @@ def test_correctness(M: int, N: int, K: int, top_k: int, E: int, routed_weight: 
     topk_ids = metadata.topk_ids
     topk_weights = metadata.topk_weights
     ref_out = torch.empty_like(c)
-    # Repeat a -> (M, top_k, K)
-    # a_expanded = a.unsqueeze(1).repeat(1, top_k, 1)
-    # # (M, top_k, N, K)
-    # w1_indexed = w1[topk_ids]
-    # w2_indexed = w2[topk_ids]
 
-    # ref_out = torch.einsum("mek,menk->men", a_expanded, w1_indexed)
-    # if routed_weight:
-    #     ref_out *= topk_weights.unsqueeze(-1)
-
-    # ref_out = silu_and_mul_torch(ref_out.reshape(M * top_k, N)).to(dtype).view(M, top_k, N // 2)
-    # ref_out = torch.einsum("men,mekn->mek", ref_out, w2_indexed)
-    # if routed_weight:
-    #     ref_out *= topk_weights.unsqueeze(-1)
-
-    ref_out = e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata)
+    ref_out = e2e_moe_ref(a, w1, w2, ref_out, M, top_k, N, metadata)
 
     # Validate correctness
     torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
@@ -540,27 +537,6 @@ def test_correctness(M: int, N: int, K: int, top_k: int, E: int, routed_weight: 
 #         ref_out = silu_and_mul_torch(ref_out.reshape(M * top_k, N)).to(dtype)
 #     # Validate correctness
 #     torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("M, N, top_k", [
-    (64, 14336, 2),
-    (16, 14336, 2),
-    (1, 14336, 2),
-    (16, 14336, 1),
-    (64, 7186, 2),
-    (64, 3584, 2),
-    (64, 1792, 2),
-    (64, 64, 2),
-])
-def test_silu_correctness(M: int, N: int, top_k: int, dtype=torch.float16):
-    torch.manual_seed(20)
-    a = torch.randn((M * top_k, N), dtype=dtype, device='cuda')
-    out = torch.zeros((M * top_k, N // 2), dtype=dtype, device='cuda')
-
-    tri_out = silu_and_mul(a, out)
-    ref_out = silu_and_mul_torch(a).to(dtype)
-
-    torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
 
 
 def get_configs():

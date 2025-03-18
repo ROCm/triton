@@ -36,7 +36,8 @@ class MetaData():
     use_int8_w8a16 = False
     use_silu_activation = False
 
-    def __init__(self, topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded, config):
+    def __init__(self, top_k, topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded, config):
+        self.top_k = top_k
         self.topk_weights = topk_weights
         self.topk_ids = topk_ids
         self.sorted_token_ids = sorted_token_ids
@@ -489,7 +490,7 @@ def moe_gemm(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, metadata: MetaDa
             stride_bse = b_descale.stride(0)
             stride_bsn = b_descale.stride(1)
 
-    _, top_k = topk_ids.shape
+    top_k = metadata.top_k
 
     EM = num_tokens_post_padded.item()
     _, N, K = b.shape
@@ -574,7 +575,7 @@ def input_helper(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool
     config = get_config_func(M)
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'], E)
 
-    metadata = MetaData(topk_weights if routed_weight else None, topk_ids, sorted_token_ids, expert_ids,
+    metadata = MetaData(top_k, topk_weights if routed_weight else None, topk_ids, sorted_token_ids, expert_ids,
                         num_tokens_post_padded, config)
 
     if use_fp8_w8a8 or use_int8_w8a16:
