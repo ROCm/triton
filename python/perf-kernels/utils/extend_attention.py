@@ -577,7 +577,7 @@ def _fwd_fused_kernel(
     """
 
     TILE_D: tl.constexpr = BLOCK_D < DQ # do we tile the w_kc fusion along D?
-    TRANS: tl.constexpr = FUSE_W_KC and FUSE_W_VC # can we replace v with k.trans()?
+    TRANS: tl.constexpr = DK==512 and DV==512 # is absorb MLA -> we can replace v load with k.trans()
 
     if PERSISTENT: # if persistent, kernel loops over multiple pids (tiles along Q)
         pid = atomic_counter.atomic_add(1)
@@ -1043,29 +1043,29 @@ def extend_fused_attention_fwd(
 
     # Print out tensor shapes and shape parameters 
     # print(f"Tensor shapes:")
-    print(f" - q_nope: {q_nope.shape} - [BatchSize * ExtendLens, HeadNum, DimModel]")
-    print(f" - q_pe: {q_pe.shape} - [BatchSize * ExtendLens, HeadNum, DimPE]")
-    print(f" - k_extend: {k_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimKey+DimPE]")
-    print(f" - v_extend: {v_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimValue]")
-    print(f" - o_extend: {o_extend.shape} - [BatchSize * ExtendLens, HeadNum, DimOut]")
-    print(f" - k_buffer: {k_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimKey+DimPE]")
-    print(f" - v_buffer: {v_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimValue]")
+    # print(f" - q_nope: {q_nope.shape} - [BatchSize * ExtendLens, HeadNum, DimModel]")
+    # print(f" - q_pe: {q_pe.shape} - [BatchSize * ExtendLens, HeadNum, DimPE]")
+    # print(f" - k_extend: {k_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimKey+DimPE]")
+    # print(f" - v_extend: {v_extend.shape} - [BatchSize * ExtendLens, KVHeadNum, DimValue]")
+    # print(f" - o_extend: {o_extend.shape} - [BatchSize * ExtendLens, HeadNum, DimOut]")
+    # print(f" - k_buffer: {k_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimKey+DimPE]")
+    # print(f" - v_buffer: {v_buffer.shape} - [BatchSize * PrefixLens, KVHeadNum, DimValue]")
 
-    if fuse_w_kc:
-        print(f" - w_kc: {w_kc.shape} - [HeadNum, LoraRank, DimModel]")
+    # if fuse_w_kc:
+    #     print(f" - w_kc: {w_kc.shape} - [HeadNum, LoraRank, DimModel]")
 
-    if fuse_w_vc:
-        print(f" - w_vc: {w_vc.shape} - [HeadNum, LoraRank, DimOut]")
+    # if fuse_w_vc:
+    #     print(f" - w_vc: {w_vc.shape} - [HeadNum, LoraRank, DimOut]")
 
-    print(f"\nShape parameters:")
-    print(f" - DQ: {DQ} (Query non-PE dimension)")
-    print(f" - DK: {DK} (Key non-PE dimension)")
-    print(f" - DV: {DV} (Value dimension)")
-    print(f" - DO: {DO} (Output dimension)")
-    print(f" - DPE: {DPE} (Position embedding dimension)")
-    print(f" - DACC: {DACC} (Accumulator dimension)")
-    print(f" - C: {C} (LoRa rank)")
-    print(f" - D: {D} (Model dimension)")
+    # print(f"\nShape parameters:")
+    # print(f" - DQ: {DQ} (Query non-PE dimension)")
+    # print(f" - DK: {DK} (Key non-PE dimension)")
+    # print(f" - DV: {DV} (Value dimension)")
+    # print(f" - DO: {DO} (Output dimension)")
+    # print(f" - DPE: {DPE} (Position embedding dimension)")
+    # print(f" - DACC: {DACC} (Accumulator dimension)")
+    # print(f" - C: {C} (LoRa rank)")
+    # print(f" - D: {D} (Model dimension)")
 
     _fwd_fused_kernel[grid](
         # input tensors

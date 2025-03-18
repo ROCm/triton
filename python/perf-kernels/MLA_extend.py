@@ -397,8 +397,18 @@ def main():
     if args.print_vgpr:
         print_vgpr(args)
         return 0
-    # run_bench(args)
-    test_op_fwd(16, 16, 0, 8192, 512, 64, 128, torch.bfloat16, "absorb", True, False, False, 1.0, 0.0, "cuda") # sanity check for function body correctness
+    run_bench(args)
+    try:
+        test_op_fwd(8, 16, 0, 8192, 512, 64, 128, torch.bfloat16, "normal", True, False, True, 1.0, 0.0, "cuda")
+    except Exception as e:
+        print(f"Error in first test: {e}")
+
+    try:
+        test_op_fwd(8, 16, 16324, 1024, 512, 64, 128, torch.bfloat16, "absorb", True, False, True, 1.0, 0.0, "cuda")
+    except Exception as e:
+        print(f"Error in second test: {e}")
+        
+    
 
 if __name__ == "__main__":
     main()
