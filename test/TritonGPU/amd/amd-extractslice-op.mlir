@@ -49,3 +49,39 @@ module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32,
     tt.return
   }
 }
+
+#mma0 = #ttg.amd_mfma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [4, 1], instrShape = [16, 16], isTransposed = true}>
+module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 64 : i32} {
+  tt.func @extract_slice_slice_mma_1d(%arg0: tensor<256xi32, #ttg.slice<{dim = 1, parent = #mma0}>> {tt.divisibility = 16 : i32}) {
+    // CHECK: llvm.func @extract_slice_slice_mma_1d
+    // CHECK-COUNT-4: %{{[0-9]*}} = llvm.extractvalue %arg0[{{[0-9]*}}] : !llvm.struct<(i32, i32, i32, i32)>
+    // CHECK: %4 = llvm.mlir.undef : !llvm.struct<(i32, i32)>
+    // CHECK-COUNT-2:  %{{[0-9]*}} = llvm.insertvalue %{{[0-9]*}}, %{{[0-9]*}}[{{[0-9]*}}] : !llvm.struct<(i32, i32)>
+    %1 = amdgpu.extract_slice %arg0 [128] : tensor<256xi32, #ttg.slice<{dim = 1, parent = #mma0}>> to tensor<128xi32, #ttg.slice<{dim = 1, parent = #mma0}>>
+    tt.return
+  }
+}
+
+#mma1 = #ttg.amd_mfma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [4, 1], instrShape = [16, 16], isTransposed = true}>
+module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32} {
+  tt.func @extract_slice_slice_mma_2d_16(%arg0: tensor<128x64xf32, #mma1> {tt.divisibility = 16 : i32}) {
+    // CHECK: llvm.func @extract_slice_slice_mma_2d_16
+    // CHECK-COUNT-32: %{{[0-9]*}} = llvm.extractvalue %arg0[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>
+    // CHECK: %32 = llvm.mlir.undef : !llvm.struct<(f32, f32, f32, f32)>
+    // CHECK-COUNT-4:  %{{[0-9]*}} = llvm.insertvalue %{{[0-9]*}}, %{{[0-9]*}}[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32)>
+    %1 = amdgpu.extract_slice %arg0 [0, 0] : tensor<128x64xf32, #mma1> to tensor<64x16xf32, #mma1>
+    tt.return
+  }
+}
+
+#mma2 = #ttg.amd_mfma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [4, 1], instrShape = [32, 32], isTransposed = true}>
+module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32} {
+  tt.func @extract_slice_slice_mma_2d_32(%arg0: tensor<128x64xf32, #mma2> {tt.divisibility = 16 : i32}) {
+    // CHECK: llvm.func @extract_slice_slice_mma_2d_32
+    // CHECK-COUNT-32: %{{[0-9]*}} = llvm.extractvalue %arg0[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>
+    // CHECK: %32 = llvm.mlir.undef : !llvm.struct<(f32, f32, f32, f32)>
+    // CHECK-COUNT-4:  %{{[0-9]*}} = llvm.insertvalue %{{[0-9]*}}, %{{[0-9]*}}[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32)>
+    %1 = amdgpu.extract_slice %arg0 [0, 0] : tensor<128x64xf32, #mma2> to tensor<128x8xf32, #mma2>
+    tt.return
+  }
+}

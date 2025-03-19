@@ -394,17 +394,28 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     // For the lane (i.e., thread) dimension, these threads are along the
     // matrix C's N dimension, with 32 consecutive threads covering a whole
     // row and the next 32 threads start after a gap spanning 4 rows.
+    std::vector<std::vector<int>> regBases = { {0, 1}, {0, 2} };
+    if (getWarpsPerCTA()[1] > 1) {
+      regBases.push_back({0, 8});
+      regBases.push_back({0, 16});
+    }
     tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, {0, 2}, {0, 8}, /*gap*/ {0, 16}}},
+        {{kRegister, regBases},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 4}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
     // For mfma.transposed layout, the element ownership among threads are
     // "transposed" within each warp.
-    if (getIsTransposed())
+    if (getIsTransposed()) {
+      regBases = { {1, 0}, {2, 0} };
+      if (getWarpsPerCTA()[1] > 1) {
+        regBases.push_back({8, 0});
+        regBases.push_back({16, 0});
+      }
       tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {2, 0}, {8, 0}, /*gap*/ {16, 0}}},
+          {{kRegister, regBases},
            {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {4, 0}}}},
           {outDimNames[order[0]], outDimNames[order[1]]});
+    }
   } else {
     assert(getMDim() == 16);
     // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
