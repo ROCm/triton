@@ -12,8 +12,23 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+
+#define PRINT_SMALL_VECTOR(X) \
+  { \
+    std::string dbgStr; \
+    llvm::raw_string_ostream dbgStream(dbgStr); \
+    dbgStream << #X << ": "; \
+    for (auto i = 0; i < X.size(); ++i) { \
+      dbgStream << X[i]; \
+      if (i < X.size()-1) { \
+        dbgStream << "x"; \
+      } \
+    } \
+    llvm::dbgs() << dbgStream.str() << "\n"; \
+  }
 
 using mlir::triton::ScaleDotElemType;
 
@@ -452,7 +467,12 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
       identityStandardND(S("warp"), getWarpsPerCTA(), order);
   LinearLayout ctaLayout = tileLayout * warpLayout;
 
-  return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
+  auto mfmaConvertedLayout = combineCtaCgaWithShape(
+    ctaLayout, getCTALayout(), shape);
+  llvm::dbgs() << "AMDMfmaEncodingAttr::toLinearLayout from: ";
+  PRINT_SMALL_VECTOR(shape)
+  llvm::dbgs() << "to: " << mfmaConvertedLayout.toString() << "\n";
+  return mfmaConvertedLayout;
 }
 
 LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,

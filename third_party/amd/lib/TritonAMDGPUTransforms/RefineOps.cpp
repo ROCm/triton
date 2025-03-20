@@ -29,6 +29,9 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
+#undef LLVM_DEBUG
+#define LLVM_DEBUG(X) X
+
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -752,7 +755,6 @@ LogicalResult rewriteElementWiseOp(OpBuilder &rewriter, OpTy op) {
   auto srcEncoding = srcType.getEncoding();
   auto srcShapePerCtaTile = getRefinedShapeElementWise(srcType);
 
-
   // Verify subsequent operands match opd[0].
   for (int i = 1; i < numOperands; ++i) {
     if (!isa<mlir::RankedTensorType>(op->getOperand(i).getType()))
@@ -778,8 +780,17 @@ LogicalResult rewriteElementWiseOp(OpBuilder &rewriter, OpTy op) {
   PRINT_SMALL_VECTOR(srcShape)
   PRINT_SMALL_VECTOR(srcShapePerCtaTile)
 
+  // DEBUG check if concat op results in correct linear layout
+  auto leRes = ttg::toLinearEncoding(resType);
+  auto llRes = leRes.getLinearLayout();
+  llvm::dbgs() << "original op result LL: " << llRes.toString() << "\n";
+
   auto resEncoding = resType.getEncoding();
   auto resShapePerCtaTile = getRefinedShapeElementWise(resType);
+
+  // debug overriding refinement
+  srcShapePerCtaTile[0] = srcShape[0]; // TODO(dtanner) remove me
+  resShapePerCtaTile[0] = resShape[0];
 
   // Calculate refined shapes.
   SmallVector<int64_t> refinedShape;
@@ -803,8 +814,8 @@ LogicalResult rewriteElementWiseOp(OpBuilder &rewriter, OpTy op) {
   rewriter.setInsertionPointAfter(op);
   SmallVector<Value> refinedOps;
   SmallVector<int64_t> offset(rank, 0);
-  int outerIdx = rank-1;
-  int innerIdx = rank-2;
+  int outerIdx = 0; // rank-1;
+  int innerIdx = 1; // rank-2;
   for (int i = 0; i < numReps[outerIdx]; ++i) {
     offset[outerIdx] = i * refinedShape[outerIdx];
 
@@ -825,6 +836,7 @@ SmallVector<Value> slicedOperands; \
     } else if (rank == 2) {
       for (int j = 0; j < numReps[innerIdx]; ++j) {
         offset[innerIdx] = j * refinedShape[innerIdx];
+        PRINT_SMALL_VECTOR(offset);
         SLICE_OP
       }
     } else {
@@ -839,6 +851,11 @@ SmallVector<Value> slicedOperands; \
   auto concatDims = DenseI64ArrayAttr::get(op->getContext(), numReps);
   auto concatOp = rewriter.create<triton::amdgpu::ConcatOp>(
       op.getLoc(), resultType, refinedOps, concatDims);
+
+  // DEBUG check if concat op results in correct linear layout
+  auto leConcat = ttg::toLinearEncoding(rankedTType(concatOp->getResult(0)));
+  auto llConcat = leConcat.getLinearLayout();
+  llvm::dbgs() << "concat op result LL: " << llConcat.toString() << "\n";
 
   auto origOpResult = op.getResult();
   origOpResult.replaceAllUsesWith(concatOp);
@@ -891,8 +908,8 @@ LogicalResult rewriteExpandDimsOp(OpBuilder &rewriter, triton::ExpandDimsOp op) 
   rewriter.setInsertionPointAfter(op);
   SmallVector<Value> refinedReduces;
   SmallVector<int64_t> offset(rank, 0);
-  for (int i = 0; i < numReps[0]; ++i) {
-    offset[0] = i * refinedSrcShape[0];
+  for (int i = 0; i < numReps[rank-1]; ++i) {
+    offset[rank-1] = i * refinedSrcShape[rank-1];
 
 #define SLICE_OP \
     auto slicedOp = rewriter.create<triton::amdgpu::ExtractSliceOp>( \
@@ -923,8 +940,8 @@ LogicalResult rewriteExpandDimsOp(OpBuilder &rewriter, triton::ExpandDimsOp op) 
     if (rank == 1) {
       SLICE_OP
     } else if (rank == 2) {
-      for (int j = 0; j < numReps[1]; ++j) {
-        offset[1] = j * refinedSrcShape[1];
+      for (int j = 0; j < numReps[rank-2]; ++j) {
+        offset[rank-2] = j * refinedSrcShape[rank-2];
         SLICE_OP
       }
     } else {
@@ -1083,8 +1100,9 @@ struct TritonAMDGPURefineOps
       if (hint.getVariant() != amdgpu::SchedHint::refine_ops) {
         return WalkResult::advance();
       }
-
+      llvm::dbgs() << "refining ops\n";
       auto *block = hint->getBlock();
+#if 0
       block->walk([&](triton::gpu::LocalLoadOp localLoadOp) {
         OpBuilder rewriter(localLoadOp->getContext());
         if (localLoadOp->getNumOperands() == 1) {
@@ -1126,7 +1144,7 @@ struct TritonAMDGPURefineOps
           LDBG("failed to refine tt.reduce: " << *reduceOp);
         }
       });
-
+#endif
       // Refine Element-Wise Ops.
       #define REFINE_ELEMENTWISE_OP(OP_TYPE) \
       block->walk([&](OP_TYPE op) { \

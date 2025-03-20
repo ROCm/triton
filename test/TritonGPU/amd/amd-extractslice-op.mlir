@@ -69,7 +69,7 @@ module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32,
     // CHECK-COUNT-32: %{{[0-9]*}} = llvm.extractvalue %arg0[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>
     // CHECK: %32 = llvm.mlir.undef : !llvm.struct<(f32, f32, f32, f32)>
     // CHECK-COUNT-4:  %{{[0-9]*}} = llvm.insertvalue %{{[0-9]*}}, %{{[0-9]*}}[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32)>
-    %1 = amdgpu.extract_slice %arg0 [0, 0] : tensor<128x64xf32, #mma1> to tensor<64x16xf32, #mma1>
+    %1 = amdgpu.extract_slice %arg0 [64, 16] : tensor<128x64xf32, #mma1> to tensor<64x16xf32, #mma1>
     tt.return
   }
 }
@@ -81,7 +81,7 @@ module attributes {"ttg.compute-capability" = 0 : i32, "ttg.num-ctas" = 1 : i32,
     // CHECK-COUNT-32: %{{[0-9]*}} = llvm.extractvalue %arg0[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>
     // CHECK: %32 = llvm.mlir.undef : !llvm.struct<(f32, f32, f32, f32)>
     // CHECK-COUNT-4:  %{{[0-9]*}} = llvm.insertvalue %{{[0-9]*}}, %{{[0-9]*}}[{{[0-9]*}}] : !llvm.struct<(f32, f32, f32, f32)>
-    %1 = amdgpu.extract_slice %arg0 [0, 0] : tensor<128x64xf32, #mma2> to tensor<128x8xf32, #mma2>
+    %1 = amdgpu.extract_slice %arg0 [0, 8] : tensor<128x64xf32, #mma2> to tensor<128x8xf32, #mma2>
     tt.return
   }
 }
