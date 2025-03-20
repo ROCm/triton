@@ -415,20 +415,75 @@ def get_cdna_autotune_configs():
                                                                      'HK']
     else:
         #sched_opt = 'refine_ops'
-        sched_opt = 'none'
+        #sched_opt = 'none'
         num_stages=2
-        return [
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+        configs = []
+
+        for block_m in [128]:
+            for block_n in [64, 32]:
+                for wpeu in [2]:
+                    for pre_load_v in [False]:
+                        for nonk in [32, 16]:
+                            for num_warps in [4]:
+                                configs.append(triton.Config({
+                                    'BLOCK_M': block_m,
+                                    'BLOCK_N': block_n,
+                                    'waves_per_eu': wpeu,
+                                    'PRE_LOAD_V': pre_load_v,
+                                    'GRID_CU_MULTIP': 2,
+                                    'matrix_instr_nonkdim': nonk,
+                                    'instruction_sched_variant': 'refine_ops'},
+                                    num_stages=num_stages, num_warps=num_warps))
+
+        return configs, ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+
+        """
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
                           num_stages=num_stages, num_warps=4),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
                           num_stages=num_stages, num_warps=4),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
                           num_stages=num_stages, num_warps=4),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
                           num_stages=num_stages, num_warps=4),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'instruction_sched_variant':sched_opt},
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
                           num_stages=num_stages, num_warps=4),
+
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+
         ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+        """
 
 
 def get_rdna_autotune_configs():
