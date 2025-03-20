@@ -469,9 +469,9 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
   auto mfmaConvertedLayout = combineCtaCgaWithShape(
     ctaLayout, getCTALayout(), shape);
-  llvm::dbgs() << "AMDMfmaEncodingAttr::toLinearLayout from: ";
-  PRINT_SMALL_VECTOR(shape)
-  llvm::dbgs() << "to: " << mfmaConvertedLayout.toString() << "\n";
+  //llvm::dbgs() << "AMDMfmaEncodingAttr::toLinearLayout from: ";
+  //PRINT_SMALL_VECTOR(shape)
+  //llvm::dbgs() << "to: " << mfmaConvertedLayout.toString() << "\n";
   return mfmaConvertedLayout;
 }
 
