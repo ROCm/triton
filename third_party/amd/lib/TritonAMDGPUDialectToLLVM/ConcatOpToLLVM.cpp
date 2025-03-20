@@ -69,15 +69,12 @@ struct ConcatOpConversion : public ConvertOpToLLVMPattern<amdgpu::ConcatOp> {
     auto resultShape = resultTy.getShape();
     PRINT_SMALL_VECTOR(resultShape)
     auto sources = adaptor.getSources();
-
     size_t totalNumElements = 0;
     for (auto source : sources) {
       totalNumElements += getSourceSize(source);
     }
     llvm::dbgs() << "totalNumElements: " << totalNumElements << "\n";
-
     auto coords = op.getCoords();
-    // there's 1 coord for each rank.
 
     auto srcTy = cast<RankedTensorType>(op.getOperand(0).getType());
     auto srcShape = srcTy.getShape();
@@ -85,46 +82,44 @@ struct ConcatOpConversion : public ConvertOpToLLVMPattern<amdgpu::ConcatOp> {
     unsigned rank = srcShape.size();
     auto srcEncoding = srcTy.getEncoding();
 
-
-    // don't want full tile shape, total output only has 32 elements
-    // each source has 8 inputs.
-    // I probably want elemsPerThread for a src shape
     auto srcElemsPerThread = ttg::getElemsPerThread(srcTy);
     PRINT_SMALL_VECTOR(srcElemsPerThread)
     auto resElemsPerThread = ttg::getElemsPerThread(resultTy);
     PRINT_SMALL_VECTOR(resElemsPerThread)
-
     llvm::SmallVector<Value> resultVals(totalNumElements);
+#if 1
     for (int srcIdx = 0; srcIdx < sources.size(); ++srcIdx) {
       auto src = sources[srcIdx];
       // Coordinate of source within result shape.
       auto srcCoord = convertSerialToND(srcIdx, coords);
-      
+      // Offset of source within result shape.
       PRINT_SMALL_VECTOR(srcCoord)
       SmallVector<int64_t> srcOffset = srcCoord;
       for (int i = 0; i < rank; ++i) {
-        srcOffset[i] *= srcElemsPerThread[i]; // srcShape[i];
+        srcOffset[i] *= srcElemsPerThread[i];
       }
       PRINT_SMALL_VECTOR(srcOffset)
       auto elements = unpackLLElements(loc, src, rewriter);
       for (auto [elemIdx, element] : llvm::enumerate(elements)) {
         // Element offset within source shape.
-        SmallVector<int64_t> elemOffset = convertSerialToND<unsigned>(elemIdx, srcElemsPerThread /*srcShape*/);
+        SmallVector<int64_t> elemOffset = convertSerialToND<unsigned>(elemIdx, srcElemsPerThread);
         PRINT_SMALL_VECTOR(elemOffset)
-        SmallVector<int64_t> netCoord(rank, 0);
+        // Net offset within result shape = offset of source within result + offset of element within source.
+        SmallVector<int64_t> netOffset(rank, 0);
         for (int i = 0; i < rank; ++i) {
-         netCoord[i] = srcOffset[i] + elemOffset[i];
+          netOffset[i] = srcOffset[i] + elemOffset[i];
         }
-        PRINT_SMALL_VECTOR(netCoord)
-        // Index in result shape.
-        int64_t serial = convertNDToSerial<int64_t, unsigned>(netCoord, resElemsPerThread /*resultShape*/);
+        PRINT_SMALL_VECTOR(netOffset)
+        // Serial index in result shape.
+        int64_t serial = convertNDToSerial<int64_t, unsigned>(netOffset, resElemsPerThread);
         llvm::dbgs() << "serial: " << serial << "\n";
         assert(serial < totalNumElements);
         resultVals[serial] = element;
       }
     }
 
-#if 0
+#else
+    // Old logic.
     size_t currNumElements = 0;
     for (auto source : sources) {
       auto elements = unpackLLElements(loc, source, rewriter);

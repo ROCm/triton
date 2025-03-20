@@ -774,11 +774,16 @@ LogicalResult rewriteElementWiseOp(OpBuilder &rewriter, OpTy op) {
   auto resShape = resType.getShape();
   if (resShape != srcShape)
     return failure();
-  if (srcShape[1] == 128) // TODO(dtanner) remove me
+
+  // TODO(dtanner) remove this restriction.
+  // this was placed here just to focus on a single certain op.
+  if (srcShape[1] == 128)
     return failure();
+
   LDBG("rewriteElementWiseOp(): " << op);
   PRINT_SMALL_VECTOR(srcShape)
   PRINT_SMALL_VECTOR(srcShapePerCtaTile)
+
 
   // DEBUG check if concat op results in correct linear layout
   auto leRes = ttg::toLinearEncoding(resType);
@@ -788,8 +793,23 @@ LogicalResult rewriteElementWiseOp(OpBuilder &rewriter, OpTy op) {
   auto resEncoding = resType.getEncoding();
   auto resShapePerCtaTile = getRefinedShapeElementWise(resType);
 
-  // debug overriding refinement
-  srcShapePerCtaTile[0] = srcShape[0]; // TODO(dtanner) remove me
+/*
+    TODO(dtanner) remove this restruction.
+    - Even with this restriction in place, the old concat errors.
+
+    - With this restruction in place, the fix causes mfma16 tests to pass.
+flash-attention.py ................................................................................................ [ 16%]
+................................................................................................................... [ 36%]
+..................................................
+
+    - Commenting out these restrictions causes the fix to still fail tests.
+flash-attention.py FFFF.F...FFFFFF.FFFF.F...FFFFFF.................................FFFF.F...FFFFFF.FFFF.F...FFFFFF. [ 16%]
+................................FFFF.F...FFFFFF.FFFF.F...FFFFFF.................................FFFF.F...FFFFFF.FFF [ 36%]
+F.F...FFFFFF.................................FFFF.F...FFFFFF.FFFF.F...FFFFFF.................................FFFF.F [ 55%]
+...FFFFFF.FFFF.F...FFFFFF.................................F
+
+*/
+  srcShapePerCtaTile[0] = srcShape[0];
   resShapePerCtaTile[0] = resShape[0];
 
   // Calculate refined shapes.
