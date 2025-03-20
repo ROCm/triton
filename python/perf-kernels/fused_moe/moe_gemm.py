@@ -403,7 +403,7 @@ def get_config_file_name(dtype: Optional[str]) -> str:
 
 
 @functools.lru_cache
-def get_moe_configs(dtype: Optional[str]) -> Optional[Dict[int, Any]]:
+def get_moe_configs(dtype: Optional[str], config_dir="configs") -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -416,7 +416,7 @@ def get_moe_configs(dtype: Optional[str]) -> Optional[Dict[int, Any]]:
     # directory
     json_file_name = get_config_file_name(dtype)
 
-    config_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
+    config_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), config_dir, json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             # If a configuration has been found, return it

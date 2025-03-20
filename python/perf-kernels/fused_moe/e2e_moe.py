@@ -1,3 +1,4 @@
+from typing import Dict, Optional
 import triton
 import torch
 import triton.language as tl
@@ -6,7 +7,7 @@ import os
 import functools
 import argparse
 import sys
-from moe_gemm import moe_align_block_size, silu_and_mul, try_get_optimal_moe_config, get_config_dtype_str, quantize_tensor, moe_gemm, MetaData as MoEMetaData
+from moe_gemm import moe_align_block_size, silu_and_mul, try_get_optimal_moe_config, get_config_dtype_str, quantize_tensor, moe_gemm, MetaData as MoEMetaData, get_moe_configs
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -226,9 +227,10 @@ def e2e_moe_kernel(
 
     # minus if pid_m is even otherwise positive
     # k_sign = (pid_m % 2) * 2 - 1
+    # num_k = tl.cdiv(K, BLOCK_SIZE_K2)
     for _k in range(0, tl.cdiv(K, BLOCK_SIZE_K2)):
-        # k = (K + (_k + pid_n) * k_sign) % K
-        # k = ((_k + pid_n)) % K
+        # k = (num_k + (_k + pid_n) * k_sign) % num_k
+        # k = ((_k + pid_n * 4)) % tl.cdiv(K, BLOCK_SIZE_K2)
         k = _k
 
         if use_int8_w8a16:
@@ -243,7 +245,7 @@ def e2e_moe_kernel(
         if use_int8_w8a16:
             out = tl.dot(acc, w2.to(a.type))
         else:
-            out = tl.dot(acc, w2,)
+            out = tl.dot(acc, w2)
 
         # TODO check do we need two of this?
         if MUL_ROUTED_WEIGHT:
@@ -262,8 +264,8 @@ def e2e_moe_kernel(
             c_mask = token_mask[:, None] & ((offs_k2 + k * BLOCK_SIZE_K2)[None, :] < K)
 
         # TODO check scope
-        # tl.store(out_ptrs, out, mask=c_mask)
-        tl.atomic_add(out_ptrs + k * BLOCK_SIZE_K2, out, mask=c_mask, sem="relaxed")
+        # tl.atomic_add(out_ptrs + k * BLOCK_SIZE_K2, out, mask=c_mask, sem="relaxed")
+        tl.store(out_ptrs + k * BLOCK_SIZE_K2, out, mask=c_mask)
 
 def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor, metadata: MetaData) -> torch.Tensor:
     metadata.check_args(a, w1, w2, c)
@@ -289,9 +291,7 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
     EM = num_tokens_post_padded.item()
     _, N, K = w1.shape
 
-    BLOCK_SIZE_K1 = config["BLOCK_SIZE_K"]
-    # TODO tune
-    BLOCK_SIZE_K2 = config["BLOCK_SIZE_K"]
+    BLOCK_SIZE_K1 = config["BLOCK_SIZE_K1"]
 
     EVEN_K = K % BLOCK_SIZE_K1 == 0
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
@@ -301,8 +301,7 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
     e2e_moe_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
                           sorted_token_ids, expert_ids, EM, N, K, EVEN_K, MUL_ROUTED_WEIGHT=topk_weights is not None,
-                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, BLOCK_SIZE_M=config["BLOCK_SIZE_M"], BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
-                          BLOCK_SIZE_K1=BLOCK_SIZE_K1, BLOCK_SIZE_K2=BLOCK_SIZE_K2, GROUP_SIZE_M=config["GROUP_SIZE_M"]
+                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, **config
                           )
     return c
 
@@ -325,6 +324,40 @@ def quantize_input(a, w1, w2, use_fp8_w8a8: tl.constexpr, use_int8_w8a16: tl.con
         return a, w1_quantized, w2_quantized
 
 
+def get_default_e2e_config(
+    M: int,
+    E: int,
+    is_marlin: bool,
+) -> Dict[str, int]:
+    config = {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K1': 32,'BLOCK_SIZE_K2': 32, 'GROUP_SIZE_M': 8}
+    # A heuristic: fused marlin works faster with this config for small M
+    if M <= E or (is_marlin and M <= 32):
+        config = {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K1': 64, 'BLOCK_SIZE_K2': 64, 'GROUP_SIZE_M': 1}
+    return config
+
+def try_get_optimal_e2e_moe_config(
+    E: int,
+    dtype: Optional[str],
+    M: int,
+    is_marlin: bool = False,
+):
+    configs = get_moe_configs(dtype, "e2e_configs")
+
+    if configs:
+        if configs:
+            if M < M_THRESHOLD_SMALL:
+                config = configs["small_M"]
+            elif M < M_THRESHOLD_MEDIUM:
+                config = configs["medium_M"]
+            else:
+                config = configs["large_M"]
+    else:
+        # Else use the default config
+        config = get_default_e2e_config(M, E, is_marlin)
+
+    return config
+
+
 def input_helper(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool, use_fp8_w8a8: bool,
                  use_int8_w8a16: bool, fp8_type, dtype):
     a = torch.randn((M, K), dtype=dtype, device='cuda')
@@ -340,7 +373,7 @@ def input_helper(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool
 
     config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, dtype=dtype)
     get_config_func = functools.partial(
-        try_get_optimal_moe_config,
+        try_get_optimal_e2e_moe_config,
         E,
         config_dtype,
     )
@@ -378,7 +411,10 @@ def silu_and_mul_torch(input):
     return output
 
 
-def e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata: MetaData):
+def e2e_moe_ref(a, w1, w2, c, M, E, top_k, N, metadata: MetaData):
+    config_dtype = get_config_dtype_str(use_fp8_w8a8=metadata.use_fp8_w8a8, use_int8_w8a16=metadata.use_int8_w8a16, dtype=c.dtype)
+
+    config = try_get_optimal_moe_config(E, config_dtype, M)
     moe_metadata1 = MoEMetaData(
         top_k=metadata.top_k,
         topk_weights=None,
@@ -386,7 +422,7 @@ def e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata: MetaData):
         sorted_token_ids=metadata.sorted_token_ids,
         expert_ids=metadata.expert_ids,
         num_tokens_post_padded=metadata.num_tokens_post_padded,
-        config=metadata.config
+        config=config
     )
     moe_metadata2 = MoEMetaData(
         top_k=1,
@@ -395,7 +431,7 @@ def e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata: MetaData):
         sorted_token_ids=metadata.sorted_token_ids,
         expert_ids=metadata.expert_ids,
         num_tokens_post_padded=metadata.num_tokens_post_padded,
-        config=metadata.config
+        config=config
     )
 
     # TODO quantization support. How to get the scale for the intermediate result?
@@ -444,7 +480,7 @@ def test_correctness(M: int, N: int, K: int, top_k: int, E: int, routed_weight: 
     topk_weights = metadata.topk_weights
     ref_out = torch.empty_like(c)
 
-    ref_out = e2e_moe_ref(a, w1, w2, ref_out, M, top_k, N, metadata)
+    ref_out = e2e_moe_ref(a, w1, w2, ref_out, M, E, top_k, N, metadata)
 
     # Validate correctness
     torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
@@ -569,9 +605,6 @@ def model_benchmark_configs(args):
         N1 = config["intermediate_size"]
         K1 = config["hidden_size"]
 
-        N2 = config["hidden_size"]
-        K2 = config["intermediate_size"] // 2
-
         E = 8
         top_k = 2
 
@@ -620,7 +653,7 @@ def run_benchmark(custom, args):
             fn = lambda: e2e_moe(a, w1, w2, c, metadata)
 
         if "ref" in provider:
-            fn = lambda: e2e_moe_ref(a, w1, w2, c, M, top_k, N, metadata)
+            fn = lambda: e2e_moe_ref(a, w1, w2, c, M, E, top_k, N, metadata)
         ms = triton.testing.do_bench(fn)
 
         return ms
