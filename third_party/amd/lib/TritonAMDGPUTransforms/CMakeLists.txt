@@ -13,6 +13,7 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
+  AMDBypassLDSForDotOperand.cpp
 
   DEPENDS
   TritonAMDGPUIR

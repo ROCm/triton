@@ -248,6 +248,8 @@ void eraseLoopCarriedValues(scf::ForOp &loop, llvm::BitVector indices);
 bool mayAliasAllocations(const DenseSet<Value> &lhs,
                          const DenseSet<Value> &rhs);
 
+// Convert \param op operands and results to layout \param encoding.
+void convertOpEncoding(Attribute encoding, Operation *op);
 } // namespace mlir
 
 #endif // TRITON_DIALECT_TRITONGPU_TRANSFORMS_UTILITY_H_
