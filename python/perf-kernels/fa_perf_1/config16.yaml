@@ -1,0 +1,11 @@
+BLOCK_M: 128
+BLOCK_N: 32
+waves_per_eu: 2
+PRE_LOAD_V: True
+GRID_CU_MULTIP: 2
+num_stages: 2
+num_ctas: 1
+num_warps: 4
+sched_opt: "refine_ops"
+matrix_instr_nonkdim: 16
+kpack: 2

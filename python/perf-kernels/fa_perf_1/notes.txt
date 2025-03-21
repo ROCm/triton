@@ -1,0 +1,9 @@
+prefer 128x32: should be large enough tile for global memory bandwidth and not spill
+
+prefer mfma16: mfma32 isn’t much faster than mfma16, and 16 gives more scheduling flexibility and clock speed
+
+prefer pre-load-v = true: because faster even though uses more registers.
+
+prefer non-causal: since causal makes all workgroups do something different and it's harder to see the impact of scheduling.
+
+prefer layout=thd: since this is prefered use case
