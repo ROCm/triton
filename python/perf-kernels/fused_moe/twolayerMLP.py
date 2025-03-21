@@ -110,77 +110,94 @@ def gemm2gemm_persistent_buffered(
     tl.assume(stride_cn > 0)
     tl.assume(stride_ck > 0)
 
-    pid = tl.program_id(axis=0) # 0, ..., NUM_WG-1
+    start_pid = tl.program_id(axis=0) # 0, ..., NUM_WG-1
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     # How many programs does a persistent workgroup loop over?
     pids_per_WG = (num_pid_m * N_BUFFERS) // (NUM_WG)
 
-    if pid < (num_pid_m * N_BUFFERS) % (NUM_WG):
+    if start_pid < (num_pid_m * N_BUFFERS) % (NUM_WG):
         pids_per_WG += 1
 
-    # one program loops over num_pid_n_per_buffer accumulator blocks. (accumulator = A x B). 
-    # So there are num_pid_n_per_buffer number of atomic adds to the same output location. (next program for the persistent workgroup outputs to the next buffer)
+    # One program loops over num_pid_n_per_buffer accumulator blocks. (acc = A x B). 
+    # So there are num_pid_n_per_buffer number of atomic adds to the same output location. 
+    # Good thing is that they come sequentially, quaranteed by the persistent loop, so we can use limited scope.
     num_pid_n_per_buffer = tl.cdiv(num_pid_n, N_BUFFERS)
 
-    for _ in range(0, pids_per_WG):
-        pid_m = pid % num_pid_m
-        output_offset = pid // num_pid_m * K # output buffer offset when moving to next program.
-        for pid_n_ in range(0, num_pid_n_per_buffer):
-            pid_n = pid_n_ + pid // num_pid_m * num_pid_n_per_buffer
-            if pid_n < num_pid_n:
-                # Create pointers for first block of A and B input matrices
-                offs_k = tl.arange(0, BLOCK_SIZE_K)
-                offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
-                offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
-                a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-                b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    
+    pid = start_pid - NUM_WG
+    pid_m = -1
+    pid_n_ = -1
+    pid_n = -1
+    output_offset = -1
+    pid_buffer = -1
 
-                acc_dtype = c_ptr.type.element_ty
-                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+    for _ in range(0, num_pid_n_per_buffer * pids_per_WG):
+        pid_n_ = tl.where(pid_n_ >= num_pid_n_per_buffer - 1, 0, pid_n_ + 1)
+        
+        if pid_n_ == 0: # move to next program
+            pid += NUM_WG
+            pid_m = pid % num_pid_m
+            pid_buffer = pid // num_pid_m # to which buffer the output block should be written to.
+            output_offset = pid_buffer * K
+        
+        pid_n = pid_n_ + pid_buffer * num_pid_n_per_buffer    
 
-                for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-                    # Load the next block of A and B, generate a mask by checking the K dimension.
-                    # If it is out of bounds, set it to 0.
-                    if EVEN_K:
-                        a = tl.load(a_ptrs)
-                        b = tl.load(b_ptrs)
-                    else:
-                        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-                        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-                    accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+        if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS might not be an integer
+            offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+            offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+            
+            offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+            offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+            a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+            b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
 
-                    # Advance the ptrs to the next K block.
-                    a_ptrs += BLOCK_SIZE_K * stride_ak
-                    b_ptrs += BLOCK_SIZE_K * stride_bk
+            acc_dtype = c_ptr.type.element_ty
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype) # accumulator block
+        
+            # first gemm: A x B = acc
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                # Load the next block of A and B, generate a mask by checking the K dimension.
+                # If it is out of bounds, set it to 0.
+                if EVEN_K:
+                    a = tl.load(a_ptrs)
+                    b = tl.load(b_ptrs)
+                else:
+                    a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+                    b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+                accumulator += tl.dot(a, b, out_dtype=acc_dtype)
 
-                # TODO: add other activation functions
-                # Apply activation function, if specified.
-                if ACTIVATION == "leaky_relu":
-                    accumulator = leaky_relu(accumulator)
+                # Advance the ptrs to the next K block.
+                a_ptrs += BLOCK_SIZE_K * stride_ak
+                b_ptrs += BLOCK_SIZE_K * stride_bk
 
-                c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+            # TODO: add other activation functions
+            # Apply activation function, if specified.
+            if ACTIVATION == "leaky_relu":
+                accumulator = leaky_relu(accumulator)
 
-                for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-                    # Load the next block of A and B, generate a mask by checking the K dimension.
-                    # If it is out of bounds, set it to 0.
-                    if EVEN_K:
-                        c = tl.load(c_ptrs)
-                    else:
-                        c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-                    o_partial = tl.dot(accumulator, c, out_dtype=tl.float16)
-                    offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-                    offs_ok = k * BLOCK_SIZE_K + offs_k
-                    o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + output_offset)
-                    o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-                    tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta")
+            c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+            o_dtype = o_ptr.type.element_ty
 
-                    c_ptrs += BLOCK_SIZE_K * stride_ck
-
-        pid += NUM_WG
-
-
-
+            # loop through the row blocks that the accumulator block gets multiplied with when computing acc x C = output
+            # and store the partial output as an atomic add.
+            # TODO: in theory we could be accumulating over pid_n_ = 0, ..., num_pid_n_per_buffer - 1 and only after it do a tl.store.
+            # But this would require a lot of memory to store the tl.cdiv(K, BLOCK_SIZE_K) output accumulators of size (BLOCK_SIZE_M, BLOCK_SIZE_K).
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                if EVEN_K:
+                    c = tl.load(c_ptrs)
+                else:
+                    c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+                o_partial = tl.dot(accumulator, c, out_dtype=o_dtype)
+                offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                offs_ok = k * BLOCK_SIZE_K + offs_k
+                o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + output_offset)
+                o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
+                tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta", sem="relaxed")
+                # move to next row block of C
+                c_ptrs += BLOCK_SIZE_K * stride_ck
+        
 
 @triton.jit
 def gemm2gemm_persistent(
@@ -385,14 +402,15 @@ def gemm2gemm(
 # Wrapper for gemm kernel.
 def twogemms(a, b, c, o, activation="", persistent=False):
     # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions!!!"
-    assert a.dtype == b.dtype, "Mixed dtype GEMMs are not supported!!!"
+    assert a.shape[1] == b.shape[0] and b.shape[1] == c.shape[0], "Incompatible dimensions!!!"
+    assert a.dtype == b.dtype and b.dtype==c.dtype, "Mixed dtype GEMMs are not supported!!!"
+    assert a.shape[1] == c.shape[1]
     M, K = a.shape
     K, N = b.shape
     
     NUM_WG = torch.cuda.get_device_properties("cuda").multi_processor_count
 
-    BLOCK_SIZE_M=32
+    BLOCK_SIZE_M=64
     BLOCK_SIZE_N=128
     BLOCK_SIZE_K=128
     EVEN_K=K % BLOCK_SIZE_K == 0
