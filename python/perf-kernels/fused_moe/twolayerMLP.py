@@ -173,7 +173,7 @@ def gemm2gemm_persistent_buffered(
                     offs_ok = k * BLOCK_SIZE_K + offs_k
                     o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + output_offset)
                     o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-                    tl.atomic_add(o_ptrs, o_partial)  #, mask=o_mask, scope="cta")
+                    tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta")
 
                     c_ptrs += BLOCK_SIZE_K * stride_ck
 
