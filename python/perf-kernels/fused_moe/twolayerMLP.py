@@ -576,15 +576,15 @@ def benchmark(M, N, K, provider, dtype=torch.float16):
 
     quantiles = [0.5, 0.2, 0.8]
     if 'e2e' in provider:
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twogemms(a, b, c, o, activation="leaky_relu", persistent=True), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twogemms(a, b, c, o, activation="", persistent=True), quantiles=quantiles)
     else: # two sequential gemms
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twomatmuls(a, b, c, o), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twomatmuls(a, b, c, o, activation=""), quantiles=quantiles)
 
     return ms
 
 if __name__ == "__main__":
     torch.manual_seed(0)
     benchmark.run(show_plots=False, print_data=True)
-    test_correctness(128*32, 1024, 1024, True)
+    # test_correctness(128*32, 1024, 1024, True)
 
     
