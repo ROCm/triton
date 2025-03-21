@@ -19,6 +19,7 @@
 #include "triton/Analysis/Membar.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
@@ -212,6 +213,17 @@ struct ConvertTritonAMDGPUToLLVM
         typeConverter, patterns, targetInfo, commonBenefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
+
+    MLIRContext *ctx = mod->getContext();
+    mod->walk([&](LLVM::LLVMFuncOp funcOp) {
+      llvm::SmallVector<StringAttr> targetFeatures;
+      if (auto attr = funcOp.getTargetFeatures()) {
+        llvm::copy(attr->getFeatures(), std::back_inserter(targetFeatures));
+      }
+      targetFeatures.push_back(str_attr("-packed-fp32-ops"));
+      funcOp.setTargetFeaturesAttr(
+          ::mlir::LLVM::TargetFeaturesAttr::get(ctx, targetFeatures));
+    });
 
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns)))) {
       return signalPassFailure();
