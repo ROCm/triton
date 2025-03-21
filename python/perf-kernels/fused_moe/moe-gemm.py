@@ -285,8 +285,8 @@ def moe_align_block_size(topk_ids: torch.Tensor, block_size: int,
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
-def get_config_dtype_str(dtype: torch.dtype, use_int8_w8a16: Optional[bool] = False, use_int8_w8a8: Optional[bool] = False,
-                         use_fp8_w8a8: Optional[bool] = False):
+def get_config_dtype_str(dtype: torch.dtype, use_int8_w8a16: Optional[bool] = False,
+                         use_int8_w8a8: Optional[bool] = False, use_fp8_w8a8: Optional[bool] = False):
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
@@ -370,7 +370,7 @@ def moe_gemm(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, metadata: MetaDa
     # TODO shard M dim
     metadata.check_args(a, b, c)
 
-    topk_ids, num_tokens_post_padded, topk_weights, sorted_token_ids, expert_ids, config = metadata.topk_ids, metadata.num_tokens_post_padded, metadata.topk_weights, metadata.sorted_token_ids, metadata.expert_ids, metadata.config
+    num_tokens_post_padded, topk_weights, sorted_token_ids, expert_ids, config = metadata.num_tokens_post_padded, metadata.topk_weights, metadata.sorted_token_ids, metadata.expert_ids, metadata.config
 
     use_fp8_w8a8, use_int8_w8a16, use_int8_w8a8 = metadata.use_fp8_w8a8, metadata.use_int8_w8a16, metadata.use_int8_w8a8
     a_descale, b_descale = None, None
@@ -420,7 +420,8 @@ def quantize_tensor(tensor: torch.Tensor, dtype, dim=()) -> tuple[torch.Tensor, 
     return tensor_quantized, scale, 1 / scale
 
 
-def quantize_input(a, b, use_fp8_w8a8: tl.constexpr, use_int8_w8a16: tl.constexpr, use_int8_w8a8: tl.constexpr, metatdata: MetaData, fp8_type=None):
+def quantize_input(a, b, use_fp8_w8a8: tl.constexpr, use_int8_w8a16: tl.constexpr, use_int8_w8a8: tl.constexpr,
+                   metatdata: MetaData, fp8_type=None):
     assert not (use_fp8_w8a8 and use_int8_w8a16 and use_int8_w8a8)
     assert not (use_fp8_w8a8 and fp8_type is None)
 
@@ -453,7 +454,8 @@ def input_helper(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool
     softmax_vals = torch.softmax(values, dim=1)
     topk_weights, topk_ids = torch.topk(softmax_vals, k=top_k, dim=1)
 
-    config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, use_int8_w8a8=use_int8_w8a8, dtype=dtype)
+    config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16,
+                                        use_int8_w8a8=use_int8_w8a8, dtype=dtype)
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         E,
@@ -562,7 +564,7 @@ def test_correctness_fp8(M: int, N: int, K: int, top_k: int, E: int, routed_weig
 @pytest.mark.parametrize('routed_weight', [True, False])
 @pytest.mark.parametrize('use_int8_w8a16', [True])
 def test_correctness_int8_w8a16(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool, use_int8_w8a16,
-                          dtype=torch.float16):
+                                dtype=torch.float16):
     torch.manual_seed(20)
     a, b, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=False,
                                      use_int8_w8a16=use_int8_w8a16, use_int8_w8a8=False, fp8_type=None, dtype=dtype)
@@ -601,7 +603,7 @@ def test_correctness_int8_w8a16(M: int, N: int, K: int, top_k: int, E: int, rout
 @pytest.mark.parametrize('routed_weight', [True, False])
 @pytest.mark.parametrize('use_int8_w8a8', [True])
 def test_correctness_int8_w8a8(M: int, N: int, K: int, top_k: int, E: int, routed_weight: bool, use_int8_w8a8,
-                          dtype=torch.float16):
+                               dtype=torch.float16):
     torch.manual_seed(20)
     a, b, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=False,
                                      use_int8_w8a16=False, use_int8_w8a8=use_int8_w8a8, fp8_type=None, dtype=dtype)
@@ -625,6 +627,7 @@ def test_correctness_int8_w8a8(M: int, N: int, K: int, top_k: int, E: int, route
 
     # Validate correctness
     torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
+
 
 def get_configs():
     configs = [
@@ -702,10 +705,11 @@ def run_benchmark(custom, args):
                 })
 
     @triton.testing.perf_report([benchmark])
-    def bench_moe_gemm(M, N, K, E, top_k, dtype, routed_weight, metric, use_fp8_w8a8, use_int8_w8a16, use_int8_w8a8, fp8_type,
-                       model=None):
+    def bench_moe_gemm(M, N, K, E, top_k, dtype, routed_weight, metric, use_fp8_w8a8, use_int8_w8a16, use_int8_w8a8,
+                       fp8_type, model=None):
         a, b, c, metadata = input_helper(M, N, K, top_k, E, routed_weight=routed_weight, use_fp8_w8a8=use_fp8_w8a8,
-                                         use_int8_w8a16=use_int8_w8a16, use_int8_w8a8=use_int8_w8a8, fp8_type=fp8_type, dtype=dtype)
+                                         use_int8_w8a16=use_int8_w8a16, use_int8_w8a8=use_int8_w8a8, fp8_type=fp8_type,
+                                         dtype=dtype)
 
         # (M, K) * (top_k, N, K) -> (M, top_k, N). 2 for multiplication and accumulation
         flops = 2.0 * M * top_k * K * N
