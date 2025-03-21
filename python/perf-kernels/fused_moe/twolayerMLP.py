@@ -4,6 +4,7 @@ import triton.language as tl
 import sys
 import os
 import pytest
+import argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)  # This goes one level up from fused-moe/
@@ -61,9 +62,6 @@ def reduce_buffers(
     # Store the final result
     o_ptrs = o_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
     tl.store(o_ptrs, o_output, mask=mask)
-
-
-
 
 # Problems:
 # We need the output blocks per persistent workgroup to fit into L2 cache. L2 cache size is 4MB. Required size is BLOCK_SIZE_M * K * bytes_per_output_element (2 for fp16).
@@ -133,10 +131,11 @@ def gemm2gemm_persistent_buffered(
     output_offset = -1
     pid_buffer = -1
 
+    # persistent kernel loop
     for _ in range(0, num_pid_n_per_buffer * pids_per_WG):
         pid_n_ = tl.where(pid_n_ >= num_pid_n_per_buffer - 1, 0, pid_n_ + 1)
         
-        if pid_n_ == 0: # move to next program
+        if pid_n_ == 0: # move to the next program
             pid += NUM_WG
             pid_m = pid % num_pid_m
             pid_buffer = pid // num_pid_m # to which buffer the output block should be written to.
@@ -194,7 +193,7 @@ def gemm2gemm_persistent_buffered(
                 offs_ok = k * BLOCK_SIZE_K + offs_k
                 o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + output_offset)
                 o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-                tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta", sem="relaxed")
+                tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta")
                 # move to next row block of C
                 c_ptrs += BLOCK_SIZE_K * stride_ck
         
@@ -408,9 +407,9 @@ def twogemms(a, b, c, o, activation="", persistent=False):
     M, K = a.shape
     K, N = b.shape
     
-    NUM_WG = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_WG = 128  # torch.cuda.get_device_properties("cuda").multi_processor_count
 
-    BLOCK_SIZE_M=64
+    BLOCK_SIZE_M=16
     BLOCK_SIZE_N=128
     BLOCK_SIZE_K=128
     EVEN_K=K % BLOCK_SIZE_K == 0
@@ -455,7 +454,7 @@ def twogemms(a, b, c, o, activation="", persistent=False):
                 **args,
             )
 
-            grid_ = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(K, BLOCK_SIZE_K))
+            grid_ = (triton.cdiv(M, 128), triton.cdiv(K, 128))
             
             reduce_buffers[grid_](
                 o_buffers,
@@ -467,8 +466,8 @@ def twogemms(a, b, c, o, activation="", persistent=False):
                 o_buffers.stride(1),
                 o.stride(0),
                 o.stride(1),
-                BLOCK_SIZE_M=BLOCK_SIZE_M,
-                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_M=128,
+                BLOCK_SIZE_K=128,
             )
         else:
             grid = (NUM_WG,)
@@ -552,39 +551,150 @@ def test_correctness(M, N, K, persistent, dtype=torch.float16):
     torch.testing.assert_close(o_ref, o_tri, atol=2e-2, rtol=2e-2)
     print("test_correctness passed.")
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['M', 'N', 'K'],
-        x_vals=get_x_vals(),
-        line_arg='provider',
-        line_vals=[
-            'e2e', 'ref'
-        ],
-        line_names=[
-            'e2e', 'ref'
-        ],
-        ylabel="ms",
-        plot_name="Two layer MLP performance (ms)",
-        args={},
-    ))
-def benchmark(M, N, K, provider, dtype=torch.float16):
-    a = torch.randn(M, K, device="cuda", dtype=dtype)
-    b = torch.randn(K, N, device="cuda", dtype=dtype)
-    c = torch.randn(N, K, device="cuda", dtype=dtype)
+
+def benchmark(args):
+
+    if args.M or args.N or args.K:
+        assert args.M and args.N and args.K, "All M, N, K should be provided."
+        x_vals = [(args.M, args.N, args.K)]
+    else:
+        x_vals = get_x_vals()
     
-    o = torch.empty_like(a)
+    @triton.testing.perf_report(
+        triton.testing.Benchmark(
+            x_names=['M', 'N', 'K'],
+            x_vals=x_vals,
+            line_arg='provider',
+            line_vals=[
+                'e2e', 'ref'
+            ],
+            line_names=[
+                'e2e', 'ref'
+            ],
+            ylabel="ms",
+            plot_name="Two layer MLP performance (ms)",
+            args={},
+        ))
+    def bench(M, N, K, provider, dtype=torch.float16):
+        a = torch.randn(M, K, device="cuda", dtype=dtype)
+        b = torch.randn(K, N, device="cuda", dtype=dtype)
+        c = torch.randn(N, K, device="cuda", dtype=dtype)
+        
+        o = torch.empty_like(a)
 
-    quantiles = [0.5, 0.2, 0.8]
-    if 'e2e' in provider:
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twogemms(a, b, c, o, activation="", persistent=True), quantiles=quantiles)
-    else: # two sequential gemms
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: twomatmuls(a, b, c, o, activation=""), quantiles=quantiles)
+        quantiles = [0.5, 0.2, 0.8]
+        if 'e2e' in provider:
+            ms, min_ms, max_ms = triton.testing.do_bench(lambda: twogemms(a, b, c, o, activation="", persistent=True), quantiles=quantiles)
+        else: # two sequential gemms
+            ms, min_ms, max_ms = triton.testing.do_bench(lambda: twomatmuls(a, b, c, o, activation=""), quantiles=quantiles)
 
-    return ms
+        return ms
+    bench.run(save_path=None, print_data=True, show_plots=False)
+
+import re
+from prettytable import PrettyTable
+
+def parse_vgpr_usage(file_path):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    
+    # Extract VGPR-related information
+    vgpr_info = []
+    table_lines = []
+    in_table = False
+
+    for line in lines:
+        # Parse autotuning outputs
+        if re.search(r"Autotuning kernel", line):
+            vgpr_info.append(line.strip())
+        if re.search(r"Triton autotuning for function", line):
+            vgpr_info.append(line.strip())
+
+        if re.search(r"\.name:", line):
+            vgpr_info.append(line.strip())
+        if re.search(r"\.vgpr_count:", line) or re.search(r"\.vgpr_spill_count:", line):
+            vgpr_info.append(line.strip())
+        # Detect start of table
+        if re.match(r"^\s*Two layer MLP performance", line):
+            vgpr_info.append(line.strip())
+            in_table = True
+        elif in_table:
+            table_lines.append(line.strip())
+
+    # Print extracted information
+    print("\n".join(vgpr_info))
+
+    table = PrettyTable()
+    table.field_names = table_lines[0].split()
+    [table.add_row(line.split()[1:]) for line in table_lines[1:]]
+
+    print(table)
+
+
+def run_bench(args):
+    torch.manual_seed(0)
+    benchmark(args)
+
+import sys
+import time
+import re
+import os
+import tempfile
+
+def print_vgpr(args):
+    # Create a temporary file
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
+        output_file = temp_file.name
+
+        # Redirect stdout and stderr to the temporary file
+        sys.stdout = temp_file
+        sys.stderr = temp_file
+        
+        os.environ["AMDGCN_ENABLE_DUMP"] = "1"
+        os.environ["TRITON_ALWAYS_COMPILE"] = "1"
+        os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+        run_bench(args)  # Run the benchmark
+        
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+    # Restore stdout and stderr to normal
+    sys.stdout = sys.__stdout__
+    sys.stderr = sys.__stderr__
+
+    time.sleep(0.5)  # Ensure everything is written before reading
+
+    # Parse and print relevant output
+    parse_vgpr_usage(output_file)
+
+    # Remove the temporary file
+    os.unlink(output_file)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Benchmark gemm2gemm",
+        allow_abbrev=False,
+    )
+    parser.add_argument("-M", type=int, default=0)
+    parser.add_argument("-N", type=int, default=0)
+    parser.add_argument("-K", type=int, default=0)
+    parser.add_argument("-dtype", default='fp16')
+    parser.add_argument("-device", default='cuda')
+    parser.add_argument("-print_vgpr", action='store_true', default=False)
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    if args.print_vgpr:
+        print_vgpr(args)
+        return 0
+    run_bench(args)
+
+
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    benchmark.run(show_plots=False, print_data=True)
+    main()
     # test_correctness(128*32, 1024, 1024, True)
 
     
