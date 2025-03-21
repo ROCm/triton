@@ -27,12 +27,12 @@
     "BLOCK_SIZE_M": 256,
     "BLOCK_SIZE_N": 256,
     "BLOCK_SIZE_K1": 64,
-    "BLOCK_SIZE_K2": 64,
+    "BLOCK_SIZE_K2": 128,
     "GROUP_SIZE_M": 1,
     "num_warps": 8,
     "num_stages": 2,
-    "waves_per_eu": 0,
+    "waves_per_eu": 2,
     "matrix_instr_nonkdim": 16,
-    "kpack": 2
+    "kpack": 1
   }
 }
