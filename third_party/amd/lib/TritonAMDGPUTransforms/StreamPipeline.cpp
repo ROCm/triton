@@ -871,10 +871,10 @@ LogicalResult StreamPipeliner::pipelineLoop() {
     options.predicateFn = streamPredication;
   else
     options.predicateFn = tt::predicateOp;
-  
+
   options.getScheduleFn =
-      [coarseSchedule](scf::ForOp,
-                       std::vector<std::pair<Operation *, unsigned>> &s) {
+      [&coarseSchedule](scf::ForOp,
+                        std::vector<std::pair<Operation *, unsigned>> &s) {
         s = std::move(coarseSchedule);
       };
 

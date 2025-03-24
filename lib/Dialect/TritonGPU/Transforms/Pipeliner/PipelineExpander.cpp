@@ -790,7 +790,8 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
           // @@@: Is this valid for all results and all epilogue stages
           // consider loop-carried addptr result needed for next stage
           if (guardEpilogue)
-            nextValue = rewriter.create<arith::SelectOp>(loc, pred, nextValue, prevValue);
+            nextValue = rewriter.create<arith::SelectOp>(loc, pred, nextValue,
+                                                         prevValue);
           returnValues[ri] = nextValue;
           if (nextVersion <= maxStage)
             setValueMapping(mapVal, nextValue, nextVersion);

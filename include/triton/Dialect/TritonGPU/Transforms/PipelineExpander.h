@@ -51,7 +51,7 @@ struct PipeliningOption {
   /// lambda to generate the predicated version of operations.
   bool peelEpilogue = true;
 
-  /// 
+  ///
   bool guardEpilogue = true;
 
   /// Control whether the transformation checks that the number of iterations is
