@@ -338,12 +338,12 @@ Value getSmemVecOffset(const LinearLayout &regLayout,
     // This reverts #5645, because it introduced increased register pressure in
     // AMD backend.
     // TODO: remove when new implementation performance reaches target level
-    llvm::outs() << "       Simple LDS access";
+    // llvm::outs() << "       Simple LDS access";
     auto swizzledSharedEnc =
         mlir::dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(
             sharedEnc);
     if (false && swizzledSharedEnc) {
-      llvm::outs() << " ==> using 2D regToSharedLayout\n";
+        // llvm::outs() << " ==> using 2D regToSharedLayout\n";
       auto regToSharedLayout =
           getRegToSharedLayout(ctx, shape, regLayout, swizzledSharedEnc,
                                elemLlvmTy.getIntOrFloatBitWidth());
@@ -359,8 +359,8 @@ Value getSmemVecOffset(const LinearLayout &regLayout,
       smemOffset = dot(rewriter, loc, smemOffsets,
                        applyPermutation(smemStrides, smemOrder));
     }
-    else
-        llvm::outs() << "\n";
+    //else
+    //    llvm::outs() << "\n";
   } else { // Case 2 -> rank-reduced swizzling
     assert(rank >= 2 && "Swizzling only applies to tensors with rank >= 2");
     assert((isa<triton::gpu::SwizzledSharedEncodingAttr,
@@ -423,8 +423,8 @@ bool emitTransferBetweenRegistersAndShared(
   MLIRContext *ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  llvm::outs() << "Calling emitTransferBetweenRegistersAndShared with regLayout = ";
-  llvm::outs() << regLayout << "\n";
+  // llvm::outs() << "Calling emitTransferBetweenRegistersAndShared with regLayout = ";
+  // llvm::outs() << regLayout << "\n";
 
   StringAttr kBlock = str_attr("block");
   StringAttr kRegister = str_attr("register");
@@ -434,14 +434,14 @@ bool emitTransferBetweenRegistersAndShared(
   auto shape = sharedTy.getShape();
   LinearLayout sharedLayout =
       triton::gpu::toLinearLayout(shape, sharedTy.getEncoding());
-  llvm::outs() << "SharedLayout = " << sharedLayout << "\n";
+  // llvm::outs() << "SharedLayout = " << sharedLayout << "\n";
   LinearLayout regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
-  llvm::outs() << "regToSharedLayout =" << regToSharedLayout << "\n";
+  // llvm::outs() << "regToSharedLayout =" << regToSharedLayout << "\n";
 
-  llvm::outs() << "shape: ";
-  printVec(shape);
-  llvm::outs() << "allocShape: ";
-  printVec(sharedTy.getAllocShape());
+  // llvm::outs() << "shape: ";
+  // printVec(shape);
+  // llvm::outs() << "allocShape: ";
+  // printVec(sharedTy.getAllocShape());
 
   auto swizzledSharedEnc =
       mlir::dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(
@@ -450,7 +450,7 @@ bool emitTransferBetweenRegistersAndShared(
       auto regTo2dSharedLayout =
           getRegToSharedLayout(ctx, shape, regLayout, swizzledSharedEnc,
                                elemLlvmTy.getIntOrFloatBitWidth());
-      llvm::outs() << "regTo2dSharedLayout = " << regTo2dSharedLayout << "\n";
+      // llvm::outs() << "regTo2dSharedLayout = " << regTo2dSharedLayout << "\n";
   }
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
@@ -498,10 +498,10 @@ bool emitTransferBetweenRegistersAndShared(
                                   sharedTy.getEncoding())
           .pseudoinvert();
 
-  llvm::outs() << "invertAllocSharedLayout =" << invertAllocSharedLayout << "\n";
+  // llvm::outs() << "invertAllocSharedLayout =" << invertAllocSharedLayout << "\n";
   int numElems = regToSharedLayout.getInDimSize(kRegister);
   auto vecTy = vec_ty(elemLlvmTy, vecElems);
-  llvm::outs() << "vecElems, numElems = " << vecElems << ", " << numElems << "\n";
+  // llvm::outs() << "vecElems, numElems = " << vecElems << ", " << numElems << "\n";
   SmallVector<Value> ret;
 
 
@@ -596,7 +596,7 @@ SmallVector<Value> loadSharedToDistributed(
     const TargetInfoBase &target, std::pair<size_t, Type> *const llvmOpCount) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> ret;
-  llvm::outs() << ">>>>>>>>>>> loadSharedToDistributed <<<<<<<<<<<<<\n";
+  // llvm::outs() << ">>>>>>>>>>> loadSharedToDistributed <<<<<<<<<<<<<\n";
   bool success = emitTransferBetweenRegistersAndShared(
       dstTy, srcTy, elemLlvmTy, /*maxVecElems=*/std::nullopt, smemObj, loc,
       rewriter, target, [&](VectorType vecTy, Value vecAddr) {
@@ -626,7 +626,7 @@ void storeDistributedToShared(triton::gpu::MemDescType dstTy,
                               const TargetInfoBase &target,
                               std::pair<size_t, Type> *const llvmOpCount) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  llvm::outs() << ">>>>>>>>>>> storeDistributedToShared <<<<<<<<<<<<<\n";
+  // llvm::outs() << ">>>>>>>>>>> storeDistributedToShared <<<<<<<<<<<<<\n";
   bool success = emitTransferBetweenRegistersAndShared(
       srcTy, dstTy, elemLlvmTy, /*maxVecElems=*/std::nullopt, smemObj, loc,
       rewriter, target, [&](VectorType vecTy, Value vecAddr) {
