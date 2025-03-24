@@ -32,9 +32,9 @@ def main():
     triton_dir = os.environ.get("TRITONDIR", "~/triton")  # Default to ~/triton if not set
     output_file = os.path.expanduser("~/profiling.csv")
     kernel_names = ["gemm2gemm.kd", "gemm2gemm_persistent.kd", "gemm2gemm_persistent_buffered.kd", "reduce_buffers.kd", "matmul_kernel.kd"]
-    M = [4096]
-    N = [4096]
-    K = [4096]
+    M = [512*128, 4096]
+    N = [4096, 4096]
+    K = [4096, 4096]
     
     table = PrettyTable()
     table.field_names = ["M", "N", "K"] + kernel_names + ["Other Kernels Sum (µs)"]
