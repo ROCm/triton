@@ -296,7 +296,7 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_membar_analysis(pm)
         amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch)
         passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
+        #amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
 
         pm.run(mod)
         if "TRITON_MLIR_DUMP_REFINE_OPS" in os.environ.keys():
