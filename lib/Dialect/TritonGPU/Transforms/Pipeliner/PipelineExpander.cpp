@@ -346,7 +346,7 @@ LogicalResult LoopPipelinerInternal::emitPrologue(RewriterBase &rewriter) {
       int predicateIdx = i - stages[op];
       if (predicates[predicateIdx]) {
         OpBuilder::InsertionGuard insertGuard(rewriter);
-        newOp = predicateFn(rewriter, newOp, predicates[predicateIdx], true);
+        newOp = predicateFn(rewriter, newOp, predicates[predicateIdx]);
         if (newOp == nullptr)
           return failure();
       }
@@ -595,7 +595,7 @@ LogicalResult LoopPipelinerInternal::createKernel(
 
     if (predicates[useStage]) {
       OpBuilder::InsertionGuard insertGuard(rewriter);
-      newOp = predicateFn(rewriter, newOp, predicates[useStage], true);
+      newOp = predicateFn(rewriter, newOp, predicates[useStage]);
       if (!newOp)
         return failure();
       // Remap the results to the new predicated one.
@@ -747,7 +747,7 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
           });
       if (dynamicLoop) {
         OpBuilder::InsertionGuard insertGuard(rewriter);
-        newOp = predicateFn(rewriter, newOp, predicates[currentVersion], guardEpilogue);
+        newOp = predicateFn(rewriter, newOp, predicates[currentVersion]);
         if (!newOp)
           return failure();
       }
@@ -787,6 +787,8 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
           Value pred = predicates[currentVersion];
           Value prevValue = valueMapping[mapVal][currentVersion];
           Value nextValue = pair.value();
+          // @@@: Is this valid for all results and all epilogue stages
+          // consider loop-carried addptr result needed for next stage
           if (guardEpilogue)
             nextValue = rewriter.create<arith::SelectOp>(loc, pred, nextValue, prevValue);
           returnValues[ri] = nextValue;

@@ -67,7 +67,7 @@ struct PipeliningOption {
   // predication is impossible. In the latter case, pipelining will fail and
   // may leave IR in a partially transformed state.
   using PredicateOpFnType =
-      std::function<Operation *(RewriterBase &, Operation *, Value, bool)>;
+      std::function<Operation *(RewriterBase &, Operation *, Value)>;
   PredicateOpFnType predicateFn = nullptr;
 
   // TODO: add option to decide if the prologue should be peeled.
