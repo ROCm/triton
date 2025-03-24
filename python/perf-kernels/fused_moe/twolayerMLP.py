@@ -119,23 +119,65 @@ def gemm2gemm_persistent_buffered(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_k = tl.cdiv(K, BLOCK_SIZE_K)
 
-    pids_per_WG = (num_pid_m * N_BUFFERS) // NUM_WG
-    if pid < (num_pid_m * N_BUFFERS) % NUM_WG:
-        pids_per_WG += 1
-
     pids_n_per_buffer = tl.cdiv(num_pid_n, N_BUFFERS)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # persistent kernel looping over programs:
     # one program computes a row of output blocks of out
-    for _ in tl.range(0, pids_per_WG, step=1, num_stages=1):
         
-        pid_m = pid % num_pid_m
-        buffer_offset = pid // num_pid_m
+    pid_m = pid % num_pid_m
+    buffer_offset = pid // num_pid_m
 
+    # gemm1
+    # compute and store the row of accumulator blocks (acc = A x B) for the current buffer
+    for pid_n_ in tl.range(0, pids_n_per_buffer, 1, num_stages=1):
+        pid_n = pid_n_ + buffer_offset * pids_n_per_buffer
+        if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS maybe not an integer # TODO: refactor. 
+            # accumulator block offsets
+            offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+            offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+            
+            acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
+            acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
-        # gemm1
-        # compute and store the row of accumulator blocks (acc = A x B) for the current buffer
+            accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
+
+            acc_dtype = c_ptr.type.element_ty
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+            # Create pointers for first block k of A and B input matrices
+            a_ptrs = a_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
+            b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+            # compute the block of acc = A x B
+            for k1 in range(0, num_pid_k):
+                # Load the next block of A and B, generate a mask by checking the K dimension.
+                # If it is out of bounds, set it to 0.
+                if EVEN_K:
+                    a = tl.load(a_ptrs)
+                    b = tl.load(b_ptrs)
+                else:
+                    a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k1 * BLOCK_SIZE_K, other=0.0)
+                    b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k1 * BLOCK_SIZE_K, other=0.0)
+                accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+
+                # Advance the ptrs to the next K block.
+                a_ptrs += BLOCK_SIZE_K * stride_ak
+                b_ptrs += BLOCK_SIZE_K * stride_bk
+
+            # Apply activation function, if specified.
+            if ACTIVATION == "leaky_relu":
+                accumulator = leaky_relu(accumulaccumulatorator_add)
+            
+            # only this workgroup will be needing the values so coherence in L2 is enough
+            # tl.atomic_add(acc_ptrs, accumulator_add, mask=acc_mask, scope="cta")
+            tl.store(acc_ptrs, accumulator, mask=acc_mask)
+    
+    tl.debug_barrier()
+    
+    # for this buffer, go over the row of output blocks which share the same row of accumulator blocks (from acc = A x B)
+    for k in tl.range(0, num_pid_k, step=1, num_stages=1): 
+        # output block accumulator
+        o_acc_dtype = o_ptr.type.element_ty
+        o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
         for pid_n_ in tl.range(0, pids_n_per_buffer, 1, num_stages=1):
             pid_n = pid_n_ + buffer_offset * pids_n_per_buffer
             if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS maybe not an integer # TODO: refactor. 
@@ -147,73 +189,23 @@ def gemm2gemm_persistent_buffered(
                 acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
                 accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
+            
+                c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+                c_ptrs += k * BLOCK_SIZE_K * stride_ck
 
-                acc_dtype = c_ptr.type.element_ty
-                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-                # Create pointers for first block k of A and B input matrices
-                a_ptrs = a_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
-                b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
-                # compute the block of acc = A x B
-                for k1 in range(0, num_pid_k):
-                    # Load the next block of A and B, generate a mask by checking the K dimension.
-                    # If it is out of bounds, set it to 0.
-                    if EVEN_K:
-                        a = tl.load(a_ptrs)
-                        b = tl.load(b_ptrs)
-                    else:
-                        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k1 * BLOCK_SIZE_K, other=0.0)
-                        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k1 * BLOCK_SIZE_K, other=0.0)
-                    accumulator += tl.dot(a, b, out_dtype=acc_dtype)
-
-                    # Advance the ptrs to the next K block.
-                    a_ptrs += BLOCK_SIZE_K * stride_ak
-                    b_ptrs += BLOCK_SIZE_K * stride_bk
-
-                # Apply activation function, if specified.
-                if ACTIVATION == "leaky_relu":
-                    accumulator = leaky_relu(accumulaccumulatorator_add)
+                if EVEN_K:
+                    c = tl.load(c_ptrs)
+                else:
+                    c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
                 
-                # only this workgroup will be needing the values so coherence in L2 is enough
-                # tl.atomic_add(acc_ptrs, accumulator_add, mask=acc_mask, scope="cta")
-                tl.store(acc_ptrs, accumulator, mask=acc_mask)
-        
-        tl.debug_barrier()
-        
-        # for this buffer, go over the row of output blocks which share the same row of accumulator blocks (from acc = A x B)
-        for k in tl.range(0, num_pid_k, step=1, num_stages=1): 
-            # output block accumulator
-            o_acc_dtype = o_ptr.type.element_ty
-            o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
-            for pid_n_ in tl.range(0, pids_n_per_buffer, 1, num_stages=1):
-                pid_n = pid_n_ + buffer_offset * pids_n_per_buffer
-                if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS maybe not an integer # TODO: refactor. 
-                    # accumulator block offsets
-                    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
-                    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
-                    
-                    acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
-                    acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+                o_accumulator += tl.dot(accumulator, c, out_dtype=o_acc_dtype)
 
-                    accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
-                
-                    c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
-                    c_ptrs += k * BLOCK_SIZE_K * stride_ck
-
-                    if EVEN_K:
-                        c = tl.load(c_ptrs)
-                    else:
-                        c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-                    
-                    o_accumulator += tl.dot(accumulator, c, out_dtype=o_acc_dtype)
-
-            # store the output accumulator block (to the correct buffer)
-            offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_ok = k * BLOCK_SIZE_K + offs_k
-            o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + buffer_offset * K)
-            o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-            tl.store(o_ptrs, o_accumulator, mask=o_mask)
-        
-        pid += NUM_WG # move to next program
+        # store the output accumulator block (to the correct buffer)
+        offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_ok = k * BLOCK_SIZE_K + offs_k
+        o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + buffer_offset * K)
+        o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
+        tl.store(o_ptrs, o_accumulator, mask=o_mask)
             
         
 
@@ -266,19 +258,62 @@ def gemm2gemm_persistent(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_k = tl.cdiv(K, BLOCK_SIZE_K)
 
-    pids_per_WG = num_pid_m // NUM_WG
-    if pid_m < num_pid_m % NUM_WG:
-        pids_per_WG += 1
+
 
     o_acc_dtype = o_ptr.type.element_ty
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # persistent kernel looping over programs:
     # one program computes a row of output blocks of out
-    for _ in tl.range(0, pids_per_WG, 1, num_stages=1):
+   
+    # gemm1
+    # compute and store the row of accumulator blocks (acc = A x B)
+    for pid_n in tl.range(0, num_pid_n, 1, num_stages=1):
+        # accumulator block offsets
+        offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+        offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
         
-        # gemm1
-        # compute and store the row of accumulator blocks (acc = A x B)
+        acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
+        acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+
+        acc_dtype = c_ptr.type.element_ty
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+        # Create pointers for first block k of A and B input matrices
+        a_ptrs = a_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
+        b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+        for k1 in range(0, num_pid_k):
+            # Load the next block of A and B, generate a mask by checking the K dimension.
+            # If it is out of bounds, set it to 0.
+            if EVEN_K:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            else:
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k1 * BLOCK_SIZE_K, other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k1 * BLOCK_SIZE_K, other=0.0)
+            accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+
+            # Advance the ptrs to the next K block.
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            b_ptrs += BLOCK_SIZE_K * stride_bk
+
+        # Apply activation function, if specified.
+        if ACTIVATION == "leaky_relu":
+            accumulator = leaky_relu(accumulator)
+
+        acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
+        acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+
+        # only this workgroup will be needing these values later so coherence in L2 is enough
+        tl.store(acc_ptrs, accumulator, mask=acc_mask)
+        # tl.atomic_add(acc_ptrs, accumulator, mask=acc_mask, scope="cta")
+    
+    tl.debug_barrier()
+
+    # gemm2
+    # compute the row of output blocks loading the computed accumulator blocks and multiplying with corresponding column blocks of C (out = acc x C)
+    for k in range(0, num_pid_k): 
+        # output block accumulator
+        o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
         for pid_n in tl.range(0, num_pid_n, 1, num_stages=1):
             # accumulator block offsets
             offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
@@ -286,75 +321,28 @@ def gemm2gemm_persistent(
             
             acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
             acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    
-            acc_dtype = c_ptr.type.element_ty
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-            # Create pointers for first block k of A and B input matrices
-            a_ptrs = a_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
-            b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
-            for k1 in range(0, num_pid_k):
-                # Load the next block of A and B, generate a mask by checking the K dimension.
-                # If it is out of bounds, set it to 0.
-                if EVEN_K:
-                    a = tl.load(a_ptrs)
-                    b = tl.load(b_ptrs)
-                else:
-                    a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k1 * BLOCK_SIZE_K, other=0.0)
-                    b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k1 * BLOCK_SIZE_K, other=0.0)
-                accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+            
+            
+            # The idea is that this load would be from L2
+            accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
+            
+            c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+            c_ptrs += k * BLOCK_SIZE_K * stride_ck
 
-                # Advance the ptrs to the next K block.
-                a_ptrs += BLOCK_SIZE_K * stride_ak
-                b_ptrs += BLOCK_SIZE_K * stride_bk
+            if EVEN_K:
+                c = tl.load(c_ptrs)
+            else:
+                c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
-            # Apply activation function, if specified.
-            if ACTIVATION == "leaky_relu":
-                accumulator = leaky_relu(accumulator)
+            o_accumulator += tl.dot(accumulator, c, out_dtype=o_acc_dtype)
 
-            acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
-            acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    
-            # only this workgroup will be needing these values later so coherence in L2 is enough
-            tl.store(acc_ptrs, accumulator, mask=acc_mask)
-            # tl.atomic_add(acc_ptrs, accumulator, mask=acc_mask, scope="cta")
-        
-        tl.debug_barrier()
+        # store the output accumulator block
+        offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_ok = k * BLOCK_SIZE_K + offs_k
+        o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * offs_ok[None, :]
+        o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
+        tl.store(o_ptrs, o_accumulator, mask=o_mask)
 
-        # gemm2
-        # compute the row of output blocks loading the computed accumulator blocks and multiplying with corresponding column blocks of C (out = acc x C)
-        for k in range(0, num_pid_k): 
-            # output block accumulator
-            o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
-            for pid_n in tl.range(0, num_pid_n, 1, num_stages=1):
-                # accumulator block offsets
-                offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
-                offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
-                
-                acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
-                acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-                
-                
-                # The idea is that this load would be from L2
-                accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
-                
-                c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
-                c_ptrs += k * BLOCK_SIZE_K * stride_ck
-
-                if EVEN_K:
-                    c = tl.load(c_ptrs)
-                else:
-                    c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-
-                o_accumulator += tl.dot(accumulator, c, out_dtype=o_acc_dtype)
-
-            # store the output accumulator block
-            offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_ok = k * BLOCK_SIZE_K + offs_k
-            o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * offs_ok[None, :]
-            o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-            tl.store(o_ptrs, o_accumulator, mask=o_mask)
-
-        pid_m += NUM_WG # move to next program
 
 
 @triton.jit
@@ -466,7 +454,7 @@ def twogemms(a, b, c, o, activation="", persistent=False):
     M, K = a.shape
     K, N = b.shape
     
-    NUM_WG = 304  # torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_WG = torch.cuda.get_device_properties("cuda").multi_processor_count
 
     BLOCK_SIZE_M=128
     BLOCK_SIZE_N=128
@@ -480,9 +468,8 @@ def twogemms(a, b, c, o, activation="", persistent=False):
 
     if persistent:
         if NUM_WG > num_pid_m: # get more parallelism by buffering the output
-            
-            N_BUFFERS = min(triton.cdiv(NUM_WG, num_pid_m), num_pid_n)
-            grid = (NUM_WG,)
+            N_BUFFERS = 8
+            grid = (num_pid_m*N_BUFFERS,)
             o_buffers = torch.empty_like(o).contiguous().repeat(1, N_BUFFERS)
             acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
 
@@ -531,7 +518,7 @@ def twogemms(a, b, c, o, activation="", persistent=False):
                 BLOCK_SIZE_K=128,
             )
         else:
-            grid = (NUM_WG,)
+            grid = (num_pid_m, )
             acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
             
             gemm2gemm_persistent[grid](
