@@ -250,6 +250,7 @@ class HIPBackend(BaseBackend):
 
         if bypass_lds:
             amd.passes.ttgpuir.add_bypass_lds_for_dot_operand(pm)
+            passes.ttgpuir.add_remove_layout_conversions(pm)
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
         if options.schedule_hint == "local-prefetch":
