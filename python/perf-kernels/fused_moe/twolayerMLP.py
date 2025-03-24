@@ -407,7 +407,7 @@ def twogemms(a, b, c, o, activation="", persistent=False):
     M, K = a.shape
     K, N = b.shape
     
-    NUM_WG = 128  # torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_WG = 256  # torch.cuda.get_device_properties("cuda").multi_processor_count
 
     BLOCK_SIZE_M=16
     BLOCK_SIZE_N=128
