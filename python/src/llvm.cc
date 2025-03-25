@@ -326,6 +326,30 @@ void init_triton_llvm(py::module &&m) {
           instrCbPtr = &passInstrCb;
         }
 
+        auto afterPassName = mlir::triton::tools::getStrEnv("PRINT_AFTER");
+        if (!afterPassName.empty()) {
+            auto options = llvm::cl::getRegisteredOptions();
+            auto optIt = options.find("print-after");
+            if (optIt != options.end()) {
+                auto optPtr = static_cast<llvm::cl::list<std::string> *>(optIt->second);
+                optPtr->push_back(afterPassName);
+            }
+            standardInstr.registerCallbacks(passInstrCb, &mam);
+            instrCbPtr = &passInstrCb;
+        }
+
+        auto beforePassName = mlir::triton::tools::getStrEnv("PRINT_BEFORE");
+        if (!beforePassName.empty()) {
+            auto options = llvm::cl::getRegisteredOptions();
+            auto optIt = options.find("print-before");
+            if (optIt != options.end()) {
+                auto optPtr = static_cast<llvm::cl::list<std::string> *>(optIt->second);
+                optPtr->push_back(beforePassName);
+            }
+            standardInstr.registerCallbacks(passInstrCb, &mam);
+            instrCbPtr = &passInstrCb;
+        }
+
         PipelineTuningOptions tuningOptions;
         tuningOptions.LoopUnrolling = true;
         tuningOptions.LoopInterleaving = true;
