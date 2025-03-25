@@ -520,7 +520,7 @@ bool emitTransferBetweenRegistersAndShared(
           auto vecOffset = getSmemVecOffset(
               regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
               sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.add(vec0Offset, vecOffset);
+          vecOffset = b.xor_(vec0Offset, vecOffset);
           auto smemBase = smemObj.getBase();
           auto ptrTy = smemBase.getType();
           auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
@@ -537,7 +537,7 @@ bool emitTransferBetweenRegistersAndShared(
           auto vecOffset = getSmemVecOffset(
               regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
               sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.add(vec0Offset, vecOffset);
+          vecOffset = b.xor_(vec0Offset, vecOffset);
           auto smemBase = smemObj.getBase();
           auto ptrTy = smemBase.getType();
           auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
@@ -552,7 +552,7 @@ bool emitTransferBetweenRegistersAndShared(
           auto vecOffset = getSmemVecOffset(
               regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
               sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.add(vec1Offset, vecOffset);
+          vecOffset = b.xor_(vec1Offset, vecOffset);
           auto smemBase = smemObj.getBase();
           auto ptrTy = smemBase.getType();
           auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
