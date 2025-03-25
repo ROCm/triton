@@ -35,6 +35,7 @@ from utils.benchmark_utils import get_available_models, get_model_configs
 dump_ir_type=None
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 
+
 class MetaData():
     cu_seqlens_q = None
     cu_seqlens_k = None
@@ -436,21 +437,51 @@ def get_cdna_autotune_configs():
         return configs, ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 
         """
-    return [
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
-        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-        #              num_stages=2, num_warps=4),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
 
-    ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': True, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=8),
+
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 256, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N':  32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2, 'matrix_instr_nonkdim': 16, 'instruction_sched_variant':sched_opt},
+                          num_stages=num_stages, num_warps=4),
+
+        ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
         """
 
 
@@ -492,9 +523,15 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz,
-             stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh,
-             stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, Q_descale,
+def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out,
+        stride_qz, stride_qh, stride_qm, stride_qk,
+        stride_kz, stride_kh, stride_kn, stride_kk,
+        stride_vz, stride_vh, stride_vk, stride_vn,
+        stride_oz, stride_oh,
+        stride_om, stride_on, stride_bz,
+        stride_bh, stride_bm, stride_bn,
+        stride_az, stride_ah,
+        Q_descale,
              K_descale, P_scale, P_descale, V_descale, cu_seqlens_q, cu_seqlens_k, dropout_p, philox_seed,
              PERSISTENT: tl.constexpr, PERSISTENT_DYNAMIC: tl.constexpr, atomic_counter, NUM_CU: tl.constexpr,
              GRID_CU_MULTIP: tl.constexpr, B: tl.constexpr, philox_offset_base, encoded_softmax, alibi_slopes,
@@ -503,27 +540,6 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr,
              INT8: tl.constexpr, USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr):
-
-    tl.assume(stride_qz >= 0)
-    tl.assume(stride_qh >= 0)
-    tl.assume(stride_qm >= 0)
-    tl.assume(stride_qk >= 0)
-    tl.assume(stride_kz >= 0)
-    tl.assume(stride_kh >= 0)
-    tl.assume(stride_kn >= 0)
-    tl.assume(stride_kk >= 0)
-    tl.assume(stride_bz >= 0)
-    tl.assume(stride_bh >= 0)
-    tl.assume(stride_bm >= 0)
-    tl.assume(stride_bn >= 0)
-    tl.assume(stride_vz >= 0)
-    tl.assume(stride_vh >= 0)
-    tl.assume(stride_vk >= 0)
-    tl.assume(stride_vn >= 0)
-    tl.assume(stride_oz >= 0)
-    tl.assume(stride_oh >= 0)
-    tl.assume(stride_om >= 0)
-    tl.assume(stride_on >= 0)
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -1398,12 +1414,8 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
     if not equal_seqlens:
         max_seqlens_q = N_CTX_Q // Z
         max_seqlens_k = N_CTX_K // Z
-        if N_CTX_Q == N_CTX_K:
-            seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
-            seqlens_k = seqlens_q
-        else:
-            seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
-            seqlens_k = torch.randint(1, max_seqlens_k + 1, (Z, ), dtype=torch.int32)
+        seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
+        seqlens_k = torch.randint(1, max_seqlens_k + 1, (Z, ), dtype=torch.int32)
     else:
         seqlens_q = torch.full((Z, ), N_CTX_Q // Z)
         seqlens_k = torch.full((Z, ), N_CTX_K // Z)
@@ -1901,7 +1913,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     #print(tri_dv)
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
-    # The current block size for gfx90a and gfx908 series is 64x64. This results in
+    # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
 
     if dtype == torch.bfloat16:
@@ -1972,7 +1984,7 @@ def model_benchmark_configs(args):
     for model_name, config in configs.items():
         HQ = config["num_attention_heads"]
         HK = HQ if config["num_key_value_heads"] is None else config["num_key_value_heads"]
-        N_CTX_Q = args.sq if args.sq else 8192
+        N_CTX_Q = args.sq if args.sq else 4096
         N_CTX_K = args.sk if args.sk else N_CTX_Q
         HEAD_DIM = config["hidden_size"] // HQ
         fa_configs.append((model_name, batch_size, HQ, HK, N_CTX_Q, N_CTX_K, HEAD_DIM))
@@ -1988,11 +2000,11 @@ def run_benchmark(custom, args):
     head_size = 128 if not args.d else args.d
     mode = 'fwd'
     x_names = ['BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K']
-    causal = args.causal if not args.model else True
+    causal = args.causal
     int8 = args.int8
     quantize_p = args.quantize_p and int8
     int8_kv = args.int8_kv and int8
-    varlen = True if args.model else args.layout == 'thd'
+    varlen = args.layout == 'thd'
     configs = []
     plot_name = f'fused-attention-{mode}-d{head_size}-layout{args.layout}'
     extra_args = {'D_HEAD': head_size, 'dtype': dtype, 'causal': causal, 'mode': mode}
@@ -2041,36 +2053,13 @@ def run_benchmark(custom, args):
             q, k, v, input_metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                                                           args.equal_seqlens)
             for i in range(0, input_metadata.num_contexts):
-                seqlen_q = (input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]).item()
-                seqlen_k = (input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]).item()
-                # x2 in both cases for 2 GEMMs
-                if causal:
-                    # If seqlen_q != seqlen_k then the causal mask ignores computation
-                    # depending on which seqlen is larger. Either the lower triangle, or right triangle
-                    # If seqlen_q is greater than seqlen_k, the lower triangle is non zero
-                    # where the last row has seqlen_k valid element, the second last row has
-                    # seqlen_k - 1 valid elements and so on until one element is valid in the
-                    # seqlen_q - seqlen_k row, hence total valid elements are 1+2+...+seqlen_k
-                    # which is seqlen_k*(seqlen_k+1)/2
-                    # If seqlen_q is less than seqlen_k, then we count the zero elements
-                    # the first row has seqlen_q-1 zero elements, the second row has seqlen_q-2
-                    # zero elements and so on until the second last row has 1 zero element
-                    # Total zero elements are 1+2+...+(seqlen_q-1) = seqlen_q*(seqlen_q-1)/2
-                    # Total non zero elements are seqlen_q*seqlen_k - (seqlen_q*(seqlen_q-1)/2)
-                    valid_out_elements = ((seqlen_k**2 + seqlen_k) / 2) if seqlen_q > seqlen_k else \
-                            (seqlen_q * seqlen_k - ((seqlen_q**2 - seqlen_q) / 2))
-                    flops_per_matmul += valid_out_elements * HQ * D_HEAD * 2
-                else:
-                    flops_per_matmul += seqlen_q * seqlen_k * HQ * D_HEAD * 2
+                seqlen_q = input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]
+                seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
+                # x2 for 2 GEMMs
+                flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
         else:
             q, k, v, input_metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout)
-            if causal:
-                # Same calculation as if varlen/if causal above
-                valid_out_elements = ((N_CTX_K**2 + N_CTX_K) / 2) if N_CTX_Q > N_CTX_K else \
-                        (N_CTX_Q * N_CTX_K - ((N_CTX_Q**2 - N_CTX_Q) / 2))
-                flops_per_matmul = 2.0 * BATCH * HQ * valid_out_elements * D_HEAD
-            else:
-                flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
+            flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
         if causal:
             input_metadata.need_causal()
 
@@ -2105,6 +2094,14 @@ def run_benchmark(custom, args):
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         total_flops = 2 * flops_per_matmul
+        if causal:
+            # total_flops *= 0.5 # normally, but we have to take into account the unequal seqlen_q/k
+            seqlen_q = N_CTX_Q
+            seqlen_k = N_CTX_K
+            if seqlen_q > seqlen_k:
+                total_flops *= (seqlen_k / (2 * seqlen_q))
+            else:
+                total_flops *= (1 - seqlen_q / (2 * seqlen_k))
         if mode == "bwd":
             total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
         if print_time:
@@ -2152,12 +2149,12 @@ def parse_args():
     parser.add_argument("-dtype", default='fp16')
     parser.add_argument("-return_time", action='store_true', default=False)
     parser.add_argument("-layout", type=str, default='bhsd', help=supported_layouts())
-    parser.add_argument(
-        "-persistent", nargs='?', const='fixed', choices=['fixed', 'dynamic'], default=None,
-        help="Enable persistent kernels. Use '-persistent dynamic' for dynamic scheduling of the tiles.")
     parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir','llir', 'amdgcn'],
                         default="none",
                         help="dump IR format")
+    parser.add_argument(
+        "-persistent", nargs='?', const='fixed', choices=['fixed', 'dynamic'], default=None,
+        help="Enable persistent kernels. Use '-persistent dynamic' for dynamic scheduling of the tiles.")
     return parser.parse_args()
 
 
@@ -2167,8 +2164,8 @@ arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': tor
 def main():
     args = parse_args()
     custom_config = False
-    assert args.layout == 'thd' or not args.equal_seqlens or args.model, \
-           "Equal sequence lengths arg must be used with the thd layout or a model config."
+    assert args.layout == 'thd' or not args.equal_seqlens, \
+           "Equal sequence lengths arg must be used with the thd layout."
     if args.hq or args.hk or args.d:
         custom_config = True
         assert args.b and args.hq and args.sq and args.d, \
@@ -2183,15 +2180,11 @@ def main():
     assert args.dtype in arg_to_torch_dtype, \
            "Only fp16, bf16 and f32 types currently supported."
 
-    if args.model:
-        print("Note: Model config sets causal masking and THD layout (varlen) by default.")
-
     if args.dump_ir != 'none':
         global dump_ir_type
         dump_ir_type = args.dump_ir
 
     run_benchmark(custom_config, args)
-    #test_op_fwd()
 
 
 if __name__ == '__main__':
