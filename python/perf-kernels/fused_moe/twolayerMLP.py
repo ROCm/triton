@@ -63,10 +63,211 @@ def reduce_buffers(
     o_ptrs = o_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
     tl.store(o_ptrs, o_output, mask=mask)
 
-# Problems:
-# We need the output blocks per persistent workgroup to fit into L2 cache. L2 cache size is 4MB. Required size is BLOCK_SIZE_M * K * bytes_per_output_element (2 for fp16).
-# With  BLOCK_SIZE_M = 32, K=4096, bytes_per_output_element=2, we get 256KB. Should be able to fit.
-# M / BLOCK_SIZE_M will not saturate occupancy. Solution: We can multiply the number of launched workgroups by splitting the N dimension with N_buffers, and have a workgroup update a correct buffer for a output block.
+
+
+@triton.jit
+def gemm2gemm_persistent_buffered_atomic(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    o_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cn,
+    stride_ck,
+    stride_om,
+    stride_ok,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+    N_BUFFERS: tl.constexpr,
+):
+    """
+    End to end fusion of two consecutive GEMMs.
+    acc = A x B.
+    out = acc x C
+    A has shape (M, K), B has shape (K, N) and C has shape (N, K)
+    """
+
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cn > 0)
+    tl.assume(stride_ck > 0)
+
+    pid = tl.program_id(axis=0) #
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    # One program loops over num_pid_n_per_buffer accumulator blocks. (acc = A x B). 
+    # So there are num_pid_n_per_buffer number of atomic adds to the same output location. 
+
+    num_pid_n_per_buffer = tl.cdiv(num_pid_n, N_BUFFERS)
+
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    
+    pid_m = pid % num_pid_m
+    pid_buffer = pid // num_pid_m # to which buffer the output block should be written to.
+    output_offset = pid_buffer * K
+    
+    for pid_n_ in tl.range(0, num_pid_n_per_buffer, 1, num_stages=1):
+        pid_n = pid_n_ + pid_buffer * num_pid_n_per_buffer  
+        if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS might not be an integer # TODO: refactor
+            offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+            offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+            
+            offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+            offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+            a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+            b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+
+            acc_dtype = c_ptr.type.element_ty
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype) # accumulator block
+        
+            # first gemm: A x B = acc
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                # Load the next block of A and B, generate a mask by checking the K dimension.
+                # If it is out of bounds, set it to 0.
+                if EVEN_K:
+                    a = tl.load(a_ptrs)
+                    b = tl.load(b_ptrs)
+                else:
+                    a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+                    b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+                accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+
+                # Advance the ptrs to the next K block.
+                a_ptrs += BLOCK_SIZE_K * stride_ak
+                b_ptrs += BLOCK_SIZE_K * stride_bk
+
+            # TODO: add other activation functions
+            # Apply activation function, if specified.
+            if ACTIVATION == "leaky_relu":
+                accumulator = leaky_relu(accumulator)
+
+            c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+            o_dtype = o_ptr.type.element_ty
+
+            # loop through the row blocks that the accumulator block gets multiplied with when computing acc x C = output
+            # and store the partial output as an atomic add.
+            for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), 1, num_stages=2):
+                if EVEN_K:
+                    c = tl.load(c_ptrs)
+                else:
+                    c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+                o_partial = tl.dot(accumulator, c, out_dtype=o_dtype)
+                offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                offs_ok = k * BLOCK_SIZE_K + offs_k
+                o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * (offs_ok[None, :] + output_offset)
+                o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
+
+                # high latency operation, we need to hide this somehow
+                tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta", sem="relaxed")
+                # move to next row block of C
+                c_ptrs += BLOCK_SIZE_K * stride_ck
+        
+
+@triton.jit
+def gemm2gemm_persistent_atomic(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    o_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cn,
+    stride_ck,
+    stride_om,
+    stride_ok,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+):
+    """
+    End to end fusion of two consecutive GEMMs.
+    acc = A x B.
+    out = acc x C
+    A has shape (M, K), B has shape (K, N) and C has shape (N, K)
+    """
+
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cn > 0)
+    tl.assume(stride_ck > 0)
+
+    pid_m = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    for pid_n in tl.range(0, num_pid_n, step=1, num_stages=1):
+        # Create pointers for first block of A and B input matrices
+        offs_k = tl.arange(0, BLOCK_SIZE_K)
+        offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
+        offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
+        a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+        b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+
+        acc_dtype = c_ptr.type.element_ty
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+            # Load the next block of A and B, generate a mask by checking the K dimension.
+            # If it is out of bounds, set it to 0.
+            if EVEN_K:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            else:
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            accumulator += tl.dot(a, b, out_dtype=acc_dtype)
+
+            # Advance the ptrs to the next K block.
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            b_ptrs += BLOCK_SIZE_K * stride_bk
+
+        
+        # Apply activation function, if specified.
+        if ACTIVATION == "leaky_relu":
+            accumulator = leaky_relu(accumulator)
+
+        c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
+
+        for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), step=1, num_stages=2):
+            # Load the next block of A and B, generate a mask by checking the K dimension.
+            # If it is out of bounds, set it to 0.
+            if EVEN_K:
+                c = tl.load(c_ptrs)
+            else:
+                c = tl.load(c_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            o_partial = tl.dot(accumulator, c)
+            offs_om = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_ok = k * BLOCK_SIZE_K + offs_k
+            o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * offs_ok[None, :]
+            o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
+            # we need coherency only in workgroup (thread block level)
+            tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta", sem="relaxed")
+            c_ptrs += BLOCK_SIZE_K * stride_ck
+
+
 
 @triton.jit
 def gemm2gemm_persistent_buffered(
@@ -93,7 +294,6 @@ def gemm2gemm_persistent_buffered(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
-    NUM_WG: tl.constexpr,
     ACTIVATION: tl.constexpr,
     N_BUFFERS: tl.constexpr,
 ):
@@ -234,7 +434,6 @@ def gemm2gemm_persistent(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
-    NUM_WG: tl.constexpr,
     ACTIVATION: tl.constexpr,
 ):
     """
@@ -243,7 +442,11 @@ def gemm2gemm_persistent(
     out = acc x C
     A has shape (M, K), B has shape (K, N) and C has shape (N, K)
 
-    Persistent version: persistent kernel computes 
+    One workgroup (kernel launch) computes a row of output blocks.
+    It first computes the row of accumulator blocks (acc = A x B) and stores them in memory. 
+    Then it computes the row of output blocks (out = acc x C) by loading the row of accumulator blocks and a corresponding column of blocks from C.
+    The idea is that store and load of accumulator blocks happens in cache (L1/L2) and is fast. 
+    The coherence is needed only in cache level because only this workgroup needs to know the values of the the row of accumulator blocks.
     """
 
     tl.assume(stride_am > 0)
@@ -258,13 +461,8 @@ def gemm2gemm_persistent(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_k = tl.cdiv(K, BLOCK_SIZE_K)
 
-
-
     o_acc_dtype = o_ptr.type.element_ty
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-
-    # persistent kernel looping over programs:
-    # one program computes a row of output blocks of out
    
     # gemm1
     # compute and store the row of accumulator blocks (acc = A x B)
@@ -303,14 +501,13 @@ def gemm2gemm_persistent(
         acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
         acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
-        # only this workgroup will be needing these values later so coherence in L2 is enough
+        # only this workgroup will be needing these values later so coherence in cache (L1/L2) is enough
         tl.store(acc_ptrs, accumulator, mask=acc_mask)
-        # tl.atomic_add(acc_ptrs, accumulator, mask=acc_mask, scope="cta")
     
     tl.debug_barrier()
 
     # gemm2
-    # compute the row of output blocks loading the computed accumulator blocks and multiplying with corresponding column blocks of C (out = acc x C)
+    # compute the row of output blocks loading the computed accumulator blocks and multiplying with corresponding column of blocks from C (out = acc x C)
     for k in range(0, num_pid_k): 
         # output block accumulator
         o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
@@ -322,8 +519,7 @@ def gemm2gemm_persistent(
             acc_ptrs = acc_ptr + (offs_m[:, None] * stride_accm + offs_n[None, :] * stride_accn)
             acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
             
-            
-            # The idea is that this load would be from L2
+            # The idea is that this load would be from cache
             accumulator = tl.load(acc_ptrs, mask=acc_mask, other=0.0) # BLOCK_SIZE_M x BLOCK_SIZE_N
             
             c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
@@ -440,13 +636,15 @@ def gemm2gemm(
         offs_ok = k * BLOCK_SIZE_K + offs_k
         o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * offs_ok[None, :]
         o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-        tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta")
-        # tl.store(o_ptrs, o_partial, mask=o_mask)
+        
+        # This is horribly slow operation requiring synchronization of all memory.
+        tl.atomic_add(o_ptrs, o_partial, mask=o_mask)
+        
         c_ptrs += BLOCK_SIZE_K * stride_ck
 
 
 # Wrapper for gemm kernel.
-def twogemms(a, b, c, o, activation="", persistent=False):
+def twogemms(a, b, c, o, activation="", persistent=False, atomic=False):
     # Check constraints.
     assert a.shape[1] == b.shape[0] and b.shape[1] == c.shape[0], "Incompatible dimensions!!!"
     assert a.dtype == b.dtype and b.dtype==c.dtype, "Mixed dtype GEMMs are not supported!!!"
@@ -464,43 +662,68 @@ def twogemms(a, b, c, o, activation="", persistent=False):
     num_pid_m = triton.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = triton.cdiv(N, BLOCK_SIZE_N)
 
-    args = {"num_warps": 8, "waves_per_eu": 2, "num_stages": 1}
+    args = {"num_warps": 8, "waves_per_eu": 2, "num_stages": 2}
 
     if persistent:
         if NUM_WG > num_pid_m: # get more parallelism by buffering the output
-            N_BUFFERS = 8
+            N_BUFFERS = triton.next_power_of_2(triton.cdiv(NUM_WG, num_pid_m))
             grid = (num_pid_m*N_BUFFERS,)
             o_buffers = torch.empty_like(o).contiguous().repeat(1, N_BUFFERS)
-            acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
-
-            gemm2gemm_persistent_buffered[grid](
-                a,
-                b,
-                c,
-                acc,
-                o_buffers,
-                M,
-                N,
-                K,
-                a.stride(0),
-                a.stride(1),
-                b.stride(0),
-                b.stride(1),
-                c.stride(0),
-                c.stride(1),
-                acc.stride(0),
-                acc.stride(1),
-                o_buffers.stride(0),
-                o_buffers.stride(1),
-                NUM_WG=NUM_WG,
-                BLOCK_SIZE_M=BLOCK_SIZE_M,
-                BLOCK_SIZE_N=BLOCK_SIZE_N,
-                BLOCK_SIZE_K=BLOCK_SIZE_K,
-                EVEN_K=EVEN_K,
-                ACTIVATION=activation,
-                N_BUFFERS=N_BUFFERS,
-                **args,
-            )
+            
+            if atomic:
+                gemm2gemm_persistent_buffered_atomic[grid](
+                    a,
+                    b,
+                    c,
+                    o_buffers,
+                    M,
+                    N,
+                    K,
+                    a.stride(0),
+                    a.stride(1),
+                    b.stride(0),
+                    b.stride(1),
+                    c.stride(0),
+                    c.stride(1),
+                    o_buffers.stride(0),
+                    o_buffers.stride(1),
+                    BLOCK_SIZE_M=BLOCK_SIZE_M,
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                    EVEN_K=EVEN_K,
+                    ACTIVATION=activation,
+                    N_BUFFERS=N_BUFFERS,
+                    **args,
+                )
+            else:
+                acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
+                gemm2gemm_persistent_buffered[grid](
+                    a,
+                    b,
+                    c,
+                    acc,
+                    o_buffers,
+                    M,
+                    N,
+                    K,
+                    a.stride(0),
+                    a.stride(1),
+                    b.stride(0),
+                    b.stride(1),
+                    c.stride(0),
+                    c.stride(1),
+                    acc.stride(0),
+                    acc.stride(1),
+                    o_buffers.stride(0),
+                    o_buffers.stride(1),
+                    BLOCK_SIZE_M=BLOCK_SIZE_M,
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                    EVEN_K=EVEN_K,
+                    ACTIVATION=activation,
+                    N_BUFFERS=N_BUFFERS,
+                    **args,
+                )
 
             grid_ = (triton.cdiv(M, 128), triton.cdiv(K, 128))
             
@@ -519,35 +742,59 @@ def twogemms(a, b, c, o, activation="", persistent=False):
             )
         else:
             grid = (num_pid_m, )
-            acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
             
-            gemm2gemm_persistent[grid](
-                a,
-                b,
-                c,
-                acc,
-                o,
-                M,
-                N,
-                K,
-                a.stride(0),
-                a.stride(1),
-                b.stride(0),
-                b.stride(1),
-                c.stride(0),
-                c.stride(1),
-                acc.stride(0),
-                acc.stride(1), 
-                o.stride(0),
-                o.stride(1),
-                NUM_WG=NUM_WG,
-                BLOCK_SIZE_M=BLOCK_SIZE_M,
-                BLOCK_SIZE_N=BLOCK_SIZE_N,
-                BLOCK_SIZE_K=BLOCK_SIZE_K,
-                EVEN_K=EVEN_K,
-                ACTIVATION=activation,
-                **args,
-            )
+            if atomic:
+                gemm2gemm_persistent_atomic[grid](
+                    a,
+                    b,
+                    c,
+                    o,
+                    M,
+                    N,
+                    K,
+                    a.stride(0),
+                    a.stride(1),
+                    b.stride(0),
+                    b.stride(1),
+                    c.stride(0),
+                    c.stride(1),
+                    o.stride(0),
+                    o.stride(1),
+                    BLOCK_SIZE_M=BLOCK_SIZE_M,
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                    EVEN_K=EVEN_K,
+                    ACTIVATION=activation,
+                    **args,
+                )
+            else:
+                acc = torch.zeros(M, N, device="cuda", dtype=o.dtype).contiguous()
+                gemm2gemm_persistent[grid](
+                    a,
+                    b,
+                    c,
+                    acc,
+                    o,
+                    M,
+                    N,
+                    K,
+                    a.stride(0),
+                    a.stride(1),
+                    b.stride(0),
+                    b.stride(1),
+                    c.stride(0),
+                    c.stride(1),
+                    acc.stride(0),
+                    acc.stride(1),
+                    o.stride(0),
+                    o.stride(1),
+                    BLOCK_SIZE_M=BLOCK_SIZE_M,
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                    EVEN_K=EVEN_K,
+                    ACTIVATION=activation,
+                    **args,
+                )
         
     else:
         grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),) # one pid per block of output matrix
@@ -737,10 +984,10 @@ def parse_args():
     parser.add_argument("-dtype", default='fp16')
     parser.add_argument("-device", default='cuda')
     parser.add_argument("-print_vgpr", action='store_true', default=False)
+    parser.add_argument("-test_correctness", action='store_true', default=False)
     return parser.parse_args()
 
-def main():
-    args = parse_args()
+def main(args):
     if args.print_vgpr:
         print_vgpr(args)
         return 0
@@ -749,8 +996,23 @@ def main():
 
 
 if __name__ == "__main__":
-    test_correctness(128*512, 4096, 4096, True)
-    test_correctness(4096, 4096, 4096, True)
+    args = parse_args()
+    if args.test_correctness:
+        # Run tests with error handling
+        try:
+            print("Testing M=128*512, N=4096, K=4096:")
+            test_correctness(128*512, 4096, 4096, True, torch.float16)
+            print("First test passed successfully.")
+        except Exception as e:
+            print(f"First test failed: {e}")
+        
+        try:
+            print("Testing M=4096, N=4096, K=4096:")
+            test_correctness(4096, 4096, 4096, True, torch.float16)
+            print("Second test passed successfully.")
+        except Exception as e:
+            print(f"Second test failed: {e}")
+        
+    main(args)
 
-    main()
     

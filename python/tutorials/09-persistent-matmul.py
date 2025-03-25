@@ -241,6 +241,7 @@ def matmul_persistent(a, b):
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype
+    
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=dtype)
     # 1D launch kernel where each block gets its own program.
