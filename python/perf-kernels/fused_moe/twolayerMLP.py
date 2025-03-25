@@ -130,7 +130,7 @@ def gemm2gemm_persistent_buffered(
 
     # gemm1
     # compute and store the row of accumulator blocks (acc = A x B) for the current buffer
-    for pid_n_ in tl.range(0, pids_n_per_buffer, 1, num_stages=1):
+    for pid_n_ in tl.range(0, pids_n_per_buffer, 1, num_stages=2):
         pid_n = pid_n_ + buffer_offset * pids_n_per_buffer
         if pid_n < num_pid_n: # check because num_pid_n / N_BUFFERS maybe not an integer # TODO: refactor. 
             # accumulator block offsets
@@ -174,7 +174,7 @@ def gemm2gemm_persistent_buffered(
     tl.debug_barrier()
     
     # for this buffer, go over the row of output blocks which share the same row of accumulator blocks (from acc = A x B)
-    for k in tl.range(0, num_pid_k, step=1, num_stages=1): 
+    for k in tl.range(0, num_pid_k, step=1, num_stages=2): 
         # output block accumulator
         o_acc_dtype = o_ptr.type.element_ty
         o_accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=o_acc_dtype)
@@ -464,7 +464,7 @@ def twogemms(a, b, c, o, activation="", persistent=False):
     num_pid_m = triton.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = triton.cdiv(N, BLOCK_SIZE_N)
 
-    args = {"num_stages": 1, "num_warps": 4, "waves_per_eu": 1}
+    args = {"num_warps": 8, "waves_per_eu": 2, "num_stages": 1}
 
     if persistent:
         if NUM_WG > num_pid_m: # get more parallelism by buffering the output
