@@ -26,7 +26,7 @@ Attribute getLHSTMemLayout(MMAOpTy tcGen5MMAOp,
   auto CTALayout = getCTALayout(srcLayout);
   int numWarps = ttg::lookupNumWarps(tcGen5MMAOp);
   auto accTmemEncoding = dyn_cast<ttng::TensorMemoryEncodingAttr>(
-      tcGen5MMAOp.getD().getType().getEncoding());
+      tcGen5MMAOp.getC().getType().getEncoding());
   auto lhs = tcGen5MMAOp.getA();
   auto lhsShape = lhs.getType().getShape();
   // M has to follow the MMA size, as it is related to the message we are using.
@@ -57,7 +57,7 @@ public:
     auto srcType = cast<RankedTensorType>(src.getType());
     auto srcLayout = cast<ttg::BlockedEncodingAttr>(srcType.getEncoding());
     bool layoutTmemCompatible = ttng::isDistributedLayoutTMemCompatible(
-        tcGen5MMAOp, srcType, tcGen5MMAOp.getD().getType());
+        tcGen5MMAOp, srcType, tcGen5MMAOp.getC().getType());
     Attribute newLayout = srcLayout;
     if (!layoutTmemCompatible) {
       if (triton::tools::getBoolEnv("ALLOW_LHS_TMEM_LAYOUT_CONVERSION")) {
@@ -74,7 +74,7 @@ public:
       src = rewriter.create<ttg::ConvertLayoutOp>(loc, newTy, src);
     }
     auto accTMemEncoding = dyn_cast<ttng::TensorMemoryEncodingAttr>(
-        tcGen5MMAOp.getD().getType().getEncoding());
+        tcGen5MMAOp.getC().getType().getEncoding());
     ArrayRef<unsigned> CTASplitNum = srcLayout.getCTALayout().getCTASplitNum();
     // TMem encoding for A operand is the same as for D (Acc), but unpacked.
     auto aTMemEncoding = ttng::TensorMemoryEncodingAttr::get(

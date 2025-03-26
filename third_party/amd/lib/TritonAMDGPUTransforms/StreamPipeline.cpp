@@ -1,6 +1,7 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "triton/Analysis/AxisInfo.h"
@@ -147,7 +148,8 @@ private:
   void createStreamCopy(tt::LoadOp loadOp, Value alloc, Value extractIdx);
   void createStreamOps();
 
-  void checkComputeOp(Operation *op);
+  bool safeDAG(Value v, int index);
+  void checkResultResilience();
 
   void scheduleOp(Operation *op, SchedType type, int stage = -1) {
     if (stage < 0)
@@ -197,12 +199,70 @@ private:
 
 } // namespace
 
-void StreamPipeliner::checkComputeOp(Operation *op) {
-  if (!mlir::isMemoryEffectFree(op))
-    mustGuardEpilogue = true;
-  // ops that return non-zero
-  if (!isa<tt::DotOp>(op))
-    mustGuardEpilogue = true;
+bool StreamPipeliner::safeDAG(Value v, int index) {
+  if (Operation *defOp = v.getDefiningOp()) {
+    if (auto loadOp = dyn_cast<tt::LoadOp>(defOp)) {
+      // Loads in the loop will be guarded
+      return loadOp->getParentOfType<scf::ForOp>() == forOp;
+    } else if (auto cvtOp = dyn_cast<ttg::ConvertLayoutOp>(defOp)) {
+      return safeDAG(cvtOp.getSrc(), index);
+    } else if (auto dotOp = dyn_cast<tt::DotOpInterface>(defOp)) {
+      // 1 input must be safe
+      if (!safeDAG(dotOp.getA(), -1) && !safeDAG(dotOp.getB(), -1))
+        return false;
+      return safeDAG(dotOp.getC(), index);
+    } else if (auto splatOp = dyn_cast<tt::SplatOp>(defOp)) {
+      // both inputs must be safe
+      return safeDAG(splatOp.getOperand(), -1);
+    } else if (auto bcastOp = dyn_cast<tt::BroadcastOp>(defOp)) {
+      // both inputs must be safe
+      return safeDAG(bcastOp.getOperand(), -1);
+    } else if (auto expandOp = dyn_cast<tt::ExpandDimsOp>(defOp)) {
+      // both inputs must be safe
+      return safeDAG(expandOp.getOperand(), -1);
+    } else if (auto addOp = dyn_cast<arith::AddFOp>(defOp)) {
+      // both inputs must be safe
+      return safeDAG(addOp.getLhs(), -1) && safeDAG(addOp.getRhs(), -1);
+    } else if (auto subOp = dyn_cast<arith::SubFOp>(defOp)) {
+      // both inputs must be safe
+      return safeDAG(subOp.getLhs(), -1) && safeDAG(subOp.getRhs(), -1);
+    } else if (auto mulOp = dyn_cast<arith::MulFOp>(defOp)) {
+      // either input must be safe
+      return safeDAG(mulOp.getLhs(), -1) || safeDAG(mulOp.getRhs(), -1);
+    } else if (auto truncOp = dyn_cast<arith::TruncFOp>(defOp)) {
+      // either input must be safe
+      return safeDAG(truncOp.getOperand(), -1);
+    } else if (auto constOp = dyn_cast<arith::ConstantOp>(defOp)) {
+      // check for constant zero
+      if (auto attr = dyn_cast<FloatAttr>(constOp.getValue()))
+        return attr.getValue().isZero();
+    } else if (auto exp2Op = dyn_cast<math::Exp2Op>(defOp)) {
+      // either input must be safe
+      return safeDAG(exp2Op.getOperand(), -1);
+    } else {
+      v.dump();
+      assert(0);
+    }
+  } else {
+    // check block arg
+    auto arg = cast<BlockArgument>(v);
+    return arg.getArgNumber() == index;
+  }
+  return false;
+}
+
+
+void StreamPipeliner::checkResultResilience() {
+  auto yieldVals = forOp.getYieldedValuesMutable().value();
+  for (auto [index, res] : llvm::enumerate(forOp.getResults())) {
+    if (!res.use_empty()) {
+      // Check init value == 0
+      // Backtrack yield value
+      Value yieldVal = yieldVals[index].get();
+      if (!safeDAG(yieldVal, index + 1)) // + induction
+        mustGuardEpilogue = true;
+    }
+  }
 }
 
 // Init Schedule Config based on settings and loop characteristics.
@@ -213,6 +273,8 @@ void StreamPipeliner::checkComputeOp(Operation *op) {
 //            can cause invalid schedules to be produced.
 LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 
+  checkResultResilience();
+  
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxIndirectionLevel;
 
@@ -605,7 +667,6 @@ LogicalResult StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
   for (auto &[loadOp, dist, use] : loadOpToIndLevelAndUse) {
     // Non-LoadOp(s) are the (final) root uses of all LoadOp(s).
     if (!isa<tt::LoadOp>(use)) {
-      checkComputeOp(use);
       scheduleOp(use, SCHED_COMPUTE);
       rootUsers.insert(use);
     }
