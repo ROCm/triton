@@ -1,0 +1,14 @@
+prefer 128x64: should be large enough tile for global memory bandwidth and not spill
+CK was using 128x128 I think
+Want more global memoy latency hiding
+
+prefer mfma: this is what ck is using
+
+
+prefer pre-load-v = true: because faster even though uses more registers.
+
+prefer causal: this is what really matters, will use more registers
+
+prefer layout=thd: since this is prefered use case
+
+uses in_thread_transpose
