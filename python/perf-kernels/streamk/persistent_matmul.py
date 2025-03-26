@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 import re
 
-DEBUG = True
+DEBUG = False
 num_sms = torch.cuda.get_device_properties(0).multi_processor_count
 num_xcds = 4
 
