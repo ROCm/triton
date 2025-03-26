@@ -1,17 +1,16 @@
 import torch
 import triton
 import triton.language as tl
-import sys
-import argparse
-import pytest
 import re
 
 DEBUG = False
 num_sms = torch.cuda.get_device_properties(0).multi_processor_count
 num_xcds = 4
 
+
 def is_cdna4():
     return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
+
 
 e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
 e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
@@ -25,6 +24,7 @@ name_to_torch_types = {
     'fp8e5': e5m2_type,
     'fp8e4': e4m3_type,
 }
+
 
 @triton.autotune(
     configs=[
@@ -52,13 +52,16 @@ name_to_torch_types = {
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 2},
             num_warps=8, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 32, 'waves_per_eu': 0,
+                'kpack': 1
+            }, num_warps=8, num_stages=2),
     ],
     key=['M', 'N', 'K'],
     use_cuda_graph=True,
 )
-@triton.heuristics({
-    'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0
-})
+@triton.heuristics({'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0})
 @triton.jit()
 def persistent_gemm(
     A,
@@ -146,6 +149,7 @@ def persistent_gemm(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
+
 def persistent_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -159,7 +163,7 @@ def persistent_matmul(
 
     grids = num_sms
 
-    kk = persistent_gemm[(grids,)](
+    kk = persistent_gemm[(grids, )](
         a,
         b,
         c,
@@ -172,46 +176,47 @@ def persistent_matmul(
         b.stride(1),
         c.stride(0),
         c.stride(1),
-        NUM_SMS= num_sms,
+        NUM_SMS=num_sms,
         NUM_XCDS=num_xcds,
     )
+    if DEBUG:
+        print(f"{kk.n_regs} registers used, {kk.n_spills} spills")
 
     return c
+
 
 def get_type(provider):
     res = re.findall(r'\(.*?\)', provider)
     return res[0][1:-1].split('/', 1)
 
+
 def get_x_vals():
     x_vals = [
-    # GEMMRS configurations
-    (8192, 4096, 11008),       # LLaMA-7B
-    (8192, 3584, 14336),       # Gemm2-9B
-    (8192, 4608, 36864),       # Gemma2-27B
-    (8192, 8192, 28672),       # LLaMA-3.1-70B
-    (8192, 8192, 29568),       # Qwen2-72B
+        # GEMMRS configurations
+        (8192, 4096, 11008),  # LLaMA-7B
+        (8192, 3584, 14336),  # Gemm2-9B
+        (8192, 4608, 36864),  # Gemma2-27B
+        (8192, 8192, 28672),  # LLaMA-3.1-70B
+        (8192, 8192, 29568),  # Qwen2-72B
 
-    # AGGEMM configurations
-    (8192, 11008, 4096),       # LLaMA-7B
-    (8192, 14336, 4096),       # LLaMA-3.1-8B/Mistral-7B
-    (8192, 28672, 8192),       # LLaMA-3.1-70B
-    (8192, 53248, 16384),      # LLaMA-3.1-405B
-    (8192, 29568, 8192)        # Qwen2-72B
+        # AGGEMM configurations
+        (8192, 11008, 4096),  # LLaMA-7B
+        (8192, 14336, 4096),  # LLaMA-3.1-8B/Mistral-7B
+        (8192, 28672, 8192),  # LLaMA-3.1-70B
+        (8192, 53248, 16384),  # LLaMA-3.1-405B
+        (8192, 29568, 8192)  # Qwen2-72B
     ]
 
     return x_vals
+
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['M', 'N', 'K', 'num_sms', 'num_xcds'],
         x_vals=[tuple(list(size) + [num_sms, num_xcds]) for size in get_x_vals()],
         line_arg='provider',
-        line_vals=[
-            'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)'
-        ],
-        line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16"
-        ],
+        line_vals=['hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)'],
+        line_names=["rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16"],
         ylabel="TFLOPS",
         plot_name="persistent-gemm-performance",
         args={},
@@ -231,12 +236,13 @@ def benchmark(M, N, K, num_sms, num_xcds, provider, model=None, args=None):
         # Allocates output.
         C = torch.zeros((M, N), device="cuda", dtype=out_dtype)
 
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: persistent_matmul(A, B, C, num_sms, num_xcds), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: persistent_matmul(A, B, C, num_sms, num_xcds),
+                                                     quantiles=quantiles)
         if DEBUG:
             print(f'Best tuning config for M={M}, N={N}, K={K}, '
                   f'dtype={in_dtype_a} / {in_dtype_b} / {out_dtype}: \n({persistent_gemm.best_config})\n')
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
+
 
 benchmark.run(show_plots=True, print_data=True)

@@ -1,9 +1,14 @@
-# streak gemm script v0.4
+# streamk gemm script v0.5
+
+### features added:
+- add tunning group sizes
+- add standalone persistent_gemm standalone script for easy experiment.
+
+# streamk gemm script v0.4
 
 ### features added:
 - enable tuning with different kernels from command line, default for streamk_kernel
 - change persistent_gemm kernel back
--
 
 ### command line example
 
