@@ -53,7 +53,7 @@ def get_full_tuning_space():
     block_mn_range = [16, 32, 64, 128, 256]
     block_k_range = [16, 32, 64, 128, 256]
     num_warps_range = [1, 2, 4, 8]
-    group_m_range = [1, 4, 8, 16, 32]
+    group_m_range = [1, 4, 6, 8, 16]
     # For now we see better perf with num_stages=2 for all gemm configs we care
     # But keep this explicit so that we do not forget we may need to set it to
     # other values in the future
@@ -61,6 +61,8 @@ def get_full_tuning_space():
     waves_per_eu_range = [0]
     matrix_instr_nonkdim_range = [16, 32]
     kpack_range = [1, 2]
+    # gfx942: 304, 80, 64 
+    # gfx950: 256
     num_sms_range = [304]
 
     space = itertools.product(block_mn_range, block_mn_range, block_k_range, num_warps_range, group_m_range,
@@ -399,6 +401,9 @@ def matmul(kernel_func, a, b, c, bias, P, locks, num_sms, block_m, block_n, bloc
     n_tiles = triton.cdiv(N, block_n)
     streamk_tiles = m_tiles * n_tiles % num_sms
     # change num_xcds = 1 if using gfx90a
+    # change num_xcds = 4 if using gfx942 80/64 CUs
+    # change num_xcds = 8 if using gfx942 304 CUs
+    # TODOs: implement xcd query function
     num_xcds = 8
     kernel_func[
         grid,
