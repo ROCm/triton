@@ -213,13 +213,14 @@ def gemm2gemm_persistent_atomic(
     tl.assume(stride_bn > 0)
     tl.assume(stride_cn > 0)
     tl.assume(stride_ck > 0)
+    tl.assume(stride_om > 0)
+    tl.assume(stride_ok > 0)
 
     pid_m = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
-    for pid_n in tl.range(0, num_pid_n, step=1, num_stages=1):
-        # Create pointers for first block of A and B input matrices
+    for pid_n in tl.range(0, num_pid_n, step=1, num_stages=2):
         offs_k = tl.arange(0, BLOCK_SIZE_K)
         offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
         offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
@@ -230,8 +231,6 @@ def gemm2gemm_persistent_atomic(
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
         for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-            # Load the next block of A and B, generate a mask by checking the K dimension.
-            # If it is out of bounds, set it to 0.
             if EVEN_K:
                 a = tl.load(a_ptrs)
                 b = tl.load(b_ptrs)
@@ -240,11 +239,9 @@ def gemm2gemm_persistent_atomic(
                 b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
             accumulator += tl.dot(a, b, out_dtype=acc_dtype)
 
-            # Advance the ptrs to the next K block.
             a_ptrs += BLOCK_SIZE_K * stride_ak
             b_ptrs += BLOCK_SIZE_K * stride_bk
 
-        
         # Apply activation function, if specified.
         if ACTIVATION == "leaky_relu":
             accumulator = leaky_relu(accumulator)
@@ -252,8 +249,6 @@ def gemm2gemm_persistent_atomic(
         c_ptrs = c_ptr + (offs_n[:, None] * stride_cn + offs_k[None, :] * stride_ck)
 
         for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), step=1, num_stages=2):
-            # Load the next block of A and B, generate a mask by checking the K dimension.
-            # If it is out of bounds, set it to 0.
             if EVEN_K:
                 c = tl.load(c_ptrs)
             else:
@@ -263,8 +258,9 @@ def gemm2gemm_persistent_atomic(
             offs_ok = k * BLOCK_SIZE_K + offs_k
             o_ptrs = o_ptr + stride_om * offs_om[:, None] + stride_ok * offs_ok[None, :]
             o_mask = (offs_om[:, None] < M) & (offs_ok[None, :] < K)
-            # we need coherency only in workgroup (thread block level)
-            tl.atomic_add(o_ptrs, o_partial, mask=o_mask, scope="cta", sem="relaxed")
+            # we need output memory coherency only in workgroup level
+            # scope="cta"
+            tl.atomic_add(o_ptrs, o_partial, mask=o_mask, sem="relaxed", scope="cta")
             c_ptrs += BLOCK_SIZE_K * stride_ck
 
 
@@ -502,9 +498,10 @@ def gemm2gemm_persistent(
         acc_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
         # only this workgroup will be needing these values later so coherence in cache (L1/L2) is enough
-        tl.store(acc_ptrs, accumulator, mask=acc_mask)
+        tl.atomic_add(acc_ptrs, accumulator, mask=acc_mask, scope="cta", sem="release")
+        # tl.store(acc_ptrs, accumulator, mask=acc_mask)
     
-    tl.debug_barrier()
+    # tl.debug_barrier()
 
     # gemm2
     # compute the row of output blocks loading the computed accumulator blocks and multiplying with corresponding column of blocks from C (out = acc x C)
@@ -644,7 +641,7 @@ def gemm2gemm(
 
 
 # Wrapper for gemm kernel.
-def twogemms(a, b, c, o, activation="", persistent=False, atomic=False):
+def twogemms(a, b, c, o, activation="", persistent=True, atomic=False):
     # Check constraints.
     assert a.shape[1] == b.shape[0] and b.shape[1] == c.shape[0], "Incompatible dimensions!!!"
     assert a.dtype == b.dtype and b.dtype==c.dtype, "Mixed dtype GEMMs are not supported!!!"
@@ -832,7 +829,7 @@ def twomatmuls(a, b, c, o, activation=""):
 
 def get_x_vals():
     x_vals = [(128*512, 4096, 4096), # non-buffered
-              (4096, 4096, 4096) # buffered
+              # (4096, 4096, 4096) # buffered
               ]
     return x_vals
 
@@ -862,17 +859,18 @@ def benchmark(args):
     else:
         x_vals = get_x_vals()
     
+    
+    providers = [
+                'e2e', 'ref'
+            ]
+    
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=['M', 'N', 'K'],
             x_vals=x_vals,
             line_arg='provider',
-            line_vals=[
-                'e2e', 'ref'
-            ],
-            line_names=[
-                'e2e', 'ref'
-            ],
+            line_vals=providers,
+            line_names=providers,
             ylabel="ms",
             plot_name="Two layer MLP performance (ms)",
             args={},
