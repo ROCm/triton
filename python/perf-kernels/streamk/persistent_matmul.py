@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 import re
 
-DEBUG = False
+DEBUG = True
 num_sms = torch.cuda.get_device_properties(0).multi_processor_count
 num_xcds = 4
 
@@ -30,7 +30,7 @@ name_to_torch_types = {
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2,
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
                 'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
         triton.Config(
@@ -38,7 +38,7 @@ name_to_torch_types = {
             num_warps=8, num_stages=2),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2,
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
                 'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
         triton.Config(
@@ -50,7 +50,7 @@ name_to_torch_types = {
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0},
             num_warps=8, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 2},
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0},
             num_warps=8, num_stages=2),
         triton.Config(
             {
