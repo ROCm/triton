@@ -34,8 +34,9 @@ name_to_torch_types = {
                 'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0,
+                'kpack': 1, 'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
         triton.Config(
             {
                 'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
@@ -44,18 +45,20 @@ name_to_torch_types = {
         triton.Config(
             {
                 'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 16, 'waves_per_eu': 0,
-                'kpack': 1
+                'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0,
+                'kpack': 1, 'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6, 'waves_per_eu': 0,
+                'kpack': 1, 'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
         triton.Config(
             {
                 'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 32, 'waves_per_eu': 0,
-                'kpack': 1
+                'kpack': 1, 'matrix_instr_nonkdim': 16
             }, num_warps=8, num_stages=2),
     ],
     key=['M', 'N', 'K'],
