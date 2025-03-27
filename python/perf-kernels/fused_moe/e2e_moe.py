@@ -69,6 +69,10 @@ class MetaData():
             assert self.fp8_type in supported_fp8, f"fp8 type {self.fp8_type} not supported"
 
 
+@triton.jit
+def e2e_moe_persistent_kernel():
+    pass
+
 @triton.heuristics({
 'GRID_MN':
     lambda args: triton.cdiv(args['EM'], args['BLOCK_SIZE_M']) * triton.cdiv(args['N'], args['BLOCK_SIZE_N'])
@@ -112,6 +116,7 @@ def e2e_moe_kernel(
     BLOCK_SIZE_K2: tl.constexpr, # outputs (EM, BLOCK_SIZE_K2)
     GROUP_SIZE_M: tl.constexpr,
     GRID_MN: tl.constexpr,
+    atomic_num_stages: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -142,7 +147,23 @@ def e2e_moe_kernel(
     BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix
     multiplication across different blocks processed by the same expert.
     """
-    # TODO NUM_XCD
+
+
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_w1e > 0)
+    tl.assume(stride_w1n > 0)
+    tl.assume(stride_w1k > 0)
+    tl.assume(stride_w2e > 0)
+    tl.assume(stride_w2n > 0)
+    tl.assume(stride_w2k > 0)
+    tl.assume(stride_cm > 0)
+    if use_int8_w8a16:
+        tl.assume(stride_w1se > 0)
+        tl.assume(stride_w1sn > 0)
+        tl.assume(stride_w2se > 0)
+        tl.assume(stride_w2sk > 0)
+
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -259,11 +280,11 @@ def e2e_moe_kernel(
         w2_scale = tl.load(W2_scale + off_experts)
 
     # minus if pid_m is even otherwise positive
-    # k_sign = (pid_m % 2) * 2 - 1
-    # num_k = tl.cdiv(K, BLOCK_SIZE_K2)
-    for _k in range(0, tl.cdiv(K, BLOCK_SIZE_K2)):
-        # k = (num_k + (_k + pid_n) * k_sign) % num_k
-        k = ((_k + pid_n * 4)) % tl.cdiv(K, BLOCK_SIZE_K2)
+    k_sign = (pid_m % 2) * 2 - 1
+    num_k = tl.cdiv(K, BLOCK_SIZE_K2)
+    for _k in tl.range(0, num_k, num_stages=atomic_num_stages):
+        k = (num_k + (_k * k_sign)) % num_k
+        k = ((k + pid_n * 4)) % num_k
         # k = _k
 
         if use_int8_w8a16:
@@ -280,7 +301,6 @@ def e2e_moe_kernel(
         else:
             out = tl.dot(acc, w2)
 
-        # TODO check do we need two of this?
         if MUL_ROUTED_WEIGHT:
             moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
             out = out * moe_weight[:, None]
@@ -331,10 +351,16 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
 
     stride_cm = c.stride(1)
 
+    if EM > 1024:
+        atomic_num_stages = 2
+    else:
+        atomic_num_stages = 1
+
+
     e2e_moe_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
                           sorted_token_ids, expert_ids, EM, N, K, EVEN_K, MUL_ROUTED_WEIGHT=topk_weights is not None,
-                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, **config
+                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, atomic_num_stages=atomic_num_stages, **config
                           )
     return c
 
@@ -667,7 +693,7 @@ def run_benchmark(custom, args):
             configs = get_configs()
             x_vals_list = [(cfg['M'], cfg['N'], cfg['K'], cfg['E'], cfg['top_k']) for cfg in configs]
 
-    line_names = ['ref', 'fused']
+    line_names = ["ref", "fused"]
 
     benchmark = triton.testing.Benchmark(
         x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_names, line_names=line_names,
