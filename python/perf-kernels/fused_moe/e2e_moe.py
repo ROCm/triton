@@ -70,8 +70,203 @@ class MetaData():
 
 
 @triton.jit
-def e2e_moe_persistent_kernel():
-    pass
+def e2e_moe_persistent_kernel(
+    A,
+    W1,
+    W2,
+    Out,
+    A_scale,
+    W1_scale,
+    W2_scale,
+    stride_am,
+    stride_ak,
+    stride_w1e,
+    stride_w1n,
+    stride_w1k,
+    stride_w2e,
+    stride_w2n,
+    stride_w2k,
+    stride_cm,
+    stride_w1se,
+    stride_w1sn,
+    stride_w2se,
+    stride_w2sk,
+    top_k: tl.constexpr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    intermediate_ptr,
+    stride_im,
+    EM: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a16: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N1: tl.constexpr,
+    BLOCK_SIZE_N2: tl.constexpr,
+    BLOCK_SIZE_K1: tl.constexpr, # original block_size_k
+    BLOCK_SIZE_K2: tl.constexpr, # outputs (EM, BLOCK_SIZE_K2)
+    NUM_SMS: tl.constexpr,
+):
+    # TODO do we need XCD remapping in here?
+    m = tl.program_id(axis=0)
+    num_pid_m: tl.constexpr = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n: tl.constexpr = tl.cdiv(N, BLOCK_SIZE_N1)
+    num_pid_k: tl.constexpr = tl.cdiv(K, BLOCK_SIZE_K2)
+    m_tile_per_sm = tl.cdiv(num_pid_m, NUM_SMS)
+
+    tall_m = NUM_SMS if tall_m == 0 else tall_m
+    # Compute current XCD and local pid within the XCD
+    # Calculate new pid based on the new grouping
+    # Note that we need to consider the following two cases:
+    # 1. the current pid is on a tall xcd
+    # 2. the current pid is on a short xcd
+    if m < tall_m:
+        pid_m_start = m * m_tile_per_sm
+    else:
+        pid_m_start = tall_m * m_tile_per_sm + (m - tall_m) * (m_tile_per_sm - 1)
+
+    num_m_tile = m_tile_per_sm if m < tall_m else m_tile_per_sm - 1
+
+    N_HALF: tl.constexpr = N // 2
+
+    offs_k1 = tl.arange(0, BLOCK_SIZE_K1)
+    offs_k2 = tl.arange(0, BLOCK_SIZE_K2)
+    offs_n1 = tl.arange(0, BLOCK_SIZE_N1)
+    offs_n1_half = tl.arange(0, BLOCK_SIZE_N1 // 2)
+    offs_n2 = tl.arange(0, BLOCK_SIZE_N2)
+    offs_m = tl.arange(0, BLOCK_SIZE_M)
+    BLOCK_SIZE_HALF: tl.constexpr = BLOCK_SIZE_N1 // 2
+    i = offs_n1.to(tl.int64)
+    # [0, 0, 1, 1, ..., BLOCK_SIZE_HALF - 1, BLOCK_SIZE_HALF - 1]
+    i_floor = i // 2
+
+    dtype = Out.dtype.element_ty
+
+    for m_off in range(0, num_m_tile):
+        pid_m = pid_m_start + m_off
+        for pid_n in range(0, num_pid_n):
+            offs_token_id = pid_m * BLOCK_SIZE_M + offs_m
+            offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+
+            # Here we assume that valid tokens are in the range [0, M).
+            token_mask = (offs_token >= 0) & (offs_token < EM)
+
+            off_experts = tl.load(expert_ids_ptr + pid_m)
+
+            offs_half = (pid_n * (BLOCK_SIZE_N1 // 2) + i_floor) % (N // 2)
+            # (i % 2): [0, 1, 0, 1, ...] (alternating)
+            # (i % 2) * (N // 2) : [0, (N // 2), 0, (N // 2),...]
+            # So offs_w1n now takes element from the first BLOCK_SIZE_HALF half and the second BLOCK_SIZE_HALF half in an alternating way (This allows us to do reshape without permute)
+            offs_w1n = (offs_half + (i % 2) * (N // 2)) % N
+
+            mask_w1n = (pid_n * BLOCK_SIZE_N1 + i) < N
+
+            a_ptrs = A + (offs_token[:, None] // top_k * stride_am + offs_k1[None, :] * stride_ak)
+            w1_ptrs = W1 + off_experts * stride_w1e + (offs_k1[:, None] * stride_w1k + offs_w1n[None, :] * stride_w1n)
+
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N1), dtype=tl.float32)
+
+            if use_int8_w8a16:
+                w1_scale_ptrs = W1_scale + off_experts * stride_w1se + offs_w1n[None, :] * stride_w1sn
+                w1_scale = tl.load(w1_scale_ptrs)
+
+            if use_fp8_w8a8:
+                a_scale = tl.load(A_scale)
+                w1_scale = tl.load(W1_scale + off_experts)
+
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K1)):
+                # Masking ensures we don't load from invalid tokens or indices
+                if EVEN_K:
+                    a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
+                    w1 = tl.load(w1_ptrs, mask=mask_w1n[None, :], other=0.0)
+                else:
+                    a = tl.load(a_ptrs, mask=(token_mask[:, None] & (offs_k1[None, :] < K - k * BLOCK_SIZE_K1)), other=0.0)
+                    w1 = tl.load(w1_ptrs, mask=(offs_k1[:, None] < K - k * BLOCK_SIZE_K1) & mask_w1n[None, :], other=0.0)
+
+                if use_int8_w8a16:
+                    accumulator = tl.dot(a, w1.to(a.type), acc=accumulator)
+                elif use_fp8_w8a8:
+                    accumulator += tl.dot(a, w1)
+                else:
+                    accumulator = tl.dot(a, w1, acc=accumulator)
+                a_ptrs += BLOCK_SIZE_K1 * stride_ak
+                w1_ptrs += BLOCK_SIZE_K1 * stride_w1k
+
+            if use_int8_w8a16:
+                accumulator = (accumulator * w1_scale)
+            elif use_fp8_w8a8:
+                accumulator = (accumulator * a_scale * w1_scale)
+
+            silu_acc, mul_acc = accumulator.reshape(BLOCK_SIZE_M, BLOCK_SIZE_HALF, 2).split()
+            silu_acc = (silu_acc / (1.0 + tl.exp2(-(silu_acc * 1.44269504089))))
+            acc = (silu_acc * mul_acc).to(dtype)
+            intermediate_ptrs = (intermediate_ptr + stride_im * offs_token[:, None] +
+                    offs_n1_half[None, :] + (BLOCK_SIZE_N1 // 2) * pid_n)
+            c_mask = token_mask[:, None] & (offs_n1_half[None, :] + (BLOCK_SIZE_N1 // 2) * pid_n < N_HALF)
+
+            tl.atomic_add(intermediate_ptrs, acc, mask=c_mask, sem="release")
+        # TODO quantization
+
+    for m_off in range(0, num_m_tile):
+        pid_m = pid_m_start + m_off
+        for pid_k in range(0, num_pid_k):
+            offs_w2k = (pid_k * BLOCK_SIZE_K2 + offs_k2) % K
+
+            intermediate_ptrs = intermediate_ptr + (offs_token[:, None] // top_k * stride_am + offs_n2[None, :])
+            w2_ptrs = W2 + off_experts * stride_w2e + (offs_n2[:, None] * stride_w2n + offs_w2k[None, :] * stride_w2k)
+
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K2), dtype=tl.float32)
+
+            mask_w2k = (pid_k * BLOCK_SIZE_K2 + offs_k2) < K
+
+            if use_int8_w8a16:
+                w2_scale_ptrs = W2_scale + off_experts * stride_w2se + offs_k2[None, :] * stride_w2sk
+                w2_scale = tl.load(w2_scale_ptrs)
+
+            if use_fp8_w8a8:
+                # TODO calculate the intermediate scale and scale intermediate
+                # a_scale = tl.load(A_scale)
+                i_scale = 1
+                w2_scale = tl.load(W2_scale + off_experts)
+
+            for n in range(0, tl.cdiv(N_HALF, BLOCK_SIZE_N2)):
+                # Masking ensures we don't load from invalid tokens or indices
+
+                if EVEN_N:
+                    intermediate = tl.load(intermediate_ptrs, mask=(token_mask[:, None]), other=0.0)
+                    w2 = tl.load(w2_ptrs)
+                else:
+                    intermediate = tl.load(intermediate_ptrs, mask=(token_mask[:, None] & (offs_n2[None, :] < N_HALF - n * BLOCK_SIZE_N2)), other=0.0)
+                    w2 = tl.load(w2_ptrs, mask=(offs_n2[:, None] < N_HALF - n * BLOCK_SIZE_N2) & mask_w2k[None, :], other=0.0)
+
+                if use_int8_w8a16:
+                    accumulator = tl.dot(intermediate, w2.to(intermediate.type), acc=accumulator)
+                elif use_fp8_w8a8:
+                    accumulator += tl.dot(intermediate, w2)
+                else:
+                    accumulator = tl.dot(intermediate, w2, acc=accumulator)
+                intermediate_ptrs += BLOCK_SIZE_N2
+                w2_ptrs += BLOCK_SIZE_N2 * stride_w2n
+
+            if MUL_ROUTED_WEIGHT:
+                moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+                accumulator = accumulator * moe_weight[:, None]
+
+            if use_int8_w8a16:
+                accumulator = (accumulator * w2_scale)
+            elif use_fp8_w8a8:
+                accumulator = (accumulator * i_scale * w2_scale)
+
+            offs_ck = pid_k * BLOCK_SIZE_K2 + offs_k2
+            c_mask = token_mask[:, None] & (offs_ck[None, :] < K)
+            out_ptrs = Out + stride_cm * offs_token[:, None] + offs_ck[None, :]
+            tl.store(out_ptrs, acc.to(dtype), mask=c_mask)
+
 
 @triton.heuristics({
 'GRID_MN':
@@ -361,6 +556,51 @@ def e2e_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, c: torch.Tensor
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
                           sorted_token_ids, expert_ids, EM, N, K, EVEN_K, MUL_ROUTED_WEIGHT=topk_weights is not None,
                           use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, atomic_num_stages=atomic_num_stages, **config
+                          )
+    return c
+
+
+def e2e_moe_persistent(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, intermediate: torch.Tensor, c: torch.Tensor, metadata: MetaData) -> torch.Tensor:
+    metadata.check_args(a, w1, w2, c)
+
+    topk_ids, num_tokens_post_padded, topk_weights, sorted_token_ids, expert_ids, config = metadata.topk_ids, metadata.num_tokens_post_padded, metadata.topk_weights, metadata.sorted_token_ids, metadata.expert_ids, metadata.config
+
+    use_fp8_w8a8, use_int8_w8a16 = metadata.use_fp8_w8a8, metadata.use_int8_w8a16
+    a_descale, w1_descale, w2_descale = None, None, None
+    stride_w1se = None
+    stride_w1sn = None
+    stride_w2se = None
+    stride_w2sk = None
+    if use_fp8_w8a8 or use_int8_w8a16:
+        a_descale, w1_descale, w2_descale = metadata.a_descale, metadata.w1_descale, metadata.w2_descale
+        if use_int8_w8a16:
+            stride_w1se = w1_descale.stride(0)
+            stride_w1sn = w1_descale.stride(1)
+            stride_w2se = w2_descale.stride(0)
+            stride_w2sk = w2_descale.stride(1)
+
+    _, top_k = topk_ids.shape
+
+    EM = num_tokens_post_padded.item()
+    _, N, K = w1.shape
+
+    BLOCK_SIZE_K1 = config["BLOCK_SIZE_K1"]
+    BLOCK_SIZE_N2 = config["BLOCK_SIZE_N2"]
+
+    EVEN_K = K % BLOCK_SIZE_K1 == 0
+    EVEN_N = (N // 2) % BLOCK_SIZE_N2 == 0
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count * 2
+    grid = lambda META: (min(
+            NUM_SMS,
+            triton.cdiv(sorted_token_ids.shape[0], META["BLOCK_SIZE_M"])
+            ), )
+    stride_cm = c.stride(1)
+    stride_im = intermediate.stride(1)
+
+    e2e_moe_persistent_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
+                          w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
+                          sorted_token_ids, expert_ids, intermediate, stride_im, EM, N, K, EVEN_K, EVEN_N, MUL_ROUTED_WEIGHT=topk_weights is not None,
+                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, **config
                           )
     return c
 
