@@ -65,7 +65,8 @@ struct ExtractSliceOpConversion
     auto resultTy = cast<RankedTensorType>(op.getType());
     auto vals = unpackLLElements(loc, adaptor.getSource(), rewriter);
     auto elemsPerThread = triton::gpu::getElemsPerThread(srcTy);
-    auto contigPerThread = triton::gpu::getContigPerThread(srcTy);
+    auto contigPerThread =
+        triton::gpu::toLinearEncoding(srcTy).getSizePerThread();
 
     auto totalContigPerThread = product<unsigned>(contigPerThread);
     auto order = triton::gpu::getOrder(srcTy);
