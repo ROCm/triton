@@ -129,8 +129,19 @@ def ConcatOp : TT_AMDGPU_Op<"concat", [Pure]> {
     TODO: complete
     }];
 
-  let arguments = (ins Variadic<TT_Tensor>:$sources, DenseI64ArrayAttr:$coords);
+  let arguments = (ins Variadic<TT_Tensor>:$sources, DenseI64ArrayAttr:$coords, DenseI64ArrayAttr:$loweringOrder);
   let results = (outs AnyRankedTensor:$result);
+
+  let builders = [
+    OpBuilder<(ins "::mlir::Type":$result, "::mlir::ValueRange":$sources, "::mlir::DenseI64ArrayAttr":$coords), [{
+      auto ctx = $_state.getContext();
+      std::vector<int64_t> order(coords.getSize());
+      int64_t counter = 0;
+      std::for_each(order.rbegin(), order.rend(), [&counter](int64_t &val) { val = counter++; });
+      auto loweringOrderAttr = DenseI64ArrayAttr::get(ctx, order);
+      build($_builder, $_state, result, sources, coords, loweringOrderAttr);
+    }]>
+  ];
 
   let assemblyFormat = [{
     $sources $coords attr-dict `:` type($sources) `->` type($result)

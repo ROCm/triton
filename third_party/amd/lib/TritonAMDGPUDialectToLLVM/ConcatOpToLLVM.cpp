@@ -2,9 +2,9 @@
 #include "TritonAMDGPUToLLVM/GCNAsmFormat.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "third_party/amd/include/Dialect/TritonAMDGPU/Utility/CommonUtils.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/MLIRTypes.h"
-#include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir;
@@ -12,7 +12,7 @@ using namespace mlir::triton;
 
 namespace {
 
-inline size_t getSourceSize(Value &source) {
+inline size_t getSourceSize(Value source) {
   ArrayRef<Type> types = cast<LLVM::LLVMStructType>(source.getType()).getBody();
   return types.size();
 }
@@ -27,29 +27,35 @@ struct ConcatOpConversion : public ConvertOpToLLVMPattern<amdgpu::ConcatOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     auto resultTy = cast<RankedTensorType>(op.getResult().getType());
+    auto dims = op.getCoords();
+    auto order = op.getLoweringOrder();
 
     auto sources = adaptor.getSources();
+    auto elemPerSource = getSourceSize(sources.front());
+    llvm::SmallVector<Value> resultVals;
 
-    size_t totalNumElements = 0;
-    for (auto source : sources) {
-      totalNumElements += getSourceSize(source);
-    }
+    auto coords =
+        mlir::triton::AMD::CoordinateMapper::cartesian(dims.vec(), order.vec());
+    std::vector<int> strides(dims.size(), 1);
+    std::exclusive_scan(dims.rbegin(), dims.rend(), strides.rbegin(), 1,
+                        std::multiplies<>());
 
-    size_t currNumElements = 0;
-    llvm::SmallVector<Value> resultVals(totalNumElements);
-    for (auto source : sources) {
-      auto elements = unpackLLElements(loc, source, rewriter);
-      for (auto [idx, element] : llvm::enumerate(elements)) {
-        resultVals[currNumElements + idx] = element;
+    for (const auto &vec : coords) {
+      int linearIndex = 0;
+      for (size_t i = 0; i < vec.size(); ++i) {
+        linearIndex += vec[i] * strides[i];
       }
-      currNumElements += getSourceSize(source);
+
+      auto elements = unpackLLElements(loc, sources[linearIndex], rewriter);
+      for (auto elem : elements) {
+        resultVals.push_back(elem);
+      }
     }
 
     Value ret = packLLElements(loc, this->getTypeConverter(), resultVals,
                                rewriter, resultTy);
 
     rewriter.replaceOp(op, ret);
-
     return llvm::success();
   }
 };
