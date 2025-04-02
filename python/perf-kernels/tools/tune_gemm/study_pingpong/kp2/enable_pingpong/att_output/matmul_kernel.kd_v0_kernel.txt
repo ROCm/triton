@@ -1,0 +1,6 @@
+matmul_kernel.kd dispatch[5] GPU[565680080]: matmul_kernel.kd
+0x7f501ec70000 0x1e481 1 memory587171#offset=0x38ae4e60&size=131768.out
+0x7f501ec40000 0x8000 2 memory587171#offset=0x3d126300&size=25240.out
+0x7f501c400000 0x1a1549 3 memory587171#offset=0x3492b5d0&size=1829856.out
+0x7f501ea80000 0x72bf9 4 memory587171#offset=0x3559d690&size=509824.out
+0x7f501ec94000 0x5000 5 memory587171#offset=0x3c5a2650&size=14760.out
