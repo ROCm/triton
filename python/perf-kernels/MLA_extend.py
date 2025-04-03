@@ -63,7 +63,7 @@ def input_helper_fused(B, H, prefix_length, extend_length, kv_lora_rank, qk_rope
     qo_indptr = torch.arange(B + 1, device=device) * (extend_length) # 0, extend_length, extend_length*2
     
     # prefix parts
-    k_buffer = torch.randn(B * (extend_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
+    k_buffer = torch.randn(B * (prefix_length), kv_lora_rank + qk_rope_head_dim, dtype=dtype, device=device)
     v_buffer = k_buffer[..., :kv_lora_rank]
 
     # prefix indexing
