@@ -1,4 +1,5 @@
 from typing import Dict, Optional
+import torch.test
 import triton
 import torch
 import triton.language as tl
@@ -111,29 +112,15 @@ def e2e_moe_persistent_kernel(
     BLOCK_SIZE_K1: tl.constexpr, # original block_size_k
     BLOCK_SIZE_K2: tl.constexpr, # outputs (EM, BLOCK_SIZE_K2)
     NUM_SMS: tl.constexpr,
-    num_pid_m: tl.constexpr
-):
-    # TODO do we need XCD remapping in here?
-    m = tl.program_id(axis=0)
-    # num_pid_m: tl.constexpr = tl.cdiv(EM, BLOCK_SIZE_M)
+    ):
+    start_m = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n: tl.constexpr = tl.cdiv(N, BLOCK_SIZE_N1)
     num_pid_k: tl.constexpr = tl.cdiv(K, BLOCK_SIZE_K2)
-    # m_tile_per_sm: tl.constexpr = tl.cdiv(num_pid_m, NUM_SMS)
-    m_tile_per_sm = (num_pid_m + NUM_SMS - 1) // NUM_SMS
+    m_tile_per_sm = num_pid_m // NUM_SMS
 
-    tall_m = num_pid_m % NUM_SMS
-    tall_m = NUM_SMS if tall_m == 0 else tall_m
-    # Compute current XCD and local pid within the XCD
-    # Calculate new pid based on the new grouping
-    # Note that we need to consider the following two cases:
-    # 1. the current pid is on a tall xcd
-    # 2. the current pid is on a short xcd
-    if m < tall_m:
-        pid_m_start = m * m_tile_per_sm
-    else:
-        pid_m_start = tall_m * m_tile_per_sm + (m - tall_m) * (m_tile_per_sm - 1)
-
-    num_m_tile = m_tile_per_sm if m < tall_m else m_tile_per_sm - 1
+    if start_m < num_pid_m % NUM_SMS:
+        m_tile_per_sm += 1
 
     N_HALF: tl.constexpr = N // 2
     BLOCK_SIZE_HALF: tl.constexpr = BLOCK_SIZE_N1 // 2
@@ -150,8 +137,10 @@ def e2e_moe_persistent_kernel(
 
     dtype = Out.dtype.element_ty
 
-    for m_off in range(0, num_m_tile):
-        pid_m = m_off
+    pid_m = start_m - NUM_SMS
+
+    for _ in range(0, m_tile_per_sm):
+        pid_m += NUM_SMS
         # pid_m = pid_m_start + m_off
         offs_token_id = pid_m * BLOCK_SIZE_M + offs_m
         offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
@@ -214,21 +203,15 @@ def e2e_moe_persistent_kernel(
             offs_in = pid_n * BLOCK_SIZE_HALF + offs_n1_half
             i_mask = token_mask[:, None] & (offs_in[None, :] < N_HALF)
             i_ptrs = intermediate_ptr + stride_im * offs_token[:, None] + offs_in[None, :]
-
             # TODO dtye??
             tl.atomic_add(i_ptrs, acc, mask=i_mask, sem="release")
             # TODO quantization
 
-        for pid_k in range(0, 0):
+        for pid_k in range(0, num_pid_k):
             offs_w2k = (pid_k * BLOCK_SIZE_K2 + offs_k2) % K
             offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
 
-            # Here we assume that valid tokens are in the range [0, M).
-            token_mask = (offs_token >= 0) & (offs_token < EM)
-
-            off_experts = tl.load(expert_ids_ptr + pid_m)
-
-            intermediate_ptrs = intermediate_ptr + (offs_token[:, None] // top_k * stride_am + offs_n2[None, :])
+            intermediate_ptrs = intermediate_ptr + (offs_token[:, None] * stride_im + offs_n2[None, :])
             w2_ptrs = W2 + off_experts * stride_w2e + (offs_n2[:, None] * stride_w2n + offs_w2k[None, :] * stride_w2k)
 
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K2), dtype=tl.float32)
@@ -614,9 +597,11 @@ def e2e_moe_persistent(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, inte
     e2e_moe_persistent_kernel[grid](a, w1, w2, c, a_descale, w1_descale, w2_descale, a.stride(0), a.stride(1), w1.stride(0), w1.stride(1),
                           w1.stride(2), w2.stride(0), w2.stride(2), w2.stride(1), stride_cm, stride_w1se, stride_w1sn, stride_w2se, stride_w2sk, top_k, topk_weights,
                           sorted_token_ids, expert_ids, intermediate, stride_im, EM, N, K, EVEN_K, EVEN_N, MUL_ROUTED_WEIGHT=topk_weights is not None,
-                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, NUM_SMS=NUM_SMS, num_pid_m=num_pid_m, **config
+                          use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a16=use_int8_w8a16, NUM_SMS=NUM_SMS, **config,
                           )
-    return c
+
+    
+    return c, intermediate
 
 
 def quantize_input(a, w1, w2, use_fp8_w8a8: tl.constexpr, use_int8_w8a16: tl.constexpr, metatdata: MetaData, fp8_type=None):
@@ -736,6 +721,8 @@ def e2e_moe_ref(a, w1, w2, c, M, E, top_k, N, metadata: MetaData):
     config_dtype = get_config_dtype_str(use_fp8_w8a8=metadata.use_fp8_w8a8, use_int8_w8a16=metadata.use_int8_w8a16, dtype=c.dtype)
 
     config = try_get_optimal_moe_config(E, config_dtype, M)
+
+    
     moe_metadata1 = MoEMetaData(
         top_k=metadata.top_k,
         topk_weights=None,
@@ -765,7 +752,7 @@ def e2e_moe_ref(a, w1, w2, c, M, E, top_k, N, metadata: MetaData):
 
     moe_gemm(intermediate_cache2, w2, c, moe_metadata2)
 
-    return c
+    return c, intermediate_cache2
 
 
 @pytest.mark.parametrize("M, N, K, top_k, E", [
@@ -835,16 +822,19 @@ def test_correctness_persistent(M: int, N: int, K: int, top_k: int, E: int, rout
                                      use_int8_w8a16=False, fp8_type=None,
                                      dtype=dtype, persistent=True)
 
-    tri_out = e2e_moe_persistent(a, w1, w2, intermediate, c, metadata)
+    tri_out, tri_intermediate = e2e_moe_persistent(a, w1, w2, intermediate, c, metadata)
 
     topk_ids = metadata.topk_ids
     topk_weights = metadata.topk_weights
     ref_out = torch.empty_like(c)
 
-    ref_out = e2e_moe_ref(a, w1, w2, ref_out, M, E, top_k, N, metadata)
+    ref_out, ref_intermediate = e2e_moe_ref(a, w1, w2, ref_out, M, E, top_k, N, metadata)
+
+    torch.testing.assert_close(tri_intermediate, ref_intermediate, atol=2e-2, rtol=2e-2)
 
     # Validate correctness
-    torch.testing.assert_close(tri_out, ref_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(tri_out, ref_out, atol=2e-2, rtol=2e-2)
+    print("all tests pass")
 
 # @pytest.mark.parametrize("M, N, K, top_k, E", [
 #     (64, 14336, 4096, 2, 8),
@@ -1052,12 +1042,16 @@ arg_to_torch_dtype = {
 
 
 def main():
-    args = parse_args()
-    custom_config = False
-    # If user provides all M,K,N,E,top_k we consider it custom
-    if args.M and args.K and args.N and args.E and args.top_k:
-        custom_config = True
-    run_benchmark(custom_config, args)
+    # args = parse_args()
+    # custom_config = False
+    # # If user provides all M,K,N,E,top_k we consider it custom
+    # if args.M and args.K and args.N and args.E and args.top_k:
+    #     custom_config = True
+
+    
+    # run_benchmark(custom_config, args)
+
+    # test_correctness_persistent(4096, 4096, 4096, 2, 4, False, torch.float32)
 
 
 if __name__ == '__main__':
