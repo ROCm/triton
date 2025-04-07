@@ -421,7 +421,7 @@ def get_config_dtype_str(dtype: torch.dtype, use_int8_w8a16: Optional[bool] = Fa
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
-        return "float32"
+        return None
     return None
 
 
