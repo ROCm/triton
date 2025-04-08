@@ -26,10 +26,10 @@ static int __builtin_ctz(unsigned x) {
 
 #endif
 
-#define printVec(vec)                           \
-    for (int i = 0; i < vec.size(); i++)        \
-        llvm::outs() << vec[i] << "  ";         \
-    llvm::outs() << "\n";
+#define printVec(vec)                                                          \
+  for (int i = 0; i < vec.size(); i++)                                         \
+    llvm::outs() << vec[i] << "  ";                                            \
+  llvm::outs() << "\n";
 
 // This reverts #5645, because it introduced increased register pressure in AMD
 // backend.
@@ -276,12 +276,12 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
 namespace {
 
 Value getSmemVecOffset(const LinearLayout &regLayout,
-                     const LinearLayout &regToSharedLayout,
-                     const LinearLayout &invertAllocSharedLayout,
-                     const SharedMemoryObject &smemObj,
-                     triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
-                     Value regId, Value laneId, Value warpId, Value blockId,
-                     Location loc, RewriterBase &rewriter) {
+                       const LinearLayout &regToSharedLayout,
+                       const LinearLayout &invertAllocSharedLayout,
+                       const SharedMemoryObject &smemObj,
+                       triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
+                       Value regId, Value laneId, Value warpId, Value blockId,
+                       Location loc, RewriterBase &rewriter) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   MLIRContext *ctx = rewriter.getContext();
   StringAttr kBlock = str_attr("block");
@@ -340,10 +340,9 @@ Value getSmemVecOffset(const LinearLayout &regLayout,
     // TODO: remove when new implementation performance reaches target level
     // llvm::outs() << "       Simple LDS access";
     auto swizzledSharedEnc =
-        mlir::dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(
-            sharedEnc);
+        mlir::dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(sharedEnc);
     if (false && swizzledSharedEnc) {
-        // llvm::outs() << " ==> using 2D regToSharedLayout\n";
+      // llvm::outs() << " ==> using 2D regToSharedLayout\n";
       auto regToSharedLayout =
           getRegToSharedLayout(ctx, shape, regLayout, swizzledSharedEnc,
                                elemLlvmTy.getIntOrFloatBitWidth());
@@ -359,8 +358,8 @@ Value getSmemVecOffset(const LinearLayout &regLayout,
       smemOffset = dot(rewriter, loc, smemOffsets,
                        applyPermutation(smemStrides, smemOrder));
     }
-    //else
-    //    llvm::outs() << "\n";
+    // else
+    //     llvm::outs() << "\n";
   } else { // Case 2 -> rank-reduced swizzling
     assert(rank >= 2 && "Swizzling only applies to tensors with rank >= 2");
     assert((isa<triton::gpu::SwizzledSharedEncodingAttr,
@@ -423,8 +422,8 @@ bool emitTransferBetweenRegistersAndShared(
   MLIRContext *ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  // llvm::outs() << "Calling emitTransferBetweenRegistersAndShared with regLayout = ";
-  // llvm::outs() << regLayout << "\n";
+  // llvm::outs() << "Calling emitTransferBetweenRegistersAndShared with
+  // regLayout = "; llvm::outs() << regLayout << "\n";
 
   StringAttr kBlock = str_attr("block");
   StringAttr kRegister = str_attr("register");
@@ -447,10 +446,10 @@ bool emitTransferBetweenRegistersAndShared(
       mlir::dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(
           sharedTy.getEncoding());
   if (swizzledSharedEnc) {
-      auto regTo2dSharedLayout =
-          getRegToSharedLayout(ctx, shape, regLayout, swizzledSharedEnc,
-                               elemLlvmTy.getIntOrFloatBitWidth());
-      // llvm::outs() << "regTo2dSharedLayout = " << regTo2dSharedLayout << "\n";
+    auto regTo2dSharedLayout =
+        getRegToSharedLayout(ctx, shape, regLayout, swizzledSharedEnc,
+                             elemLlvmTy.getIntOrFloatBitWidth());
+    // llvm::outs() << "regTo2dSharedLayout = " << regTo2dSharedLayout << "\n";
   }
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
@@ -498,12 +497,13 @@ bool emitTransferBetweenRegistersAndShared(
                                   sharedTy.getEncoding())
           .pseudoinvert();
 
-  // llvm::outs() << "invertAllocSharedLayout =" << invertAllocSharedLayout << "\n";
+  // llvm::outs() << "invertAllocSharedLayout =" << invertAllocSharedLayout <<
+  // "\n";
   int numElems = regToSharedLayout.getInDimSize(kRegister);
   auto vecTy = vec_ty(elemLlvmTy, vecElems);
-  // llvm::outs() << "vecElems, numElems = " << vecElems << ", " << numElems << "\n";
+  // llvm::outs() << "vecElems, numElems = " << vecElems << ", " << numElems <<
+  // "\n";
   SmallVector<Value> ret;
-
 
   // storeToLDS: numElems = 32, vecElems = 8
   // loadA: numElems = 128, vecElems = 8
@@ -512,53 +512,58 @@ bool emitTransferBetweenRegistersAndShared(
   bool isStore = numElems < 64;
 
   if (isStore) {
-      auto vec0Offset = getSmemVecOffset(
+    auto vec0Offset =
+        getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                         smemObj, sharedTy, elemLlvmTy, b.i32_val(0), laneId,
+                         warpId, blockId, loc, rewriter);
+    for (int i = 0; i < numElems / vecElems; i++) {
+      auto regId = b.i32_val(i * vecElems);
+      auto vecOffset = getSmemVecOffset(
           regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-          sharedTy, elemLlvmTy, b.i32_val(0), laneId, warpId, blockId, loc, rewriter);
-      for (int i = 0; i < numElems / vecElems; i++) {
-          auto regId = b.i32_val(i * vecElems);
-          auto vecOffset = getSmemVecOffset(
-              regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-              sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.xor_(vec0Offset, vecOffset);
-          auto smemBase = smemObj.getBase();
-          auto ptrTy = smemBase.getType();
-          auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
-          vecAddr.setInbounds(true);
-          perVectorCallback(vecTy, vecAddr);
-      }
-  }
-  else { // isLoad
-      auto vec0Offset = getSmemVecOffset(
+          sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
+          loc, rewriter);
+      vecOffset = b.xor_(vec0Offset, vecOffset);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
+  } else { // isLoad
+    auto vec0Offset =
+        getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                         smemObj, sharedTy, elemLlvmTy, b.i32_val(0), laneId,
+                         warpId, blockId, loc, rewriter);
+    for (int i = 0; i < numElems / vecElems; i += 2) {
+      auto regId = b.i32_val(i * vecElems);
+      auto vecOffset = getSmemVecOffset(
           regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-          sharedTy, elemLlvmTy, b.i32_val(0), laneId, warpId, blockId, loc, rewriter);
-      for (int i = 0; i < numElems / vecElems; i+=2) {
-          auto regId = b.i32_val(i * vecElems);
-          auto vecOffset = getSmemVecOffset(
-              regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-              sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.xor_(vec0Offset, vecOffset);
-          auto smemBase = smemObj.getBase();
-          auto ptrTy = smemBase.getType();
-          auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
-          vecAddr.setInbounds(true);
-          perVectorCallback(vecTy, vecAddr);
-      }
-      auto vec1Offset = getSmemVecOffset(
+          sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
+          loc, rewriter);
+      vecOffset = b.xor_(vec0Offset, vecOffset);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
+    auto vec1Offset =
+        getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                         smemObj, sharedTy, elemLlvmTy, b.i32_val(8), laneId,
+                         warpId, blockId, loc, rewriter);
+    for (int i = 0; i < numElems / vecElems; i += 2) {
+      auto regId = b.i32_val(i * vecElems);
+      auto vecOffset = getSmemVecOffset(
           regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-          sharedTy, elemLlvmTy, b.i32_val(8), laneId, warpId, blockId, loc, rewriter);
-      for (int i = 0; i < numElems / vecElems; i+=2) {
-          auto regId = b.i32_val(i * vecElems);
-          auto vecOffset = getSmemVecOffset(
-              regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-              sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0), loc, rewriter);
-          vecOffset = b.xor_(vec1Offset, vecOffset);
-          auto smemBase = smemObj.getBase();
-          auto ptrTy = smemBase.getType();
-          auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
-          vecAddr.setInbounds(true);
-          perVectorCallback(vecTy, vecAddr);
-      }
+          sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
+          loc, rewriter);
+      vecOffset = b.xor_(vec1Offset, vecOffset);
+      auto smemBase = smemObj.getBase();
+      auto ptrTy = smemBase.getType();
+      auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
+      vecAddr.setInbounds(true);
+      perVectorCallback(vecTy, vecAddr);
+    }
   }
 
   /* original code

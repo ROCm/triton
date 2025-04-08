@@ -322,12 +322,8 @@ def get_type(provider):
         x_names=['M', 'N', 'K'],
         x_vals=get_x_vals(),
         line_arg='provider',
-        line_vals=[
-            'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)'
-        ],
-        line_names=[
-            "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16"
-        ],
+        line_vals=['hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)', 'triton(bf16/bf16)'],
+        line_names=["rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16", "Triton.Bf16"],
         ylabel="TFLOPS",
         plot_name="matmul-performance",
         args={},
@@ -385,12 +381,8 @@ def parse_args():
 
 
 def get_line_vals_names(a_dtype=None, b_dtype=None):
-    line_vals = [
-        'hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)'
-    ]
-    line_names = [
-        "rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16"
-    ]
+    line_vals = ['hipblaslt(fp16/fp16)', 'hipblaslt(bf16/bf16)', 'triton(fp16/fp16)']
+    line_names = ["rocBLAS.Fp16", "rocBLAS.Bf16", "Triton.Fp16"]
     assert not ((a_dtype is None) ^ (b_dtype is None))
     if a_dtype is not None:
         line_vals_suffix_str = '(' + a_dtype + '/' + b_dtype + ')'
