@@ -401,7 +401,7 @@ def get_cdna_autotune_configs():
                            'GRID_CU_MULTIP': kernel_config['GRID_CU_MULTIP'],
                            'matrix_instr_nonkdim': kernel_config['matrix_instr_nonkdim'],
                            'kpack': kernel_config['kpack'],
-                           'instruction_sched_variant':kernel_config['sched_opt']},
+                           },
                             num_stages=kernel_config['num_stages'],
                             num_warps=kernel_config['num_warps'])], ['IS_CAUSAL',
                                                                      'dropout_p',
@@ -429,8 +429,8 @@ def get_cdna_autotune_configs():
                                     'waves_per_eu': wpeu,
                                     'PRE_LOAD_V': pre_load_v,
                                     'GRID_CU_MULTIP': 2,
-                                    'matrix_instr_nonkdim': nonk,
-                                    'instruction_sched_variant': 'refine_ops'},
+                                    'matrix_instr_nonkdim': nonk
+                                    },
                                     num_stages=num_stages, num_warps=num_warps))
 
         return configs, ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
