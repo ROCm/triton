@@ -1,4 +1,4 @@
-import torch
+import numpy as np
 from dataclasses import dataclass
 from typing import List, Any
 
@@ -9,23 +9,26 @@ class TmaDescKernelParam:
     TMA_DESC_SIZE = 128
 
     def __init__(self):
-        self.desc = torch.empty(self.TMA_DESC_SIZE, dtype=torch.uint8, device="cpu")
+        self.desc = np.empty(self.TMA_DESC_SIZE, dtype=np.uint8)
+
+    def desc_ptr(self):
+        return self.desc.ctypes.data
 
     def fill_(self, ptr, dims, block_dims, element_size):
         assert len(dims) == len(block_dims)
         assert 1 <= len(dims) <= 2
-        assert self.desc.data_ptr() % 64 == 0
+        assert self.desc_ptr() % 64 == 0
 
         if len(dims) == 1:
             triton.runtime.driver.active.utils.fill_1d_tma_descriptor(ptr, dims[0], block_dims[0], element_size,
-                                                                      self.desc.data_ptr())
+                                                                      self.desc_ptr())
         else:
             triton.runtime.driver.active.utils.fill_2d_tma_descriptor(ptr, dims[0], dims[1], block_dims[0],
-                                                                      block_dims[1], element_size, self.desc.data_ptr())
+                                                                      block_dims[1], element_size, self.desc_ptr())
 
     # Return a CUtensorMap* pointer in host memory
     def tma_desc_cpu_ptr(self):
-        return self.desc.data_ptr()
+        return self.desc_ptr()
 
 
 def create_1d_tma_descriptor(ptr, dim, block_dim, element_size):
