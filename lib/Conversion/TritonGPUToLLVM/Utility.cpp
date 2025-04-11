@@ -534,19 +534,6 @@ bool emitTransferBetweenRegistersAndShared(
         getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
                          smemObj, sharedTy, elemLlvmTy, b.i32_val(0), laneId,
                          warpId, blockId, loc, rewriter);
-    for (int i = 0; i < numElems / vecElems; i += 2) {
-      auto regId = b.i32_val(i * vecElems);
-      auto vecOffset = getSmemVecOffset(
-          regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-          sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
-          loc, rewriter);
-      vecOffset = b.xor_(vec0Offset, vecOffset);
-      auto smemBase = smemObj.getBase();
-      auto ptrTy = smemBase.getType();
-      auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
-      vecAddr.setInbounds(true);
-      perVectorCallback(vecTy, vecAddr);
-    }
     auto vec1Offset =
         getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
                          smemObj, sharedTy, elemLlvmTy, b.i32_val(8), laneId,
@@ -557,12 +544,16 @@ bool emitTransferBetweenRegistersAndShared(
           regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
           sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
           loc, rewriter);
-      vecOffset = b.xor_(vec1Offset, vecOffset);
+      Value vecOffsetEven = b.xor_(vec0Offset, vecOffset);
+      Value vecOffsetOdd = b.xor_(vec1Offset, vecOffset);
       auto smemBase = smemObj.getBase();
       auto ptrTy = smemBase.getType();
-      auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffset);
-      vecAddr.setInbounds(true);
-      perVectorCallback(vecTy, vecAddr);
+      auto vecAddrEven = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffsetEven);
+      auto vecAddrOdd = b.gep(ptrTy, elemLlvmTy, smemBase, vecOffsetOdd);
+      vecAddrEven.setInbounds(true);
+      vecAddrOdd.setInbounds(true);
+      perVectorCallback(vecTy, vecAddrEven);
+      perVectorCallback(vecTy, vecAddrOdd);
     }
   }
 
