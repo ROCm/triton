@@ -86,7 +86,7 @@ def draw_lds_access_cmd(dim0, dim1, dtype, mfmaNonKDim, ldsConfig):
         dim1Name = 'k'
     dim0Size = dim0
     dim1Size = dim1
-    '''
+    """
     Definitions of different vector size
 
     swizzleVec: Number of elements that are grouped together when swizzling is enabled.
@@ -134,7 +134,7 @@ def draw_lds_access_cmd(dim0, dim1, dtype, mfmaNonKDim, ldsConfig):
 
     case 4: MN-contig in HBM and k-Contig in LDS (-inThreadTrans)
       Not supported yet
-    '''
+    """
 
     elemTypeInBytes = typeToBytes(dtype)
 
@@ -160,37 +160,37 @@ def draw_lds_access_cmd(dim0, dim1, dtype, mfmaNonKDim, ldsConfig):
     kWidth = ldsConfig.kWidth
     vecInBytes = vec * elemTypeInBytes
 
-    return f'''\\begin{{document}}
-  \\begin{{tikzpicture}}
-    \\def\\scale{{1}}
-    \\def\\M{{{dim0}}}
-    \\def\\K{{{dim1}}}
-    \\def\\mfmaKWidth{{{kWidth}}}
-    \\def\\vec{{{vec}}}
-    \\def\\swizzleVec{{{swizzleVec}}}
-    \\def\\accessVec{{{accessVec}}}
-    \\def\\vecInBytes{{{vecInBytes}}}
-    \\def\\bytesPerElem{{{elemTypeInBytes}}}
-    \\def\\hasSwizzle{{{hasSwizzle}}}
-    \\def\\accessMode{{{accessMode}}}
-    \\def\\mfmaNonKDim{{{mfmaNonKDim}}}
-    \\def\\dtype{{{dtype}}}
-    \\def\\trans{{{trans}}}
-    \\def\\useMfmaTransLD{{{useMfmaTransLD}}}
-    \\def\\padInterval{{{padInterval}}}
-    \\def\\padAmount{{{padAmount}}}
+    return f"""\\begin{{document}}
+               \\begin{{tikzpicture}}
+               \\def\\scale{{1}}
+               \\def\\M{{{dim0}}}
+               \\def\\K{{{dim1}}}
+               \\def\\mfmaKWidth{{{kWidth}}}
+               \\def\\vec{{{vec}}}
+               \\def\\swizzleVec{{{swizzleVec}}}
+               \\def\\accessVec{{{accessVec}}}
+               \\def\\vecInBytes{{{vecInBytes}}}
+               \\def\\bytesPerElem{{{elemTypeInBytes}}}
+               \\def\\hasSwizzle{{{hasSwizzle}}}
+               \\def\\accessMode{{{accessMode}}}
+               \\def\\mfmaNonKDim{{{mfmaNonKDim}}}
+               \\def\\dtype{{{dtype}}}
+               \\def\\trans{{{trans}}}
+               \\def\\useMfmaTransLD{{{useMfmaTransLD}}}
+               \\def\\padInterval{{{padInterval}}}
+               \\def\\padAmount{{{padAmount}}}
 
-    \\def\\elemH{{0.18}}
-    \\def\\elem{{0.18}}
-    \\def\\bsize{{{bsize}}}
-    \\def\\bankLabelScale{{{bankLabelScale}}}
-    \\coordinate (tile TL) at (0,0);
-    \\coordinate (TL) at (tile TL);
-    \\drawTensorLayoutGlobalMem{{{dim0Name}}}{{{dim1Name}}}{{{dim0Size}}}{{{dim1Size}}}
-    \\coordinate (TL) at ($(TL)+(0, -\drawRow-8*\\elemH)$);
-    \\drawLDSLayoutAndAccess{{\\hasSwizzle}}{{\\accessMode}}{{{banks}}}{{{dim0Name}}}{{{dim1Name}}}{{{dim1Size}}}
-  \\end{{tikzpicture}}
-\\end{{document}}'''
+               \\def\\elemH{{0.18}}
+               \\def\\elem{{0.18}}
+               \\def\\bsize{{{bsize}}}
+               \\def\\bankLabelScale{{{bankLabelScale}}}
+               \\coordinate (tile TL) at (0,0);
+               \\coordinate (TL) at (tile TL);
+               \\drawTensorLayoutGlobalMem{{{dim0Name}}}{{{dim1Name}}}{{{dim0Size}}}{{{dim1Size}}}
+               \\coordinate (TL) at ($(TL)+(0, -\drawRow-8*\\elemH)$);
+               \\drawLDSLayoutAndAccess{{\\hasSwizzle}}{{\\accessMode}}{{{banks}}}{{{dim0Name}}}{{{dim1Name}}}{{{dim1Size}}}
+               \\end{{tikzpicture}}
+               \\end{{document}}"""
 
 
 def generate_lds_tex(args):
@@ -203,8 +203,8 @@ def generate_lds_tex(args):
     kWidth = args.kWidth
     dtype = args.dtype
     mfmaNonKDim = args.nonKDim
-    ldsLayout = args.lds_layout
-    ldsAccess = args.lds_access
+    ldsLayout = args.layout
+    ldsAccess = args.access
     banks = args.banks
     mnContig = args.mnContig
     mfmaTransLD = args.mfma_trans_load
@@ -212,8 +212,8 @@ def generate_lds_tex(args):
     padInterval = args.padInterval
     padAmount = args.padAmount
 
-    ldsConfig = LDSConfig(banks, ldsLayout, ldsAccess, mnContig, mfmaTransLD, swizzleVec, kWidth, kWidth, padInterval,
-                          padAmount)
+    ldsConfig = LDSConfig(banks, ldsLayout, ldsAccess, mnContig, mfmaTransLD,
+                          swizzleVec, kWidth, kWidth, padInterval, padAmount)
 
     # checks and logging
     print(f"Plotting LDS access for tensor {dim0}x{dim1} with vec={kWidth}")
