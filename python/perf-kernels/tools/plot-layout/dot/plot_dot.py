@@ -42,8 +42,8 @@ def isMixedPrecType(dtype):
 
 
 def isMixedPrecBtwF8AndF4OrF6(dtypeA, dtypeB):
-    return (isType8BitFloat(dtypeA) and isType4Or6Bit(dtypeB)) or (isType8BitFloat(dtypeB)
-                                                                     and isType4Or6Bit(dtypeA))
+    return (isType8BitFloat(dtypeA) and isType4Or6Bit(dtypeB)) or \
+           (isType8BitFloat(dtypeB) and isType4Or6Bit(dtypeA))
 
 
 def draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot_scale, dotConfig):
@@ -119,8 +119,9 @@ def draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot
 def checkMfmaValidity(mfmaNonKDim, kWidth, kGroup, dtypeA, dtypeB, trans, scale):
     # Check input types
     # Mixed precision is only allowed within f8, f6 and f4
-    assert (isMixedPrecType(dtypeA) and isMixedPrecType(dtypeB)) or (
-        dtypeA == dtypeB), f"Cannot do mixed precision mfma with {dtypeA} and {dtypeB}"
+    assert (isMixedPrecType(dtypeA) and isMixedPrecType(dtypeB)) or \
+           (dtypeA == dtypeB), \
+           f"Cannot do mixed precision mfma with {dtypeA} and {dtypeB}"
     """
     Check mfma size according to data types
     * refers to newly added instructions on gfx950
@@ -183,9 +184,8 @@ def checkMfmaValidity(mfmaNonKDim, kWidth, kGroup, dtypeA, dtypeB, trans, scale)
 
     # Both types are fp16 or bf16
     if isType16Bit(dtypeA) and isType16Bit(dtypeB):
-        assert (
-            kWidth == 8 or kWidth == 4
-        ) and kGroup == 1, f"Not a valid mfma instruction for {dtypeA} x {dtypeB} with {kWidth=} and {kGroup=}"
+        assert (kWidth == 8 or kWidth == 4) and kGroup == 1, \
+            f"Not a valid mfma instruction for {dtypeA} x {dtypeB} with {kWidth=} and {kGroup=}"
         kpack = 1
         CBSZ = -1
         BLGP = -1
@@ -193,15 +193,15 @@ def checkMfmaValidity(mfmaNonKDim, kWidth, kGroup, dtypeA, dtypeB, trans, scale)
 
     # Both types are i8
     if dtypeA == 'i8' and dtypeB == 'i8':
-        assert (
-            kWidth == 16 or kWidth == 8
-        ) and kGroup == 1, f"Not a valid mfma instruction for {dtypeA} x {dtypeB} with {kWidth=} and {kGroup=}"
+        assert (kWidth == 16 or kWidth == 8) and kGroup == 1, \
+            f"Not a valid mfma instruction for {dtypeA} x {dtypeB} with {kWidth=} and {kGroup=}"
         kpack = 1
         CBSZ = -1
         BLGP = -1
         return f"mfma_i32_{mfmaNonKDim}x{mfmaNonKDim}x{kDim:.0f}_{dtypeA}", kpack, CBSZ, BLGP, False
 
     assert False, "Mixed precision between fp8/bf8 and fp6/bf6/f4 not supported in this mode"
+
 
 def generate_dot_tex(args):
     assert args.plot_type == "dot", \
@@ -252,8 +252,8 @@ def generate_dot_tex(args):
     else:
         kDim = kWidth * kGroup * 64 // mfmaNonKDim
         assert K % kDim == 0, f"one mfma instruction requires multiple of {kDim} elements along k dim but BLOCK_K = {K}"
-        mfma_inst_str, kpack, CBSZ, BLGP, plot_scale = checkMfmaValidity(mfmaNonKDim, kWidth, kGroup, dtypeA,
-                                                                            dtypeB, trans, scale)
+        mfma_inst_str, kpack, CBSZ, BLGP, plot_scale = checkMfmaValidity(mfmaNonKDim, kWidth, kGroup, dtypeA, dtypeB,
+                                                                         trans, scale)
         isMixed864 = False
     flag = '' if CBSZ == -1 else f" with {CBSZ=},{BLGP=}"
     scale_info = " (scale is not supported hence ignored)" if (scale and not plot_scale) else ''
@@ -279,6 +279,6 @@ def generate_dot_tex(args):
 
         f_plot.write(preamble)
         draw_dotLayout_str = draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot_scale,
-                                                     dotConfig)
+                                                 dotConfig)
         f_plot.write("\input{dot/dotLayout}\n")
         f_plot.write(draw_dotLayout_str)

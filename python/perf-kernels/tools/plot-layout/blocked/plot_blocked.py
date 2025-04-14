@@ -8,6 +8,7 @@ class BlockedConfig:
     warpsPerCTA: tuple
     order: tuple
 
+
 def draw_blocked_layout_cmd(dim0, dim1, dim0Name, dim1Name, blockedConfig):
     return f"""\\begin{{document}}
                \\begin{{tikzpicture}}

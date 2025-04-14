@@ -34,6 +34,7 @@ class LDSConfig:
             f"{self.banks=} {self.ldsLayout=} {self.ldsAccess=} {self.mnContig=} {self.mfmaTransLD=} {self.swizzleVec=} {self.accessVec=} {self.kWidth=} {self.padInterval} {self.padAmount}"
         )
 
+
 def typeToBytes(dtype):
     if dtype == 'bf16' or dtype == 'fp16':
         return 2
@@ -200,7 +201,7 @@ def generate_lds_tex(args):
     tShape = args.tensorShape
     dim0 = tShape[0]
     dim1 = tShape[1]
-    kWidth = args.kWidth
+    accessVec = kWidth = args.kWidth
     dtype = args.dtype
     mfmaNonKDim = args.nonKDim
     ldsLayout = args.layout
@@ -212,8 +213,8 @@ def generate_lds_tex(args):
     padInterval = args.padInterval
     padAmount = args.padAmount
 
-    ldsConfig = LDSConfig(banks, ldsLayout, ldsAccess, mnContig, mfmaTransLD,
-                          swizzleVec, kWidth, kWidth, padInterval, padAmount)
+    ldsConfig = LDSConfig(banks, ldsLayout, ldsAccess, mnContig, mfmaTransLD, swizzleVec, accessVec, kWidth,
+                          padInterval, padAmount)
 
     # checks and logging
     print(f"Plotting LDS access for tensor {dim0}x{dim1} with vec={kWidth}")

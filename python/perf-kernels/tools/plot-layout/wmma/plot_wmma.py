@@ -9,6 +9,7 @@ def draw_wmma_instr_cmd(waveSize):
   \\end{{tikzpicture}}
 \\end{{document}}'''
 
+
 def generate_wmma_tex(args):
     assert args.plot_type == "wmma", \
         f"parsing the wrong arguments. Want wmma but have {args.plot_type}"
