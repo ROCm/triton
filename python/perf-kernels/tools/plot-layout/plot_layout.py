@@ -12,7 +12,7 @@ from wmma import generate_wmma_tex
 def parse_args():
     top_parser = argparse.ArgumentParser(
         prog="Draw triton layouts",
-        allow_abbrev=True,
+        allow_abbrev=False,
     )
     top_parser.add_argument("--output", type=str, default="myplot", help='output pdf file name (without surfix)')
     top_parser.add_argument("--keep", action='store_true', default=False, help='If set, keep the generated .tex file')
@@ -28,6 +28,7 @@ def parse_args():
     # blocked layout parameters
     blocked_parser = subparsers.add_parser(
         "blocked",
+        allow_abbrev=False,
         help="plot blocked layout for global memory access",
         formatter_class=lambda prog: OneLineFormatter(prog, max_help_position=40),
     )
@@ -48,6 +49,7 @@ def parse_args():
     ## dot layout parameters
     dot_parser = subparsers.add_parser(
         "dot",
+        allow_abbrev=False,
         help="plot dot layout for MFMA",
         formatter_class=lambda prog: OneLineFormatter(prog, max_help_position=50),
     )
@@ -74,6 +76,7 @@ def parse_args():
     ## LDS access parameters
     lds_parser = subparsers.add_parser(
         "lds",
+        allow_abbrev=False,
         help="plot LDS (shared memory) layout",
         formatter_class=lambda prog: OneLineFormatter(prog, max_help_position=50),
         )
