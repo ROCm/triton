@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -273,12 +274,14 @@ def generate_dot_tex(args):
         print("")
 
     # write the tex file
+    curr_dir = Path(__file__).resolve().parent
     with open("myplot.tex", 'w') as f_plot:
-        with open("utils/preamble.tex") as file:
+        with open(curr_dir / "../utils/preamble.tex") as file:
             preamble = file.read()
 
         f_plot.write(preamble)
         draw_dotLayout_str = draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot_scale,
                                                  dotConfig)
-        f_plot.write("\input{dot/dotLayout}\n")
+        func_ref = str(curr_dir / "dotLayout")
+        f_plot.write(f"\input{{ {func_ref} }}\n")
         f_plot.write(draw_dotLayout_str)

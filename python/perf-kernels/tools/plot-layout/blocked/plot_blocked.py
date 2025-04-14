@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -61,11 +62,13 @@ def generate_blocked_tex(args):
         "CTAShape[1] should be smaller than dim of {dim1Name}={dim1} and fully spans it"
 
     # write the tex file
+    curr_dir = Path(__file__).resolve().parent
     with open("myplot.tex", 'w') as f_plot:
-        with open("utils/preamble.tex") as file:
+        with open(curr_dir / "../utils/preamble.tex") as file:
             preamble = file.read()
 
         f_plot.write(preamble)
         draw_blockedLayout_str = draw_blocked_layout_cmd(dim0, dim1, dim0Name, dim1Name, blockedConfig)
-        f_plot.write("\input{blocked/blockedLayout}\n")
+        func_ref = str(curr_dir / "blockedLayout")
+        f_plot.write(f"\input{{ {func_ref} }}\n")
         f_plot.write(draw_blockedLayout_str)

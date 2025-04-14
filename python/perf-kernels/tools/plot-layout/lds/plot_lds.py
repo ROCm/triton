@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -219,11 +220,13 @@ def generate_lds_tex(args):
     # checks and logging
     print(f"Plotting LDS access for tensor {dim0}x{dim1} with vec={kWidth}")
     # write the tex file
+    curr_dir = Path(__file__).resolve().parent
     with open("myplot.tex", 'w') as f_plot:
-        with open("utils/preamble.tex") as file:
+        with open(curr_dir / "../utils/preamble.tex") as file:
             preamble = file.read()
 
         f_plot.write(preamble)
         draw_lds_str = draw_lds_access_cmd(dim0, dim1, dtype, mfmaNonKDim, ldsConfig)
-        f_plot.write("\input{lds/ldsLayout}\n")
+        func_ref = str(curr_dir / "ldsLayout")
+        f_plot.write(f"\input{{ {func_ref} }}\n")
         f_plot.write(draw_lds_str)

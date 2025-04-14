@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 def draw_wmma_instr_cmd(waveSize):
     wmma_mode = 0 if waveSize == 32 else 1
     return f'''\\begin{{document}}
@@ -17,11 +20,13 @@ def generate_wmma_tex(args):
     waveSize = args.wave_size
     # checks and logging
     # write the tex file
+    curr_dir = Path(__file__).resolve().parent
     with open("myplot.tex", 'w') as f_plot:
-        with open("utils/preamble.tex") as file:
+        with open(curr_dir / "../utils/preamble.tex") as file:
             preamble = file.read()
 
         f_plot.write(preamble)
         draw_wmma_str = draw_wmma_instr_cmd(waveSize)
-        f_plot.write("\input{wmma/wmmaLayout}\n")
+        func_ref = str(curr_dir / "wmmaLayout")
+        f_plot.write(f"\input{{ {func_ref} }}\n")
         f_plot.write(draw_wmma_str)
