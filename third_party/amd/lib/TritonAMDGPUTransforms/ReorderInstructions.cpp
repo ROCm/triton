@@ -1,5 +1,6 @@
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Verifier.h"
@@ -343,8 +344,12 @@ struct TritonAMDGPUReorderInstructionsPass
 
       moveUpTranspose(funcOp);
 
+      funcOp.walk([&](scf::ForOp forOp) -> void {
+        auto resultLoops = loopUnrollByFactor(forOp, 2);
+      });
+
       if (isPureMatmulFunc(funcOp)) {
-        scheduleGlobalLoadLocalStore(funcOp);
+        // scheduleGlobalLoadLocalStore(funcOp);
         funcOp.walk([&](scf::ForOp forOp) -> void { sinkSecondLoad(forOp); });
       } else {
         SmallVector<scf::ForOp> leafForOps = triton::AMD::getLeafForOps(funcOp);

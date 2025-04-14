@@ -248,7 +248,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   int globalLoadCluster = 0;
   int localStoreCluster = 2;
   if (!pairedGlobalLoadLocalStore) {
-    globalLoadCluster = 2;
+    globalLoadCluster = 0;
     localStoreCluster = 1;
   }
 
