@@ -113,7 +113,7 @@ class StreamPipeliner {
     SCHED_LOCAL_STORE,
     SCHED_LOCAL_LOAD,
     SCHED_COMPUTE,
-    SCHED_ASYNC_WAIT,
+    // SCHED_ASYNC_WAIT,
     SCHED_SIZE
   };
 
@@ -127,8 +127,10 @@ public:
     stages[SCHED_GLOBAL_LOAD] = 0;
     stages[SCHED_LOCAL_STORE] = _globalPrefetch;
     stages[SCHED_LOCAL_LOAD] = lastStage - _localPrefetch;
+    // AsyncWait should be in same stage as the LocalLoad
+    // stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
     stages[SCHED_COMPUTE] = lastStage;
-    stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
+    // stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
     options.supportDynamicLoops = true;
     options.peelEpilogue = true;
@@ -178,6 +180,7 @@ private:
   int stages[SCHED_SIZE];
   // Cluster for each SchedType Op
   std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusters;
+  std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusterVec;
 
   // Scheduling clusters
   tt::CoarseSchedule schedule;
@@ -219,13 +222,14 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxIndirectionLevel;
 
-  LDBG(
-      "Stage schedule:" << "  GLOBAL_LOAD stage = " << stages[SCHED_GLOBAL_LOAD]
-                        << ", LOCAL_STORE stage = " << stages[SCHED_LOCAL_STORE]
-                        << ", LOCAL_LOAD stage = " << stages[SCHED_LOCAL_LOAD]
-                        << ", COMPUTE stage = " << stages[SCHED_COMPUTE]
-                        << ", ASYNC_WAIT stage = " << stages[SCHED_ASYNC_WAIT]
-                        << "; total = " << numStages);
+  LDBG("Stage schedule:"
+       << "  GLOBAL_LOAD stage = " << stages[SCHED_GLOBAL_LOAD]
+       << ", LOCAL_STORE stage = " << stages[SCHED_LOCAL_STORE]
+       << ", LOCAL_LOAD stage = " << stages[SCHED_LOCAL_LOAD]
+       << ", COMPUTE stage = "
+       << stages[SCHED_COMPUTE]
+       // << ", ASYNC_WAIT stage = " << stages[SCHED_ASYNC_WAIT]
+       << "; total = " << numStages);
 
   if (stages[SCHED_LOCAL_STORE] >= numStages ||
       stages[SCHED_LOCAL_STORE] > stages[SCHED_LOCAL_LOAD]) {
@@ -242,6 +246,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   if (useAsyncCopy) {
     numBuffers += 1;
   }
+  numBuffers = 2;
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
@@ -282,15 +287,27 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   }
 
   // Make assignments
-  std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusterVec;
-  std::generate(clusterVec.begin(), clusterVec.end(),
-                [&]() { return schedule.clusters.newAtBack(); });
+  // std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusterVec;
+  // std::generate(clusterVec.begin(), clusterVec.end(),
+  //               [&]() { return schedule.clusters.newAtBack(); });
+  clusterVec = {schedule.clusters.newAtBack(), schedule.clusters.newAtBack(),
+                schedule.clusters.newAtBack(), schedule.clusters.newAtBack()};
 
   clusters[SCHED_GLOBAL_LOAD] = clusterVec[globalLoadCluster];
   clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
   clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
   clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
-  clusters[SCHED_ASYNC_WAIT] = clusterVec[asyncWaitCluster];
+  // clusters[SCHED_ASYNC_WAIT] = clusterVec[asyncWaitCluster];
+
+  // ATTENTION 4-stage
+  clusters[SCHED_GLOBAL_LOAD] = clusterVec[2];
+  clusters[SCHED_LOCAL_STORE] = clusterVec[1];
+  clusters[SCHED_LOCAL_LOAD] = clusterVec[1];
+  clusters[SCHED_COMPUTE] = clusterVec[0];
+
+  // Always have ASYNC_WAIT as the first cluster because we want it at the top
+  // of the schedule block
+  // clusters[SCHED_ASYNC_WAIT] = schedule.clusters.newAtFront();
 
   LDBG("Cluster schedule:" << "  GLOBAL_LOAD cluster = " << globalLoadCluster
                            << ", LOCAL_STORE cluster = " << localStoreCluster
@@ -355,26 +372,32 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
 
   ttg::AsyncWaitOp waitOp =
       builder.create<ttg::AsyncWaitOp>(loc, commitOp->getResult(0), 0);
+  // scheduleOp(waitOp, SCHED_ASYNC_WAIT);
 
   // Create local load which consumes the async token from the AsyncWait
   auto sharedLoad =
       builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad, waitOp);
 
   auto [loadStage, loadCluster] = schedule[loadOp];
+  auto localLoadStage = loadStage == 0 ? 1 : 3;
+  auto localLoadCluster = loadStage == 0 ? 3 : 1;
+
   schedule.erase(loadOp);
   // Schedule new ops
   schedule.insert(copyOp, loadStage, loadCluster);
   // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
   // later UpdateAsyncWaitCount pass can deduce better waitcnts
   schedule.insert(commitOp, loadStage, loadCluster);
-  // If the LocalLoads are scheduled to a later stage than AsyncCopy we need to
-  // place the AsyncCopy prefetches after the AsyncWaits which create a barrier
-  // to ensure all warps are finished reading the shared buffer we will write
-  // into. This is done by scheduling AsyncWait as the first cluster.
-  // If AsyncCopy and LocalLoads are in the same stage we do not assign a
-  // schdule so they are placed before the LocalLoads
-  if (loadStage != stages[SCHED_LOCAL_LOAD])
-    scheduleOp(waitOp, SCHED_ASYNC_WAIT);
+  // If the LocalLoads are scheduled to a later stage than AsyncCopy we need
+  // to place the AsyncCopy prefetches after the AsyncWaits which create a
+  // barrier to ensure all warps are finished reading the shared buffer we
+  // will write into. This is done by scheduling AsyncWait as the first
+  // cluster. If AsyncCopy and LocalLoads are in the same stage we do not
+  // assign a schdule so they are placed before the LocalLoads
+  schedule.insert(sharedLoad, localLoadStage, clusterVec[localLoadCluster]);
+
+  // if (loadStage != stages[SCHED_LOCAL_LOAD])
+  //   scheduleOp(waitOp, SCHED_ASYNC_WAIT);
 
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
     scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
@@ -703,19 +726,29 @@ LogicalResult StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
       llvm::divideCeil(numStages - 2, maxIndirectionLevel + 1);
   LDBG("stagesBetweenLoads = " << stagesBetweenLoads);
 
+  // Assign stages to the loads.
+  // FA:
+  //  Load1: Stage=0, cluster=1
+  //  Load2: Stage=1, cluster=3
+  int i{};
+  for (auto [loadOp, indLevel, _] : loadOpToIndLevelAndUse) {
+    int stage = (maxIndirectionLevel - indLevel) * stagesBetweenLoads;
+    if (schedule.count(loadOp) > 0)
+      continue;
+    // scheduleOp(loadOp, SCHED_GLOBAL_LOAD, stage);
+    schedule.insert(loadOp, i, clusterVec[i == 0 ? 1 : 3]);
+    i++;
+  }
+
   // Put the root uses of the loads in the last stage.
   for (auto &[loadOp, dist, use] : loadOpToIndLevelAndUse) {
     // Non-LoadOp(s) are the (final) root uses of all LoadOp(s).
     if (!isa<tt::LoadOp>(use)) {
-      scheduleOp(use, SCHED_COMPUTE);
+      auto loadStage = schedule[loadOp].first;
+      schedule.insert(use, loadStage + 2, clusterVec[loadStage == 0 ? 0 : 2]);
+      // scheduleOp(use, SCHED_COMPUTE);
       rootUsers.insert(use);
     }
-  }
-
-  // Assign stages to the loads.
-  for (auto [loadOp, indLevel, _] : loadOpToIndLevelAndUse) {
-    int stage = (maxIndirectionLevel - indLevel) * stagesBetweenLoads;
-    scheduleOp(loadOp, SCHED_GLOBAL_LOAD, stage);
   }
 
   // Calculate distance from the load to the use.
@@ -745,7 +778,29 @@ void StreamPipeliner::scheduleDependencies() {
     for (auto [op, stage_, cluster] : opsInOrder) {
       if (stage_ != stage)
         continue;
-      schedule.insertDepsOfOp(op, stage, cluster, false);
+      auto depCluster = cluster;
+      LDBG("Stage: " << stage);
+      bool override = false;
+      if (llvm::isa<triton::DotOpInterface>(op) && stage == 3) {
+        LDBG("Update sched to 0");
+        depCluster = clusterVec[0];
+        override = true;
+      }
+
+      auto moveStages = [this, stage, cluster = cluster,
+                         depCluster = depCluster, override](Operation *op) {
+        LDBG("Schedule Op: " << *op);
+        if (llvm::isa<ttg::ConvertLayoutOp>(op)) {
+          LDBG("Is a cvt layout\n");
+          return std::make_pair(stage, cluster);
+        }
+        if (override) {
+          LDBG("Override to 0!");
+          // return std::make_pair(stage, clusterVec[0]);
+        }
+        return std::make_pair(stage, depCluster);
+      };
+      schedule.insertDepsOfOp(op, false, false, moveStages);
     }
   }
 }
@@ -919,6 +974,25 @@ LogicalResult StreamPipeliner::preprocessLoopAndBuildSchedule() {
 
   // Convert the loads into shared memory allocations and loads from them.
   createStreamOps();
+  LLVM_DEBUG({
+    LDBG("Coarse schedule with replaced laod ops:");
+    schedule.dump();
+  });
+
+  // Schedule reductions
+  int c = 2;
+  for (auto reduceOp : forOp.getBody()->getOps<tt::ReduceOp>()) {
+    schedule.insert(reduceOp, c, clusterVec[c == 2 ? 2 : 0]);
+    c++;
+  }
+
+  for (auto exp2Op : forOp.getBody()->getOps<mlir::math::Exp2Op>()) {
+    schedule.insert(exp2Op, 2, clusterVec[2]);
+  }
+  LLVM_DEBUG({
+    LDBG("Coarse schedule after schedule reduction:");
+    schedule.dump();
+  });
 
   scheduleDependencies();
   LLVM_DEBUG({

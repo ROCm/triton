@@ -53,8 +53,17 @@ bool tt::CoarseSchedule::insertMinimum(Operation *op, int stage,
 bool tt::CoarseSchedule::insertDepsOfOp(Operation *op, int stage,
                                         tt::CoarseSchedule::Cluster cluster,
                                         bool includeArg, bool insertIfEarlier) {
-  auto tryInsert = [&](Operation *op, int stage,
-                       tt::CoarseSchedule::Cluster cluster) {
+  auto func = [=](Operation *) { return std::make_pair(stage, cluster); };
+  return insertDepsOfOp(op, includeArg, insertIfEarlier, func);
+}
+
+bool tt::CoarseSchedule::insertDepsOfOp(
+    Operation *op, bool includeArg, bool insertIfEarlier,
+    llvm::function_ref<std::pair<int, tt::CoarseSchedule::Cluster>(Operation *)>
+        getStageAndClusterForOp) {
+  auto tryInsert = [&insertIfEarlier,
+                    this](Operation *op, int stage,
+                          tt::CoarseSchedule::Cluster cluster) {
     if (!insertIfEarlier)
       return insertIfAbsent(op, stage, cluster);
     return insertMinimum(op, stage, cluster);
@@ -78,9 +87,11 @@ bool tt::CoarseSchedule::insertDepsOfOp(Operation *op, int stage,
     }
     Operation *defOp = v.getDefiningOp();
     if (defOp && defOp->getBlock() == op->getBlock()) {
-      if (tryInsert(defOp, stage, cluster)) {
+      auto [defStage, defCluster] = getStageAndClusterForOp(defOp);
+      if (tryInsert(defOp, defStage, defCluster)) {
         inserted = true;
-        insertDepsOfOp(defOp, stage, cluster, includeArg, insertIfEarlier);
+        insertDepsOfOp(defOp, includeArg, insertIfEarlier,
+                       getStageAndClusterForOp);
       }
     }
   }
