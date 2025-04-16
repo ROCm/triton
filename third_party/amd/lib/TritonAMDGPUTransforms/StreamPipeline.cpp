@@ -403,6 +403,17 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
     scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
 
   loadOp->replaceAllUsesWith(ValueRange{sharedLoad});
+
+  // Make sure that a possible cvt is in the same stage or otherwise it will not
+  // get folded
+  if (sharedLoad->hasOneUse()) {
+    if (auto cvt =
+            dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
+      LDBG("Change cvt layout stage and cluster");
+      schedule.insert(cvt, localLoadStage, clusterVec[localLoadCluster]);
+    }
+  }
+
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] &&
       sharedLoad->hasOneUse()) {
     if (auto cvt =
