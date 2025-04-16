@@ -511,7 +511,8 @@ bool emitTransferBetweenRegistersAndShared(
 
   bool isStore = numElems < 64;
 
-  if (isStore) {
+  //if (isStore) {
+  if (true) {
     auto vec0Offset =
         getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
                          smemObj, sharedTy, elemLlvmTy, b.i32_val(0), laneId,
