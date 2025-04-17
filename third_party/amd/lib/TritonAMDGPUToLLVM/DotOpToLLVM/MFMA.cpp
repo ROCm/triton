@@ -270,8 +270,14 @@ struct DotOpMFMAConversionHelper {
     bool allowXF32 =
         op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
     StringRef intrinsicName;
+
+    auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+    auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
+    int kWidth = aEncoding.getKWidth();
+
+    unsigned kLimit = kWidth == 8 ? kDimOperandSize : 8;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
+        mfmaVersion, mDim, nDim, kLimit, elemTyA, elemTyB,
         /*withScale=*/false, allowXF32);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
@@ -279,9 +285,10 @@ struct DotOpMFMAConversionHelper {
     intrinsicName = maybeMfmaIntrinsic->name;
     unsigned kBase = maybeMfmaIntrinsic->kBase;
 
-    auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
-    auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
-    int kWidth = aEncoding.getKWidth();
+
+
+    llvm::outs() << "Selected " << intrinsicName << ", kWidth = " << kWidth << ", kBase = " << kBase << "\n";
+    llvm::outs() << "kDimOperandSize = " << kDimOperandSize << "\n";
 
     // If we are using XF32, the kWidth (and kBase) is double that of F32.
     if (aTensorTy.getElementType().isF32() && allowXF32)
@@ -370,6 +377,7 @@ struct DotOpMFMAConversionHelper {
     packAndReplaceResult(op, fc, maybeMfmaIntrinsic, dstElemTy, elemTyA,
                          mmaCount);
 
+    llvm::outs() << "convertDot succeed!!\n";
     return success();
   }
 
@@ -738,6 +746,10 @@ LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
   auto rankedTType = [](Value tensor) {
     return cast<RankedTensorType>(tensor.getType());
   };
+
+  llvm::outs() << "convertMFMA\n";
+  auto dotOpEnc = cast<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding());
+  llvm::outs() << "kWdith = " << dotOpEnc.getKWidth() << "\n";
 
   assert(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
          isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&

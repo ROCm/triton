@@ -460,6 +460,8 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
   assert(mfmaLayout.getMDim() == 16 || mfmaLayout.getNDim() == 32);
   assert(elemBitWidth == 16 || elemBitWidth == 8);
 
+  llvm::outs() << "-- chooseDotDsReadB64TrLayout\n";
+
   auto rank = shape.size();
   bool hasBatchDim = rank == 3;
   int32_t kWidthDot = dotMfmaLayout.getKWidth();
@@ -471,6 +473,7 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
   auto kDim = dotMfmaLayout.getOpIdx() == 0 ? rank - 1 : rank - 2;
 
   int32_t kSize = shape[kDim];
+  llvm::outs() << "kSize, kWidthTransRead = " << kSize << ", " << kWidthTransRead << "\n";
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
   MLIRContext *ctx = dotMfmaLayout.getContext();
@@ -532,6 +535,9 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
   const int threadsPerSubtileNonK = 16 / kWidthTransRead;
   const int threadsPerSubtileK = kWidthTransRead;
 
+  llvm::outs() << "threadsPerSubtileNonK = " << threadsPerSubtileNonK << "\n";
+  llvm::outs() << "threadsPerSubtileK = " << threadsPerSubtileK << "\n";
+
   // Populate lane base for first subtile
   for (int i = 1; i < threadsPerSubtileNonK; i *= 2) {
     laneBase.push_back({i * kWidthTransRead, 0});
@@ -541,8 +547,10 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
   }
 
   // Function to extend register base for multiple tiles K dim.
-  auto extendRegisterBaseForKDim = [&](int kTileSize) {
-    const int regsPerTile = kWidthTransRead * 2; // Two subtiles per tile
+  auto extendRegisterBaseForKDim = [&](int kTileSize, bool largeKSize) {
+    const int numSubtilesPerTile = largeKSize ? 2 : 1;
+    const int regsPerTile = kWidthTransRead * numSubtilesPerTile;
+    kTileSize *= numSubtilesPerTile;
     int totalRegs = (kSize / kTileSize) * regsPerTile;
 
     for (int reg = regsPerTile; reg < totalRegs; reg *= 2) {
@@ -553,13 +561,15 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
   const bool isMfma32 = (mfmaLayout.getMDim() == 32);
   const bool isMfma16 = (mfmaLayout.getMDim() == 16);
   const int kTileSize = isMfma32 ? 32 / elemByteWidth : 64 / elemByteWidth;
-  const bool largeKSize = kSize >= kTileSize;
+  //const bool largeKSize = kSize >= kTileSize;
+  llvm::outs() << "kTileSize = " << kTileSize << "\n";
+  const bool largeKSize = false;
 
   // Extend register base for large K sizes.
   if (largeKSize) {
     registerBase.push_back({0, threadsPerSubtileK}); // Second subtile
-    extendRegisterBaseForKDim(kTileSize);
   }
+  extendRegisterBaseForKDim(kTileSize/2, largeKSize);
 
   // Extend lane base based on MFMA size.
   const int numSubtilesPerTile = largeKSize ? 2 : 1;

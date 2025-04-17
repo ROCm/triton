@@ -120,7 +120,6 @@ public:
     Attribute dstLayout = dstTy.getEncoding();
 
     if (canUseTransLoad(op, srcTy, dstTy)) {
-      assert(checkPerformanceProperties(srcTy, dstTy));
       return lowerSharedToDotOperandTransLL(op, adaptor, getTypeConverter(),
                                             rewriter);
     }
@@ -150,51 +149,6 @@ private:
     int rank = dstTy.getRank();
     const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
     return kDim != sharedEnc.getOrder()[0];
-  }
-
-  bool checkPerformanceProperties(MemDescType srcTy,
-                                  RankedTensorType dstTy) const {
-    // Single rate MFMA insts:
-    // fp16, bf16: mfma32x32x8, mfma16x16x16
-    // fp8, bf8: mfma32x32x16, mfma16x16x32
-    // int8: mfma32x32x16, mfma16x16x32
-    //
-    // Double rate MFMA insts:
-    // fp16, bf16: mfma32x32x16, mfma16x16x32
-    // fp8, bf8: mfma32x32x64, mfma16x16x128
-    // i8: mfma32x32x32, mfma16x16x64
-    //
-    // Check that double-rate MFMA instructions are used whenever possible.
-    // Single rate instructions should only be used if the K block size is not
-    // large enough.
-    auto dotEnc = llvm::cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    auto mfmaEnc = llvm::cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
-
-    int rank = dstTy.getRank();
-    auto bitwidth = typeConverter->convertType(dstTy.getElementType())
-                        .getIntOrFloatBitWidth();
-    int32_t kWidth = dotEnc.getKWidth();
-    const int32_t mDim = mfmaEnc.getMDim();
-    assert((mDim == 32 || mDim == 16) && "Invalid MFMA instruction dimension");
-
-    const int kFactor = 16 / bitwidth;
-    const int kSizeSingleRateMfma32 = 8 * kFactor;
-    const int kSizeSingleRateMfma16 = 16 * kFactor;
-    int largeTileThreshold =
-        (mDim == 32) ? kSizeSingleRateMfma32 : kSizeSingleRateMfma16;
-
-    // For FP8, wider MFMA instructions (scaled MFMA) have a k-dimension
-    // that is four times of regular MFMA instructions.
-    if (dstTy.getElementType().isFloat() && bitwidth == 8) {
-      largeTileThreshold *= 2;
-    }
-
-    const auto shape = dstTy.getShape();
-    const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-
-    const bool isLargeTile = shape[kDim] > largeTileThreshold;
-    const int expectedKWidth = (isLargeTile ? 8 : 4) * kFactor;
-    return kWidth == expectedKWidth;
   }
 
   bool checkCurrentLimitation(Operation *localLoad,
