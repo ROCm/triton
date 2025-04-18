@@ -310,6 +310,7 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype_a, in_dtype_b, out_dtype):
                                    torch_output.to(torch.int8).to(torch.float32), atol=1e-3, rtol=1e-2)
     else:
         torch.testing.assert_close(c, torch_output.to(torch_out_dtype), atol=5e-3, rtol=1e-2)
+    print(f'Torch and Triton match ✅')
 
 
 def get_type(provider):
@@ -428,4 +429,5 @@ def main():
 
 
 if __name__ == '__main__':
+    test_correctness(8192, 16384, 53248, False, True, "fp16", "fp16", "fp16")
     sys.exit(main())
