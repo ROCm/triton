@@ -37,9 +37,9 @@ namespace gpu {
 LinearEncodingAttr TritonGPUDialect::toLinearEncoding(ArrayRef<int64_t> shape,
                                                       Attribute layout) {
   CacheKey key{std::vector<int64_t>(shape.begin(), shape.end()), layout};
-  if (auto result = leCache.get(key)) {
-    return *result;
-  }
+  //if (auto result = leCache.get(key)) {
+  //  return *result;
+  //}
   auto linearLayout = toLinearLayout(shape, layout);
   auto linearEncoding =
       LinearEncodingAttr::get(layout.getContext(), std::move(linearLayout));

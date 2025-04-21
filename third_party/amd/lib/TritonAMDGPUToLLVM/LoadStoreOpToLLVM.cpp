@@ -424,6 +424,7 @@ struct BufferLoadOpConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::BufferLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    //llvm::dbgs() << "BufferLoadOpConversion\n";
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
@@ -448,7 +449,10 @@ struct BufferLoadOpConversion
         typeConverter->convertType(getElementTypeOrSelf(valueTy));
     Type ptrType = getPointerTypeWithShape(ptr, offset);
     unsigned numElems = getTotalElemsPerThread(ptrType);
+    //llvm::dbgs() << "  numElems: " << numElems << "\n";
+
     unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
+    //llvm::dbgs() << "  vec: " << vec << "\n";
 
     // Get the offset
     SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
@@ -457,6 +461,7 @@ struct BufferLoadOpConversion
     // Get the mask
     SmallVector<Value> maskElems =
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
+    //llvm::dbgs() << "  vec: " << vec << "\n";
 
     // Get the `other` value (if any)
     SmallVector<Value> otherElems;

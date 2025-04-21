@@ -12,6 +12,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -903,8 +904,11 @@ BlockedEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
       identityStandardND(S("register"), getSizePerThread(), order) *
       identityStandardND(S("lane"), getThreadsPerWarp(), order) *
       identityStandardND(S("warp"), getWarpsPerCTA(), order);
+  //llvm::dbgs() << "ctaLayout: " << ctaLayout.toString() << "\n";
 
-  return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
+  auto withShape = combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
+  //llvm::dbgs() << "withShape: " << withShape.toString() << "\n";
+  return withShape;
 }
 
 LinearLayout fmaDotToLinearLayout(DotOperandEncodingAttr operandLayout,

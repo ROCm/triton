@@ -30,10 +30,28 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
+//#undef LLVM_DEBUG
+//#define LLVM_DEBUG(X) X
+
+#define PRINT_SMALL_VECTOR(X) \
+  { \
+    std::string dbgStr; \
+    llvm::raw_string_ostream dbgStream(dbgStr); \
+    dbgStream << #X << ": "; \
+    for (auto i = 0; i < X.size(); ++i) { \
+      dbgStream << X[i]; \
+      if (i < X.size()-1) { \
+        dbgStream << "x"; \
+      } \
+    } \
+    llvm::dbgs() << dbgStream.str() << "\n"; \
+  }
+
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+static int buffer_load_id = 0;
 
 using namespace mlir;
 namespace tt = mlir::triton;
@@ -521,6 +539,11 @@ struct RefinedBlock {
       refinedShape[dim] = shape[dim] / numPerDims[dim];
       numSubTiles *= numPerDims[dim];
     }
+    //PRINT_SMALL_VECTOR(shape)
+    //PRINT_SMALL_VECTOR(sizePerThread)
+    //PRINT_SMALL_VECTOR(elementsPerWorkGroup)
+    //PRINT_SMALL_VECTOR(numPerDims)
+    //PRINT_SMALL_VECTOR(refinedShape)
 
     tensorType =
         RankedTensorType::get(elementsPerWorkGroup, elemType, encoding);
@@ -584,6 +607,105 @@ LogicalResult rewriteLoadOp(OpBuilder &rewriter, triton::LoadOp loadOp) {
   auto concatDims = DenseI64ArrayAttr::get(ctx, refinedBlock.numPerDims);
   auto joinedResult = rewriter.create<triton::amdgpu::ConcatOp>(
       loc, origResultType, refinedTensors, concatDims);
+
+  origResult.replaceAllUsesWith(joinedResult);
+  return success();
+}
+
+LogicalResult rewriteAMDGCNBufferLoadOp(OpBuilder &rewriter,
+                                        triton::amdgpu::BufferLoadOp loadOp) {
+  auto ctx = loadOp->getContext();
+  auto loc = loadOp.getLoc();
+
+  auto origBasePtr = loadOp.getPtr();
+  auto origElementType =
+      cast<PointerType>(origBasePtr.getType()).getPointeeType();
+  auto origOffsets = loadOp.getOffsets();
+  auto origEncoding =
+      cast<RankedTensorType>(origOffsets.getType()).getEncoding();
+  if (!origEncoding)
+    return failure();
+
+  auto origStride = loadOp.getStride();
+  auto origCache = loadOp.getCache();
+  auto origMask = loadOp.getMask();
+  auto origOtherTensor = loadOp.getOther();
+  //llvm::dbgs() << "\n";
+  rewriter.setInsertionPointAfter(loadOp);
+
+  auto refineTensor = [&](mlir::Value tensor) {
+    auto tensorType = cast<RankedTensorType>(tensor.getType());
+    auto origShape = tensorType.getShape();
+    auto elemType = tensorType.getElementType();
+    auto encoding = dyn_cast<BlockedEncodingAttr>(tensorType.getEncoding());
+    assert(encoding != nullptr);
+
+    RefinedBlock refinedBlock(origShape, elemType, encoding);
+
+    AMD::CoordinateMapper coordsMapper(refinedBlock.numPerDims);
+    SmallVector<Value> slices;
+    for (size_t linearIdx = 0; linearIdx < refinedBlock.numSubTiles;
+         ++linearIdx) {
+      auto coords = coordsMapper.map(linearIdx);
+      SmallVector<int64_t> offset(refinedBlock.numDims, 0);
+      for (auto [dim, coord] : llvm::enumerate(coords)) {
+        offset[dim] = coord * refinedBlock.elementsPerWorkGroup[dim];
+      }
+
+      auto slice = rewriter.create<triton::amdgpu::ExtractSliceOp>(
+          loc, Type{refinedBlock.tensorType}, Value{tensor}, offset);
+
+      slices.push_back(slice);
+    }
+    
+    return std::tuple(slices, refinedBlock.refinedShape,
+                      refinedBlock.numPerDims, encoding.getSizePerThread());
+  };
+
+  auto [slicedOffsets, refinedShape, numPerDims, sizePerThread] = refineTensor(origOffsets);
+
+  //PRINT_SMALL_VECTOR(refinedShape)
+  //PRINT_SMALL_VECTOR(numPerDims)
+  //PRINT_SMALL_VECTOR(sizePerThread)
+
+  std::optional<SmallVector<Value>> slicedMasks;
+  if (origMask) {
+    //llvm::dbgs() << "origMask\n";
+    auto [maskOffsets, maskShape, maskNumPerDims, maskSizePerThread] = refineTensor(origMask);
+    slicedMasks = std::get<0>(refineTensor(origMask));
+    assert(slicedMasks.value().size() == slicedOffsets.size());
+    //PRINT_SMALL_VECTOR(maskShape)
+    //PRINT_SMALL_VECTOR(maskNumPerDims)
+  }
+
+  std::optional<SmallVector<Value>> slicedOtherTensors;
+  if (origOtherTensor) {
+    //llvm::dbgs() << "origOtherTensor\n";
+    slicedOtherTensors = std::get<0>(refineTensor(origOtherTensor));
+    assert(slicedOtherTensors.value().size() == slicedOffsets.size());
+    //PRINT_SMALL_VECTOR(slicedOtherTensors.value())
+  }
+
+  Type refinedTensorType =
+      RankedTensorType::get(refinedShape, origElementType, origEncoding);
+
+  SmallVector<Value> refinedOps;
+  for (size_t i = 0; i < slicedOffsets.size(); ++i) {
+    Value slicedOffset = slicedOffsets[i];
+    Value slicedMask = slicedMasks ? slicedMasks.value()[i] : nullptr;
+    Value slicedOtherTensor =
+        slicedOtherTensors ? slicedOtherTensors.value()[i] : nullptr;
+
+    auto refinedOp = rewriter.create<triton::amdgpu::BufferLoadOp>(
+        loc, refinedTensorType, origBasePtr, slicedOffset, origStride,
+        origCache, slicedMask, slicedOtherTensor);
+    refinedOps.push_back(refinedOp);
+  }
+
+  auto concatDims = DenseI64ArrayAttr::get(ctx, numPerDims);
+  Value origResult = loadOp.getResult();
+  auto joinedResult = rewriter.create<triton::amdgpu::ConcatOp>(
+      loc, origResult.getType(), refinedOps, concatDims);
 
   origResult.replaceAllUsesWith(joinedResult);
   return success();
@@ -1049,7 +1171,7 @@ LogicalResult rewriteBroadcastOp(OpBuilder &rewriter, BroadcastOp op) {
 
 // Refine Element-Wise Ops.
 #define REFINE_ELEMENTWISE_OP(OP_TYPE)                                         \
-  block->walk([&](OP_TYPE op) {                                                \
+  WALKEE->walk([&](OP_TYPE op) {                                                \
     OpBuilder rewriter(op->getContext());                                      \
     if (failed(rewriteElementWiseOp<OP_TYPE>(rewriter, op))) {                 \
       LDBG("failed to refine binary op: " << *op);                             \
@@ -1078,7 +1200,9 @@ struct TritonAMDGPURefineOps
 
       auto *block = hint->getBlock();
 
-      block->walk([&](triton::gpu::LocalLoadOp localLoadOp) {
+  #define WALKEE block
+
+      WALKEE->walk([&](triton::gpu::LocalLoadOp localLoadOp) {
         OpBuilder rewriter(localLoadOp->getContext());
         if (localLoadOp->getNumOperands() == 1) {
           if (failed(rewriteLocalLoad(rewriter, localLoadOp))) {
@@ -1087,7 +1211,7 @@ struct TritonAMDGPURefineOps
         }
       });
 
-      block->walk([&](triton::DotOp dotOp) {
+      WALKEE->walk([&](triton::DotOp dotOp) {
         OpBuilder rewriter(dotOp->getContext());
         // TODO: extend to WMMA instructions
         if (failed(rewriteMFMA(rewriter, dotOp))) {
@@ -1095,7 +1219,7 @@ struct TritonAMDGPURefineOps
         }
       });
 
-      block->walk([&](triton::LoadOp loadOp) {
+      WALKEE->walk([&](triton::LoadOp loadOp) {
         OpBuilder rewriter(loadOp->getContext());
         if (loadOp->getNumOperands() == 1) {
           if (failed(rewriteLoadOp(rewriter, loadOp))) {
@@ -1103,17 +1227,24 @@ struct TritonAMDGPURefineOps
           }
         }
       });
-
-      block->walk([&](triton::gpu::LocalStoreOp storeOp) {
+#if 1
+      WALKEE->walk([&](triton::amdgpu::BufferLoadOp loadOp) {
+        OpBuilder rewriter(loadOp->getContext());
+        if (failed(rewriteAMDGCNBufferLoadOp(rewriter, loadOp))) {
+          LDBG("failed to refine amdgpu.buffer_load: " << *loadOp);
+        }
+      });
+#endif
+      WALKEE->walk([&](triton::gpu::LocalStoreOp storeOp) {
         OpBuilder rewriter(storeOp->getContext());
         if (storeOp->getNumOperands() == 2) {
           if (failed(rewriteLocalStoreOp(rewriter, storeOp))) {
-            LDBG("failed to refine ttg.localLoadOp: " << *storeOp);
+            LDBG("failed to refine ttg.localStoreOp: " << *storeOp);
           }
         }
       });
 
-      block->walk([&](triton::ReduceOp reduceOp) {
+      WALKEE->walk([&](triton::ReduceOp reduceOp) {
         OpBuilder rewriter(reduceOp->getContext());
         if (failed(rewriteReduceOp(rewriter, reduceOp))) {
           LDBG("failed to refine tt.reduce: " << *reduceOp);
@@ -1160,7 +1291,7 @@ struct TritonAMDGPURefineOps
       REFINE_ELEMENTWISE_OP(triton::gpu::ConvertLayoutOp)
 
       // Refine ExpandDimsOp: 128 -> 128x1
-      block->walk([&](triton::ExpandDimsOp op) {
+      WALKEE->walk([&](triton::ExpandDimsOp op) {
         OpBuilder rewriter(op->getContext());
         if (failed(rewriteExpandDimsOp(rewriter, op))) {
           LDBG("failed to refine tt.expand_dims: " << *op);

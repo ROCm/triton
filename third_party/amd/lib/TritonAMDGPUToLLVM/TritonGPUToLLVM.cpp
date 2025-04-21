@@ -22,7 +22,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
-
+#include "include/triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "third_party/proton/dialect/include/TritonProtonToLLVM/PatternTritonProtonOpToLLVM.h"
 
 namespace mlir::triton {
@@ -212,6 +212,17 @@ struct ConvertTritonAMDGPUToLLVM
         typeConverter, patterns, targetInfo, commonBenefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
+
+    MLIRContext *ctx = mod->getContext();
+    mod->walk([&](LLVM::LLVMFuncOp funcOp) {
+      llvm::SmallVector<StringAttr> targetFeatures;
+      if (auto attr = funcOp.getTargetFeatures()) {
+        llvm::copy(attr->getFeatures(), std::back_inserter(targetFeatures));
+      }
+      targetFeatures.push_back(str_attr("-packed-fp32-ops"));
+      funcOp.setTargetFeaturesAttr(
+          ::mlir::LLVM::TargetFeaturesAttr::get(ctx, targetFeatures));
+    });
 
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns)))) {
       return signalPassFailure();

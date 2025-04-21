@@ -7,6 +7,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
+//#undef LLVM_DEBUG
+//#define LLVM_DEBUG(X) X
 #define DEBUG_TYPE "axis-info"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -1249,6 +1251,8 @@ unsigned ModuleAxisInfoAnalysis::getContiguity(Value value) {
 
 unsigned ModuleAxisInfoAnalysis::getContiguity(Value offsetsValue,
                                                unsigned elementBitWidth) {
+  //llvm::dbgs() << "  ModuleAxisInfoAnalysis::getContiguity()\n";
+
   // FIXME: This is not as good as it could be, as we don't need to restrict
   // the analysis to one dimension. We should determine contiguity on the
   // flattenOuts() layout
@@ -1263,6 +1267,8 @@ unsigned ModuleAxisInfoAnalysis::getContiguity(Value offsetsValue,
          "Unexpected uniqueContigPerThread size");
   unsigned contiguity = uniqueContigPerThread[order[0]];
   LDBG("getContiguity uniqueContigPerThread = " << contiguity);
+  //llvm::dbgs() << "    align: " << align << "\n";
+  //llvm::dbgs() << "    contiguity: " << contiguity << "\n";
   contiguity = std::min(align, contiguity);
 
   return contiguity;
@@ -1283,6 +1289,8 @@ unsigned ModuleAxisInfoAnalysis::getAlignment(Value value) {
 
 unsigned ModuleAxisInfoAnalysis::getAlignment(Value offsetsValue,
                                               unsigned elementBitWidth) {
+  // TODO(dtanner)
+  return 64;
   auto tensorTy = cast<RankedTensorType>(offsetsValue.getType());
   auto *axisInfo = getAxisInfo(offsetsValue);
   if (!axisInfo)
@@ -1310,6 +1318,7 @@ unsigned ModuleAxisInfoAnalysis::getAlignment(Value offsetsValue,
 }
 
 unsigned ModuleAxisInfoAnalysis::getMaskAlignment(Value mask) {
+  return 64;
   auto tensorTy = dyn_cast<RankedTensorType>(mask.getType());
   if (!tensorTy)
     return 1;

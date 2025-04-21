@@ -257,6 +257,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         if options.schedule_hint.lower() != "none":
             amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
+
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
@@ -300,9 +301,41 @@ class HIPBackend(BaseBackend):
 
         passes.ttgpuir.add_allocate_shared_memory(pm)
         amd.passes.ttgpuir.add_membar_analysis(pm)
+
+        pm.run(mod)
+        if "TRITON_MLIR_DUMP_SCHED_HINT_OPS" in os.environ.keys():
+            mod.dump()
+        if "TRITON_MLIR_INSERT_SCHED_HINT_OPS" in os.environ.keys():
+            insert_module_path = str(os.environ["TRITON_MLIR_INSERT_SCHED_HINT_OPS"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'Cannot find `{insert_module_path}`')
+            new_mod = ir.parse_mlir_module(insert_module_path, mod.context)
+            new_mod.context = mod.context
+            mod = new_mod
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.common.add_canonicalizer(pm)
+
+        # TODO
         amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch)
         passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
+
+        pm.run(mod)
+        if "TRITON_MLIR_DUMP_REFINE_OPS" in os.environ.keys():
+            mod.dump()
+        if "TRITON_MLIR_INSERT_REFINE_OPS" in os.environ.keys():
+            insert_module_path = str(os.environ["TRITON_MLIR_INSERT_REFINE_OPS"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'Cannot find `{insert_module_path}`')
+            new_mod = ir.parse_mlir_module(insert_module_path, mod.context)
+            new_mod.context = mod.context
+            mod = new_mod
+
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.common.add_canonicalizer(pm)
+        # TODO
+        #amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
         ## __HIP_FTZ is used to control the denorm flushing behavior of exp2 op as follows:
         ## 1. If __HIP_FTZ = 1, exp2 flushes denorms in input and output regardless
         ##    of the value of kernel arg `allow_flush_denorm`.
@@ -407,8 +440,8 @@ class HIPBackend(BaseBackend):
         # into loops to avoid register spills in the MachineSinking pass, while it
         # can also lead to regression in some cases. But from current observation,
         # the regression is not significant. It would be better to have some heuristics.
-        if options.schedule_hint == 'attention':
-            flags.append('sink-insts-to-avoid-spills')
+        #if options.schedule_hint == 'attention':
+        flags.append('sink-insts-to-avoid-spills')
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")

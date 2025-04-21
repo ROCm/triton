@@ -517,6 +517,7 @@ unsigned getContiguity(Value ptr, ModuleAxisInfoAnalysis &axisAnalysisPass) {
 
 unsigned getContiguity(Value ptr, Value offset,
                        ModuleAxisInfoAnalysis &axisAnalysisPass) {
+  //llvm::dbgs() << "getContiguity()\n";
 
   Type type = getPointerTypeWithShape(ptr, offset);
   RankedTensorType tensorTy = cast<RankedTensorType>(type);
@@ -524,13 +525,21 @@ unsigned getContiguity(Value ptr, Value offset,
   // To compute the contiguity of the scalar/warp-uniform ptr and offset pair we
   // need to look at the contiguity of the offsets and the alignment of the ptr
   auto elemNumBits = triton::getPointeeBitWidth(tensorTy);
+  //llvm::dbgs() << "  elemNumBits: " << elemNumBits << "\n";
   auto contiguity = axisAnalysisPass.getContiguity(offset, elemNumBits);
+  //llvm::dbgs() << "  contiguity: " << contiguity << "\n";
 
   // To get the alignment of the scalar ptr we need to look at the divisibility
   auto *axisInfo = axisAnalysisPass.getAxisInfo(ptr);
   auto maxMultipleBytes = axisInfo->getDivisibility(0);
+  //llvm::dbgs() << "  maxMultipleBytes: " << maxMultipleBytes << "\n";
+
   auto elemNumBytes = std::max<unsigned>(elemNumBits / 8, 1);
+  //llvm::dbgs() << "  elemNumBytes: " << elemNumBytes << "\n";
+
   auto align = std::max<unsigned>(maxMultipleBytes / elemNumBytes, 1);
+  //llvm::dbgs() << "  align: " << align << "\n";
+
 
   // FIXME (Alex): this should not be needed anymore because it's done inside
   // getContiguity, but we have an order issues with LL, so we keep this
@@ -541,8 +550,11 @@ unsigned getContiguity(Value ptr, Value offset,
       triton::gpu::LinearEncodingAttr::get(tensorTy.getContext(), linearLayout);
   auto order = triton::gpu::getOrder(tensorTy);
   auto contigPerThread = llAttr.getContigPerThread();
+
   assert(order[0] < contigPerThread.size() &&
          "Unexpected contigPerThread size");
+  //llvm::dbgs() << "  contigPerThread[order[0]]: " << contigPerThread[order[0]] << "\n";
+
   contiguity = std::min(contiguity, contigPerThread[order[0]]);
 
   // Final contiguity is a min of the offset contiguity and pointer alignment
