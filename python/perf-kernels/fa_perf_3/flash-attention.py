@@ -274,21 +274,23 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
+        mask = tl.full([BLOCK_M, BLOCK_N], True, dtype=tl.int1)
         if MASK_STEPS:
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not is_modulo_mn.
             # last step might get wasted but that is okay. check if this masking works For
             # that case.
-            if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
-                boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
-                size_n = start_n + OFFS_N[None, :]
-                mask = size_n < boundary_m[:, None]
-                qk = tl.where(mask, qk, float("-inf"))
+            bound_cond = (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0)
+            boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
+            size_n = start_n + OFFS_N[None, :]
+            mask_partial = size_n < boundary_m[:, None]
+            mask = tl.where(bound_cond, mask_partial, mask)
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
-            causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            causal_mask = (OFFS_M[:, None] >= causal_boundary[None, :])
+            mask = mask and causal_mask
+        qk = tl.where(mask, qk, float("-inf"))
         # -- compute qk ----
         if INT8_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) * QK_SCALE)
@@ -734,7 +736,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                 block_max = n_blocks * BLOCK_N
                 # Compute for full blocks. Here we set causal to false regardless of its actual
                 # value because there is no masking. Similarly we do not need padding.
-                if n_full_blocks > 0:
+                #if n_full_blocks > 0:
+                if True:
                     block_max = (n_blocks - masked_blocks) * BLOCK_N
                     tl.assume(block_max > block_min+BLOCK_N)
                     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk,
