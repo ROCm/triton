@@ -238,11 +238,11 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     }
   }
 
-  // Emits the computation to get the lane index which holds the source
+  // Emits the computation to get the lane id offset which holds the source
   // pointers/offsets we need to store to shared memory
-  Value emitSwizzledLaneIndex(RewriterBase &rewriter, TritonLLVMOpBuilder &b,
-                              Location loc, Value coalescedShmem,
-                              Value swizzledShmem, Value vecBytes) const {
+  Value emitSwizzledLaneOffset(RewriterBase &rewriter, TritonLLVMOpBuilder &b,
+                               Location loc, Value coalescedShmem,
+                               Value swizzledShmem, Value vecBytes) const {
     // Compute the laneOffset based on the difference in elements between
     // the two shmem addresses. laneOffset will be negative for half the
     // lanes because a smaller laneId might hold our global_ptr.
@@ -250,9 +250,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     auto swizzledAddr = b.ptrtoint(i64_ty, swizzledShmem);
     auto diff = b.trunc(i32_ty, b.sub(swizzledAddr, coalescedAddr));
     Value laneOffset = b.sdiv(diff, vecBytes);
-    // laneId + laneOffset will always stay inside the warp [0,
-    // threadsPerWarp) because we only swizzle inside a warp
-    return b.add(getLaneId(rewriter, loc), laneOffset);
+    return laneOffset;
   }
 
   // Swizzle the mask (1bit) based on selectLane via ballot
@@ -541,11 +539,21 @@ struct BufferLoadToLocalOpConversion
 
       if (hasSwizzling) {
         // Apply swizzling to the src offsets
-        Value swizzledLaneId =
-            emitSwizzledLaneIndex(rewriter, b, loc, coalescedShmemAddr[i],
-                                  swizzledShmemAddr[i], vecBytesVal);
-        offsetIn =
-            targetInfo.shuffleIdx(rewriter, loc, offsetIn, swizzledLaneId);
+        Value laneOffset =
+            emitSwizzledLaneOffset(rewriter, b, loc, coalescedShmemAddr[i],
+                                   swizzledShmemAddr[i], vecBytesVal);
+        // laneId + laneOffset will always stay inside the warp [0,
+        // threadsPerWarp) because we only swizzle inside a warp
+        Value swizzledLaneId = b.add(getLaneId(rewriter, loc), laneOffset);
+
+        if (tools::getBoolEnv("TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE")) {
+          offsetIn = b.add(
+              offsetIn, b.mul(laneOffset, b.i32_val(vecTy.getNumElements())));
+        } else {
+          offsetIn =
+              targetInfo.shuffleIdx(rewriter, loc, offsetIn, swizzledLaneId);
+        }
+
         if (mask) {
           pred =
               shuffleMask(rewriter, b, loc, targetInfo, swizzledLaneId, pred);
@@ -666,9 +674,12 @@ struct AsyncCopyGlobalToLocalOpConversion
 
       if (hasSwizzling) {
         // Apply swizzling to the src pointers
-        Value swizzledLaneId =
-            emitSwizzledLaneIndex(rewriter, b, loc, coalescedShmemAddr[i],
-                                  swizzledShmemAddr[i], vecBytesVal);
+        Value laneOffset =
+            emitSwizzledLaneOffset(rewriter, b, loc, coalescedShmemAddr[i],
+                                   swizzledShmemAddr[i], vecBytesVal);
+        // laneId + laneOffset will always stay inside the warp [0,
+        // threadsPerWarp) because we only swizzle inside a warp
+        Value swizzledLaneId = b.add(getLaneId(rewriter, loc), laneOffset);
         srcPtr = targetInfo.shuffleIdx(rewriter, loc, srcPtr, swizzledLaneId);
         if (!maskElements.empty()) {
           pred =
