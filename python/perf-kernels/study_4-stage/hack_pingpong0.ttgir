@@ -24,6 +24,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     %cst_1 = arith.constant dense<0.000000e+00> : tensor<256x128xf32, #mma> loc(#loc1)
     %cst_2 = arith.constant dense<1.000000e+00> : tensor<256x1xf32, #mma> loc(#loc1)
     %cst_3 = arith.constant dense<1.000000e+00> : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc1)
+    %cst_minus_1 = arith.constant dense<-1.000000e+00> : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc1)
     %cst_4 = arith.constant dense<0xFF800000> : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc1)
     %c16640_i32 = arith.constant 16640 : i32 loc(#loc1)
     %c786432_i32 = arith.constant 786432 : i32 loc(#loc1)
@@ -297,16 +298,18 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 
         // SM1[1]
         %212 = arith.mulf %193, %cst_0 : tensor<256x64xf32, #mma> loc(#loc125)
-        %213 = arith.addf %212, %cst : tensor<256x64xf32, #mma> loc(#loc126)
-        %214 = "tt.reduce"(%213) <{axis = 1 : i32}> ({
+        //%213 = arith.addf %212, %cst : tensor<256x64xf32, #mma> loc(#loc126)
+        %214 = "tt.reduce"(%212) <{axis = 1 : i32}> ({
         ^bb0(%arg44: f32 loc(callsite(#loc1 at #loc127)), %arg45: f32 loc(callsite(#loc1 at #loc127))):
           %228 = arith.maxnumf %arg44, %arg45 : f32 loc(#loc148)
           tt.reduce.return %228 : f32 loc(#loc144)
         }) : (tensor<256x64xf32, #mma>) -> tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc144)
         %215 = arith.maxnumf %arg30, %214 : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc128)
-        %216 = tt.expand_dims %215 {axis = 1 : i32} : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> -> tensor<256x1xf32, #mma> loc(#loc129)
+        //%233 = arith.negf %215 : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>>
+        %233 = arith.mulf %215, %cst_minus_1 : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>>
+        %216 = tt.expand_dims %233 {axis = 1 : i32} : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> -> tensor<256x1xf32, #mma> loc(#loc129)
         %217 = tt.broadcast %216 : tensor<256x1xf32, #mma> -> tensor<256x64xf32, #mma> loc(#loc130)
-        %218 = arith.subf %213, %217 : tensor<256x64xf32, #mma> loc(#loc130)
+        %218 = arith.addf %212, %217 : tensor<256x64xf32, #mma> loc(#loc130)
         // yielded
         %219 = math.exp2 %218 : tensor<256x64xf32, #mma> loc(#loc131)
         %220 = arith.subf %arg30, %215 : tensor<256xf32, #ttg.slice<{dim = 1, parent = #mma}>> loc(#loc132)
