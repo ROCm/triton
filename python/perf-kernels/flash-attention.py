@@ -281,7 +281,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             mask = tl.where(bound_cond, mask_partial, mask)
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
-            causal_mask = (OFFS_M[:, None] >= causal_boundary[None, :])
+            causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
             mask = mask and causal_mask
         qk = tl.where(mask, qk, float("-inf"))
         # -- compute qk ----
