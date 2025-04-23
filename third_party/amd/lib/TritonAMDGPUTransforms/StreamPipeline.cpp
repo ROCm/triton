@@ -1153,11 +1153,11 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
       (void)sp.pipelineLoop();
     }
 
-    if (useAsyncCopy) {
-      llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
-      moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
-      tt::combineRedundantWaitOps(waitOps);
-    }
+    // if (useAsyncCopy) {
+    // llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
+    // moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
+    // tt::combineRedundantWaitOps(waitOps);
+    // }
   }
 };
 } // namespace
