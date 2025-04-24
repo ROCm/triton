@@ -180,11 +180,11 @@ private:
   int stages[SCHED_SIZE];
   // (not used anymore) Cluster for each SchedType Op
   std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusters;
-  // Clusters to hold ops defined by the design document 0-3 (will be mapped to
-  // clusters 0,2,3,5)
-  std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> mainClusters;
-  // Clusters to hold the two async waits (will be mapped to clusters 1,4)
-  std::array<tt::CoarseSchedule::Cluster, 2> waitClusters;
+
+  // Clusters to hold the different Ops for the 4-stage pipeliner
+  std::array<tt::CoarseSchedule::Cluster, 2> localReadClusters;
+  std::array<tt::CoarseSchedule::Cluster, 2> softmaxClusters;
+  std::array<tt::CoarseSchedule::Cluster, 2> asyncCopyClusters;
   std::array<tt::CoarseSchedule::Cluster, 2> dotClusters;
 
   // Scheduling clusters
@@ -296,36 +296,33 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   // std::generate(clusterVec.begin(), clusterVec.end(),
   //               [&]() { return schedule.clusters.newAtBack(); });
 
-  // Create clusters, we have 6 because we have 2 extra for wait ops to be
-  // placed before the memory blocks
+  // Create clusters in order of 4-stage pipeliner. You can swap lines below to
+  // change the schedule of the loop. Not all combination are valid, e.g. if a
+  // consumer and producer from the same stage are in the wrong cluster order
+  // the loop expander will silently fail
 
   // DOT1
   dotClusters[0] = schedule.clusters.newAtBack();
   // SM2,
-  mainClusters[0] = schedule.clusters.newAtBack();
+  softmaxClusters[0] = schedule.clusters.newAtBack();
   // Wait for V, LRV
-  waitClusters[0] = schedule.clusters.newAtBack();
+  localReadClusters[0] = schedule.clusters.newAtBack();
   // ACK
-  mainClusters[1] = schedule.clusters.newAtBack();
+  asyncCopyClusters[0] = schedule.clusters.newAtBack();
   // DOT2
   dotClusters[1] = schedule.clusters.newAtBack();
   // SM1
-  mainClusters[2] = schedule.clusters.newAtBack();
+  softmaxClusters[1] = schedule.clusters.newAtBack();
   // Wait for K, LRK
-  waitClusters[1] = schedule.clusters.newAtBack();
+  localReadClusters[1] = schedule.clusters.newAtBack();
   // ACV
-  mainClusters[3] = schedule.clusters.newAtBack();
+  asyncCopyClusters[1] = schedule.clusters.newAtBack();
 
-  clusters[SCHED_GLOBAL_LOAD] = mainClusters[globalLoadCluster];
-  clusters[SCHED_LOCAL_STORE] = mainClusters[localStoreCluster];
-  clusters[SCHED_LOCAL_LOAD] = mainClusters[localLoadCluster];
-  clusters[SCHED_COMPUTE] = mainClusters[computeCluster];
-
-  // ATTENTION 4-stage
-  clusters[SCHED_GLOBAL_LOAD] = mainClusters[2];
-  clusters[SCHED_LOCAL_STORE] = mainClusters[1];
-  clusters[SCHED_LOCAL_LOAD] = mainClusters[1];
-  clusters[SCHED_COMPUTE] = mainClusters[0];
+  // ATTENTION 4-stage (not used)
+  clusters[SCHED_GLOBAL_LOAD] = softmaxClusters[1];
+  clusters[SCHED_LOCAL_STORE] = asyncCopyClusters[0];
+  clusters[SCHED_LOCAL_LOAD] = asyncCopyClusters[0];
+  clusters[SCHED_COMPUTE] = dotClusters[0];
 
   // Always have ASYNC_WAIT as the first cluster because we want it at the top
   // of the schedule block
@@ -417,8 +414,9 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   // will write into. This is done by scheduling AsyncWait as the first
   // cluster. If AsyncCopy and LocalLoads are in the same stage we do not
   // assign a schdule so they are placed before the LocalLoads
-  schedule.insert(sharedLoad, localLoadStage, waitClusters[localLoadCluster]);
-  schedule.insert(waitOp, localLoadStage, waitClusters[waitCluster]);
+  schedule.insert(sharedLoad, localLoadStage,
+                  localReadClusters[localLoadCluster]);
+  schedule.insert(waitOp, localLoadStage, localReadClusters[localLoadCluster]);
 
   // if (loadStage != stages[SCHED_LOCAL_LOAD])
   //   scheduleOp(waitOp, SCHED_ASYNC_WAIT);
@@ -434,7 +432,7 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
     if (auto cvt =
             dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
       LDBG("Change cvt layout stage and cluster");
-      schedule.insert(cvt, localLoadStage, waitClusters[localLoadCluster]);
+      schedule.insert(cvt, localLoadStage, localReadClusters[localLoadCluster]);
     }
   }
 
@@ -772,8 +770,7 @@ LogicalResult StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
     int stage = (maxIndirectionLevel - indLevel) * stagesBetweenLoads;
     if (schedule.count(loadOp) > 0)
       continue;
-    // scheduleOp(loadOp, SCHED_GLOBAL_LOAD, stage);
-    schedule.insert(loadOp, i, mainClusters[i == 0 ? 1 : 3]);
+    schedule.insert(loadOp, i, asyncCopyClusters[i == 0 ? 0 : 1]);
     i++;
   }
 
@@ -816,24 +813,16 @@ void StreamPipeliner::scheduleDependencies() {
       if (stage_ != stage)
         continue;
       auto depCluster = cluster;
-      LDBG("Stage: " << stage);
       bool override = false;
       if (llvm::isa<triton::DotOpInterface>(op) && stage == 3) {
-        LDBG("Update sched to 0");
-        depCluster = mainClusters[0];
+        depCluster = softmaxClusters[0];
         override = true;
       }
 
       auto moveStages = [this, stage, cluster = cluster,
                          depCluster = depCluster, override](Operation *op) {
-        LDBG("Schedule Op: " << *op);
         if (llvm::isa<ttg::ConvertLayoutOp>(op)) {
-          LDBG("Is a cvt layout\n");
           return std::make_pair(stage, cluster);
-        }
-        if (override) {
-          LDBG("Override to 0!");
-          // return std::make_pair(stage, clusterVec[0]);
         }
         return std::make_pair(stage, depCluster);
       };
@@ -1019,12 +1008,12 @@ LogicalResult StreamPipeliner::preprocessLoopAndBuildSchedule() {
   // Schedule reductions
   int c = 2;
   for (auto reduceOp : forOp.getBody()->getOps<tt::ReduceOp>()) {
-    schedule.insert(reduceOp, c, mainClusters[c == 2 ? 2 : 0]);
+    schedule.insert(reduceOp, c, softmaxClusters[c == 2 ? 1 : 0]);
     c++;
   }
 
   for (auto exp2Op : forOp.getBody()->getOps<mlir::math::Exp2Op>()) {
-    schedule.insert(exp2Op, 2, mainClusters[2]);
+    schedule.insert(exp2Op, 2, softmaxClusters[1]);
   }
   LLVM_DEBUG({
     LDBG("Coarse schedule after schedule reduction:");
