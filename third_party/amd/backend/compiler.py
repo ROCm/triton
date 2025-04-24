@@ -440,8 +440,8 @@ class HIPBackend(BaseBackend):
         # into loops to avoid register spills in the MachineSinking pass, while it
         # can also lead to regression in some cases. But from current observation,
         # the regression is not significant. It would be better to have some heuristics.
-        #if options.schedule_hint == 'attention':
-        flags.append('sink-insts-to-avoid-spills')
+        if options.schedule_hint == 'attention':
+            flags.append('sink-insts-to-avoid-spills')
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")
