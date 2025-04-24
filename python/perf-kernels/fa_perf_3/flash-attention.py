@@ -2030,7 +2030,8 @@ def run_benchmark(custom, args):
             extra_args = {'dtype': dtype, 'causal': causal, 'mode': mode}
 
     print_time = args.return_time
-    line_vals = ['triton', 'torch']  # 'Time (ms)' if print_time else 'TFLOPS'
+    #line_vals = ['triton', 'torch']  # 'Time (ms)' if print_time else 'TFLOPS'
+    line_vals = ['triton']  # 'Time (ms)' if print_time else 'TFLOPS'
     configs.append(
         triton.testing.Benchmark(x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_vals,
                                  line_names=line_vals, styles=[('green', '-'), ('red', '-')],
@@ -2043,6 +2044,7 @@ def run_benchmark(custom, args):
         assert not (int8_kv and quantize_p)
         warmup = 25
         rep = 100
+        print(warmup, rep)
         # TODO: Enable bias after testing.
         # if use_bias:
         #     bias = torch.randn((1, H, N_CTX, N_CTX), dtype=torch.float32, device="cuda")
