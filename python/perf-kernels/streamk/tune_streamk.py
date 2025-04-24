@@ -60,10 +60,10 @@ def get_full_tuning_space():
     num_stage_range = [2]
     waves_per_eu_range = [0]
     matrix_instr_nonkdim_range = [16, 32]
-    kpack_range = [1, 2]
+    kpack_range = [1]
     # gfx942: 304, 80, 64 
     # gfx950: 256
-    num_sms_range = [304]
+    num_sms_range = [256]
 
     space = itertools.product(block_mn_range, block_mn_range, block_k_range, num_warps_range, group_m_range,
                               num_sms_range, num_stage_range, waves_per_eu_range, matrix_instr_nonkdim_range,
@@ -725,7 +725,7 @@ def main():
         sizeDict.update(bestConfig)
         sizeDict.update({'TFLOPS': formatted_tflops, 'time(us)': minTime})
         if not run_bench:
-            f_results.write("- " + str(sizeDict) + " ")
+            f_results.write("- " + str(sizeDict) + "  \n")
 
         # remove generated files if asked to
         if not keepTmp:
