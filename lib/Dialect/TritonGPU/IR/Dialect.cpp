@@ -1797,6 +1797,15 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   int innerDimLength = operandShape[sharedOrder[0]];
   int elemsPerOneBanksRow = (numBanks * bankBitWidth) / elemBitWidth;
 
+  // If we load via AsyncCopy we have to write coalesced into LDS so if
+  // vectorSize * elemBitWidth < 128 we can only load 32 bit direct-to-lds loads
+  // (64bit is not suppoted by the HW). So we extend vectorSize to get 128bit to
+  // get wider loads and accept some bank conflicts durcing ds_reads
+  // TODO (alex): Make this more generic for async copy
+  if (vectorSize == 4 && elemBitWidth == 16) {
+    vectorSize = 8;
+  }
+
   int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
   int maxPhase =
       std::max(std::min(simdWidth / perPhase, innerDimLength / vectorSize), 1u);
