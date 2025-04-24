@@ -185,6 +185,7 @@ private:
   std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> mainClusters;
   // Clusters to hold the two async waits (will be mapped to clusters 1,4)
   std::array<tt::CoarseSchedule::Cluster, 2> waitClusters;
+  std::array<tt::CoarseSchedule::Cluster, 2> dotClusters;
 
   // Scheduling clusters
   tt::CoarseSchedule schedule;
@@ -297,17 +298,22 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 
   // Create clusters, we have 6 because we have 2 extra for wait ops to be
   // placed before the memory blocks
-  // SM2, DOT1
+
+  // DOT1
+  dotClusters[0] = schedule.clusters.newAtBack();
+  // SM2,
   mainClusters[0] = schedule.clusters.newAtBack();
-  // Wait for V
+  // Wait for V, LRV
   waitClusters[0] = schedule.clusters.newAtBack();
-  // LRV, ACK
+  // ACK
   mainClusters[1] = schedule.clusters.newAtBack();
-  // DOT2, SM1
+  // DOT2
+  dotClusters[1] = schedule.clusters.newAtBack();
+  // SM1
   mainClusters[2] = schedule.clusters.newAtBack();
-  // Wait for K
+  // Wait for K, LRK
   waitClusters[1] = schedule.clusters.newAtBack();
-  // LRK, ACV
+  // ACV
   mainClusters[3] = schedule.clusters.newAtBack();
 
   clusters[SCHED_GLOBAL_LOAD] = mainClusters[globalLoadCluster];
@@ -776,7 +782,7 @@ LogicalResult StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
     // Non-LoadOp(s) are the (final) root uses of all LoadOp(s).
     if (!isa<tt::LoadOp>(use)) {
       auto loadStage = schedule[loadOp].first;
-      schedule.insert(use, loadStage + 2, mainClusters[loadStage == 0 ? 0 : 2]);
+      schedule.insert(use, loadStage + 2, dotClusters[loadStage == 0 ? 0 : 1]);
       // scheduleOp(use, SCHED_COMPUTE);
       rootUsers.insert(use);
     }
