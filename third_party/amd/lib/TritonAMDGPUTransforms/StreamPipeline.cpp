@@ -322,7 +322,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   clusters[SCHED_GLOBAL_LOAD] = softmaxClusters[1];
   clusters[SCHED_LOCAL_STORE] = asyncCopyClusters[0];
   clusters[SCHED_LOCAL_LOAD] = asyncCopyClusters[0];
-  clusters[SCHED_COMPUTE] = dotClusters[0];
+  clusters[SCHED_COMPUTE] = softmaxClusters[0];
 
   // Always have ASYNC_WAIT as the first cluster because we want it at the top
   // of the schedule block
