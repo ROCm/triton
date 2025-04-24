@@ -35,3 +35,6 @@ Experiment setup
 Hacked ttgir is saved as `study_4-stage/hack_pp1.ttgir`.
 The IR dumps from this hacked ttgir is saved in `study_4-stage/hack_pp1/IR_dump/`.
 
+Since there is barrier between bufferLoadToLocal and `ds_read`, I have to remove
+the extra `s_barrier` and the hacked assembly is saved as `study_4-stage/hack_pp1/hack_remove-barrier.amdgcn`.
+
