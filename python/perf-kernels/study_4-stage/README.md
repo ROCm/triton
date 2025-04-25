@@ -52,7 +52,7 @@ The IR dumps from this hacked ttgir is saved in `study_4-stage/hack_pp2/IR_dump/
 
 # Hack pingpong3 (pp3)
 
-`study_4-stage/hack_pp2.ttgir`
+`study_4-stage/hack_pp3.ttgir`
 - Reverse the priority of compute and memory cluster. Now mem cluster has higher prio than compute.
 - remove gpu.barrier after mem cluster
 
@@ -60,3 +60,12 @@ Now I need to hack the assembly
 - `hack_asm0.amdgcn`: Add s_barrier after mem cluster ==> 788 tflops
 - `hack_asm1.amdgcn`: Manually breakdown some `v_pk_mul` ==> 800 tflops
   - If further remove all leftover `v_pk_mul` ==> 819 tflops
+  
+## bf16 input
+
+`study_4-stage/hack_pp3_bf16.ttgir`
+
+- Original run ==> 756
+- `hack_asm0.amdgcn`: add s_barrier after memory cluster ==> 800
+- `hack_asm1.amdgcn`: Manually breakdown some `v_pk_mul` ==> 830 tflops
+  - If further remove all leftover `v_pk_mul` ==> 840 tflops
