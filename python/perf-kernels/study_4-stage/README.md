@@ -57,5 +57,6 @@ The IR dumps from this hacked ttgir is saved in `study_4-stage/hack_pp2/IR_dump/
 - remove gpu.barrier after mem cluster
 
 Now I need to hack the assembly
-- `hack.asm0.amdgcn`: Add s_barrier after mem cluster ==> 788 tflops
-
+- `hack_asm0.amdgcn`: Add s_barrier after mem cluster ==> 788 tflops
+- `hack_asm1.amdgcn`: Manually breakdown some `v_pk_mul` ==> 800 tflops
+  - If further remove all leftover `v_pk_mul` ==> 819 tflops
