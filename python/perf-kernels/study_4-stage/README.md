@@ -49,3 +49,13 @@ the extra `s_barrier` and the hacked assembly is saved as `study_4-stage/hack_pp
     
 Hacked ttgir is saved as `study_4-stage/hack_pp2.ttgir`.
 The IR dumps from this hacked ttgir is saved in `study_4-stage/hack_pp2/IR_dump/`.
+
+# Hack pingpong3 (pp3)
+
+`study_4-stage/hack_pp2.ttgir`
+- Reverse the priority of compute and memory cluster. Now mem cluster has higher prio than compute.
+- remove gpu.barrier after mem cluster
+
+Now I need to hack the assembly
+- `hack.asm0.amdgcn`: Add s_barrier after mem cluster ==> 788 tflops
+
