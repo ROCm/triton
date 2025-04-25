@@ -69,3 +69,7 @@ Now I need to hack the assembly
 - `hack_asm0.amdgcn`: add s_barrier after memory cluster ==> 800
 - `hack_asm1.amdgcn`: Manually breakdown some `v_pk_mul` ==> 830 tflops
   - If further remove all leftover `v_pk_mul` ==> 840 tflops
+
+# Hack pingpong4 (pp4)
+
+unroll the loop, does not work well
