@@ -87,3 +87,5 @@ Assembly hack
 - `hack_asm0.amdgcn`: add s_barrier after memory cluster ==> 820 tflops
 - `hack_asm1.amdgcn`: Manually breakdown some `v_pk_mul` ==> 880 tflops
   - If further remove all leftover `v_pk_mul` ==>  900 tflops
+- `hack_asm2.amdgcn`: Manually reorder some `mfma` and `exp` ==> 890 tflops
+  - If further remove all leftover `v_exp` ==>  915 tflops
