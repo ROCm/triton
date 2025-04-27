@@ -1810,6 +1810,15 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   int innerDimLength = operandShape[sharedOrder[0]];
   int elemsPerOneBanksRow = (numBanks * bankBitWidth) / elemBitWidth;
 
+  // This is a hack optimization for the V tensor shared layout, which
+  // - is not kContig
+  // - local_load from the tensor will have kWidth=4
+  // - ds_read_tr is used
+  // In this case, we can set vecSize to nonkDim of the mfma instruction
+  // to avoid read bank conflicts
+  if (!isKContig && isGFX950)
+    vectorSize = getMDim();
+
   int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
   int maxPhase =
       std::max(std::min(simdWidth / perPhase, innerDimLength / vectorSize), 1u);
