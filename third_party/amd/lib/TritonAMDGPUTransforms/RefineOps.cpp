@@ -75,6 +75,16 @@ inline bool isRowMajor(::llvm::ArrayRef<unsigned> order) {
   return order[rank - 1] == 0;
 }
 
+inline bool isRefinable(Operation *op) {
+  auto result =
+      op->getBlock()->walk([](triton::amdgpu::InstructionSchedHint hint) {
+        if (hint.getVariant() == triton::amdgpu::SchedHint::refine_ops)
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      });
+  return result.wasInterrupted();
+}
+
 struct RefinedBlock {
   RefinedBlock(ArrayRef<int64_t> shape, Type elemType,
                BlockedEncodingAttr encoding)
@@ -437,6 +447,9 @@ struct DotOpPattern : public OpRewritePattern<triton::DotOp> {
 
   LogicalResult matchAndRewrite(triton::DotOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     auto result = rewriteMFMA(rewriter, op);
     if (failed(result)) {
       LDBG("failed to refine tt.Dot: " << *op);
@@ -451,6 +464,9 @@ struct LocalLoadOpPattern : public OpRewritePattern<triton::gpu::LocalLoadOp> {
 
   LogicalResult matchAndRewrite(triton::gpu::LocalLoadOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     if (op->getNumOperands() != 1) {
       return failure();
     }
@@ -554,6 +570,9 @@ struct LoadOpPattern : public OpRewritePattern<triton::LoadOp> {
 
   LogicalResult matchAndRewrite(triton::LoadOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     if (op->getNumOperands() != 1) {
       return failure();
     }
@@ -618,6 +637,9 @@ struct LocalStoreOpPattern
 
   LogicalResult matchAndRewrite(triton::gpu::LocalStoreOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     if (op->getNumOperands() != 2) {
       return failure();
     }
@@ -685,6 +707,9 @@ struct ReduceOpPattern : public OpRewritePattern<triton::ReduceOp> {
   // sliced layouts. This currently only supports 2d inputs.
   LogicalResult matchAndRewrite(triton::ReduceOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     auto ctx = op->getContext();
     auto loc = op.getLoc();
     uint32_t axisReduce = op.getAxis();
@@ -863,6 +888,9 @@ struct ElementWiseOpPattern : public OpRewritePattern<OpTy> {
 
   LogicalResult matchAndRewrite(OpTy op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     auto result = rewriteElementWiseOp(rewriter, op);
     if (failed(result)) {
       LDBG("failed to refine elementwise op: " << *op);
@@ -884,6 +912,9 @@ struct ExpandDimsOpPattern : public OpRewritePattern<triton::ExpandDimsOp> {
   // ViewOpToLLVM.cpp ?
   LogicalResult matchAndRewrite(triton::ExpandDimsOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     int numOperands = op->getNumOperands();
     if (op->getNumOperands() != 1)
       return failure();
@@ -1009,6 +1040,9 @@ struct BroadcastOpPattern : public OpRewritePattern<BroadcastOp> {
   //                      <64x32> /
   LogicalResult matchAndRewrite(triton::BroadcastOp op,
                                 PatternRewriter &rewriter) const override {
+    if (!isRefinable(op))
+      return failure();
+
     // src tensor e.g. <128x1>.
     int numOperands = op->getNumOperands();
     if (op->getNumOperands() != 1)
