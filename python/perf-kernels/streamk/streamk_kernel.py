@@ -48,7 +48,7 @@ def streamk_gemm(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_full_tiles, NUM_SMS):
+    for tile_id in tl.range(pid, total_full_tiles, NUM_SMS, flatten=True):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -74,8 +74,10 @@ def streamk_gemm(
         if not EVEN_K:
             loop_k -= 1
 
+        tl.assume(loop_k > 1)
+
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for k in range(0, loop_k):
+        for k in tl.range(0, loop_k):
             a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
             b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
             acc += tl.dot(a, b)

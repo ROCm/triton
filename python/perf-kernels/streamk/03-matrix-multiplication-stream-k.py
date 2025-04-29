@@ -156,7 +156,8 @@ perf = lambda ms: 2 * m * n * k * 1e-12 / (ms * 1e-3)
 
 ## test for tiles that is not multipe of 304 tiles
 #m, n, k = 4096, 4096, 8192  # some problem size to test
-m, n, k = 8192, 8192, 8192  # some problem size to test
+m, n, k = 8192, 8192, 512  # some problem size to test
+#m, n, k = 8704, 8704, 8192  # some problem size to test
 #m, n, k = 512, 512, 512  # some problem size to test
 
 ## memory bound sizes
@@ -220,7 +221,7 @@ locks = torch.zeros((total_sm, ), device="cuda", dtype=torch.int32)
 P = torch.zeros((total_sm, BLK_M * BLK_N), device="cuda", dtype=torch.float32)
 C = matmul.apply(A, B, C, bias, P, locks, total_sm, BLK_M, BLK_N, BLK_K, gsize_m, two_tiles, num_stages, num_warps,
                  waves_per_eu, mfmaInstrSize, kpack)
-#exit(0)
+exit(0)
 matmul.set_debug(False)
 expected = A @ B
 
