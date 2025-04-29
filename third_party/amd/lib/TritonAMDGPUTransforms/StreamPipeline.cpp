@@ -113,7 +113,6 @@ class StreamPipeliner {
     SCHED_LOCAL_STORE,
     SCHED_LOCAL_LOAD,
     SCHED_COMPUTE,
-    // SCHED_ASYNC_WAIT,
     SCHED_SIZE
   };
 
@@ -127,8 +126,6 @@ public:
     stages[SCHED_GLOBAL_LOAD] = 0;
     stages[SCHED_LOCAL_STORE] = _globalPrefetch;
     stages[SCHED_LOCAL_LOAD] = lastStage - _localPrefetch;
-    // AsyncWait should be in same stage as the LocalLoad
-    // stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
     stages[SCHED_COMPUTE] = lastStage;
     // stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
@@ -324,9 +321,10 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   clusters[SCHED_LOCAL_LOAD] = asyncCopyClusters[0];
   clusters[SCHED_COMPUTE] = softmaxClusters[0];
 
-  // Always have ASYNC_WAIT as the first cluster because we want it at the top
-  // of the schedule block
-  // clusters[SCHED_ASYNC_WAIT] = schedule.clusters.newAtFront();
+  // clusters[SCHED_GLOBAL_LOAD] = clusterVec[globalLoadCluster];
+  // clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
+  // clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
+  // clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
 
   LDBG("Cluster schedule:" << "  GLOBAL_LOAD cluster = " << globalLoadCluster
                            << ", LOCAL_STORE cluster = " << localStoreCluster
