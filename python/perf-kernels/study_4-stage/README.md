@@ -7,7 +7,7 @@ Experiment setup
 Command
 ```bash
 rm -rf ~/.triton/cache
-TRITON_HIP_USE_ASYNC_COPY=1 python fa/flash-attention.py
+TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_USE_ASYNC_COPY=1 python fa/flash-attention.py
 ```
 
 The generated IR is saved in `study_4-stage/orig`
@@ -89,3 +89,14 @@ Assembly hack
   - If further remove all leftover `v_pk_mul` ==>  900 tflops
 - `hack_asm2.amdgcn`: Manually reorder some `mfma` and `exp` ==> 890 tflops
   - If further remove all leftover `v_exp` ==>  915 tflops
+
+# Automatic pingpong
+
+Triton compiler:
+- base branch: https://github.com/AlexAUT/triton/commits/faPipelining
+- base commit: f7d950bdec23f8dc945ad22c99218c03dfeb7f19
+- cherry picked: 50b2057e480447e0cddce0f8245555c92fee73e9 from https://github.com/jungpark-mlir/triton/commits/pp-4s/
+
+Perf
+- fp16: 830 tflops
+- bf16: 870 tflops
