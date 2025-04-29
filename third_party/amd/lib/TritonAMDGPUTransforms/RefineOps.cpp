@@ -922,7 +922,8 @@ struct ExpandDimsOpPattern : public RefineRewritePattern<triton::ExpandDimsOp> {
     if (!isa<mlir::RankedTensorType>(src.getType()))
       return failure();
     auto srcType = rankedTType(src);
-    if (srcType.getElementTypeBitWidth() == 1)
+    if ((srcType.getElementType().isIntOrFloat()) &&
+        (srcType.getElementTypeBitWidth() == 1))
       return failure();
 
     auto rank = srcType.getRank();
@@ -1051,7 +1052,8 @@ struct BroadcastOpPattern : public RefineRewritePattern<BroadcastOp> {
     auto rank = srcType.getRank();
     if (rank != 2)
       return failure();
-    if (srcType.getElementTypeBitWidth() == 1)
+    if ((srcType.getElementType().isIntOrFloat()) &&
+        (srcType.getElementTypeBitWidth() == 1))
       return failure();
     auto srcShape = srcType.getShape();
     auto srcEncoding = srcType.getEncoding();
