@@ -642,7 +642,8 @@ attention_ck = lambda q, k, v, scale: flash_attn.flash_attn_with_kvcache(
 def get_input_shapes():
     cases = [
         # (1, 1,  4096, 64, 16, 128),
-        (1, 1, 16384, 64, 16, 128),
+        # (1, 1, 16384, 64, 16, 128),
+        (1, 1, 16384, 64, 64, 128),
     ]
     return cases
 
@@ -826,7 +827,15 @@ def bench_flash_attention(B, Mq, Mkv, Hq, Hkv, K, provider, dtype=torch.float16,
         ms = do_bench(bench_fn, warmup=warmup, rep=rep)
         # ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     else:
-        bench_fn()
+        from triton.testing import runtime
+        di = runtime.driver.active.get_device_interface()
+        cache = runtime.driver.active.get_empty_cache_for_benchmark()
+        for i in range(1000):
+            # cache.zero_()
+            # di.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            bench_fn()
 
     flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
     total_flops = 2 * flops_per_matmul
@@ -858,5 +867,5 @@ if __name__ == '__main__':
     
     to run this script with rocprof directly, set ENABLE_DO_BENCH to 0 to turnoff do_bench and to limit function calls to 1
         ENABLE_DO_BENCH=0 rocprof --tool-version 1 --stats python fwd_decode_splitk_kvcache-compare-with-ck.py
-        
+
 """
