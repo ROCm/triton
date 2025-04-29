@@ -279,6 +279,8 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
+
+        passes.ttgpuir.add_remove_layout_conversions(pm)
         pm.run(mod)
         return mod
 
