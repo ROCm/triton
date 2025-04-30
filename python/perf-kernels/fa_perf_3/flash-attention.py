@@ -425,24 +425,26 @@ def get_cdna_autotune_configs():
     else:
         #sched_opt = 'refine_ops'
         #sched_opt = 'none'
-        num_stages=2
+        #num_stages=2
         configs = []
 
         for block_m in [128]:
-            for block_n in [64, 32]:
-                for wpeu in [1,2]:
-                    for pre_load_v in [False, True]:
-                        for nonk in [16, 32]:
-                            for num_warps in [4, 8]:
-                                configs.append(triton.Config({
-                                    'BLOCK_M': block_m,
-                                    'BLOCK_N': block_n,
-                                    'waves_per_eu': wpeu,
-                                    'PRE_LOAD_V': pre_load_v,
-                                    'GRID_CU_MULTIP': 2,
-                                    'matrix_instr_nonkdim': nonk,
-                                    'schedule_hint': 'refine_ops'},
-                                    num_stages=num_stages, num_warps=num_warps))
+            for block_n in [64]:
+                for wpeu in [2]:
+                    for pre_load_v in [True]:
+                        for nonk in [32]:
+                            for num_warps in [4]:
+                                for num_stages in [1]:
+                                    configs.append(triton.Config({
+                                        'BLOCK_M': block_m,
+                                        'BLOCK_N': block_n,
+                                        'waves_per_eu': wpeu,
+                                        'PRE_LOAD_V': pre_load_v,
+                                        'GRID_CU_MULTIP': 2,
+                                        'matrix_instr_nonkdim': nonk,
+                                        'schedule_hint': 'none'},
+                                        num_stages=num_stages,
+                                        num_warps=num_warps))
 
         return configs, ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
 

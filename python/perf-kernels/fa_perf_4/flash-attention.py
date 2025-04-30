@@ -24,12 +24,16 @@ import argparse
 import subprocess
 import pytest
 import sys
+import os
+import yaml
 import torch
 
 import triton
 import triton.language as tl
 from utils.benchmark_utils import get_available_models, get_model_configs
 
+dump_ir_type=None
+curr_dir = os.path.dirname(os.path.abspath(__file__))
 
 class MetaData():
     cu_seqlens_q = None
@@ -245,7 +249,16 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr,
                     QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr, USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr):
     # loop over k, v, and update accumulator
-    for start_n in range(block_min, block_max, BLOCK_N):
+
+    #tl.assume(block_max > block_min+BLOCK_N)
+    #for start_n in range(block_min, block_max, BLOCK_N):
+
+    num_block_iter = tl.cdiv(block_max-block_min, BLOCK_N)
+    tl.assume(num_block_iter > 0)
+    tl.assume(num_block_iter < 16)
+    for block_iter in range(0, num_block_iter):
+        start_n = block_min + block_iter*BLOCK_N
+
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
         if MASK_STEPS:
@@ -261,21 +274,23 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
+        mask = tl.full([BLOCK_M, BLOCK_N], True, dtype=tl.int1)
         if MASK_STEPS:
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not is_modulo_mn.
             # last step might get wasted but that is okay. check if this masking works For
             # that case.
-            if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
-                boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
-                size_n = start_n + OFFS_N[None, :]
-                mask = size_n < boundary_m[:, None]
-                qk = tl.where(mask, qk, float("-inf"))
+            bound_cond = (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0)
+            boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
+            size_n = start_n + OFFS_N[None, :]
+            mask_partial = size_n < boundary_m[:, None]
+            mask = tl.where(bound_cond, mask_partial, mask)
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
-            causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            causal_mask = (OFFS_M[:, None] >= causal_boundary[None, :])
+            mask = mask and causal_mask
+        qk = tl.where(mask, qk, float("-inf"))
         # -- compute qk ----
         if INT8_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) * QK_SCALE)
@@ -379,11 +394,44 @@ def is_rdna():
 
 
 def get_cdna_autotune_configs():
+    if "FA_CONFIG" in os.environ.keys():
+        kernel_config_path = str(os.environ['FA_CONFIG'])
+        if not os.path.exists(kernel_config_path):
+            print(f'ERROR: cannot open provided config file (e.g., {kernel_config_path})')
+            sys.exit(-1)
+
+        with open(kernel_config_path, 'r') as file:
+            kernel_config = yaml.safe_load(file)
+
+        print(f'INFO: running a single config given from a file')
+        return [
+            triton.Config({'BLOCK_M': kernel_config['BLOCK_M'],
+                           'BLOCK_N': kernel_config['BLOCK_N'],
+                           'waves_per_eu': kernel_config['waves_per_eu'],
+                           'PRE_LOAD_V': kernel_config['PRE_LOAD_V'],
+                           'GRID_CU_MULTIP': kernel_config['GRID_CU_MULTIP'],
+                           'matrix_instr_nonkdim': kernel_config['matrix_instr_nonkdim'],
+                           'kpack': kernel_config['kpack'],
+                           'schedule_hint':kernel_config['schedule_hint']},
+                            num_stages=kernel_config['num_stages'],
+                            num_warps=kernel_config['num_warps'])], ['IS_CAUSAL',
+                                                                     'dropout_p',
+                                                                     'MAX_SEQLENS_Q',
+                                                                     'MAX_SEQLENS_K',
+                                                                     'ACTUAL_BLOCK_DMODEL',
+                                                                     'VARLEN',
+                                                                     'HQ',
+                                                                     'HK']
+    else:
+        #sched_opt = 'refine_ops'
+        #sched_opt = 'none'
+        #num_stages=2
         configs = []
+
         for block_m in [128]:
             for block_n in [64]:
                 for wpeu in [2]:
-                    for pre_load_v in [False, True]:
+                    for pre_load_v in [True]:
                         for nonk in [32]:
                             for num_warps in [4]:
                                 for num_stages in [1]:
@@ -399,20 +447,21 @@ def get_cdna_autotune_configs():
                                         num_warps=num_warps))
 
         return configs, ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+
         """
     return [
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
+        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #              num_stages=2, num_warps=4),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
                       num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
-                      num_stages=2, num_warps=4),
+        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #              num_stages=2, num_warps=4),
+        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #              num_stages=2, num_warps=4),
+        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #              num_stages=2, num_warps=4),
+        #triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 1, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        #              num_stages=2, num_warps=4),
 
     ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
         """
@@ -502,7 +551,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
         tile_id = 0
         num_tiles_total = 1
 
-    while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
+    # while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
+    if True:
         if PERSISTENT:
             # tile id basically tells us the Q block we are handling
             off_z = tile_id // num_tiles_per_sample  # at which batch sample are we
@@ -537,7 +587,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
             seqlen_q = MAX_SEQLENS_Q
             seqlen_k = MAX_SEQLENS_K
 
-        if continue_condition:
+        #if continue_condition:
+        if True:
             # Now we compute whether we need to exit early due to causal masking.
             # This is because for seqlen_q > seqlen_k, M rows of the attn scores
             # are completely masked, resulting in 0s written to the output, and
@@ -557,7 +608,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                 n_blocks = min(n_blocks, n_blocks_seqlen)
                 # If we have no blocks after adjusting for seqlen deltas, this WG is part of
                 # the blocks that are all 0. We exit early.
-                if n_blocks <= 0:
+                #if n_blocks <= 0:
+                if False:
                     o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
                     o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_on
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=Out.type.element_ty)
@@ -576,7 +628,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                     continue_condition = False
                     # return
 
-            if continue_condition:
+            #if continue_condition:
+            if True:
                 # If MQA / GQA, set the K and V head offsets appropriately.
                 GROUP_SIZE: tl.constexpr = HQ // HK
                 if GROUP_SIZE != 1:
@@ -685,8 +738,10 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                 block_max = n_blocks * BLOCK_N
                 # Compute for full blocks. Here we set causal to false regardless of its actual
                 # value because there is no masking. Similarly we do not need padding.
-                if n_full_blocks > 0:
+                #if n_full_blocks > 0:
+                if True:
                     block_max = (n_blocks - masked_blocks) * BLOCK_N
+                    tl.assume(block_max > block_min+BLOCK_N)
                     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk,
                                                     stride_bn, start_m, seqlen_k, seqlen_q, dropout_p, philox_seed,
                                                     batch_philox_offset, encoded_sm_ptrs,
@@ -704,7 +759,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
 
                 tl.debug_barrier()
                 # Remaining blocks, if any, are full / not masked.
-                if (masked_blocks > 0):
+                #if (masked_blocks > 0):
+                if True:
                     if IS_CAUSAL:
                         offs_n_causal = offs_n + (seqlen_q - seqlen_k)
                     else:
@@ -715,6 +771,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                         bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
                     if RETURN_ENCODED_SOFTMAX:
                         encoded_sm_ptrs += n_full_blocks * BLOCK_N
+                    tl.assume(block_max > block_min+BLOCK_N)
                     acc, l_i, m_i = _attn_fwd_inner(
                         acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, start_m, seqlen_k,
                         seqlen_q, dropout_p, philox_seed, batch_philox_offset, encoded_sm_ptrs, block_min, block_max,
@@ -1165,7 +1222,7 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+        handle = attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
                        *bias_strides, *alibi_strides, q_descale, k_descale, p_scale, p_descale, v_descale,
                        metadata.cu_seqlens_q, metadata.cu_seqlens_k, dropout_p=metadata.dropout_p,
                        philox_seed=philox_seed, philox_offset_base=philox_offset, encoded_softmax=encoded_softmax,
@@ -1178,6 +1235,13 @@ class _attention(torch.autograd.Function):
                        USE_P_SCALE=metadata.int8 and metadata.use_p_scale, INT8_KV=metadata.int8 and metadata.int8_kv,
                        PERSISTENT=metadata.persistent is not None, PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
                        NUM_CU=NUM_CU, atomic_counter=atomic_counter, B=batch)
+
+        global dump_ir_type
+        if dump_ir_type:
+            filename = f'{handle.name}.{dump_ir_type}'
+            with open(os.path.join(curr_dir, filename), "w") as file:
+                file.write(handle.asm[dump_ir_type])
+            dump_ir_type = None
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -1968,7 +2032,8 @@ def run_benchmark(custom, args):
             extra_args = {'dtype': dtype, 'causal': causal, 'mode': mode}
 
     print_time = args.return_time
-    line_vals = ['triton', 'torch']  # 'Time (ms)' if print_time else 'TFLOPS'
+    #line_vals = ['triton', 'torch']  # 'Time (ms)' if print_time else 'TFLOPS'
+    line_vals = ['triton']  # 'Time (ms)' if print_time else 'TFLOPS'
     configs.append(
         triton.testing.Benchmark(x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=line_vals,
                                  line_names=line_vals, styles=[('green', '-'), ('red', '-')],
@@ -1979,8 +2044,9 @@ def run_benchmark(custom, args):
                               model=None):
         assert mode in ["fwd", "bwd"]
         assert not (int8_kv and quantize_p)
-        warmup = 25
-        rep = 100
+        warmup = 25*10
+        rep = 100*10
+        print(warmup, rep)
         # TODO: Enable bias after testing.
         # if use_bias:
         #     bias = torch.randn((1, H, N_CTX, N_CTX), dtype=torch.float32, device="cuda")
@@ -2112,6 +2178,9 @@ def parse_args():
     parser.add_argument(
         "-persistent", nargs='?', const='fixed', choices=['fixed', 'dynamic'], default=None,
         help="Enable persistent kernels. Use '-persistent dynamic' for dynamic scheduling of the tiles.")
+    parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir','llir', 'amdgcn'],
+                        default="none",
+                        help="dump IR format")
     return parser.parse_args()
 
 
@@ -2139,6 +2208,10 @@ def main():
 
     if args.model:
         print("Note: Model config sets causal masking and THD layout (varlen) by default.")
+
+    if args.dump_ir != 'none':
+        global dump_ir_type
+        dump_ir_type = args.dump_ir
 
     run_benchmark(custom_config, args)
     #test_op_fwd()
