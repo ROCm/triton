@@ -376,6 +376,8 @@ class HIPBackend(BaseBackend):
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
 
+        amd.add_unpack_vector_fmul_llvm_pass(fns[0])
+
         # Get some metadata
         metadata["shared"] = src.get_int_attr("ttg.shared")
 

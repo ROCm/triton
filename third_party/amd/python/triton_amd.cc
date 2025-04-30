@@ -32,6 +32,8 @@
 
 namespace py = pybind11;
 
+extern void runUnpackVectorFMulPassOnFunction(llvm::Function &F);
+
 namespace {
 const char *const amdTargetTriple = "amdgcn-amd-amdhsa";
 
@@ -291,4 +293,7 @@ void init_triton_amd(py::module &&m) {
       arg.addAttr(llvm::Attribute::InReg);
     }
   });
+
+  m.def("add_unpack_vector_fmul_llvm_pass",
+        [](llvm::Function *fn) { runUnpackVectorFMulPassOnFunction(*fn); });
 }
