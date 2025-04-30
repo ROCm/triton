@@ -100,3 +100,14 @@ Triton compiler:
 Perf
 - fp16: 830 tflops
 - bf16: 870 tflops
+
+With this version of compiler, there is no need to hack ttgir or assembly.
+The dumped IR is saved in `study_4-stage/pp-4s/IR_dump`
+
+# unpack `v_pk_mul` right after llir
+
+Cherry picked https://github.com/triton-lang/triton/pull/6656,
+which unpacks `v_pk_mul` at llvmir level.
+
+Perf improves a bit. However, it reduces vgpr count from 256 (8) to 253 (0).
+The dumped IR is saved in `study_4-stage/pp-4s_unpack-mul/IR_dump`
