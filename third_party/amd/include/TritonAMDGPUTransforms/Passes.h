@@ -24,7 +24,8 @@ std::unique_ptr<Pass> createTritonAMDGPUReorderInstructionsPass();
 
 std::unique_ptr<Pass> createTritonAMDGPUVerifier();
 
-std::unique_ptr<Pass> createTritonAMDGPUOptimizeEpiloguePass();
+std::unique_ptr<Pass>
+createTritonAMDGPUOptimizeEpiloguePass(std::string archGenName = std::string());
 
 std::unique_ptr<Pass> createTritonAMDGPUHoistLayoutConversionsPass();
 

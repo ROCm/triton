@@ -59,8 +59,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_3("add_accelerate_matmul",
                      mlir::createTritonAMDGPUAccelerateMatmulPass,
                      const std::string, int, int);
-  ADD_PASS_WRAPPER_0("add_optimize_epilogue",
-                     mlir::createTritonAMDGPUOptimizeEpiloguePass);
+  ADD_PASS_WRAPPER_1("add_optimize_epilogue",
+                     mlir::createTritonAMDGPUOptimizeEpiloguePass,
+                     const std::string);
   m.def("add_hoist_layout_conversions", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUHoistLayoutConversionsPass());

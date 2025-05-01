@@ -32,8 +32,11 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 using namespace mlir;
+using namespace mlir::triton;
+using namespace mlir::triton::gpu;
 
 namespace {
 
@@ -59,6 +62,78 @@ bool isOneOperandElementwiseOp(Operation *op) {
   return false;
 }
 
+static triton::StoreOp
+convertMfmaLayoutForCDNA4(mlir::PatternRewriter &rewriter, Value ptr, Value val,
+                          Value mask, triton::StoreOp oldStOp) {
+  auto ptrType = cast<RankedTensorType>(ptr.getType());
+  auto valType = cast<RankedTensorType>(val.getType());
+
+  auto mfmaLayout =
+      cast<triton::gpu::AMDMfmaEncodingAttr>(valType.getEncoding());
+
+  bool mfma32 = mfmaLayout.getMDim() == 32 && mfmaLayout.getNDim() == 32;
+  bool mfma16 = mfmaLayout.getMDim() == 16 && mfmaLayout.getNDim() == 16;
+  if (!valType.getElementType().isF16() || !mfmaLayout.getIsTransposed() ||
+      (!mfma32 && !mfma16)) {
+    return rewriter.create<triton::StoreOp>(oldStOp.getLoc(), ptr, val, mask,
+                                            oldStOp.getCache(),
+                                            oldStOp.getEvict());
+  }
+
+  // Create a new layout that each thread holds 8 consecutive elements.
+  MLIRContext *ctx = mfmaLayout.getContext();
+  StringAttr kRegister = StringAttr::get(ctx, "register");
+  StringAttr kLane = StringAttr::get(ctx, "lane");
+  StringAttr kWarp = StringAttr::get(ctx, "warp");
+  StringAttr kBlock = StringAttr::get(ctx, "block");
+
+  SmallVector<unsigned> order = {0, 1};
+  auto standardOutDims = standardOutDimNames(ctx, 2);
+  LinearLayout mfma8Layout = LinearLayout::empty();
+  if (mfma32) {
+    mfma8Layout = LinearLayout(
+        {{kRegister, {{1, 0}, {2, 0}, {4, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {8, 0}}},
+         {kWarp, {}},
+         {kBlock, {}}},
+        {standardOutDims[order[0]], standardOutDims[order[1]]});
+  } else {
+    mfma8Layout = triton::LinearLayout(
+        {{kRegister, {{1, 0}, {2, 0}, {4, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}, {8, 0}}},
+         {kWarp, {}},
+         {kBlock, {}}},
+        {standardOutDims[order[0]], standardOutDims[order[1]]});
+  }
+  triton::LinearLayout warpLayout =
+      identityStandardND(kWarp, mfmaLayout.getWarpsPerCTA(), order);
+  mfma8Layout = mfma8Layout * warpLayout;
+  Attribute newEncoding = LinearEncodingAttr::get(ctx, mfma8Layout);
+
+  auto newPtrType = RankedTensorType::get(
+      ptrType.getShape(), ptrType.getElementType(), newEncoding);
+  Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(ptr.getLoc(),
+                                                               newPtrType, ptr);
+
+  auto newValType = RankedTensorType::get(
+      valType.getShape(), valType.getElementType(), newEncoding);
+  Value newVal = rewriter.create<triton::gpu::ConvertLayoutOp>(val.getLoc(),
+                                                               newValType, val);
+
+  Value newMask = mask;
+  if (mask) {
+    auto maskType = dyn_cast<RankedTensorType>(mask.getType());
+    auto newMaskType = RankedTensorType::get(
+        maskType.getShape(), maskType.getElementType(), newEncoding);
+    newMask = rewriter.create<triton::gpu::ConvertLayoutOp>(mask.getLoc(),
+                                                            newMaskType, mask);
+  }
+
+  return rewriter.create<triton::StoreOp>(oldStOp.getLoc(), newPtr, newVal,
+                                          newMask, oldStOp.getCache(),
+                                          oldStOp.getEvict());
+}
+
 // convert(val) : xmma -> blocked
 // elementWiseOp(val) : blocked
 // ...
@@ -76,10 +151,12 @@ bool isOneOperandElementwiseOp(Operation *op) {
 //
 // xmma layout is either MFMA or WMMA
 class BypassEpilogueSMEM : public mlir::RewritePattern {
+  StringRef arch;
 
 public:
-  explicit BypassEpilogueSMEM(mlir::MLIRContext *context)
-      : mlir::RewritePattern(triton::StoreOp::getOperationName(), 1, context) {}
+  explicit BypassEpilogueSMEM(mlir::MLIRContext *context, StringRef arch)
+      : mlir::RewritePattern(triton::StoreOp::getOperationName(), 1, context),
+        arch(arch) {}
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
@@ -126,12 +203,12 @@ public:
     auto newEncoding =
         cast<RankedTensorType>(cvtOp.getSrc().getType()).getEncoding();
 
-    auto newVal = cvtOp.getSrc();
-
     auto newPtrType = RankedTensorType::get(
         ptrType.getShape(), ptrType.getElementType(), newEncoding);
     Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(
         ptr.getLoc(), newPtrType, ptr);
+
+    auto newVal = cvtOp.getSrc();
 
     for (auto chainedOp : llvm::reverse(chainedOps)) {
       auto oldType =
@@ -139,6 +216,7 @@ public:
       chainedOp->setOperand(0, newVal);
       newVal = llvm::cast<mlir::TypedValue<RankedTensorType>>(
           chainedOp->getResult(0));
+
       auto newType = mlir::RankedTensorType::get(
           oldType.getShape(), oldType.getElementType(), newEncoding);
       newVal.setType(newType);
@@ -153,8 +231,16 @@ public:
           mask.getLoc(), newMaskType, mask);
     }
 
-    rewriter.replaceOpWithNewOp<triton::StoreOp>(
-        stOp, newPtr, newVal, newMask, stOp.getCache(), stOp.getEvict());
+    triton::StoreOp newStoreOp;
+    if (arch.contains("gfx950")) {
+      newStoreOp =
+          convertMfmaLayoutForCDNA4(rewriter, newPtr, newVal, newMask, stOp);
+    } else
+      newStoreOp = rewriter.create<triton::StoreOp>(
+          stOp.getLoc(), newPtr, newVal, newMask, stOp.getCache(),
+          stOp.getEvict());
+
+    rewriter.replaceOp(stOp, newStoreOp);
     return mlir::success();
   }
 };
@@ -170,6 +256,9 @@ class TritonAMDGPUOptimizeEpiloguePass
 
 public:
   TritonAMDGPUOptimizeEpiloguePass() = default;
+  TritonAMDGPUOptimizeEpiloguePass(StringRef archGen) {
+    this->archGenerationName = archGen.data();
+  }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -177,7 +266,7 @@ public:
 
     mlir::RewritePatternSet patterns(context);
 
-    patterns.add<BypassEpilogueSMEM>(context);
+    patterns.add<BypassEpilogueSMEM>(context, archGenerationName);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
@@ -185,6 +274,7 @@ public:
   }
 };
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUOptimizeEpiloguePass() {
-  return std::make_unique<TritonAMDGPUOptimizeEpiloguePass>();
+std::unique_ptr<Pass>
+mlir::createTritonAMDGPUOptimizeEpiloguePass(std::string archGen) {
+  return std::make_unique<TritonAMDGPUOptimizeEpiloguePass>(archGen);
 }
