@@ -467,6 +467,15 @@ def pow(arg0, arg1, _builder=None):
 
 
 @core.extern
+def round(arg0, _builder=None):
+    return core.extern_elementwise(
+        "", "", [arg0], {
+            (core.dtype("fp32"), ): ("__ocml_round_f32", core.dtype("fp32")),
+            (core.dtype("fp64"), ): ("__ocml_round_f64", core.dtype("fp64")),
+        }, is_pure=True, _builder=_builder)
+
+
+@core.extern
 def ilogb(arg0, _builder=None):
     return core.extern_elementwise(
         "", "", [arg0], {
