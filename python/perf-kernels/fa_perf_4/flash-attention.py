@@ -2044,8 +2044,8 @@ def run_benchmark(custom, args):
                               model=None):
         assert mode in ["fwd", "bwd"]
         assert not (int8_kv and quantize_p)
-        warmup = 25*10
-        rep = 100*10
+        warmup = 25
+        rep = 100
         print(warmup, rep)
         # TODO: Enable bias after testing.
         # if use_bias:
@@ -2130,6 +2130,7 @@ def run_benchmark(custom, args):
         total_flops = 2 * flops_per_matmul
         if mode == "bwd":
             total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+        print("ms=", ms)
         if print_time:
             return ms
         else:

@@ -10,6 +10,7 @@
 ; fixed setprio
 ; converted some v_mul to v_pk_mul
 ; removed waits for tail buffer_loads to mimic prefetching
+; removed 200 cycles from main loop
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx942"
 	.amdhsa_code_object_version 5
@@ -736,6 +737,7 @@ attn_fwd:                               ; @attn_fwd
 	v_fma_f32 v69, v69, s29, 0
 	v_max_f32_e32 v124, v66, v67
 	v_fma_f32 v70, v70, s29, 0
+	ds_write_b32 v189, v114 offset:8192
 	v_fma_f32 v71, v71, s29, 0
 	v_max3_f32 v124, v124, v68, v69
 	v_fma_f32 v72, v72, s29, 0
@@ -744,13 +746,14 @@ attn_fwd:                               ; @attn_fwd
 	v_fma_f32 v74, v74, s29, 0
 	v_fma_f32 v75, v75, s29, 0
 	v_max3_f32 v124, v124, v72, v73
-	ds_write_b32 v189, v114 offset:8192
+	ds_write_b32 v190, v114 offset:8192
 	v_fma_f32 v76, v76, s29, 0
 	v_fma_f32 v77, v77, s29, 0
 	v_max3_f32 v124, v124, v74, v75
 	v_fma_f32 v78, v78, s29, 0
 	v_fma_f32 v79, v79, s29, 0
 	v_max3_f32 v124, v124, v76, v77
+	ds_write_b32 v191, v114 offset:8192
 	v_fma_f32 v80, v80, s29, 0
 
 	v_fma_f32 v81, v81, s29, 0
@@ -771,11 +774,11 @@ attn_fwd:                               ; @attn_fwd
 	v_perm_b32 v114, v121, v117, s27
 
 	s_waitcnt lgkmcnt(0)
-	ds_write_b32 v190, v114 offset:8192
+	ds_write_b32 v192, v114 offset:8192
 	v_max3_f32 v180, v123, v124, v125
 	s_waitcnt vmcnt(1)
 
-	ds_write_b32 v191, v114 offset:8192
+	ds_write_b32 v193, v114 offset:8192
 
 	v_sub_f32_e32 v66, v66, v180
 	v_sub_f32_e32 v67, v67, v180
@@ -785,8 +788,8 @@ attn_fwd:                               ; @attn_fwd
 	v_sub_f32_e32 v69, v69, v180
 	v_exp_f32_e32 v68, v68
 	v_sub_f32_e32 v70, v70, v180
+	ds_write_b32 v194, v114 offset:8192
 
-	ds_write_b32 v192, v114 offset:8192
 
 	v_exp_f32_e32 v69, v69
 	v_sub_f32_e32 v71, v71, v180
@@ -796,8 +799,8 @@ attn_fwd:                               ; @attn_fwd
 	v_add_f32_e32 v124, v66, v67
 	v_sub_f32_e32 v73, v73, v180
 	v_exp_f32_e32 v72, v72
+	ds_write_b32 v195, v114 offset:8192
 
-	ds_write_b32 v193, v114 offset:8192
 
 	v_add_f32_e32 v124, v68, v124
 	v_sub_f32_e32 v74, v74, v180
@@ -808,8 +811,8 @@ attn_fwd:                               ; @attn_fwd
 	v_exp_f32_e32 v74, v74
 	v_add_f32_e32 v124, v70, v124
 	v_sub_f32_e32 v76, v76, v180
+	ds_write_b64 v196, v[134:135]
 
-	ds_write_b32 v194, v114 offset:8192
 
 	v_exp_f32_e32 v75, v75
 	v_add_f32_e32 v124, v71, v124
@@ -819,8 +822,8 @@ attn_fwd:                               ; @attn_fwd
 	v_sub_f32_e32 v78, v78, v180
 	v_exp_f32_e32 v77, v77
 	v_add_f32_e32 v124, v73, v124
+	ds_write_b64 v196, v[136:137] offset:8
 
-	ds_write_b32 v195, v114 offset:8192
 
 	v_sub_f32_e32 v79, v79, v180
 	v_exp_f32_e32 v78, v78
@@ -830,14 +833,18 @@ attn_fwd:                               ; @attn_fwd
 	v_add_f32_e32 v124, v75, v124
 	v_sub_f32_e32 v81, v81, v180
 	v_exp_f32_e32 v80, v80
-	buffer_load_dwordx4 v[114:117], v163, s[48:51], 0 offen
+	ds_write_b64 v196, v[130:131] offset:4096
 	v_add_f32_e32 v124, v76, v124
 	v_exp_f32_e32 v81, v81
+	buffer_load_dwordx4 v[114:117], v163, s[48:51], 0 offen
 	v_add_f32_e32 v124, v77, v124
 	v_add_f32_e32 v124, v78, v124
 	v_add_f32_e32 v124, v79, v124
 	v_add_f32_e32 v124, v80, v124
 	v_add_f32_e32 v124, v81, v124
+
+	ds_write_b64 v196, v[132:133] offset:4104
+
 	ds_bpermute_b32 v125, v157, v124
   ; TODO more ops here
 
@@ -857,6 +864,9 @@ attn_fwd:                               ; @attn_fwd
 	v_cvt_f16_f32_e32 v216, v73
 
 	s_waitcnt lgkmcnt(0)
+	buffer_load_dwordx4 v[134:137], v160, s[48:51], 0 offen
+	s_barrier
+
 	v_add_f32_e32 v201, v124, v125
 	v_cvt_f16_f32_e32 v124, v66
 	v_cvt_f16_f32_e32 v125, v67
@@ -866,104 +876,21 @@ attn_fwd:                               ; @attn_fwd
 	v_cvt_f16_f32_e32 v77, v77
 	v_cvt_f16_f32_e32 v78, v78
 	v_cvt_f16_f32_e32 v79, v79
+	buffer_load_dwordx4 v[130:133], v161, s[48:51], 0 offen
 	v_cvt_f16_f32_e32 v80, v80
+	ds_read_b64 v[66:67], v197 offset:8192
 	v_cvt_f16_f32_e32 v81, v81
-	;ds_write_b128 v196, v[134:137]
-	ds_write_b64 v196, v[134:135]
-	v_mov_b32_e32 v122, v123
 	v_mul_f32_e32 v50, v50, v123
 	v_mul_f32_e32 v51, v51, v123
 	v_mul_f32_e32 v52, v52, v123
+	ds_read_b64 v[68:69], v198 offset:8192
 	v_mul_f32_e32 v53, v53, v123
 	v_mul_f32_e32 v54, v54, v123
-	ds_write_b64 v196, v[136:137] offset:8
 	v_mul_f32_e32 v55, v55, v123
 	v_mul_f32_e32 v56, v56, v123
-	v_mul_f32_e32 v57, v57, v123
-	buffer_load_dwordx4 v[134:137], v160, s[48:51], 0 offen
-	v_mul_f32_e32 v58, v58, v123
-	v_mul_f32_e32 v59, v59, v123
-	v_mul_f32_e32 v60, v60, v123
-	v_mul_f32_e32 v61, v61, v123
-	;ds_write_b128 v196, v[130:133] offset:4096
-	ds_write_b64 v196, v[130:131] offset:4096
-	v_mul_f32_e32 v62, v62, v123
-	v_mul_f32_e32 v63, v63, v123
-	v_mul_f32_e32 v64, v64, v123
-	v_mul_f32_e32 v65, v65, v123
-	v_mul_f32_e32 v34, v34, v123
-	v_mul_f32_e32 v35, v35, v123
-	ds_write_b64 v196, v[132:133] offset:4104
-	v_mul_f32_e32 v36, v36, v123
-	v_mul_f32_e32 v37, v37, v123
-	v_mul_f32_e32 v38, v38, v123
-	v_mul_f32_e32 v39, v39, v123
-	v_mul_f32_e32 v40, v40, v123
-	v_mul_f32_e32 v41, v41, v123
-	v_mul_f32_e32 v42, v42, v123
-	v_mul_f32_e32 v43, v43, v123
-	v_mul_f32_e32 v44, v44, v123
-	buffer_load_dwordx4 v[130:133], v161, s[48:51], 0 offen
-	v_mul_f32_e32 v45, v45, v123
-	v_mul_f32_e32 v46, v46, v123
-	v_mul_f32_e32 v47, v47, v123
-	v_mul_f32_e32 v48, v48, v123
-	v_mul_f32_e32 v49, v49, v123
-	s_waitcnt lgkmcnt(0)
-	s_barrier
-	v_mul_f32_e32 v18, v18, v123
-	v_mul_f32_e32 v19, v19, v123
-	v_mul_f32_e32 v20, v20, v123
-	v_mul_f32_e32 v21, v21, v123
-	v_mul_f32_e32 v22, v22, v123
-	v_mul_f32_e32 v23, v23, v123
-	v_mul_f32_e32 v24, v24, v123
-	v_mul_f32_e32 v25, v25, v123
-	ds_read_b64 v[66:67], v197 offset:8192
-	v_mul_f32_e32 v26, v26, v123
-	v_mul_f32_e32 v27, v27, v123
-	v_mul_f32_e32 v28, v28, v123
-	v_mul_f32_e32 v29, v29, v123
-	v_mul_f32_e32 v30, v30, v123
-	v_mul_f32_e32 v31, v31, v123
-	v_mul_f32_e32 v32, v32, v123
-	v_mul_f32_e32 v33, v33, v123
-	ds_read_b64 v[68:69], v198 offset:8192
-	s_setprio 2
 
-	;v_mul_f32_e32 v2, v2, v123
-	;v_mul_f32_e32 v3, v3, v123
-	v_pk_mul_f32 v[2:3], v[2:3], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v4, v4, v123
-	;v_mul_f32_e32 v5, v5, v123
-	v_pk_mul_f32 v[4:5], v[4:5], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v6, v6, v123
-	;v_mul_f32_e32 v7, v7, v123
-	v_pk_mul_f32 v[6:7], v[6:7], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v8, v8, v123
-	;v_mul_f32_e32 v9, v9, v123
-	v_pk_mul_f32 v[8:9], v[8:9], v[122:123] op_sel_hi:[0,1]
 
 	ds_read_b64 v[70:71], v199 offset:8192
-
-	v_mul_f32_e32 v10, v10, v123
-	v_mul_f32_e32 v11, v11, v123
-	v_pk_mul_f32 v[10:11], v[10:11], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v12, v12, v123
-	;v_mul_f32_e32 v13, v13, v123
-	v_pk_mul_f32 v[12:13], v[12:13], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v14, v14, v123
-	;v_mul_f32_e32 v15, v15, v123
-	v_pk_mul_f32 v[14:15], v[14:15], v[122:123] op_sel_hi:[0,1]
-
-	;v_mul_f32_e32 v16, v16, v123
-	;v_mul_f32_e32 v17, v17, v123
-	v_pk_mul_f32 v[16:17], v[16:17], v[122:123] op_sel_hi:[0,1]
 
 	v_fmac_f32_e32 v201, v122, v123
 	v_pack_b32_f16 v73, v126, v127
@@ -982,7 +909,7 @@ attn_fwd:                               ; @attn_fwd
 ; 126,127
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	ds_read_b64 v[122:123], v200 offset:8192
-	//s_setprio 2
+	s_setprio 2
 	v_mfma_f32_32x32x8_f16 v[50:65], v[66:67], v[72:73], v[50:65]
 	s_waitcnt lgkmcnt(2)
 	ds_read_b64 v[124:125], v202 offset:8192
@@ -2015,6 +1942,12 @@ attn_fwd:                               ; @attn_fwd
 	v_perm_b32 v66, v73, v69, s10
 	ds_write_b32 v200, v66 offset:8192
 	s_cbranch_scc1 .LBB0_13
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Mask Loop - End
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
 ; %bb.14:                               ; %._crit_edge669.loopexit
 	v_readlane_b32 s10, v227, 2
 	v_readlane_b32 s82, v227, 0
@@ -2022,11 +1955,6 @@ attn_fwd:                               ; @attn_fwd
 	v_readlane_b32 s11, v227, 3
 	v_readlane_b32 s83, v227, 1
 	s_branch .LBB0_16
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Mask Loop - End
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 .LBB0_15:
 	v_mov_b32_e32 v191, v67
 
