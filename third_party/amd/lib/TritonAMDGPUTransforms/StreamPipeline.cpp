@@ -120,9 +120,11 @@ class StreamPipeliner {
 
 public:
   StreamPipeliner(scf::ForOp _forOp, int _numStages, int _globalPrefetch,
-                  int _localPrefetch, bool _useAsyncCopy)
+                  int _localPrefetch, bool _useAsyncCopy,
+                  bool _useBlockPingpong)
       : forOp(_forOp), numStages(_numStages), numBuffers(1),
-        useAsyncCopy(_useAsyncCopy), schedule(numStages),
+        useAsyncCopy(_useAsyncCopy), useBlockPingpong(_useBlockPingpong),
+        schedule(numStages),
         axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
     int lastStage = numStages - 1;
     stages[SCHED_GLOBAL_LOAD] = 0;
@@ -175,6 +177,9 @@ private:
   // Directly store to shared memory with AsyncCopy when pipelining tt.loads
   bool useAsyncCopy;
 
+  // Whether or not we are intend to ping-pong.
+  bool useBlockPingpong;
+
   // Stage for each SchedType Op
   int stages[SCHED_SIZE];
   // Cluster for each SchedType Op
@@ -220,6 +225,15 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxIndirectionLevel;
 
+  // In useAsyncCopy + PingPong case, we'd want to hoist out first async_wait
+  // out of the loop, and async_wait within the loop be towards the end.
+  // This is beneficial for maximizing hiding of latency, while ensuring
+  // 2 barriers between asyncWait and localLoad at start of loop S.T
+  // we do not hit race conditions between warp-lo and warp-hi.
+  if (useAsyncCopy && useBlockPingpong) {
+    stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_STORE];
+  }
+
   LDBG(
       "Stage schedule:" << "  GLOBAL_LOAD stage = " << stages[SCHED_GLOBAL_LOAD]
                         << ", LOCAL_STORE stage = " << stages[SCHED_LOCAL_STORE]
@@ -247,9 +261,9 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
   // We place async wait as the first cluster because we want to have it being
-  // the first in the main loop after pipelining.
-  int asyncWaitCluster = 0;
-
+  // the first in the main loop after pipelining. However if we intend on doing
+  // PP then we set it near the end of the loop for reasons state above.
+  int asyncWaitCluster = useBlockPingpong ? 4 : 0;
   // If tt.load and ttg.local_store are in the same stage
   //   spread them apart to allow overlap with compute
   // else
@@ -1029,13 +1043,15 @@ void labelLoadOpsForTritonDot(scf::ForOp forOp) {
 struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
   PipelinePass() = default;
   PipelinePass(int32_t _numStages, int32_t _globalPrefetch,
-               int32_t _localPrefetch, bool _useAsyncCopy) {
+               int32_t _localPrefetch, bool _useAsyncCopy,
+               bool _useBlockPingpong) {
     this->numStages = _numStages;
 
     this->globalPrefetch = _globalPrefetch;
     this->localPrefetch = _localPrefetch;
 
     this->useAsyncCopy = _useAsyncCopy;
+    this->useBlockPingpong = _useBlockPingpong;
   }
 
   void runOnOperation() override {
@@ -1072,12 +1088,16 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
         (void)fsp.pipelineLoop();
       } else {
         StreamPipeliner sp(forOp, tt::getNumStagesOrDefault(forOp, numStages),
-                           globalPrefetch, localPrefetch, useAsyncCopy);
+                           globalPrefetch, localPrefetch, useAsyncCopy,
+                           useBlockPingpong);
         (void)sp.pipelineLoop();
       }
     }
 
-    if (useAsyncCopy) {
+    // This removes additional barrier but pingpong will add the barrier again.
+    // So we should just not do it to get a better vmcnt in front of each
+    // AsyncCopy.
+    if (useAsyncCopy && !useBlockPingpong) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
       tt::combineRedundantWaitOps(waitOps);
@@ -1086,8 +1106,10 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
 };
 } // namespace
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUStreamPipelinePass(
-    int numStages, int globalPrefetch, int localPrefetch, bool useAsyncCopy) {
-  return std::make_unique<PipelinePass>(numStages, globalPrefetch,
-                                        localPrefetch, useAsyncCopy);
+std::unique_ptr<Pass>
+mlir::createTritonAMDGPUStreamPipelinePass(int numStages, int globalPrefetch,
+                                           int localPrefetch, bool useAsyncCopy,
+                                           bool useBlockPingpong) {
+  return std::make_unique<PipelinePass>(
+      numStages, globalPrefetch, localPrefetch, useAsyncCopy, useBlockPingpong);
 }

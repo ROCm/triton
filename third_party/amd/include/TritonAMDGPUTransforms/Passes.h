@@ -8,10 +8,9 @@
 
 namespace mlir {
 
-std::unique_ptr<Pass>
-createTritonAMDGPUStreamPipelinePass(int numStages = 2, int globalPrefetch = 0,
-                                     int localPrefetch = 0,
-                                     bool useAsyncCopy = false);
+std::unique_ptr<Pass> createTritonAMDGPUStreamPipelinePass(
+    int numStages = 2, int globalPrefetch = 0, int localPrefetch = 0,
+    bool useAsyncCopy = false, bool useBlockPingpong = false);
 
 std::unique_ptr<Pass>
 createTritonAMDGPUAccelerateMatmulPass(std::string archGenName = std::string(),
@@ -34,7 +33,8 @@ std::unique_ptr<Pass> createTritonAMDGPUConvertToBufferOpsPass(
     std::string archGenName = std::string());
 
 std::unique_ptr<Pass>
-createTritonAMDGPUBlockPingpongPass(int32_t numStages = 2);
+createTritonAMDGPUBlockPingpongPass(int32_t numStages = 2,
+                                    bool useAsyncCopy = false);
 
 std::unique_ptr<Pass> createTritonAMDGPUInThreadTransposePass();
 
