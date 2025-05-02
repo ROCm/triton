@@ -631,6 +631,10 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
 // Fixme : document the scheduling.
 // Assuming pipeliner already ordered the ops.
 LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
+  if (asyncWaitOps.size() != 2) {
+    return llvm::failure();
+  }
+
   builder.setInsertionPointToStart(forOp.getBody());
   updateOpInsertion(dotOps[0]);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority), false);
