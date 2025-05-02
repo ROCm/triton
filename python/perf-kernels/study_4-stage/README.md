@@ -111,3 +111,47 @@ which unpacks `v_pk_mul` at llvmir level.
 
 Perf improves a bit. However, it reduces vgpr count from 256 (8) to 253 (0).
 The dumped IR is saved in `study_4-stage/pp-4s_unpack-mul/IR_dump`
+
+# loop unrolling
+
+- `hack_unroll0.ttgir`: unroll the loop with a factor of 2 but early return inside
+the loop. Done by Alex. Original [gist](https://gist.github.com/AlexAUT/3bc3305fff10f1c989d47b2a1336bf81).
+- `hack_unroll1.ttgir`: since we unroll the loop, we can use hardcoded buffer index
+for ACK and ACV in the loop
+
+We think it should help with vgprs usages (and it does for a simple matmul kernel), 
+but the FA kernel is too complicated for LLVM to make reasonable decisions about reg allocation. 
+E.g. we think the two reg sets for LRK and LRV should be the same since they do not overlap. 
+But it seems the backend does not distinguish different instruction types. 
+Also we think element-wise instructions should just update the reg in place, but some time it uses a new reg. 
+That being said, the backend is already struggling to figure out reg allocation to the loop body, 
+it makes it worse when the loop is unrolled. 
+ 
+On the other hand, Maks PR reduces the vgpr usage from 8 spills to 0 (253 vgprs in total). 
+I checked the kernel and it's just the backend allocates the regs in a different way :shrug
+
+Since we have no spills, there is no need to explore the loop unroll pass, 
+which does not work with the current LLVM backend anyway.
+
+# Early wait for LR to finish
+
+We can wait with `lgkmcnt(0)` at the beginning of the compute cluster given that 
+`ds_read` should finish before compute cluster begins. This can save a lot of 
+`s_waitcnt` instructions inside the compute cluster. Note that `s_waitcnt` cannot
+be co-issued (not co-execute) with neither mfma or valu instructions.
+Therefore, this can save the lost cycles inside the compute cluster.
+
+The IR change is saved as `study_4-stage/hack_s_waitcnt.ttgir`.
+The dumped IR is saved in `study_4-stage/hack_s_waitcnt/IR_dump`.
+
+However, such change also affect how backend schedules mfma and valu instructions.
+As a result, worse interleaving is generated.
+
+Then we hack the original amdgcn directly by removing all `s_waitcnt lgkmcnt(x)`
+and change the first one to be `lgkmcnt(0)` in the compute cluster.
+The hacked assembly code is saved as `hack_s_waitcnt.s`
+
+Perf
+- before this change: 850 tflops
+- use `hack_s_waitcnt.ttgir`: 830 tflops
+- use `hack_s_waitcnt.s`: 860 tflops
