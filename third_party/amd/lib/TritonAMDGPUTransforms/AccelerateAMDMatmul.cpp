@@ -517,8 +517,8 @@ public:
     // kWidth = 4 so that the coversion from #mma (result of 1st dot)
     // to #dotOp (operand 0 of 2nd dot) is a no-op.
     // TODO (lixun): relax the condition for 8-bit elementTy.
-    if ((aElemTy.isF16() || aElemTy.isBF16()) && isChainDotTail(dotOp))
-      kWidth = 4;
+    //if ((aElemTy.isF16() || aElemTy.isBF16()) && isChainDotTail(dotOp))
+    kWidth = 4;
 
     Value newDot;
     if (withScale) {
