@@ -6,8 +6,6 @@ import triton
 import triton.language as tl
 
 import argparse
-import os
-
 from triton.testing import runtime, _summarize_statistics
 
 
@@ -689,6 +687,7 @@ class _attention(torch.autograd.Function):
 
 attention = _attention.apply
 
+
 def get_input_shapes():
     import itertools
     B_range = [1, 8, 16, 64, 128]
@@ -711,7 +710,7 @@ def get_input_shapes():
         input_configs.append(instance)
     # print(f"Total number of configs {len(input_configs)}")
 
-    # if you just want to try a specific config, use command line options or uncomment this line 
+    # if you just want to try a specific config, use command line options or uncomment this line
     # input_configs = [
     #     (1, 1, 4096, 64, 16, 64),
     # ]
@@ -775,13 +774,12 @@ def test_op_fwd_ck(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     q_ref, k_ref, v_ref = reshape_input(q_raw, k_raw, v_raw, "ref")
     attn = (q_ref @ k_ref.transpose(-1, -2) * sm_scale).softmax(-1)
     ref_out = attn @ v_ref
-    
+
     import flash_attn
     attention_ck = lambda q, k, v, sm_scale: flash_attn.flash_attn_with_kvcache(
-        q, k, v, None, None, rotary_cos=None, rotary_sin=None, 
-        cache_seqlens=None, cache_batch_idx=None, cache_leftpad=None,
-        block_table=None, softmax_scale=sm_scale, causal=False, window_size=(-1, -1), 
-        rotary_interleaved=False, alibi_slopes=None, num_splits=0)
+        q, k, v, None, None, rotary_cos=None, rotary_sin=None, cache_seqlens=None, cache_batch_idx=None, cache_leftpad=
+        None, block_table=None, softmax_scale=sm_scale, causal=False, window_size=(
+            -1, -1), rotary_interleaved=False, alibi_slopes=None, num_splits=0)
     q_ck, k_ck, v_ck = reshape_input(q_raw, k_raw, v_raw, "ck")
     ck_out = attention_ck(q_ck, k_ck, v_ck, sm_scale).permute(0, 2, 1, 3)
     torch.testing.assert_close(ref_out, ck_out, atol=1e-3, rtol=0)
@@ -834,12 +832,14 @@ configs.append(
         # line_vals=['triton', 'ck',],
         # line_names=['Triton', 'CK',],
         # styles=[('red', '-'), ('green', '-'),],
-        line_vals=['triton',], 
-        line_names=['Triton',], 
-        styles=[('red', '-'),], 
-        ylabel='ms', 
-        plot_name='fwd_decode_splitk_kvcache_bench_results', 
-        args={'dtype': torch.float16}))
+        line_vals=[
+            'triton',
+        ], line_names=[
+            'Triton',
+        ], styles=[
+            ('red', '-'),
+        ], ylabel='ms', plot_name='fwd_decode_splitk_kvcache_bench_results', args={'dtype': torch.float16}))
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="")
@@ -891,10 +891,9 @@ def main():
                 q, k, v = reshape_input(q, k, v, "ck")
                 import flash_attn
                 bench_fn = lambda: flash_attn.flash_attn_with_kvcache(
-                    q, k, v, None, None, rotary_cos=None, rotary_sin=None, 
-                    cache_seqlens=None, cache_batch_idx=None, cache_leftpad=None,
-                    block_table=None, softmax_scale=sm_scale, causal=False, window_size=(-1, -1), 
-                    rotary_interleaved=False, alibi_slopes=None, num_splits=0)
+                    q, k, v, None, None, rotary_cos=None, rotary_sin=None, cache_seqlens=None, cache_batch_idx=None,
+                    cache_leftpad=None, block_table=None, softmax_scale=sm_scale, causal=False, window_size=(
+                        -1, -1), rotary_interleaved=False, alibi_slopes=None, num_splits=0)
 
             ms = do_bench(bench_fn, warmup=warmup, rep=rep)  # replacing the triton.testing.do_bench function
 
@@ -912,7 +911,7 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
+    
 """
     Usage:
         to run this script using do_bench():
