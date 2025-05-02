@@ -551,6 +551,8 @@ class _attention(torch.autograd.Function):
         cls.SPLIT_K: Optional[int] = None
         cls.BLOCK_M = 16
         cls.BLOCK_N = 64
+        BLOCK_M = cls.BLOCK_M
+        BLOCK_N = cls.BLOCK_N
 
         cls.NUM_GROUPS = 1  # Default quantization is row-wise
 
@@ -580,30 +582,37 @@ class _attention(torch.autograd.Function):
         # print(f"B = {B}, M = {M}, G = {G}, H = {H}, Kkv = {Kkv}, Kq = {Kq}")
 
         BLOCK_M = min(max(triton.next_power_of_2(M), 16), 32)
+
+        # this case is rarely used
+        if M >= 128:
+            BLOCK_M = BLOCK_M * 2
+            BLOCK_N = BLOCK_N // 2
         NUM_M = triton.cdiv(M, BLOCK_M)
 
-        BLOCK_M = cls.BLOCK_M
-        BLOCK_N = cls.BLOCK_N
         if cls.SPLIT_K is not None:
             split_k = cls.SPLIT_K
         else:
             # Use heuristics
             split_k = get_split_k(B, G, H, Mk)
 
+        num_stages = 1
+        num_warps_fwd  = 1
+        waves_per_eu = 0
+        num_warps_reduce = 4
+
+        split_size = (Mk + split_k - 1) // split_k
+
+        BLOCK_N = min(max(triton.next_power_of_2(split_size), 64), 128)
+        if BLOCK_N == 128:
+            num_warps_fwd = 2
+
         M_ceil = (M + BLOCK_M - 1) // BLOCK_M * BLOCK_M
         o_splitk = torch.empty([B * G * H, split_k, M_ceil, Kq], dtype=torch.float32, device=q.device)
         metadata = torch.empty([B * G * H, 2, split_k, M_ceil], dtype=torch.float32, device=q.device)
         lse = torch.empty((B * G * H, M), device=q.device, dtype=torch.float32)
         grid = (NUM_M, B * G * H, split_k)
-        # print(grid)
         
-        num_stages = 1
-        num_warps_fwd  = 1
-        waves_per_eu = 0
-        num_warps_reduce = 4
-        split_size = (Mk + split_k - 1) // split_k
         use_seq_len = seq_len is not None
-
         # print(f"B = {B}, G = {G}, H = {H}, split_k = {split_k}, M_ceil = {M_ceil}, Kq = {Kq}, num_of_wgs = {G * G * H * split_k}")
 
         _fwd_kernel_splitK[grid](
