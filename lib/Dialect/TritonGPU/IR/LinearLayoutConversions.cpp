@@ -461,6 +461,45 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
 }
 
+
+LinearLayout chooseX(AMDMfmaEncodingAttr mfmaLayout, ArrayRef<int64_t> shape){
+  MLIRContext *ctx = mfmaLayout.getContext();
+  StringAttr kRegister = StringAttr::get(ctx, "register");
+  StringAttr kLane = StringAttr::get(ctx, "lane");
+  StringAttr kWarp = StringAttr::get(ctx, "warp");
+  StringAttr kBlock = StringAttr::get(ctx, "block");
+
+  SmallVector<unsigned> order = {1, 0};
+  auto standardOutDims = standardOutDimNames(ctx, 2);
+  LinearLayout mfma8Layout = LinearLayout::empty();
+  if (mfmaLayout.getMDim()==32) {
+      llvm::outs() << "constructing mfma32 layout!\n";
+    mfma8Layout = LinearLayout(
+        {{kRegister, {{1, 0}, {2, 0}, {4, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {8, 0}}},
+         {kWarp, {}},
+         {kBlock, {}}},
+        {standardOutDims[order[0]], standardOutDims[order[1]]});
+  } else {
+    mfma8Layout = triton::LinearLayout(
+        {{kRegister, {{1, 0}, {2, 0}, {4, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}, {8, 0}}},
+         {kWarp, {}},
+         {kBlock, {}}},
+        {standardOutDims[order[0]], standardOutDims[order[1]]});
+  }
+  triton::LinearLayout warpLayout =
+      identityStandardND(kWarp, mfmaLayout.getWarpsPerCTA(), order);
+  //mfma8Layout = mfma8Layout * warpLayout;
+
+  //llvm::outs() << mfma8Layout << "\n";
+  LinearLayout ctaLayout = mfma8Layout.transposeOuts(standardOutDims) *
+      warpLayout.transposeOuts(standardOutDims);
+
+  mfma8Layout = combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape);
+  return mfma8Layout;
+}
+
 LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
                                         ArrayRef<int64_t> shape,
                                         int32_t elemBitWidth) {

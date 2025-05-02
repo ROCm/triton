@@ -267,6 +267,7 @@ LinearLayout chooseLdMatrixLayout(Attribute enc, ArrayRef<int64_t> shape,
 // tensor from shared memory using the `ds_read_tr` instruction for AMD GPUs.
 LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
                                      int32_t elemBitWidth);
+LinearLayout chooseX(AMDMfmaEncodingAttr mfmaLayout, ArrayRef<int64_t> shape);
 
 LinearLayout getScaleTMEMStoreLinearLayout(RankedTensorType scaleType,
                                            int numWarps);

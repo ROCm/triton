@@ -81,18 +81,20 @@ convertMfmaLayoutForCDNA4(mlir::PatternRewriter &rewriter, Value ptr, Value val,
   }
 
   // Create a new layout that each thread holds 8 consecutive elements.
+  /*
   MLIRContext *ctx = mfmaLayout.getContext();
   StringAttr kRegister = StringAttr::get(ctx, "register");
   StringAttr kLane = StringAttr::get(ctx, "lane");
   StringAttr kWarp = StringAttr::get(ctx, "warp");
   StringAttr kBlock = StringAttr::get(ctx, "block");
 
-  SmallVector<unsigned> order = {0, 1};
+  SmallVector<unsigned> order = {1, 0};
   auto standardOutDims = standardOutDimNames(ctx, 2);
   LinearLayout mfma8Layout = LinearLayout::empty();
   if (mfma32) {
+      llvm::outs() << "constructing mfma32 layout!\n";
     mfma8Layout = LinearLayout(
-        {{kRegister, {{1, 0}, {2, 0}, {4, 0}}},
+        {{kRegister, {{1, 0}, {2, 0}, {4, 0}, {16, 0}}},
          {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {8, 0}}},
          {kWarp, {}},
          {kBlock, {}}},
@@ -107,7 +109,19 @@ convertMfmaLayoutForCDNA4(mlir::PatternRewriter &rewriter, Value ptr, Value val,
   }
   triton::LinearLayout warpLayout =
       identityStandardND(kWarp, mfmaLayout.getWarpsPerCTA(), order);
-  mfma8Layout = mfma8Layout * warpLayout;
+  //mfma8Layout = mfma8Layout * warpLayout;
+
+  llvm::outs() << mfma8Layout << "\n";
+  LinearLayout ctaLayout = mfma8Layout.transposeOuts(standardOutDims) *
+      warpLayout.transposeOuts(standardOutDims);
+  */
+
+  //mfma8Layout = combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(),  valType.getShape());
+  LinearLayout mfma8Layout = chooseX(mfmaLayout, ptrType.getShape());
+
+  llvm::outs() << mfma8Layout << "\n";
+
+  MLIRContext *ctx = mfmaLayout.getContext();
   Attribute newEncoding = LinearEncodingAttr::get(ctx, mfma8Layout);
 
   auto newPtrType = RankedTensorType::get(
