@@ -8,13 +8,8 @@ import triton.language as tl
 import argparse
 import os
 
-try:
-    os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "FALSE"
-    import flash_attn
-except:
-    pass
-
 from triton.testing import runtime, _summarize_statistics
+
 
 def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_mode="mean"):
     assert return_mode in ["min", "max", "mean", "median", "all"]
@@ -60,9 +55,11 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     times = torch.tensor([s.elapsed_time(e) for s, e in zip(start_event, end_event)], dtype=torch.float).numpy()
     return _summarize_statistics(times, quantiles, return_mode)
 
+
 def _strides(x: torch.Tensor, *stride_names: str):
     assert x.ndim == len(stride_names)
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
+
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -514,6 +511,7 @@ def dequantize_kv_fp16(quant_k: torch.Tensor, num_groups: int = 1) -> torch.Tens
 
     return out
 
+
 def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     """Heuristic for the number of splits"""
     bh = max(B * H, 1)  # NOTE: Handle B*h=0 case
@@ -521,7 +519,7 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     max_chunk_size = 64
     while split_k > 0 and Mk / split_k < max_chunk_size:
         split_k = split_k // 2
-    
+
     # set upper limit of WGs
     while B * H * G * split_k >= 1024:
         split_k = split_k // 2
@@ -596,7 +594,7 @@ class _attention(torch.autograd.Function):
             split_k = get_split_k(B, G, H, Mk)
 
         num_stages = 1
-        num_warps_fwd  = 1
+        num_warps_fwd = 1
         waves_per_eu = 0
         num_warps_reduce = 4
 
@@ -611,7 +609,7 @@ class _attention(torch.autograd.Function):
         metadata = torch.empty([B * G * H, 2, split_k, M_ceil], dtype=torch.float32, device=q.device)
         lse = torch.empty((B * G * H, M), device=q.device, dtype=torch.float32)
         grid = (NUM_M, B * G * H, split_k)
-        
+
         use_seq_len = seq_len is not None
         # print(f"B = {B}, G = {G}, H = {H}, split_k = {split_k}, M_ceil = {M_ceil}, Kq = {Kq}, num_of_wgs = {G * G * H * split_k}")
 
@@ -688,23 +686,17 @@ class _attention(torch.autograd.Function):
 
         return out
 
+
 attention = _attention.apply
-attention_ck = lambda q, k, v, scale: flash_attn.flash_attn_with_kvcache(
-            q, k, v,
-            None, None,
-            rotary_cos=None, rotary_sin=None,
-            cache_seqlens=None, cache_batch_idx=None, cache_leftpad=None,
-            block_table=None, softmax_scale=scale, causal=False,
-            window_size=(-1, -1), rotary_interleaved=False, alibi_slopes=None, num_splits=0)
 
 def get_input_shapes():
     import itertools
-    B_range   = [1, 8, 16, 64, 128]
-    Mq_range  = [1]
+    B_range = [1, 8, 16, 64, 128]
+    Mq_range = [1]
     Mkv_range = [4096, 8192, 16384]
-    Hq_range  = [1, 8, 16, 64, 128]
+    Hq_range = [1, 8, 16, 64, 128]
     Hkv_range = [1, 8, 16, 64, 128]
-    K_range   = [64, 128]
+    K_range = [64, 128]
     space = itertools.product(B_range, Mq_range, Mkv_range, Hq_range, Hkv_range, K_range)
     input_configs = []
     for instance in space:
@@ -718,17 +710,22 @@ def get_input_shapes():
             continue
         input_configs.append(instance)
     # print(f"Total number of configs {len(input_configs)}")
-    input_configs = [
-        (1, 1,  4096, 64, 16, 64),
-    ]
+
+    # if you just want to try a specific config, use command line options or uncomment this line 
+    # input_configs = [
+    #     (1, 1, 4096, 64, 16, 64),
+    # ]
     return input_configs
+
 
 def get_rand_input(B, Mq, Mkv, Hq, Hkv, K, dtype):
     Hq_per_Hkv = Hq // Hkv
-    q_raw =  torch.empty((B, Mq,  Hkv, Hq_per_Hkv, K), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    k_raw = (torch.empty((B, Mkv, Hkv, 1,          K), dtype=dtype, device="cuda").normal_(mean=0.,std=0.5).requires_grad_())
-    v_raw = (torch.empty((B, Mkv, Hkv, 1,          K), dtype=dtype, device="cuda").normal_(mean=0.,std=0.5).requires_grad_())
+    q_raw = torch.empty((B, Mq, Hkv, Hq_per_Hkv, K), dtype=dtype, device="cuda").normal_(mean=0.,
+                                                                                         std=0.5).requires_grad_()
+    k_raw = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_())
+    v_raw = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_())
     return q_raw, k_raw, v_raw
+
 
 def reshape_input(q_raw, k_raw, v_raw, backend):
     B = q_raw.shape[0]
@@ -747,10 +744,11 @@ def reshape_input(q_raw, k_raw, v_raw, backend):
     elif backend == "ref":
         q = q_raw.clone().reshape([B, Mq, -1, K]).permute(0, 2, 1, 3)
         k = k_raw.clone().expand(-1, -1, -1, Hq_per_Hkv, -1).reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-        v = v_raw.clone().expand(-1, -1, -1, Hq_per_Hkv, -1).reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3) 
+        v = v_raw.clone().expand(-1, -1, -1, Hq_per_Hkv, -1).reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
     else:
         Exception(f"Backend {backend} not support")
     return q, k, v
+
 
 @pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
 def test_op_fwd_triton(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
@@ -760,11 +758,12 @@ def test_op_fwd_triton(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     q_raw, k_raw, v_raw = get_rand_input(B, Mq, Mkv, Hq, Hkv, K, dtype)
     q_triton, k_triton, v_triton = reshape_input(q_raw, k_raw, v_raw, "triton")
     tri_out = attention(q_triton, k_triton, v_triton, sm_scale)
-    
+
     q_ref, k_ref, v_ref = reshape_input(q_raw, k_raw, v_raw, "ref")
     attn = (q_ref @ k_ref.transpose(-1, -2) * sm_scale).softmax(-1)
     ref_out = attn @ v_ref
     torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
+
 
 @pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
 def test_op_fwd_ck(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
@@ -772,14 +771,21 @@ def test_op_fwd_ck(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     sm_scale = 1 / K**0.5
 
     q_raw, k_raw, v_raw = get_rand_input(B, Mq, Mkv, Hq, Hkv, K, dtype)
-    
+
     q_ref, k_ref, v_ref = reshape_input(q_raw, k_raw, v_raw, "ref")
     attn = (q_ref @ k_ref.transpose(-1, -2) * sm_scale).softmax(-1)
     ref_out = attn @ v_ref
-
+    
+    import flash_attn
+    attention_ck = lambda q, k, v, sm_scale: flash_attn.flash_attn_with_kvcache(
+        q, k, v, None, None, rotary_cos=None, rotary_sin=None, 
+        cache_seqlens=None, cache_batch_idx=None, cache_leftpad=None,
+        block_table=None, softmax_scale=sm_scale, causal=False, window_size=(-1, -1), 
+        rotary_interleaved=False, alibi_slopes=None, num_splits=0)
     q_ck, k_ck, v_ck = reshape_input(q_raw, k_raw, v_raw, "ck")
     ck_out = attention_ck(q_ck, k_ck, v_ck, sm_scale).permute(0, 2, 1, 3)
     torch.testing.assert_close(ref_out, ck_out, atol=1e-3, rtol=0)
+
 
 """
     turn off test_op_fwd_int4_kv for now
@@ -823,21 +829,17 @@ def test_op_fwd_ck(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
 configs = []
 configs.append(
     triton.testing.Benchmark(
-        x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'],
-        x_vals=get_input_shapes(), 
-        line_arg='provider',
+        x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'], x_vals=get_input_shapes(), line_arg='provider',
+        # # comparing with CK will be disabled for now as CK has not yet implemented this kernel
         # line_vals=['triton', 'ck',],
-        # line_names=['Triton', 'CK',], 
+        # line_names=['Triton', 'CK',],
         # styles=[('red', '-'), ('green', '-'),],
-        line_vals=['triton', ],
-        line_names=['Triton', ], 
-        styles=[('red', '-'), ],
+        line_vals=['triton',], 
+        line_names=['Triton',], 
+        styles=[('red', '-'),], 
         ylabel='ms', 
-        plot_name=f'fwd_decode_splitk_kvcache_bench_results', 
-        args={
-            # 'D_HEAD': D_HEAD,
-            'dtype': torch.float16, 
-        }))
+        plot_name='fwd_decode_splitk_kvcache_bench_results', 
+        args={'dtype': torch.float16}))
 
 def parse_args():
     parser = argparse.ArgumentParser(description="")
@@ -850,20 +852,21 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+
 def main():
     args = parse_args()
     input_configs = args.B, args.Mq, args.Mkv, args.Hq, args.Hkv, args.K
     if all([v is not None for v in input_configs]):
-        dtype=torch.float16
+        dtype = torch.float16
         B, Mq, Mkv, Hq, Hkv, K = input_configs
         rep = 1000
         sm_scale = 1 / K**0.5
         bench_fn = None
-        print(f"-B {B} -Mq {Mq} -Mkv {Mkv} -Hq {Hq} -Hkv {Hkv} -K {K}", flush = True)
+        print(f"-B {B} -Mq {Mq} -Mkv {Mkv} -Hq {Hq} -Hkv {Hkv} -K {K}", flush=True)
         q, k, v = get_rand_input(B, Mq, Mkv, Hq, Hkv, K, dtype)
         q, k, v = reshape_input(q, k, v, "triton")
         bench_fn = lambda: attention(q, k, v, sm_scale)
-        
+
         di = runtime.driver.active.get_device_interface()
         cache = runtime.driver.active.get_empty_cache_for_benchmark()
         for i in range(rep):
@@ -872,22 +875,28 @@ def main():
             bench_fn()
 
     elif all([v is None for v in input_configs]):
+
         @triton.testing.perf_report(configs)
         def bench_flash_attention(B, Mq, Mkv, Hq, Hkv, K, provider, dtype=torch.float16, device="cuda"):
             warmup = 250
             rep = 1000
             sm_scale = 1 / K**0.5
             bench_fn = None
-            print(f"-B {B} -Mq {Mq} -Mkv {Mkv} -Hq {Hq} -Hkv {Hkv} -K {K}", flush = True)
+            print(f"-B {B} -Mq {Mq} -Mkv {Mkv} -Hq {Hq} -Hkv {Hkv} -K {K}", flush=True)
             q, k, v = get_rand_input(B, Mq, Mkv, Hq, Hkv, K, dtype)
             if provider == "triton":
                 q, k, v = reshape_input(q, k, v, "triton")
                 bench_fn = lambda: attention(q, k, v, sm_scale)
             elif provider == "ck":
                 q, k, v = reshape_input(q, k, v, "ck")
-                bench_fn = lambda: attention_ck(q, k, v, sm_scale)
-            
-            ms = do_bench(bench_fn, warmup=warmup, rep=rep) # replacing the triton.testing.do_bench function
+                import flash_attn
+                bench_fn = lambda: flash_attn.flash_attn_with_kvcache(
+                    q, k, v, None, None, rotary_cos=None, rotary_sin=None, 
+                    cache_seqlens=None, cache_batch_idx=None, cache_leftpad=None,
+                    block_table=None, softmax_scale=sm_scale, causal=False, window_size=(-1, -1), 
+                    rotary_interleaved=False, alibi_slopes=None, num_splits=0)
+
+            ms = do_bench(bench_fn, warmup=warmup, rep=rep)  # replacing the triton.testing.do_bench function
 
             # flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
             # total_flops = 2 * flops_per_matmul
@@ -906,11 +915,13 @@ if __name__ == '__main__':
 
 """
     Usage:
-        to run this script using do_bench profiling:
+        to run this script using do_bench():
             python fwd_decode_splitk_kvcache-tunning.py
-    
+        this will run all configs defined in get_input_shapes() using do_bench()
+
         to run this script with rocprof directly, you must specify a single input config, e.g.:
             rocprof --tool-version 1 --stats python -B 64 -Mq 1 -Mkv 16384 -Hq 64 -Hkv 16 -K 128
+        this will run this specific config using rocprof
 
     Input:
         B:      Batch size
@@ -920,7 +931,7 @@ if __name__ == '__main__':
         Hkv:    Number of K/V heads
         K:      Head dimension
 
-    Hq should be divisible by Hkv dimension: Hq_per_Hkv = Hq // Hkv 
+    Hq should be divisible by Hkv dimension: Hq_per_Hkv = Hq // Hkv
 
     Triton kernel requires the following input shapes:
         Q: (B, Mq,  Hkv, Hq_per_Hkv, K)
@@ -929,15 +940,15 @@ if __name__ == '__main__':
 
     CK kernel requires the following input shapes:
         Q: (B, Mq, Hq,  K)
-        K: (B, Mq, Hkv, K) 
+        K: (B, Mq, Hkv, K)
         V: (B, Mq, Hkv, K)
-        where the i^th Q head, i.e., Q[:, :, i, :] is associated with the (i//Hq_per_Hkv)^th K/V head, i.e. K[:, :, i//Hq_per_Hkv, :] 
+        where the i^th Q head, i.e., Q[:, :, i, :] is associated with the (i//Hq_per_Hkv)^th K/V head, i.e. K[:, :, i//Hq_per_Hkv, :]
 
     The reference for pytest has the following input shapes:
         Q: (B, Hq, Mq,  K)
-        K: (B, Hq, Mkv, K) 
+        K: (B, Hq, Mkv, K)
         V: (B, Hq, Mkv, K)
-        where the i^th Q head, i.e., Q[:, i, :, :] is associated with the (i//Hq_per_Hkv)^th K/V head but the input here is broadcasted, i.e. K[:, i, :, :] 
+        where the i^th Q head, i.e., Q[:, i, :, :] is associated with the (i//Hq_per_Hkv)^th K/V head but the input here is broadcasted, i.e. K[:, i, :, :]
 
     the two inputs can be converted by:
         Triton -> CK
