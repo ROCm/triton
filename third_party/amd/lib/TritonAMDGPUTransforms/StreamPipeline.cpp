@@ -1158,7 +1158,13 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
         loops.push_back(forOp);
     });
 
+    // Skip second (causal) loop
+    int loopCount{};
+
     for (scf::ForOp forOp : loops) {
+      if (loopCount++ == 1)
+        continue;
+
       if (!checkPrecondition(forOp))
         continue;
       StreamPipeliner sp(forOp, tt::getNumStagesOrDefault(forOp, numStages),
