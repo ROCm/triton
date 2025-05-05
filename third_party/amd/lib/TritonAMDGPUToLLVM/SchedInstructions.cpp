@@ -529,8 +529,8 @@ struct TritonAMDGPUInsertInstructionSchedHints
         for (auto forOp : forOps) {
           OpBuilder rewriter(ctx);
           rewriter.setInsertionPointToStart(forOp.getBody());
-          rewriter.create<triton::amdgpu::InstructionSchedHint>(forOp->getLoc(),
-                                                                schedHint);
+          rewriter.create<triton::amdgpu::RefineRescheduleOpsHint>(
+              forOp->getLoc());
         }
       });
       return;

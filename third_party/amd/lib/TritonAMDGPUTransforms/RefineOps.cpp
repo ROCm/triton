@@ -122,10 +122,8 @@ private:
     mlir::Block *block = op->getBlock();
     while (block) {
       for (auto &op : block->getOperations()) {
-        if (auto hint = dyn_cast<triton::amdgpu::InstructionSchedHint>(op)) {
-          if (hint.getVariant() == triton::amdgpu::SchedHint::refine_ops) {
-            return true;
-          }
+        if (auto hint = dyn_cast<triton::amdgpu::RefineRescheduleOpsHint>(op)) {
+          return true;
         }
       }
       block = block->getParentOp()->getBlock();
