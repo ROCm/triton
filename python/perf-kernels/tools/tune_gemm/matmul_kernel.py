@@ -70,7 +70,11 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, bias_ptr, M, N, K, stride_am, stride_ak, 
         bias = tl.load(bias_ptrs, mask=offs_am < M, other=0.0)
     acc_dtype = tl.float32 if a_ptr.type.element_ty != tl.int8 else tl.int32
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
+
+    kIter =  tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
+    tl.assume(kIter >= 2)
+
+    for k in range(0, kIter):
         if EVEN_K:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
