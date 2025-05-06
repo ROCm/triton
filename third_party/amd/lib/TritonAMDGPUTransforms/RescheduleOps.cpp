@@ -591,11 +591,9 @@ struct TritonAMDGPURescheduleOps
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     llvm::SmallVector<Block *> blocks;
-    mod.walk([&](triton::amdgpu::InstructionSchedHint hint) {
-      if (hint.getVariant() == triton::amdgpu::SchedHint::refine_ops) {
-        blocks.push_back(hint->getBlock());
-        hint->erase();
-      }
+    mod.walk([&](triton::amdgpu::RefineRescheduleOpsHint hint) {
+      blocks.push_back(hint->getBlock());
+      hint->erase();
     });
 
     for (auto block : blocks) {

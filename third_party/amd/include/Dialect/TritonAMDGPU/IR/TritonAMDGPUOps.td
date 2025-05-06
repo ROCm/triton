@@ -195,6 +195,20 @@ def InstructionSchedHint : TT_AMDGPU_Op<"instruction_sched_hint", []> {
 }
 
 //===----------------------------------------------------------------------===//
+// RefineRescheduleOpsHint
+//===----------------------------------------------------------------------===//
+
+def RefineRescheduleOpsHint : TT_AMDGPU_Op<"refine_reschedule_ops_hint", []> {
+  let summary = "A placeholder op for refining and scheduling ops";
+  let description = [{
+    TODO: description
+  }];
+
+  let arguments = (ins);
+  let assemblyFormat = [{ attr-dict }];
+}
+
+//===----------------------------------------------------------------------===//
 // CondBarrierOp
 //===----------------------------------------------------------------------===//
 
