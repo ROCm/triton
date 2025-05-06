@@ -110,7 +110,8 @@ Cherry picked https://github.com/triton-lang/triton/pull/6656,
 which unpacks `v_pk_mul` at llvmir level.
 
 Perf improves a bit. However, it reduces vgpr count from 256 (8) to 253 (0).
-The dumped IR is saved in `study_4-stage/pp-4s_unpack-mul/IR_dump`
+The dumped IR is saved in `study_4-stage/pp-4s_unpack-mul/IR_dump`.
+The branch associated with this change is checkout as `test_fav3`.
 
 # loop unrolling
 
@@ -155,3 +156,82 @@ Perf
 - before this change: 850 tflops
 - use `hack_s_waitcnt.ttgir`: 830 tflops
 - use `hack_s_waitcnt.s`: 860 tflops
+
+# Update faPipelining branch
+
+commit: 9adc728311978a042967466f8a1f3a5981d06749
+
+This branch has lower perf than branch `test_fav3` with command
+`TRITON_HIP_SCALARIZE_VECTOR_FOPS=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_USE_ASYNC_COPY=1 python fa/flash-attention.py`
+
+It also has 4 spills.
+
+# Register spill study
+
+Experiment setup
+- docker: `compute-artifactory.amd.com:5000/rocm-plus-docker/framework/compute-rocm-npi-mi350:765_ubuntu22.04_py3.10_pytorch_rocm6.4_internal_testing_gfx950_f2faad5`
+- branch: https://github.com/ROCm/triton/blob/fa_reg_spill
+  - install: `cd triton && pip install -e .`
+- FA kernel: https://github.com/ROCm/triton/blob/fa_reg_spill/fa/flash-attention.py
+
+Parameters:
+- `assume` vs `no assume`: this refers to the `tl.assume` before the for loop at
+this [line](https://github.com/ROCm/triton/blob/d04c4cc1eb586b27176c1a8ae2a66c969f394613/fa/flash-attention.py#L252).
+With `tl.assume`, we can get rid of `if` in the epilogue of the first loop.
+- `rm-2ndFor`: this refers to removal of the 2nd forLoop in ttgir and run
+the kernel with modified ttgir directly by uncommenting [these lines](https://github.com/ROCm/triton/blob/d04c4cc1eb586b27176c1a8ae2a66c969f394613/third_party/amd/backend/compiler.py#L281-L297).
+
+All IR dumps can be found at `triton/python/perf-kernels/study_4-stage/reg_pressure/`.
+
+
+## Causal = False
+
+command: 
+`TRITON_HIP_SCALARIZE_VECTOR_FOPS=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_USE_ASYNC_COPY=1 python fa/flash-attention.py -model llama3-405B`
+
+  | no assume | no assume rm-2ndFor | assume | assume rm-2ndFor
+-- | -- | -- | -- | --
+reg | 256 (27') | 256 (7') | 256 (21) | 256 (3)
+perf | 734 | 780 | 813 | 817
+
+Notes
+- perf has unit of tflops. 
+- reg has unit of vgpr count (vgpr spills). Prime (') means there are spills
+inside the first loop.
+
+## Causal = True
+
+command: 
+`TRITON_HIP_SCALARIZE_VECTOR_FOPS=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_USE_ASYNC_COPY=1 python fa/flash-attention.py -model llama3-405B -causal`
+
+  | no assume | no assume rm-2ndFor | assume | assume rm-2ndFor
+-- | -- | -- | -- | --
+reg | 256 (32') | 256 (18') | 256 (22') | 256 (3)
+perf | 515 | 481 | 692 | 764
+
+## Things to investigate
+
+The ultimate goal is to optimize the `causal_assume` case.
+
+### `rm-2ndFor`
+
+- [ ] Why does the 2nd loop increase vgpr usage a lot?
+
+### `causal_assume` vs `nonCausal_assume`
+
+Let's say we have `tl.assume` enabled to remove `if` from the epilogue. We also keep the 2nd loop.
+The `causal_assume` and `nonCausal_assume` has almost the same spills (22 vs 21).
+- [ ] Why in the `causal_assume` case, the spills happen inside the first loop? 
+But in the `nonCausal_assume` case, the spills happen outside of the first loop?
+
+### `assume` vs `no assume`
+
+- [ ] why does `if` in the epilogue increase reg usage? This is true for both causal and non-causal cases.
+- [ ] why does `if` in the epilogue introduce spill inside the loop? Check `nonCausal_nonAssume_rm-2ndFor`. 
+It has only 7 spills, but some of them are inside the loop, which kills the perf.
+
+
+
+
+
+
