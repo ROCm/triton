@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import subprocess
 import functools
 from pathlib import Path
@@ -277,6 +278,24 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
+        '''
+        print("compiling attn kernel")
+        #pm.run(mod)
+        tname = "/var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/reg_pressure/causal_assume_rm-2ndFor.ttgir"
+        outname = "./tempout.ir"
+        with open(outname, 'wb') as fd_out:
+            fd_out.write(str(mod).encode())
+            fd_out.close()
+        if os.path.isfile(tname) is False:
+            tname = outname
+            print("cannot find the ttgir")
+        mod2 = ir.parse_mlir_module(tname, mod.context)
+        mod2.context = mod.context
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        mod = mod2
+        '''
+        
         return mod
 
     @staticmethod

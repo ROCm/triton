@@ -245,7 +245,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr,
                     QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr, USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr):
     # loop over k, v, and update accumulator
-    for start_n in range(block_min, block_max, BLOCK_N):
+    block_min_idx = block_min // BLOCK_N
+    block_max_idx = block_max // BLOCK_N
+    iter_max = block_max_idx - block_min_idx
+    #for start_n in range(block_min, block_max, BLOCK_N):
+    tl.assume(iter_max >= 4)
+    for start_n_idx in range(0, iter_max):
+        start_n = (start_n_idx + block_min_idx) * BLOCK_N
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
         if MASK_STEPS:
@@ -1926,7 +1932,7 @@ def run_benchmark(custom, args):
     head_size = 128 if not args.d else args.d
     mode = 'fwd'
     x_names = ['BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K']
-    causal = args.causal if not args.model else True
+    causal = args.causal #if not args.model else True
     int8 = args.int8
     quantize_p = args.quantize_p and int8
     int8_kv = args.int8_kv and int8
@@ -2133,5 +2139,5 @@ def main():
 
 
 if __name__ == '__main__':
-    test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
+    #test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
     sys.exit(main())
