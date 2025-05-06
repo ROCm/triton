@@ -1814,6 +1814,12 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   if (getMDim() == 4)
     maxPhase = 4;
 
+  // Disable swizzling for scales
+  if (operandIdx >= 2) {
+    return SwizzledSharedEncodingAttr::get(getContext(), 1, 1, 1, sharedOrder,
+                                           ctaLayout);
+  }
+
   return SwizzledSharedEncodingAttr::get(getContext(), vectorSize, perPhase,
                                          maxPhase, sharedOrder, ctaLayout);
 }
