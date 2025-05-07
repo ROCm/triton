@@ -438,9 +438,70 @@ struct CanonicalizeConcatOp : public mlir::OpRewritePattern<amdgpu::ConcatOp> {
   }
 };
 
+struct DotOpPropagateAttrPattern : public OpRewritePattern<triton::DotOp> {
+  using OpRewritePattern::OpRewritePattern;
+  using AttrType = amdgpu::DotTileAttr;
+
+  void propagate(Operation *op, AttrType targetAttr) const {
+    Block *currBlock = op->getBlock();
+    for (auto operand : op->getOperands()) {
+      if (mlir::isa<mlir::BlockArgument>(operand))
+        continue;
+
+      auto definingOp = operand.getDefiningOp();
+      if (definingOp->getBlock() != currBlock)
+        continue;
+
+      bool allowedDialects =
+          mlir::isa<gpu::TritonGPUDialect>(definingOp->getDialect());
+      allowedDialects |=
+          mlir::isa<amdgpu::TritonAMDGPUDialect>(definingOp->getDialect());
+      if (!allowedDialects)
+        continue;
+
+      auto operandArrayAttr =
+          definingOp->getAttrOfType<mlir::ArrayAttr>(attrName);
+      if (!operandArrayAttr) {
+        operandArrayAttr = mlir::ArrayAttr::get(op->getContext(), {});
+      }
+
+      SmallVector<Attribute> updatedAttrs(operandArrayAttr.getValue());
+      auto result = operandArrayAttr.walk([&targetAttr](AttrType itemAttr) {
+        return itemAttr == targetAttr ? WalkResult::interrupt()
+                                      : WalkResult::advance();
+      });
+
+      if (!result.wasInterrupted()) {
+        updatedAttrs.push_back(targetAttr);
+      }
+
+      if (!updatedAttrs.empty())
+        definingOp->setAttr(
+            attrName, mlir::ArrayAttr::get(op->getContext(), updatedAttrs));
+
+      propagate(definingOp, targetAttr);
+    }
+  }
+
+  LogicalResult matchAndRewrite(triton::DotOp dotOp,
+                                PatternRewriter &rewriter) const override {
+    amdgpu::DotTileAttr opAttr = dotOp->getAttrOfType<AttrType>(attrName);
+    if (!opAttr)
+      return failure();
+
+    propagate(dotOp, opAttr);
+
+    return success();
+  }
+
+private:
+  static const inline StringLiteral attrName = AttrType::getMnemonic();
+};
+
 void ConcatOp::getCanonicalizationPatterns(mlir::RewritePatternSet &patterns,
                                            mlir::MLIRContext *context) {
   patterns.add<CanonicalizeConcatOpFromExtractSlice>(context);
   patterns.add<CanonicalizeConcatOp>(context);
+  patterns.add<DotOpPropagateAttrPattern>(context);
 }
 } // namespace mlir::triton::amdgpu
