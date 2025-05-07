@@ -129,7 +129,20 @@ max      261.981219
 dtype: float64
 ```
 
+You can also run the tool using a yaml configuration file as well. For example:
+
+```bash
+$ cat ./config.yaml
+kernel: ".*fwd"
+cmd: 'python3 ./flash-attention.py -b 2 -hq 4 -hk 4 -sq 113 -sk 123 -d 1 -causal -layout bhsd'
+
+$ python3 ./rocm-triton-prof.py -f ./config.yaml
+```
+
+Note, you can use a regular expression for the kernel name (see example above). The tool is
+going to abort of more than one kernel match the given regular expression.
+
 ### Known limits
 
-The tool currently supports only FP64, FP32 and FP16 operations.
-Note, it can be extended to supoprt other data types.
+The tool currently supports only FP64, FP32 and FP16 operations. Note, it can be extended
+to supoprt other data types.
