@@ -429,12 +429,12 @@ def get_cdna_autotune_configs():
         configs = []
 
         for block_m in [128]:
-            for block_n in [64]:
+            for block_n in [64, 32]:
                 for wpeu in [2]:
-                    for pre_load_v in [True]:
-                        for nonk in [32]:
+                    for pre_load_v in [False, True]:
+                        for nonk in [32, 16]:
                             for num_warps in [4]:
-                                for num_stages in [1]:
+                                for num_stages in [1, 2]:
                                     configs.append(triton.Config({
                                         'BLOCK_M': block_m,
                                         'BLOCK_N': block_n,
@@ -442,7 +442,7 @@ def get_cdna_autotune_configs():
                                         'PRE_LOAD_V': pre_load_v,
                                         'GRID_CU_MULTIP': 2,
                                         'matrix_instr_nonkdim': nonk,
-                                        'schedule_hint': 'none'},
+                                        'schedule_hint': 'refine_ops'},
                                         num_stages=num_stages,
                                         num_warps=num_warps))
 
@@ -2061,6 +2061,7 @@ def run_benchmark(custom, args):
 
         flops_per_matmul = 0
         if varlen:
+            print("varlen")
             q, k, v, input_metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                                                           args.equal_seqlens)
             for i in range(0, input_metadata.num_contexts):
@@ -2083,9 +2084,11 @@ def run_benchmark(custom, args):
                     valid_out_elements = ((seqlen_k**2 + seqlen_k) / 2) if seqlen_q > seqlen_k else \
                             (seqlen_q * seqlen_k - ((seqlen_q**2 - seqlen_q) / 2))
                     flops_per_matmul += valid_out_elements * HQ * D_HEAD * 2
+                    print('i=',i,'; seqlen_k=',seqlen_k,'; seqlen_q=',seqlen_q, '; valid_out_elements=',valid_out_elements, '; flops_per_matmul=',flops_per_matmul)
                 else:
                     flops_per_matmul += seqlen_q * seqlen_k * HQ * D_HEAD * 2
         else:
+            print("NOT varlen")
             q, k, v, input_metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout)
             if causal:
                 # Same calculation as if varlen/if causal above

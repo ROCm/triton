@@ -1,14 +1,25 @@
 rm -rf ~/.triton/cache/
 
 # Run.
+foo_bar() {
 HIP_VISIBLE_DEVICES=4 \
   TRITON_ALWAYS_COMPILE=1 \
   TRITON_PRINT_AUTOTUNING=1 \
   MLIR_ENABLE_DUMP=0 \
   FA_CONFIG=./config32.yaml \
-  TRITON_MLIR_INSERT_REFINE_OPS=ttgir/20.ttgir \
-  python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 32768 -sk 32768 -d 128 -layout thd -causal --dump-ir amdgcn
+  TRITON_MLIR_INSERT_REFINE_OPS=ttgir/19.ttgir \
+  python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 32768 -sk 32768 -d 128 -layout thd -causal -equal_seqlens --dump-ir amdgcn
+}
+foo_bar
+foo_bar
+foo_bar
 
+#  TRITON_KERNEL_DUMP=1 \
+#  TRITON_DUMP_DIR=triton_dump_dir \
+#  TRITON_KERNEL_OVERRIDE=1 \
+#  TRITON_OVERRIDE_DIR=triton_override_dir \
+
+#  TRITON_MLIR_INSERT_REFINE_OPS=ttgir/no_sched_hint.ttgir \
 # python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 65536 -sk 65536 -d 128 -layout thd -causal --dump-ir amdgcn
 # python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 32768 -sk 32768 -d 128 -layout thd -causal --dump-ir amdgcn
 # python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 16384 -sk 16384 -d 128 -causal -layout thd  --dump-ir amdgcn

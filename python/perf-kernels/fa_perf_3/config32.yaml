@@ -3,9 +3,11 @@ BLOCK_N: 64
 waves_per_eu: 2
 PRE_LOAD_V: False
 GRID_CU_MULTIP: 2
+#num_stages: 1
 num_stages: 2
 num_ctas: 1
 num_warps: 4
+#schedule_hint: "none"
 schedule_hint: "refine_ops"
 matrix_instr_nonkdim: 32
 kpack: 2

@@ -429,12 +429,12 @@ def get_cdna_autotune_configs():
         configs = []
 
         for block_m in [128]:
-            for block_n in [64]:
-                for wpeu in [2]:
-                    for pre_load_v in [True]:
-                        for nonk in [32]:
+            for block_n in [32, 64]:
+                for wpeu in [2, 3]:
+                    for pre_load_v in [False, True]:
+                        for nonk in [16, 32]:
                             for num_warps in [4]:
-                                for num_stages in [1]:
+                                for num_stages in [1, 2]:
                                     configs.append(triton.Config({
                                         'BLOCK_M': block_m,
                                         'BLOCK_N': block_n,

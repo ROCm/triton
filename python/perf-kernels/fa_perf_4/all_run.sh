@@ -14,7 +14,11 @@
 HIP_VISIBLE_DEVICES=3 \
   TRITON_PRINT_AUTOTUNING=1 \
   TRITON_ALWAYS_COMPILE=1 \
-  python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 8192 -sk 8192 -d 128 -causal -layout thd --dump-ir amdgcn
+  python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq  8192 -sk  8192 -d 128 -causal -layout thd -equal_seqlens && \
+HIP_VISIBLE_DEVICES=3 \
+  TRITON_PRINT_AUTOTUNING=1 \
+  TRITON_ALWAYS_COMPILE=1 \
+  python3 ./flash-attention.py -b 2 -hq 16 -hk 16 -sq 32768 -sk 32768 -d 128 -causal -layout thd -equal_seqlens
 
 # -causal -layout thd
 

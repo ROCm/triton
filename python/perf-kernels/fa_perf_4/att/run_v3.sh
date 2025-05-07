@@ -10,7 +10,7 @@ HIP_VISIBLE_DEVICES=3 \
   TRITON_OVERRIDE_DIR=../triton_override_dir \
   FA_CONFIG=../config.yaml \
   rocprofv3 \
-  -d fa4asm_9_v3 \
+  -d fa4asm_check \
   -i att.json \
   --advanced-thread-trace --att-parse trace \
   -- \
