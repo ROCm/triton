@@ -177,11 +177,24 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
   // Assume the following chain of IRs
   // %0 = make_range {0, 128}
   // %1 = expand_dims %0: -> tensor<1x128>
-  // %2 = broadcast %1: --> tensor<16x128>
+  // %strided = muli %1, %cst -> tensor<1x128>
+  // %2 = broadcast %1/%strided: --> tensor<16x128>
   // bcastM is the broadcast op
   auto broadcastOp = dyn_cast<triton::BroadcastOp>(bcastM);
   assert(broadcastOp && "We are not starting with a broadcast op");
   auto bcastKParentOp = broadcastOp.getSrc().getDefiningOp();
+  auto strideMulOp = dyn_cast<arith::MulIOp>(bcastKParentOp);
+  DenseElementsAttr strideConstantAttr;
+  if (strideMulOp) {
+    auto strideConstant = dyn_cast<arith::ConstantOp>(strideMulOp.getRhs().getDefiningOp());
+    assert(strideConstant && "anticipated K stride is not constant");
+    strideConstantAttr =
+        dyn_cast<mlir::DenseElementsAttr>(strideConstant.getValueAttr());
+    assert(strideConstantAttr && "K stride constant is not Dense");
+    assert(strideConstantAttr.isSplat() &&
+    "The attribute of the constantOp is not a splat");
+    bcastKParentOp = strideMulOp.getLhs().getDefiningOp();
+  }
   auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(bcastKParentOp);
   assert(expandDimsOp && "broadcast's parent must be a expand_dims op");
   auto expandDimsOpParent = expandDimsOp.getSrc().getDefiningOp();
@@ -192,8 +205,23 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
   auto newMakeRangeValue = extendMakeRange(builder, makeRangeOp, hoistDimSize);
   // new expand_dims 1x{128*ub}
   int expandDim = expandDimsOp.getAxisAttr().getInt();
-  auto newExpandDimsValue = builder.create<triton::ExpandDimsOp>(
+  mlir::Value newExpandDimsValue = builder.create<triton::ExpandDimsOp>(
       expandDimsOp.getLoc(), newMakeRangeValue, expandDim);
+
+  if (strideMulOp) {
+    RankedTensorType ty = cast<RankedTensorType>(strideConstantAttr.getType());
+    SmallVector<int64_t> newStrideShape(ty.getShape());
+    assert(newStrideShape.size() == 2);
+    newStrideShape[1] = hoistDimSize;
+    auto newStrideTy =
+        RankedTensorType::get(newStrideShape, ty.getElementType(), ty.getEncoding());
+    auto reshapedStrideAttr = strideConstantAttr.resizeSplat(newStrideTy);
+
+    auto loc = strideMulOp.getLoc();
+    auto newStrideConst = builder.create<arith::ConstantOp>(loc, newStrideTy, reshapedStrideAttr);
+
+    newExpandDimsValue = builder.create<arith::MulIOp>(loc, newExpandDimsValue, newStrideConst);
+  }
 
   // erase ops
   // makeRangeOp.erase();
