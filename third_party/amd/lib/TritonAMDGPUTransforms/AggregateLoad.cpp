@@ -186,13 +186,14 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
   auto strideMulOp = dyn_cast<arith::MulIOp>(bcastKParentOp);
   DenseElementsAttr strideConstantAttr;
   if (strideMulOp) {
-    auto strideConstant = dyn_cast<arith::ConstantOp>(strideMulOp.getRhs().getDefiningOp());
+    auto strideConstant =
+        dyn_cast<arith::ConstantOp>(strideMulOp.getRhs().getDefiningOp());
     assert(strideConstant && "anticipated K stride is not constant");
     strideConstantAttr =
         dyn_cast<mlir::DenseElementsAttr>(strideConstant.getValueAttr());
     assert(strideConstantAttr && "K stride constant is not Dense");
     assert(strideConstantAttr.isSplat() &&
-    "The attribute of the constantOp is not a splat");
+           "The attribute of the constantOp is not a splat");
     bcastKParentOp = strideMulOp.getLhs().getDefiningOp();
   }
   auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(bcastKParentOp);
@@ -213,14 +214,16 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
     SmallVector<int64_t> newStrideShape(ty.getShape());
     assert(newStrideShape.size() == 2);
     newStrideShape[1] = hoistDimSize;
-    auto newStrideTy =
-        RankedTensorType::get(newStrideShape, ty.getElementType(), ty.getEncoding());
+    auto newStrideTy = RankedTensorType::get(
+        newStrideShape, ty.getElementType(), ty.getEncoding());
     auto reshapedStrideAttr = strideConstantAttr.resizeSplat(newStrideTy);
 
     auto loc = strideMulOp.getLoc();
-    auto newStrideConst = builder.create<arith::ConstantOp>(loc, newStrideTy, reshapedStrideAttr);
+    auto newStrideConst =
+        builder.create<arith::ConstantOp>(loc, newStrideTy, reshapedStrideAttr);
 
-    newExpandDimsValue = builder.create<arith::MulIOp>(loc, newExpandDimsValue, newStrideConst);
+    newExpandDimsValue =
+        builder.create<arith::MulIOp>(loc, newExpandDimsValue, newStrideConst);
   }
 
   // erase ops
@@ -277,6 +280,95 @@ Value createLocalAlloc(OpBuilder &builder, Location loc, Value loadVal,
   return builder.create<ttg::LocalAllocOp>(loc, ldsBufferType, loadVal);
 }
 
+Value widen2dPtrCase(OpBuilder builder, Operation *aPtrs, int64_t hoistKSize) {
+  // We assume the operands of this addptr come from broadcast
+  Operation *bcastK, *bcastM;
+  for (Value ptrOperand : aPtrs->getOperands()) {
+    Operation *broadcastOp = ptrOperand.getDefiningOp();
+    Value bcastSrc = broadcastOp->getOperand(0);
+    auto srcShape = dyn_cast<RankedTensorType>(bcastSrc.getType()).getShape();
+    if (srcShape[1] == 1)
+      bcastK = broadcastOp;
+    else // srcShape[0] == 1
+      bcastM = broadcastOp;
+  }
+
+  // addptr has form: res = addptr ptr, offset
+  // bcastM refers to the broadcast along M dim, which is assumed to be the
+  // offset of the addptr. So its shape is <1 x BLOCK_K> --> <BLOCK_M x BLOCK_K>
+  // bcastK refers to the broadcast along K dim, which is assumed to be the
+  // ptr of the addptr. So its shape is <BLOCK_M x 1> --> <BLOCK_M x BLOCK_K>
+  //
+  // We also assume that bcastM comes from the chain of the following ops
+  // 1. make_range <BLOCK_K>
+  // 2. expand_dims <BLOCK_K> --> <1xBLOCK_K>
+  // 3. broadcast <1 x BLOCK_K> --> <BLOCK_M x BLOCK_K>
+  // Therefore, we need to go all the way to make_range and extend BLOCK_K
+  // to BLOCK_K*ub
+  //
+  // For bcastK, we only need to extend the broadcast to be
+  // <BLOCK_M x 1> --> <BLOCK_M x {BLOCK_K*ub}>
+
+  auto newBcastMVal = expandPathBcastM(bcastM, builder, hoistKSize);
+  auto newBcastKVal =
+      extendBroadcast(builder, bcastK, /*which dim to extend*/ 1, hoistKSize,
+                      dyn_cast<triton::BroadcastOp>(bcastK).getSrc());
+
+  // After expanding BLOCK_K to BLOCK_K*ub, we create the new addptr
+  // with the new broadcast values: addptr newBcastKVal, newBcastMVal
+  auto newPtrVal = builder.create<triton::AddPtrOp>(
+      aPtrs->getLoc(), newBcastKVal.getType(), newBcastKVal, newBcastMVal);
+  return newPtrVal;
+}
+
+Value widen1dPtrCase(OpBuilder builder, triton::BroadcastOp bcast,
+                     int64_t hoistKSize) {
+  // %34 = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32,
+  // #ttg.slice<{dim = 0, parent = #blocked4}>> loc(#loc34) %36 = tt.expand_dims
+  // %34 {axis = 0 : i32} : tensor<8xi32, #ttg.slice<{dim = 0, parent =
+  // #blocked4}>> -> tensor<1x8xi32, #blocked4> loc(#loc34) %37 = tt.splat %arg3
+  // : !tt.ptr<i8> -> tensor<1x8x!tt.ptr<i8>, #blocked4> loc(#loc35) %38 =
+  // tt.addptr %37, %36 : tensor<1x8x!tt.ptr<i8>, #blocked4>, tensor<1x8xi32,
+  // #blocked4> loc(#loc35) %39 = tt.broadcast %38 : tensor<1x8x!tt.ptr<i8>,
+  // #blocked4> -> tensor<32x8x!tt.ptr<i8>, #blocked4> loc(#loc35)
+  auto addPtr = dyn_cast<triton::AddPtrOp>(bcast.getSrc().getDefiningOp());
+  assert(addPtr && "expected addPtr before broadcast in 1d case");
+  auto baseSplat =
+      dyn_cast<triton::SplatOp>(addPtr.getOperand(0).getDefiningOp());
+  assert(baseSplat && "expeceted splat befor addPtr");
+  auto expandDims =
+      dyn_cast<triton::ExpandDimsOp>(addPtr.getOperand(1).getDefiningOp());
+  assert(expandDims && "expected expand dims before addPtr");
+  auto makeRange =
+      dyn_cast<triton::MakeRangeOp>(expandDims.getSrc().getDefiningOp());
+  assert(makeRange && "expected make range before expand dims");
+
+  // new make_range
+  auto newMakeRangeValue = extendMakeRange(builder, makeRange, hoistKSize);
+  // new expand_dims
+  int expandDim = expandDims.getAxisAttr().getInt();
+  mlir::Value newExpandDimsValue = builder.create<triton::ExpandDimsOp>(
+      expandDims.getLoc(), newMakeRangeValue, expandDim);
+  // new splat ptr
+  auto basePtr = baseSplat.getSrc();
+  SmallVector<int64_t> newSplatShape(baseSplat.getType().getShape());
+  assert(newSplatShape[0] == 1 && "expect M/N == 1");
+  assert(newSplatShape.size() == 2);
+  newSplatShape[1] = hoistKSize;
+  auto newSplatTy = RankedTensorType::get(newSplatShape, basePtr.getType(),
+                                          baseSplat.getType().getEncoding());
+  auto newBaseSplat =
+      builder.create<triton::SplatOp>(baseSplat.getLoc(), newSplatTy, basePtr);
+  // new addptr
+  auto newAddPtrTy = newBaseSplat.getType();
+  auto newAddPtr = builder.create<triton::AddPtrOp>(
+      addPtr.getLoc(), newAddPtrTy, newBaseSplat, newExpandDimsValue);
+  // new broadcast
+  auto newBcastValue = extendBroadcast(
+      builder, bcast, /*which dim to extend*/ 1, hoistKSize, newAddPtr);
+  return newBcastValue;
+}
+
 Value hoistLoad(scf::ForOp forOp, Operation *op, int64_t newUpperBound, int ub,
                 StringRef archGen) {
   triton::LoadOp loadOp = dyn_cast<triton::LoadOp>(op);
@@ -329,43 +421,12 @@ Value hoistLoad(scf::ForOp forOp, Operation *op, int64_t newUpperBound, int ub,
   // This is assumed to be the addptr op to compute the final aptrs for loadOp
   // say %29 = tt.addptr %27, %28 : tensor<16x128x!tt.ptr<f16>, #blocked>
   Operation *aPtrs = operand.get().getDefiningOp();
-  // We assume the operands of this addptr come from broadcast
-  Operation *bcastK, *bcastM;
-  for (Value ptrOperand : aPtrs->getOperands()) {
-    Operation *broadcastOp = ptrOperand.getDefiningOp();
-    Value bcastSrc = broadcastOp->getOperand(0);
-    auto srcShape = dyn_cast<RankedTensorType>(bcastSrc.getType()).getShape();
-    if (srcShape[1] == 1)
-      bcastK = broadcastOp;
-    else // srcShape[0] == 1
-      bcastM = broadcastOp;
+  Value newPtrVal;
+  if (isa<triton::AddPtrOp>(aPtrs)) {
+    newPtrVal = widen2dPtrCase(builder, aPtrs, hoistKSize);
+  } else if (auto bcast = dyn_cast<triton::BroadcastOp>(aPtrs)) {
+    newPtrVal = widen1dPtrCase(builder, bcast, hoistKSize);
   }
-
-  // addptr has form: res = addptr ptr, offset
-  // bcastM refers to the broadcast along M dim, which is assumed to be the
-  // offset of the addptr. So its shape is <1 x BLOCK_K> --> <BLOCK_M x BLOCK_K>
-  // bcastK refers to the broadcast along K dim, which is assumed to be the
-  // ptr of the addptr. So its shape is <BLOCK_M x 1> --> <BLOCK_M x BLOCK_K>
-  //
-  // We also assume that bcastM comes from the chain of the following ops
-  // 1. make_range <BLOCK_K>
-  // 2. expand_dims <BLOCK_K> --> <1xBLOCK_K>
-  // 3. broadcast <1 x BLOCK_K> --> <BLOCK_M x BLOCK_K>
-  // Therefore, we need to go all the way to make_range and extend BLOCK_K
-  // to BLOCK_K*ub
-  //
-  // For bcastK, we only need to extend the broadcast to be
-  // <BLOCK_M x 1> --> <BLOCK_M x {BLOCK_K*ub}>
-
-  auto newBcastMVal = expandPathBcastM(bcastM, builder, hoistKSize);
-  auto newBcastKVal =
-      extendBroadcast(builder, bcastK, /*which dim to extend*/ 1, hoistKSize,
-                      dyn_cast<triton::BroadcastOp>(bcastK).getSrc());
-
-  // After expanding BLOCK_K to BLOCK_K*ub, we create the new addptr
-  // with the new broadcast values: addptr newBcastKVal, newBcastMVal
-  auto newPtrVal = builder.create<triton::AddPtrOp>(
-      aPtrs->getLoc(), newBcastKVal.getType(), newBcastKVal, newBcastMVal);
 
   // The we create the aggregated load with the "fat" pointer
   // create: load newPtr
