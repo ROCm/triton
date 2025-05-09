@@ -37,6 +37,8 @@ class Pingponger {
   SmallVector<tt::LoadOp> gLoadOps;
   SmallVector<ttg::LocalLoadOp> lLoadOps;
   SmallVector<ttg::LocalStoreOp> lStoreOps;
+  SmallVector<ttg::AsyncCopyGlobalToLocalOp> asyncCopies;
+  ttg::AsyncWaitOp asyncWait;
   SmallVector<tt::DotOp> dotOps;
   SmallVector<tt::DotScaledOp> dotSOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
@@ -808,6 +810,7 @@ void Pingponger::getDotPingponged() {
   MLIRContext *ctx = forOp.getContext();
   Location loc = forOp.getLoc();
 
+  SmallVector<ttg::AsyncWaitOp> asyncWaits;
   forOp->walk([&](Operation *op) {
     if (auto gLoad = dyn_cast<tt::LoadOp>(op))
       gLoadOps.push_back(gLoad);
@@ -827,8 +830,32 @@ void Pingponger::getDotPingponged() {
         dotOps.push_back(pingpongDot);
     } else if (auto pingpongDot = dyn_cast<tt::DotScaledOp>(op)) {
       dotSOps.push_back(pingpongDot);
+    } else if (auto asyncCopy = dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(op)) {
+      asyncCopies.push_back(asyncCopy);
+    } else if (auto wait = dyn_cast<ttg::AsyncWaitOp>(op)) {
+      asyncWaits.push_back(wait);
     }
   });
+
+  asyncWait = nullptr;
+  if (asyncWaits.size() > 1) {
+    std::stringstream message;
+    message << "Unable to match ping pong scheduling pattern. Details: "
+            << "found " << asyncWaits.size()
+            << " AsyncWaitOp the scheduled region. Only one is allowed";
+    LDBG(message.str());
+    return;
+  } else if (asyncWaits.size() == 1) {
+    asyncWait = asyncWaits.pop_back_val();
+  }
+
+  if (!asyncCopies.empty() && asyncWait == nullptr) {
+    std::stringstream message;
+    message << "Unable to match ping pong scheduling pattern. Details: "
+            << "failed to find  AsyncWaitOp int the scheduled region";
+    LDBG(message.str());
+    return;
+  }
 
   // Currently, pingpong scheduling is known as helpful under limited condition.
   // Individual conditions are checked while collecting each operation such as
