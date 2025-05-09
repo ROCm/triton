@@ -670,7 +670,13 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
   if (shapeB[1] % numSlices != 0)
     return failure();
 
-  builder.setInsertionPointAfter(gLoadOps[0]);
+  if (!gLoadOps.empty())
+    builder.setInsertionPointAfter(gLoadOps[0]);
+  else if (!asyncCopies.empty()) {
+    builder.setInsertionPointAfter(asyncCopies[0]);
+  } else {
+    return failure();
+  }
   auto dotEncoding = op.getType().getEncoding();
 
   if (llvm::failed(genAsyncCopySlices(builder, sliceWidth))) {
