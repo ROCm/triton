@@ -48,7 +48,8 @@ Operation *getLoadOpFromScale(Value scale) {
 void findValidLoads(scf::ForOp forOp,
                     SetVector<std::pair<Operation *, Operation *>> &validLoads,
                     SmallVector<std::pair<int64_t, int64_t>> &hoistLoopSpecs,
-                    int ub, int64_t totalSharedMemoryUsage) {
+                    int ub, int aggregateFactor,
+                    int64_t totalSharedMemoryUsage) {
   int64_t currentSharedMemoryUsage = totalSharedMemoryUsage;
   for (Operation &op : forOp) {
     if (auto dotScaledOp = dyn_cast<triton::DotScaledOp>(&op)) {
@@ -95,7 +96,10 @@ void findValidLoads(scf::ForOp forOp,
 
       int newUpperBound = ub;
       int64_t hoistFactor = 1;
-
+      if (aggregateFactor != -1) {
+        newUpperBound = ub / aggregateFactor;
+        hoistFactor = aggregateFactor;
+      }
       auto getAlignedScaleLDSUsage = [&](int numBlocks) {
         return (aScaleShape[0] + bScaleShape[0]) *
                llvm::PowerOf2Ceil(aScaleShape[1] * numBlocks) * byteWidth;
@@ -633,8 +637,9 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
 // Stream Pipeline
 struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
   AggregateLoad() = default;
-  AggregateLoad(StringRef archGen) {
+  AggregateLoad(StringRef archGen, int factor) {
     this->archGenerationName = archGen.data();
+    this->aggregateFactor = factor;
   }
 
   void runOnOperation() override {
@@ -678,7 +683,7 @@ struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
       SetVector<std::pair<Operation *, Operation *>> validLoads;
       // newUpperBound, hoistFactor
       SmallVector<std::pair<int64_t, int64_t>> hoistLoopSpecs;
-      findValidLoads(forOp, validLoads, hoistLoopSpecs, ub,
+      findValidLoads(forOp, validLoads, hoistLoopSpecs, ub, aggregateFactor,
                      totalSharedMemoryUsage);
       // llvm::outs() << "validLoads.size(): " << validLoads.size() << "\n";
       for (auto [index, loadOps] : llvm::enumerate(validLoads)) {
@@ -704,6 +709,7 @@ struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
 } // namespace
 
 std::unique_ptr<Pass>
-mlir::createTritonAMDGPUAggregateLoadPass(std::string archGen) {
-  return std::make_unique<AggregateLoad>(archGen);
+mlir::createTritonAMDGPUAggregateLoadPass(std::string archGen,
+                                          int aggregateFactor) {
+  return std::make_unique<AggregateLoad>(archGen, aggregateFactor);
 }

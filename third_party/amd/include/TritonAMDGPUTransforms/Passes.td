@@ -18,6 +18,9 @@ def TritonAMDGPUAggregateLoad : Pass<"tritonamdgpu-aggregate-load", "mlir::Modul
     Option<"archGenerationName", "arch-generation-name",
            "std::string", /*default=*/"std::string{}",
            "GFX generation name of target device.">,
+    Option<"aggregateFactor", "factor",
+           "int32_t", /*default*/"0",
+           "number of loop iterations to aggregate.">,
   ];
 
   let dependentDialects = [];
