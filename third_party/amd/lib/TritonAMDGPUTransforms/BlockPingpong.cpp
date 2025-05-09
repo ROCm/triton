@@ -78,6 +78,7 @@ private:
                          unsigned numSlices);
   LogicalResult sliceDotScaled(OpBuilder &builder, Location loc,
                                tt::DotScaledOp op, unsigned numSlices);
+  LogicalResult genAsyncCopySlices(OpBuilder &builder, int64_t sliceWidth);
 
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
@@ -425,6 +426,7 @@ LogicalResult Pingponger::genLocalSlice(OpBuilder &builder, Value v,
                                         int64_t sliceWidth) {
   // TODO: support transformed input to dot
   auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
+
   if (!localLoad)
     return failure();
   auto memDesc = localLoad.getSrc();
@@ -550,6 +552,110 @@ LogicalResult Pingponger::sliceDot(OpBuilder &builder, Location loc,
   return success();
 }
 
+template <typename T> std::optional<T> getSingleUserOf(Value val) {
+  auto users = llvm::to_vector(val.getUsers());
+  if (users.size() == 1) {
+    auto targetOp = dyn_cast<T>(users[0]);
+    if (targetOp != nullptr)
+      return targetOp;
+  }
+  return std::nullopt;
+}
+
+std::optional<int64_t> getIndex(scf::YieldOp yield, Value target) {
+  auto tokenIt =
+      llvm::find_if(yield->getOperands(), [&](Value v) { return v == target; });
+  if (tokenIt == yield->getOperands().end())
+    return std::nullopt;
+  return std::distance(yield->getOperands().begin(), tokenIt);
+}
+
+LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder,
+                                             int64_t sliceWidth) {
+  if (asyncCopies.empty())
+    return success();
+
+  struct AsyncItem {
+    Value token;
+    Value memView;
+    Value commit;
+    int64_t commitReturnIdx;
+    int64_t memViewReturnIdx;
+    ttg::LocalLoadOp localLoad;
+    int64_t dotOpIdx;
+  };
+
+  llvm::SmallVector<AsyncItem> asyncDotOperands;
+  llvm::SmallVector<AsyncItem> asyncDotScaleOperands;
+  for (auto asyncCopy : asyncCopies) {
+    AsyncItem item;
+    item.token = asyncCopy.getToken();
+    item.memView = asyncCopy.getResult();
+
+    auto maybeAsyncCommit =
+        getSingleUserOf<ttg::AsyncCommitGroupOp>(item.token);
+    if (!maybeAsyncCommit) {
+      LDBG("expected a single `async_token` user for " << item.token);
+      continue;
+    }
+    item.commit = maybeAsyncCommit.value().getResult();
+
+    auto maybeScfYield = getSingleUserOf<scf::YieldOp>(item.commit);
+    if (!maybeScfYield) {
+      LDBG("expected a single `scf::yield` user for " << item.commit);
+      continue;
+    }
+
+    auto scfYield = maybeScfYield.value();
+    auto maybeCommitIdx = getIndex(scfYield, item.commit);
+    if (!maybeCommitIdx) {
+      LDBG("fail to find " << item.commit << " in `scf::yeild` for");
+      continue;
+    }
+    item.commitReturnIdx = maybeCommitIdx.value();
+
+    auto maybeMemViewIdx = getIndex(scfYield, item.memView);
+    if (!maybeMemViewIdx) {
+      LDBG("fail to find " << item.memView << " in `scf::yeild` for");
+      continue;
+    }
+
+    item.memViewReturnIdx = maybeMemViewIdx.value();
+    Value memViewInput =
+        asyncCopy->getBlock()->getArgument(item.memViewReturnIdx);
+    auto maybeLocalLoad = getSingleUserOf<ttg::LocalLoadOp>(memViewInput);
+    if (!maybeLocalLoad) {
+      LDBG("fail to find `ttg.local_load` from " << item.memViewReturnIdx
+                                                 << "input arg");
+      continue;
+    }
+    item.localLoad = maybeLocalLoad.value();
+    auto encoding = dyn_cast<ttg::DotOperandEncodingAttr>(
+        item.localLoad.getResult().getType().getEncoding());
+    if (encoding) {
+      item.dotOpIdx = encoding.getOpIdx();
+      asyncDotOperands.push_back(item);
+    } else {
+      item.dotOpIdx = -1;
+      asyncDotScaleOperands.push_back(item);
+    }
+  }
+
+  for (auto &item : asyncDotScaleOperands) {
+    auto maybeDot =
+        getSingleUserOf<tt::DotScaledOp>(item.localLoad.getResult());
+    if (!maybeDot) {
+      // encounter invalid IR; abort
+      LDBG("fail to find `tt.dot` for " << item.localLoad);
+      return failure();
+    }
+    item.dotOpIdx =
+        maybeDot.value().getAScale() == item.localLoad.getResult() ? 0 : 1;
+  }
+
+  return success();
+}
+
 LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
                                          tt::DotScaledOp op,
                                          unsigned numSlices) {
@@ -566,6 +672,10 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
 
   builder.setInsertionPointAfter(gLoadOps[0]);
   auto dotEncoding = op.getType().getEncoding();
+
+  if (llvm::failed(genAsyncCopySlices(builder, sliceWidth))) {
+    LDBG("failed to slice global-to-local async copies");
+  }
 
   // Generate slices for operands A and B
   if (genLocalSlice(builder, op.getA(), dotEncoding, 0, numSlices, sliceWidth)
