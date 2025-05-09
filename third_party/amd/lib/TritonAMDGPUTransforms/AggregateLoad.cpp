@@ -643,6 +643,9 @@ struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
   }
 
   void runOnOperation() override {
+    if (aggregateFactor == 0 || aggregateFactor == 1) {
+      return;
+    }
     // return;
     int64_t totalSharedMemoryUsage = 0;
     bool foundDotScaledOp = false;
