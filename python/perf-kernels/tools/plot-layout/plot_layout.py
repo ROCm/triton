@@ -55,6 +55,8 @@ def parse_args():
                             help='Dot op shape in the form of M, N, K')
     dot_parser.add_argument("--warpsPerCTA", type=int, nargs=2, default=(1, 4), metavar=("w0", "w1"),
                             help="how warps tile the dot result matrix")
+    dot_parser.add_argument("--tilesPerWarp", type=int, nargs=2, default=(1, 1), metavar=("y0", "y1"),
+                            help="how many contiguous tiles per warp")
     dot_parser.add_argument("--nonKDim", type=int, default=16, choices=[16, 32],
                             help='mfma instruction dimension of M/N')
     dot_parser.add_argument("--kWidth", type=int, default=4, choices=[4, 8, 16, 32],

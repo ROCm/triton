@@ -48,6 +48,11 @@
   %%
   %% C TL: pre defined top-left coordinates of the tensor
   %%
+  %% The following two parameters are pre-defined globally to avoid
+  %% passing too many args in this function.
+  %% \tpwM: tilesPerWarp[0]
+  %% \tpwN: tilesPerWarp[1]
+  %%
   %% #1: M
   %% #2: N
   %% #3: MFMA nonKDim
@@ -66,12 +71,13 @@
   \coordinate (TL) at (C TL);
 
 
-  \pgfmathsetmacro{\CTARepH}{\tensorShapeH/\mfmaNonKDim/\warpsPerCTAH}
-  \pgfmathsetmacro{\CTARepW}{\tensorShapeW/\mfmaNonKDim/\warpsPerCTAW}
+  \pgfmathsetmacro{\CTARepH}{\tensorShapeH/\mfmaNonKDim/\warpsPerCTAH/\tpwM}
+  \pgfmathsetmacro{\CTARepW}{\tensorShapeW/\mfmaNonKDim/\warpsPerCTAW/\tpwN}
   \pgfmathsetmacro{\maxCTAId}{\CTARepH*\CTARepW-1}
   \pgfmathsetmacro{\maxWaveId}{\warpsPerCTAH*\warpsPerCTAW-1}
-  \pgfmathsetmacro{\CTASizeH}{\warpsPerCTAH*\mfmaNonKDim}
-  \pgfmathsetmacro{\CTASizeW}{\warpsPerCTAW*\mfmaNonKDim}
+  \pgfmathsetmacro{\maxTileId}{\tpwM*\tpwN-1}
+  \pgfmathsetmacro{\CTASizeH}{\warpsPerCTAH*\mfmaNonKDim*\tpwM}
+  \pgfmathsetmacro{\CTASizeW}{\warpsPerCTAW*\mfmaNonKDim*\tpwN}
 
 
   \foreach \ctaId in {0,...,\maxCTAId}{
@@ -79,16 +85,26 @@
     \pgfmathsetmacro{\ctaCoordW}{mod(\ctaId,\CTARepW)}
     \coordinate (CTA TL) at ($(TL)+(\ctaCoordW*\CTASizeW*\elem, -\ctaCoordH*\CTASizeH*\elem)$);
     %% Draw a detailed view of wave0 in each CTA
-    \coordinate (block TL) at (CTA TL);
-    \drawBlockMFMALayoutLarge{\mfmaTrans}{\mfmaNonKDim}{0}
+    \foreach \tileId in {0,...,\maxTileId}{
+      \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwM)}
+      \pgfmathsetmacro{\tileCoordW}{mod(\tileId,\tpwN)}
+      \coordinate (block TL) at ($(CTA TL)+(\tileCoordW*\mfmaNonKDim*\elem, -\tileCoordH*\mfmaNonKDim*\elem)$);
+      \drawBlockMFMALayoutLarge{\mfmaTrans}{\mfmaNonKDim}{0}
+    }
 
     \foreach \waveId in {0,...,\maxWaveId}{
       \pgfmathsetmacro{\waveCoordH}{int(\waveId/\warpsPerCTAW)}
       \pgfmathsetmacro{\waveCoordW}{mod(\waveId,\warpsPerCTAW)}
-      \coordinate (block TL) at ($(CTA TL)+(\waveCoordW*\mfmaNonKDim*\elem, -\waveCoordH*\mfmaNonKDim*\elem)$);
-      %% Inside the loop, only draw a rectangle
-      \draw [ultra thin] (block TL) rectangle ++(\mfmaNonKDim*\elem, -\mfmaNonKDim*\elem)
-      node [scale=.7*\mfmaNonKDim/32*\scale, pos=.5, fill=white, inner sep=0] {wave\waveId};
+      \coordinate (block TL) at ($(CTA TL)+(\waveCoordW*\mfmaNonKDim*\elem*\tpwN, -\waveCoordH*\mfmaNonKDim*\elem*\tpwM)$);
+      \foreach \tileId in {0,...,\maxTileId}{
+        \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwM)}
+        \pgfmathsetmacro{\tileCoordW}{mod(\tileId,\tpwN)}
+        %% Inside the loop, only draw a rectangle
+        \draw [ultra thin] ($(block TL)+(\tileCoordW*\mfmaNonKDim*\elem, -\tileCoordH*\mfmaNonKDim*\elem)$) rectangle ++(\mfmaNonKDim*\elem, -\mfmaNonKDim*\elem)
+        node [scale=.7*\mfmaNonKDim/32*\scale, pos=.5, fill=white, inner sep=0] {wave\waveId};
+      }
+      %% Draw a thick outline for each wave
+      \draw [thick] (block TL) rectangle ++(\mfmaNonKDim*\elem*\tpwN, -\mfmaNonKDim*\elem*\tpwM);
     }
 
     %% Draw the outline of each CTA rep
@@ -185,6 +201,11 @@
   %% A TL and B TL: pre defined top-left coordinates of A and B tensor
   %% \elem: pre defined variable
   %%
+  %% The following two parameters are pre-defined globally to avoid
+  %% passing too many args in this function.
+  %% \tpwM: tilesPerWarp[0]
+  %% \tpwN: tilesPerWarp[1]
+  %%
   %% #1: M
   %% #2: N
   %% #3: K
@@ -200,41 +221,51 @@
   \pgfmathsetmacro{\warpsPerCTAN}{#6}
 
   %% operand A
-  \pgfmathsetmacro{\CTARepM}{\M/\warpsPerCTAM/\mfmaNonKDim}
+  \pgfmathsetmacro{\CTARepM}{\M/\warpsPerCTAM/\mfmaNonKDim/\tpwM}
   \pgfmathsetmacro{\maxCTAIdM}{\CTARepM-1}
   \pgfmathsetmacro{\maxWaveId}{\warpsPerCTAM-1}
+  \pgfmathsetmacro{\maxTileId}{\tpwM-1}
   \foreach \ctaId in {0,...,\maxCTAIdM}{
-    \coordinate (CTA TL) at ($(A TL)+(0, -\ctaId*\warpsPerCTAM*\mfmaNonKDim*\elem)$);
+    \coordinate (CTA TL) at ($(A TL)+(0, -\ctaId*\warpsPerCTAM*\mfmaNonKDim*\elem*\tpwM)$);
     \foreach \waveId in {0,...,\maxWaveId}{
-      \coordinate (wave TL) at ($(CTA TL)+(0, -\waveId*\mfmaNonKDim*\elem)$);
-      \draw [ultra thin] (wave TL) rectangle ++(\K*\elem, -\mfmaNonKDim*\elem);
+      \coordinate (wave TL) at ($(CTA TL)+(0, -\waveId*\mfmaNonKDim*\elem*\tpwM)$);
+      \foreach \tileId in {0,...,\maxTileId} {
+        \draw [ultra thin] ($(wave TL)+(0, -\tileId*\mfmaNonKDim*\elem)$) rectangle ++(\K*\elem, -\mfmaNonKDim*\elem);
+      }
     }
     %% Only draw the detailed view of the first wave in CTA
-    \coordinate (Op TL) at (CTA TL);
-    \drawWaveOperand{\K}{\mfmaNonKDim}{\kWidthA}{\kGroupA}{0}
+    \foreach \tileId in {0,...,\maxTileId} {
+      \coordinate (Op TL) at ($(CTA TL)+(0, -\tileId*\mfmaNonKDim*\elem)$);
+      \drawWaveOperand{\K}{\mfmaNonKDim}{\kWidthA}{\kGroupA}{0}
+    }
 
     %% Draw the outline of each CTA rep
-    \draw [ultra thick] (CTA TL) rectangle ++(\K*\elem, -\warpsPerCTAM*\mfmaNonKDim*\elem);
+    \draw [ultra thick] (CTA TL) rectangle ++(\K*\elem, -\warpsPerCTAM*\mfmaNonKDim*\elem*\tpwM);
   }
   \draw [ultra thin] (A TL) rectangle ++(\K*\elem, -\M*\elem);
 
 
   %% operand B
-  \pgfmathsetmacro{\CTARepN}{\N/\warpsPerCTAN/\mfmaNonKDim}
+  \pgfmathsetmacro{\CTARepN}{\N/\warpsPerCTAN/\mfmaNonKDim/\tpwN}
   \pgfmathsetmacro{\maxCTAIdN}{\CTARepN-1}
   \pgfmathsetmacro{\maxWaveId}{\warpsPerCTAN-1}
+  \pgfmathsetmacro{\maxTileId}{\tpwN-1}
   \foreach \ctaId in {0,...,\maxCTAIdN}{
-    \coordinate (CTA TL) at ($(B TL)+(\ctaId*\warpsPerCTAN*\mfmaNonKDim*\elem, 0)$);
+    \coordinate (CTA TL) at ($(B TL)+(\ctaId*\warpsPerCTAN*\mfmaNonKDim*\elem*\tpwN, 0)$);
     \foreach \waveId in {0,...,\maxWaveId}{
-      \coordinate (wave TL) at ($(CTA TL)+(\waveId*\mfmaNonKDim*\elem ,0)$);
-      \draw [ultra thin] (wave TL) rectangle ++(\mfmaNonKDim*\elem, -\K*\elem);
+      \coordinate (wave TL) at ($(CTA TL)+(\waveId*\mfmaNonKDim*\elem*\tpwN,0)$);
+      \foreach \tileId in {0,...,\maxTileId} {
+        \draw [ultra thin] ($(wave TL)+(\tileId*\mfmaNonKDim*\elem, 0)$) rectangle ++(\mfmaNonKDim*\elem, -\K*\elem);
+      }
     }
     %% Only draw the detailed view of the first wave in CTA
-    \coordinate (Op TL) at (CTA TL);
-    \drawWaveOperand{\K}{\mfmaNonKDim}{\kWidthB}{\kGroupB}{1}
+    \foreach \tileId in {0,...,\maxTileId} {
+      \coordinate (Op TL) at ($(CTA TL)+(\tileId*\mfmaNonKDim*\elem, 0)$);
+      \drawWaveOperand{\K}{\mfmaNonKDim}{\kWidthB}{\kGroupB}{1}
+    }
 
     %% Draw the outline of each CTA rep
-    \draw [ultra thick] (CTA TL) rectangle ++(\warpsPerCTAN*\mfmaNonKDim*\elem, -\K*\elem);
+    \draw [ultra thick] (CTA TL) rectangle ++(\warpsPerCTAN*\mfmaNonKDim*\elem*\tpwN, -\K*\elem);
   }
   \draw [ultra thin] (B TL) rectangle ++(\N*\elem, -\K*\elem);
 }
@@ -246,6 +277,11 @@
   %%
   %% C TL: pre defined top-left coordinates of the result tensor
   %% \elem: pre defined variable
+  %%
+  %% The following two parameters are pre-defined globally to avoid
+  %% passing too many args in this function.
+  %% \tpwM: tilesPerWarp[0]
+  %% \tpwN: tilesPerWarp[1]
   %%
   %% #1: M
   %% #2: N
@@ -275,11 +311,11 @@
   \drawTensorMFMALayout{\M}{\N}{\mfmaNonKDim}{\warpsPerCTAM}{\warpsPerCTAN}{\mfmaTrans}
 
   %% Draw labels
-  \node [scale=\scale, above] at ($(A TL)+(.5*\K*\elem, 0)$) {K=\K};
-  \node [scale=\scale, above, rotate=90] at ($(A TL)+(0, -.5*\M*\elem)$) {M=\M};
+  \node [scale=\scale, above] at ($(A TL)+(.5*\K*\elem, 0)$) {BK=\K};
+  \node [scale=\scale, above, rotate=90] at ($(A TL)+(0, -.5*\M*\elem)$) {BM=\M};
 
-  \node [scale=\scale, above, rotate=90] at ($(B TL)+(0, -.5*\K*\elem)$) {K=\K};
-  \node [scale=\scale, above] at ($(B TL)+(.5*\N*\elem, 0)$) {N=\N};
+  \node [scale=\scale, above, rotate=90] at ($(B TL)+(0, -.5*\K*\elem)$) {BK=\K};
+  \node [scale=\scale, above] at ($(B TL)+(.5*\N*\elem, 0)$) {BN=\N};
 
   \node [scale=\scale, above left] at (A TL) {A};
   \node [scale=\scale, above left] at (B TL) {B};

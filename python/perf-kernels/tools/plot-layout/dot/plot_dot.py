@@ -9,6 +9,7 @@ class DotConfig:
     kGroup: int
     trans: int
     warpsPerCTA: tuple
+    tilesPerWarp: tuple
 
 
 matrixFormatTable = {'fp8': 0, 'bf8': 1, 'fp6': 2, 'bf6': 3, 'f4': 4}
@@ -50,6 +51,7 @@ def isMixedPrecBtwF8AndF4OrF6(dtypeA, dtypeB):
 def draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot_scale, dotConfig):
     mfmaNonKDim = dotConfig.mfmaNonKDim
     warpsPerCTA = dotConfig.warpsPerCTA
+    tilesPerWarp = dotConfig.tilesPerWarp
     trans = 1 if dotConfig.trans else 0
     kWidth = dotConfig.kWidth
     kGroup = dotConfig.kGroup
@@ -94,6 +96,8 @@ def draw_dot_layout_cmd(M, N, K, dtypeA, dtypeB, mfma_inst_str, isMixed864, plot
                \\def\\kWidthB{{{kWidth_b}}}
                \\def\\kGroupA{{{kGroup_a}}}
                \\def\\kGroupB{{{kGroup_b}}}
+               \\def\\tpwM{{{tilesPerWarp[0]}}}
+               \\def\\tpwN{{{tilesPerWarp[1]}}}
                \\coordinate (C TL) at (0,0);
                \\drawDot{{{M}}}{{{N}}}{{{K}}}{{{mfmaNonKDim}}}{{{warpsPerCTA[0]}}}{{{warpsPerCTA[1]}}}{{{trans}}}
 
@@ -213,6 +217,7 @@ def generate_dot_tex(args):
     N = dotShape[1]
     K = dotShape[2]
     warpsPerCTA = args.warpsPerCTA
+    tilesPerWarp = args.tilesPerWarp
     mfmaNonKDim = args.nonKDim
     dtypeA = args.dtypeA
     dtypeB = args.dtypeB
@@ -221,12 +226,12 @@ def generate_dot_tex(args):
     trans = args.mfmaTrans
     scale = args.scale
     # TODO: some of the checking can be done inside this dataclass as well but plot_dot requires quite some refactoring on this
-    dotConfig = DotConfig(mfmaNonKDim, kWidth, kGroup, trans, warpsPerCTA)
+    dotConfig = DotConfig(mfmaNonKDim, kWidth, kGroup, trans, warpsPerCTA, tilesPerWarp)
 
     # checks and logging
     CTAShape = [
-        mfmaNonKDim * warpsPerCTA[0],
-        mfmaNonKDim * warpsPerCTA[1],
+        mfmaNonKDim * warpsPerCTA[0] * tilesPerWarp[0],
+        mfmaNonKDim * warpsPerCTA[1] * tilesPerWarp[1],
     ]
     print(f"Plotting dot operation with shapes {(M, N, K)=}, {kWidth=}, {kGroup=}, {warpsPerCTA=}, {CTAShape=}")
     assert M != 0 and CTAShape[0] <= M and M % CTAShape[0] == 0 and \
