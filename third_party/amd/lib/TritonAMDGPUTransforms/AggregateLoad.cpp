@@ -530,6 +530,38 @@ void processLoopBody(scf::ForOp forOp, Operation *op, Value localAllocVal) {
   loadOp.erase();
 }
 
+// TODO: replace with general axis analysis.
+// for now this function is a plain hack
+int64_t getKStride(Value ptr) {
+  // %56 = arith.muli %54, %cst_1 : tensor<1x8xi32, #blocked2> loc(#loc43)
+  // %57 = tt.broadcast %51 : tensor<32x1x!tt.ptr<i8>, #blocked2> ->
+  // tensor<32x8x!tt.ptr<i8>, #blocked2> loc(#loc44) %58 = tt.broadcast %56 :
+  // tensor<1x8xi32, #blocked2> -> tensor<32x8xi32, #blocked2> loc(#loc44) %59 =
+  // tt.addptr %57, %58 :
+  auto addptr = dyn_cast<triton::AddPtrOp>(ptr.getDefiningOp());
+  if (!addptr)
+    return 1;
+  triton::BroadcastOp bcast;
+  for (auto bcastVal : addptr.getOperands()) {
+    bcast = dyn_cast<triton::BroadcastOp>(bcastVal.getDefiningOp());
+    if (!bcast)
+      return 1;
+    auto opShape = bcast.getSrc().getType().getShape();
+    if (opShape[0] == 1)
+      break;
+  }
+  auto mulOp = dyn_cast<arith::MulIOp>(bcast.getSrc().getDefiningOp());
+  if (!mulOp)
+    return 1;
+  auto cst = dyn_cast<arith::ConstantOp>(mulOp.getRhs().getDefiningOp());
+  if (!cst)
+    return 1;
+  auto strideConstantAttr =
+      dyn_cast<mlir::DenseElementsAttr>(cst.getValueAttr());
+  auto strideAttr = strideConstantAttr.getSplatValue<IntegerAttr>();
+  return strideAttr.getInt();
+}
+
 void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
                        Value bScaleLocalAllocVal, int64_t hoistFactor,
                        int64_t newUpperBound) {
@@ -549,6 +581,8 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
       dyn_cast<RankedTensorType>(aScaleLoadOp.getPtr().getType())
           .getShape()
           .back();
+
+  int64_t kStride = getKStride(aScaleLoadOp.getPtr());
   OpBuilder builder(forOp);
   Location loc = forOp.getLoc();
   Value lb =
@@ -591,7 +625,7 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
         Value offsetEl = builder.create<arith::MulIOp>(
             loc, iv,
             builder.create<arith::ConstantOp>(
-                loc, builder.getI32IntegerAttr(hoistKSize)));
+                loc, builder.getI32IntegerAttr(hoistKSize * kStride)));
         auto [aScalePtr, newAScaleLoadedVal, newAScaleLocalAllocVal] =
             createGlobalLoadLocalAlloc(loc, aScaleLoadOp, offsetEl,
                                        aScaleLocalAllocVal);
