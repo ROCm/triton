@@ -2133,5 +2133,5 @@ def main():
 
 
 if __name__ == '__main__':
-    test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
+    #test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
     sys.exit(main())
