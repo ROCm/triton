@@ -491,7 +491,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
       %arg3: !tt.ptr<i8> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
       %arg4: !tt.ptr<i8> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
-      %arg5: i32 {tt.divisibility = 16 : i32}
+      %arg5: i32 {tt.divisibility = 16 : i32},
       %arg6: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
     %cst = arith.constant dense<32768> : tensor<32x1xi32, #blocked>
     %cst_0 = arith.constant dense<32768> : tensor<1x64xi32, #blocked1>

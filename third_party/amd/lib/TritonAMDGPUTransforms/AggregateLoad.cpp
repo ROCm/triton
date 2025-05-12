@@ -582,7 +582,6 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
           .getShape()
           .back();
 
-  int64_t kStride = getKStride(aScaleLoadOp.getPtr());
   OpBuilder builder(forOp);
   Location loc = forOp.getLoc();
   Value lb =
@@ -622,15 +621,21 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
   auto outerDimLoop = builder.create<scf::ForOp>(
       loc, lb, ub, step, ValueRange{init, aPtr, bPtr},
       [&](OpBuilder &b, Location loc, Value iv, ValueRange args) {
-        Value offsetEl = builder.create<arith::MulIOp>(
+        int64_t aKStride = getKStride(aScaleLoadOp.getPtr());
+        int64_t bKStride = getKStride(bScaleLoadOp.getPtr());
+        Value offsetElA = builder.create<arith::MulIOp>(
             loc, iv,
             builder.create<arith::ConstantOp>(
-                loc, builder.getI32IntegerAttr(hoistKSize * kStride)));
+                loc, builder.getI32IntegerAttr(hoistKSize * aKStride)));
+        Value offsetElB = builder.create<arith::MulIOp>(
+            loc, iv,
+            builder.create<arith::ConstantOp>(
+                loc, builder.getI32IntegerAttr(hoistKSize * bKStride)));
         auto [aScalePtr, newAScaleLoadedVal, newAScaleLocalAllocVal] =
-            createGlobalLoadLocalAlloc(loc, aScaleLoadOp, offsetEl,
+            createGlobalLoadLocalAlloc(loc, aScaleLoadOp, offsetElA,
                                        aScaleLocalAllocVal);
         auto [bScalePtr, newBScaleLoadedVal, newBScaleLocalAllocVal] =
-            createGlobalLoadLocalAlloc(loc, bScaleLoadOp, offsetEl,
+            createGlobalLoadLocalAlloc(loc, bScaleLoadOp, offsetElB,
                                        bScaleLocalAllocVal);
         IRMapping mapping;
         mapping.map(aScaleLoadOp.getResult(), newAScaleLoadedVal);
