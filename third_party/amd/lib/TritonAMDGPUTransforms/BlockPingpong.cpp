@@ -7,6 +7,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
@@ -22,6 +23,25 @@ namespace ttg = mlir::triton::gpu;
 namespace tt = mlir::triton;
 
 namespace {
+
+template <typename T> std::optional<T> getSingleUserOf(Value val) {
+  auto users = llvm::to_vector(val.getUsers());
+  if (users.size() == 1) {
+    auto targetOp = dyn_cast<T>(users[0]);
+    if (targetOp != nullptr)
+      return targetOp;
+  }
+  return std::nullopt;
+}
+
+template <typename T>
+std::optional<int64_t> getIndex(T consumer, Value target) {
+  auto it = llvm::find_if(consumer->getOperands(),
+                          [&](Value v) { return v == target; });
+  if (it == consumer->getOperands().end())
+    return std::nullopt;
+  return std::distance(consumer->getOperands().begin(), it);
+}
 
 // This pass transforms a for-loop calculating a GEMM. Main purpose of the
 // transform is improve the efficiency of the GPU dot instruction (mfma)
@@ -39,6 +59,8 @@ class Pingponger {
   SmallVector<ttg::LocalStoreOp> lStoreOps;
   SmallVector<ttg::AsyncCopyGlobalToLocalOp> asyncCopies;
   ttg::AsyncWaitOp asyncWait;
+  SmallVector<Value> preservedAsyncCommits;
+  DenseMap<int64_t, SmallVector<Value>> newAsyncGroups;
   SmallVector<tt::DotOp> dotOps;
   SmallVector<tt::DotScaledOp> dotSOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
@@ -46,6 +68,7 @@ class Pingponger {
   SmallVector<Operation *> dotSliceOps;
   SmallVector<Value> constOffsets;
   Operation *lastInsertedOp;
+  const static inline std::string sliceAttrName = "slice-idx";
 
   // rocdl.s.setprio will be mapped to `s_setprio` instruction which set the
   // priority of the warp within a SIMD, determines which warp to occupy the
@@ -78,7 +101,7 @@ private:
                          unsigned numSlices);
   LogicalResult sliceDotScaled(OpBuilder &builder, Location loc,
                                tt::DotScaledOp op, unsigned numSlices);
-  LogicalResult genAsyncCopySlices(OpBuilder &builder, int64_t sliceWidth);
+  LogicalResult genAsyncCopySlices(OpBuilder &builder);
 
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
@@ -474,10 +497,6 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
                                               unsigned numSlices,
                                               int64_t sliceWidth,
                                               RankedTensorType tensorType) {
-
-  SmallVector<Operation *> slices;
-  SmallVector<Operation *> subviews;
-
   auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
   if (!localLoad)
     return failure();
@@ -489,11 +508,35 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
   int64_t kIdx = opIdx == 0 ? 1 : 0;
   shape[kIdx] = sliceWidth;
 
+  auto resEncoding = localLoad.getResult().getType().getEncoding();
+  const bool refineOrigSubview =
+      dyn_cast<ttg::DotOperandEncodingAttr>(resEncoding) != nullptr;
+
+  auto arg = mlir::dyn_cast<BlockArgument>(memDesc);
+  if (!arg) {
+    LDBG("failed to cast input to `ttg.LocalLoadOp` to `BlockArgument`");
+    return failure();
+  }
+
+  auto forOp = localLoad->getParentOfType<scf::ForOp>();
+  auto argIdx = arg.getArgNumber();
+  auto yieldOperand = forOp.getTiedLoopYieldedValue(arg);
+  auto yieldOp = cast<scf::YieldOp>(yieldOperand->getOwner());
+  auto origMemDesc =
+      cast<triton::gpu::MemDescSubviewOp>(yieldOperand->get().getDefiningOp());
+
   auto subviewDescType = ttg::MemDescType::get(
       shape, elementType, type.getEncoding(), type.getMemorySpace(),
       type.getMutableMemory(), type.getAllocShape());
 
+  SmallVector<Operation *> slices;
+  SmallVector<Operation *> subviews;
+  MLIRContext *ctx = localLoad->getContext();
+  auto intType = mlir::IntegerType::get(ctx, 32);
   for (int i = 0; i < numSlices; i++) {
+    auto ip = builder.saveInsertionPoint();
+    builder.setInsertionPoint(&forOp.front());
+
     SmallVector<Value> offsetsVal;
     SmallVector<int64_t> offsets = {0, 0};
     offsets[opIdx == 0 ? 1 : 0] = i;
@@ -501,13 +544,25 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
       offsetsVal.push_back(builder.create<arith::ConstantIntOp>(
           v.getLoc(), off * sliceWidth, 32));
     }
+
+    builder.setInsertionPointAfter(origMemDesc);
+    if (refineOrigSubview) {
+      Value newOrigSmem = builder.create<ttg::MemDescSubviewOp>(
+          origMemDesc.getLoc(), subviewDescType, origMemDesc, offsetsVal);
+      newOrigSmem.getDefiningOp()->setAttr(Pingponger::sliceAttrName,
+                                           mlir::IntegerAttr::get(intType, i));
+    }
+    builder.restoreInsertionPoint(ip);
+
     Value newSmem = builder.create<ttg::MemDescSubviewOp>(
         v.getLoc(), subviewDescType, memDesc, offsetsVal);
     Value prefetchSlice =
         builder.create<ttg::LocalLoadOp>(v.getLoc(), tensorType, newSmem);
+
     subviews.push_back(newSmem.getDefiningOp());
     slices.push_back(prefetchSlice.getDefiningOp());
   }
+
   subViewOps.push_back(subviews);
   loadSliceOps.push_back(slices);
   return success();
@@ -552,105 +607,99 @@ LogicalResult Pingponger::sliceDot(OpBuilder &builder, Location loc,
   return success();
 }
 
-template <typename T> std::optional<T> getSingleUserOf(Value val) {
-  auto users = llvm::to_vector(val.getUsers());
-  if (users.size() == 1) {
-    auto targetOp = dyn_cast<T>(users[0]);
-    if (targetOp != nullptr)
-      return targetOp;
-  }
-  return std::nullopt;
-}
-
-std::optional<int64_t> getIndex(scf::YieldOp yield, Value target) {
-  auto tokenIt =
-      llvm::find_if(yield->getOperands(), [&](Value v) { return v == target; });
-  if (tokenIt == yield->getOperands().end())
-    return std::nullopt;
-  return std::distance(yield->getOperands().begin(), tokenIt);
-}
-
-LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder,
-                                             int64_t sliceWidth) {
+LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
   if (asyncCopies.empty())
     return success();
 
-  struct AsyncItem {
-    Value token;
-    Value memView;
-    Value commit;
-    int64_t commitReturnIdx;
-    int64_t memViewReturnIdx;
-    ttg::LocalLoadOp localLoad;
-    int64_t dotOpIdx;
-  };
-
-  llvm::SmallVector<AsyncItem> asyncDotOperands;
-  llvm::SmallVector<AsyncItem> asyncDotScaleOperands;
   for (auto asyncCopy : asyncCopies) {
-    AsyncItem item;
-    item.token = asyncCopy.getToken();
-    item.memView = asyncCopy.getResult();
+    MLIRContext *ctx = asyncCopy->getContext();
+    auto srcPointers = asyncCopy.getSrc();
+    auto subView = cast<triton::gpu::MemDescSubviewOp>(
+        asyncCopy.getResult().getDefiningOp());
+    auto subViewEncoding = subView.getType().getEncoding();
 
-    auto maybeAsyncCommit =
-        getSingleUserOf<ttg::AsyncCommitGroupOp>(item.token);
-    if (!maybeAsyncCommit) {
-      LDBG("expected a single `async_token` user for " << item.token);
-      continue;
+    DenseMap<int64_t, triton::gpu::MemDescSubviewOp> subViews;
+    for (auto user : subView->getUsers()) {
+      if (auto subView = dyn_cast<triton::gpu::MemDescSubviewOp>(user)) {
+        if (auto attr = subView->getAttrOfType<mlir::IntegerAttr>(
+                Pingponger::sliceAttrName)) {
+          auto sliceIdx = attr.getValue().getSExtValue();
+          subViews.insert({sliceIdx, subView});
+
+          if (!newAsyncGroups.contains(sliceIdx)) {
+            newAsyncGroups.insert({sliceIdx, {}});
+          }
+        }
+      }
     }
-    item.commit = maybeAsyncCommit.value().getResult();
 
-    auto maybeScfYield = getSingleUserOf<scf::YieldOp>(item.commit);
-    if (!maybeScfYield) {
-      LDBG("expected a single `scf::yield` user for " << item.commit);
-      continue;
-    }
-
-    auto scfYield = maybeScfYield.value();
-    auto maybeCommitIdx = getIndex(scfYield, item.commit);
-    if (!maybeCommitIdx) {
-      LDBG("fail to find " << item.commit << " in `scf::yeild` for");
-      continue;
-    }
-    item.commitReturnIdx = maybeCommitIdx.value();
-
-    auto maybeMemViewIdx = getIndex(scfYield, item.memView);
-    if (!maybeMemViewIdx) {
-      LDBG("fail to find " << item.memView << " in `scf::yeild` for");
+    if (subViews.empty()) {
+      auto commit =
+          getSingleUserOf<ttg::AsyncCommitGroupOp>(asyncCopy.getToken());
+      preservedAsyncCommits.push_back(commit->getResult());
       continue;
     }
 
-    item.memViewReturnIdx = maybeMemViewIdx.value();
-    Value memViewInput =
-        asyncCopy->getBlock()->getArgument(item.memViewReturnIdx);
-    auto maybeLocalLoad = getSingleUserOf<ttg::LocalLoadOp>(memViewInput);
-    if (!maybeLocalLoad) {
-      LDBG("fail to find `ttg.local_load` from " << item.memViewReturnIdx
-                                                 << "input arg");
-      continue;
+    // infer the sliced shape
+    triton::gpu::MemDescSubviewOp subViewSlice = subViews[0];
+    auto origShape = subView.getType().getShape();
+    auto slicedShape = subViewSlice.getType().getShape();
+    assert(origShape.size() == slicedShape.size());
+    const auto numDims = origShape.size();
+    int64_t slicedDim = -1;
+    for (size_t dim = 0; dim < numDims; ++dim) {
+      if (origShape[dim] != slicedShape[dim]) {
+        slicedDim = dim;
+        break;
+      }
     }
-    item.localLoad = maybeLocalLoad.value();
-    auto encoding = dyn_cast<ttg::DotOperandEncodingAttr>(
-        item.localLoad.getResult().getType().getEncoding());
-    if (encoding) {
-      item.dotOpIdx = encoding.getOpIdx();
-      asyncDotOperands.push_back(item);
-    } else {
-      item.dotOpIdx = -1;
-      asyncDotScaleOperands.push_back(item);
-    }
-  }
 
-  for (auto &item : asyncDotScaleOperands) {
-    auto maybeDot =
-        getSingleUserOf<tt::DotScaledOp>(item.localLoad.getResult());
-    if (!maybeDot) {
-      // encounter invalid IR; abort
-      LDBG("fail to find `tt.dot` for " << item.localLoad);
-      return failure();
+    builder.setInsertionPointAfter(asyncCopy);
+
+    auto elementType = srcPointers.getType().getElementType();
+    auto encoding =
+        cast<ttg::BlockedEncodingAttr>(srcPointers.getType().getEncoding());
+
+    auto warpsPerCTA = encoding.getWarpsPerCTA();
+    auto sizePerThread = encoding.getSizePerThread();
+    SmallVector<unsigned> threadPerWarp(warpsPerCTA.size(), 0);
+    for (size_t dim = 0; dim < numDims; ++dim) {
+      threadPerWarp[dim] =
+          slicedShape[dim] / (warpsPerCTA[dim] * sizePerThread[dim]);
     }
-    item.dotOpIdx =
-        maybeDot.value().getAScale() == item.localLoad.getResult() ? 0 : 1;
+    assert(mlir::product(threadPerWarp) == 64);
+
+    auto newEncoding = ttg::BlockedEncodingAttr::get(
+        ctx, sizePerThread, threadPerWarp, warpsPerCTA, encoding.getOrder(),
+        encoding.getCTALayout());
+    auto newSrcType =
+        RankedTensorType::get(origShape, elementType, newEncoding);
+    auto newSrcPointers = builder.create<ttg::ConvertLayoutOp>(
+        srcPointers.getLoc(), newSrcType, srcPointers);
+    auto slicedSrcType =
+        RankedTensorType::get(slicedShape, elementType, newEncoding);
+
+    assert(slicedDim != -1);
+    auto numReps = origShape[slicedDim] / slicedShape[slicedDim];
+    for (size_t rep = 0; rep < numReps; ++rep) {
+      SmallVector<int64_t> offset(slicedShape.size(), 0);
+      offset[slicedDim] = slicedShape[slicedDim] * rep;
+
+      auto extractedSrc = builder.create<triton::amdgpu::ExtractSliceOp>(
+          srcPointers.getLoc(), Type{slicedSrcType}, Value{newSrcPointers},
+          DenseI64ArrayAttr::get(ctx, offset));
+
+      auto newAsyncCopy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
+          asyncCopy->getLoc(), Value{extractedSrc},
+          Value{subViews[rep].getResult()}, Value{asyncCopy.getMask()},
+          Value{asyncCopy.getOther()}, asyncCopy.getCache(),
+          asyncCopy.getEvict(), asyncCopy.getIsVolatile());
+
+      auto newCommit = builder.create<ttg::AsyncCommitGroupOp>(
+          asyncCopy->getLoc(), newAsyncCopy.getToken());
+
+      newAsyncGroups[rep].push_back(newCommit);
+    }
   }
 
   return success();
@@ -678,10 +727,6 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
     return failure();
   }
   auto dotEncoding = op.getType().getEncoding();
-
-  if (llvm::failed(genAsyncCopySlices(builder, sliceWidth))) {
-    LDBG("failed to slice global-to-local async copies");
-  }
 
   // Generate slices for operands A and B
   if (genLocalSlice(builder, op.getA(), dotEncoding, 0, numSlices, sliceWidth)
@@ -995,6 +1040,11 @@ void Pingponger::getDotPingponged() {
          "cluster transformation");
     return;
   }
+
+  if (llvm::failed(genAsyncCopySlices(builder))) {
+    LDBG("failed to slice global-to-local async copies");
+  }
+
   // addAsymmetricSyncToLoop(builder, loc);
 
   return;
