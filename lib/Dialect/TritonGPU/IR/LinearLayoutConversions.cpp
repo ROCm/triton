@@ -1451,7 +1451,7 @@ LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
 LinearLayout chooseScaledMfmaScaleLayout(
     MLIRContext *ctx, int dotOperandIdx,
     const std::vector<std::vector<int32_t>> &dotOperandWarpBasis,
-    ArrayRef<int64_t> dotOperandShape, unsigned mfmaMDim) {
+    ArrayRef<int64_t> dotOperandShape, unsigned mfmaMDim, unsigned mfmaKDim) {
   using basisT = std::vector<std::vector<int32_t>>;
   unsigned rank = dotOperandShape.size();
   auto order = mlir::triton::gpu::getMatrixOrder(rank, /*rowMajor=*/true);
@@ -1461,7 +1461,10 @@ LinearLayout chooseScaledMfmaScaleLayout(
   StringAttr kWarp = StringAttr::get(ctx, "warp");
   StringAttr kBlock = StringAttr::get(ctx, "block");
   // Init register layout. Will be adjusted later
-  auto regs = mlir::triton::identityStandardND(kRegister, {1, 1}, order);
+  // TODO: update kVec for mfma16
+  // in 32x32 MFMA scaled, thread 0-31 holds k 0-31 and thread 32-64 holds
+  // k 32-64, so that means we always split the kDim to half
+  auto kVec = mfmaKDim / 2;
   LinearLayout lanes = LinearLayout::empty();
   // In scaled dot, the shapes of operands(without batch dimension) are,
   // respectively:
@@ -1501,7 +1504,8 @@ LinearLayout chooseScaledMfmaScaleLayout(
     // collectively handle A[0:32][32:64]. Each lane take 1 scale element
     // accordingly. Similar to B and bScale.
     lanes = LinearLayout(
-        {{kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}}},
+        {{kRegister, {{1, 0}, {2, 0}}},
+         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}}},
          {kWarp, warps},
          {kBlock, {}}},
         {standardOutDims[order[0]], standardOutDims[order[1]]});
@@ -1518,7 +1522,7 @@ LinearLayout chooseScaledMfmaScaleLayout(
                       {kBlock, {}}},
                      {standardOutDims[order[0]], standardOutDims[order[1]]});
   }
-  LinearLayout newLL = regs * lanes;
+  LinearLayout newLL = lanes;
 
   // Adjust register-level layout to fill the shape, at this level, both
   // aScale and bScale should align with A operand.
@@ -1526,6 +1530,8 @@ LinearLayout chooseScaledMfmaScaleLayout(
   for (auto d : repOrder) {
     auto outDim = standardOutDims[d];
     auto dimSize = newLL.getOutDimSize(outDim);
+    auto temp = LinearLayout::identity1D(dotOperandShape[d] / dimSize, kRegister,
+                                      outDim);
     newLL *= LinearLayout::identity1D(dotOperandShape[d] / dimSize, kRegister,
                                       outDim);
   }

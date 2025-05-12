@@ -1776,7 +1776,7 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
     CTALayoutAttr ctaLayout, int operandIdx, ArrayRef<int64_t> operandShape,
     ArrayRef<unsigned> sharedOrder, unsigned vectorSize, unsigned elemBitWidth,
     bool needTrans) const {
-  int kDimIndex = operandIdx == 0 ? 1 : 0;
+  int kDimIndex = operandIdx == 1 ? 0 : 1;
   if (needTrans)
     kDimIndex = 1 - kDimIndex;
 
@@ -1821,7 +1821,7 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
 
   // Disable swizzling for scales
   if (operandIdx >= 2) {
-    return SwizzledSharedEncodingAttr::get(getContext(), 1, 1, 1, sharedOrder,
+    return SwizzledSharedEncodingAttr::get(getContext(), vectorSize, 1, 1, sharedOrder,
                                            ctaLayout);
   }
 

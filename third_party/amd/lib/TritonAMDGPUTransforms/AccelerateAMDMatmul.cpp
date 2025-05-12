@@ -881,8 +881,7 @@ public:
       }
 
       LinearLayout newLL =
-          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim);
-
+          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim, kDim);
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
