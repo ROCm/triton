@@ -181,7 +181,7 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
   // Assume the following chain of IRs
   // %0 = make_range {0, 128}
   // %1 = expand_dims %0: -> tensor<1x128>
-  // %strided = muli %1, %cst -> tensor<1x128>
+  // optional %strided = muli %1, %cst -> tensor<1x128>
   // %2 = broadcast %1/%strided: --> tensor<16x128>
   // bcastM is the broadcast op
   auto broadcastOp = dyn_cast<triton::BroadcastOp>(bcastM);
