@@ -738,7 +738,7 @@ struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
         processLoopBody(forOp, aScaleLoadOp, aScaleLocalAllocValue);
         processLoopBody(forOp, bScaleLoadOp, bScaleLocalAllocValue);
         if (hoistFactor > 1) {
-          assert(false && "TBD fix numerical issues");
+          assert(false && "TODO fix numerical issues");
           generateOuterLoop(forOp, aScaleLocalAllocValue, bScaleLocalAllocValue,
                             hoistFactor, newUpperBound);
         }
