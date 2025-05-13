@@ -945,12 +945,23 @@ void Pingponger::getDotPingponged() {
 
   //FIXME: place tile size restriction here and obtain kWidth
   kWidth = 16;
-  if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
-    LDBG("Encountered failure when trying to execute the two ping pong "
+  if (dotSOps.size() == 1){
+    auto dotSType = dotSOps[0].getType();
+    auto dotSShape = dotSType.getShape();
+    auto aType = dotSOps[0].getA().getType();
+    auto aShape = aType.getShape();
+    auto elemWidth = aType.getElementTypeBitWidth();
+    int64_t tileSize = dotSShape[0] * dotSShape[1] * aShape[1];
+    if(tileSize != 8388608 || aShape[1] != 128 || elemWidth != 8)
+      return;
+
+    if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
+      LDBG("Encountered failure when trying to execute the two ping pong "
          "cluster transformation");
-    return;
+      return;
+    }
+    addAsymmetricSyncToLoop(builder, loc);
   }
-  addAsymmetricSyncToLoop(builder, loc);
 
   return;
 
