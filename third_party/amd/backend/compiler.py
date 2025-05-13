@@ -252,6 +252,8 @@ class HIPBackend(BaseBackend):
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch)
         if use_block_pingpong and options.num_stages == 2:
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
+            passes.ttgpuir.add_remove_layout_conversions(pm)
+
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)

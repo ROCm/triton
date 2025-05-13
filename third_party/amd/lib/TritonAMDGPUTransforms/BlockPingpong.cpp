@@ -59,8 +59,9 @@ class Pingponger {
   SmallVector<ttg::LocalStoreOp> lStoreOps;
   SmallVector<ttg::AsyncCopyGlobalToLocalOp> asyncCopies;
   ttg::AsyncWaitOp asyncWait;
-  SmallVector<Value> preservedAsyncCommits;
+  DenseSet<Value> preservedAsyncCommits;
   DenseMap<int64_t, SmallVector<Value>> newAsyncGroups;
+  DenseMap<Value, SmallVector<Value>> asyncTokenReassociation;
   SmallVector<tt::DotOp> dotOps;
   SmallVector<tt::DotScaledOp> dotSOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
@@ -102,6 +103,7 @@ private:
   LogicalResult sliceDotScaled(OpBuilder &builder, Location loc,
                                tt::DotScaledOp op, unsigned numSlices);
   LogicalResult genAsyncCopySlices(OpBuilder &builder);
+  LogicalResult updateForOpSignature(OpBuilder &builder);
 
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
@@ -611,6 +613,9 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
   if (asyncCopies.empty())
     return success();
 
+  auto &loopBody = forOp.getRegion().front();
+  auto yieldOp = cast<scf::YieldOp>(loopBody.getTerminator());
+
   for (auto asyncCopy : asyncCopies) {
     MLIRContext *ctx = asyncCopy->getContext();
     auto srcPointers = asyncCopy.getSrc();
@@ -636,7 +641,7 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
     if (subViews.empty()) {
       auto commit =
           getSingleUserOf<ttg::AsyncCommitGroupOp>(asyncCopy.getToken());
-      preservedAsyncCommits.push_back(commit->getResult());
+      preservedAsyncCommits.insert(commit->getResult());
       continue;
     }
 
@@ -680,6 +685,7 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
         RankedTensorType::get(slicedShape, elementType, newEncoding);
 
     assert(slicedDim != -1);
+    SmallVector<Value> newCommits;
     auto numReps = origShape[slicedDim] / slicedShape[slicedDim];
     for (size_t rep = 0; rep < numReps; ++rep) {
       SmallVector<int64_t> offset(slicedShape.size(), 0);
@@ -699,9 +705,161 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
           asyncCopy->getLoc(), newAsyncCopy.getToken());
 
       newAsyncGroups[rep].push_back(newCommit);
+      newCommits.push_back(newCommit);
+    }
+
+    auto origCommitGroup = getSingleUserOf<ttg::AsyncCommitGroupOp>(asyncCopy);
+    auto maybeResultIdx = getIndex(yieldOp, origCommitGroup->getResult());
+    assert(maybeResultIdx.has_value());
+    auto origYieldOperand = yieldOp->getOperand(maybeResultIdx.value());
+    asyncTokenReassociation.insert({origYieldOperand, newCommits});
+  }
+
+  return success();
+}
+
+LogicalResult Pingponger::updateForOpSignature(OpBuilder &builder) {
+  // Note: call this method at the very end when reference to the
+  // original ops are not needed anymore
+
+  if (asyncCopies.empty())
+    return llvm::success();
+
+  Block &oldBlock = forOp.getRegion().front();
+  auto origYieldOp = cast<scf::YieldOp>(oldBlock.getTerminator());
+  auto orgiInitArgs = forOp.getInitArgs();
+
+  SmallVector<Value> newInputArgTokens;
+  for (auto &[origCommit, newCommits] : asyncTokenReassociation) {
+    auto maybeIdx = getIndex(origYieldOp, origCommit);
+    assert(maybeIdx.has_value());
+    auto initCommitArgValue = orgiInitArgs[maybeIdx.value()];
+    auto initCommitOp =
+        cast<ttg::AsyncCommitGroupOp>(initCommitArgValue.getDefiningOp());
+    builder.setInsertionPointAfter(initCommitOp);
+    for (size_t i = 0; i < newCommits.size(); ++i) {
+      auto newInputArgToken = builder.create<ttg::AsyncCommitGroupOp>(
+          initCommitOp->getLoc(), initCommitOp.getAsyncToken().getType(),
+          initCommitOp.getInputTokens());
+      newInputArgTokens.push_back(newInputArgToken);
     }
   }
 
+  builder.setInsertionPointAfter(forOp);
+  DenseSet<int64_t> preservedArgsIndices;
+  DenseSet<int64_t> removedArgsIndices;
+  auto origYeildValues = forOp.getYieldedValues();
+  for (auto [idx, value] : llvm::enumerate(origYeildValues)) {
+    bool copyable = dyn_cast<ttg::AsyncTokenType>(value.getType()) == nullptr;
+    copyable |= preservedAsyncCommits.contains(value);
+    if (copyable) {
+      preservedArgsIndices.insert(idx);
+    } else {
+      removedArgsIndices.insert(idx);
+    }
+  }
+
+  DenseMap<size_t, size_t> argIndicesMap;
+  SmallVector<Value> newInitArgs;
+  for (auto [idx, value] : llvm::enumerate(orgiInitArgs)) {
+    if (preservedArgsIndices.contains(idx)) {
+      argIndicesMap.insert({idx, newInitArgs.size()});
+      newInitArgs.push_back(value);
+    }
+  }
+
+  for (auto newInputToken : newInputArgTokens) {
+    newInitArgs.push_back(newInputToken);
+  }
+
+  // Create a new ForOp
+  scf::ForOp newForOp = builder.create<scf::ForOp>(
+      forOp->getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
+      forOp.getStep(), newInitArgs);
+
+  // Map original block arguments to new ones
+  Block &newBlock = newForOp.getRegion().front();
+
+  IRMapping mapping;
+  auto oldIterArgs = forOp.getRegionIterArgs();
+  auto newIterArgs = newForOp.getRegionIterArgs();
+  mapping.map(oldBlock.getArgument(0), newBlock.getArgument(0)); // loop index
+  for (auto [origIdx, newIdx] : argIndicesMap) {
+    mapping.map(oldIterArgs[origIdx], newIterArgs[newIdx]);
+  }
+
+  // Clone the body of the loop
+  builder.setInsertionPointToStart(&newBlock);
+  for (auto &op : oldBlock.without_terminator()) {
+    builder.clone(op, mapping);
+  }
+
+  // Clone the yield terminator
+  builder.setInsertionPointToEnd(&newBlock);
+  SmallVector<Value> newYieldResults;
+  for (auto [idx, value] : llvm::enumerate(forOp.getYieldedValues())) {
+    if (preservedArgsIndices.contains(idx)) {
+      newYieldResults.push_back(mapping.lookup(value));
+    }
+  }
+
+  for (auto &[origCommit, newCommits] : asyncTokenReassociation) {
+    for (auto commit : newCommits)
+      newYieldResults.push_back(mapping.lookup(commit));
+  }
+
+  builder.create<scf::YieldOp>(origYieldOp.getLoc(), newYieldResults);
+
+  auto newForOpResults = newForOp.getResults();
+  DenseSet<Operation *> adjustedUsers;
+  for (auto [idx, oldResult] : llvm::enumerate(forOp->getResults())) {
+    if (preservedArgsIndices.contains(idx)) {
+      auto newArgIdx = argIndicesMap[idx];
+      oldResult.replaceAllUsesWith(newForOpResults[newArgIdx]);
+    } else {
+      for (auto user : oldResult.getUsers()) {
+        adjustedUsers.insert(user);
+      }
+    }
+  }
+
+  // Adjust async-wait outside the newForOp
+  assert(adjustedUsers.size() == 1);
+  auto asyncWaitEpilogue = dyn_cast<ttg::AsyncWaitOp>(*adjustedUsers.begin());
+  assert(asyncWaitEpilogue != nullptr);
+
+  builder.setInsertionPointAfter(asyncWaitEpilogue);
+  SmallVector<Value> newOperands;
+  for (auto newResult : newForOp->getResults()) {
+    if (dyn_cast<ttg::AsyncTokenType>(newResult.getType())) {
+      newOperands.push_back(newResult);
+    }
+  }
+  auto newAsyncWaitEpilogue = builder.create<ttg::AsyncWaitOp>(
+      asyncWaitEpilogue->getLoc(), newOperands, 0);
+  asyncWaitEpilogue->replaceAllUsesWith(newAsyncWaitEpilogue);
+  asyncWaitEpilogue->erase();
+
+  SmallVector<Value> newAsyncTokens;
+  for (auto &arg : newForOp.getRegionIterArgs()) {
+    if (dyn_cast<ttg::AsyncTokenType>(arg.getType()))
+      newAsyncTokens.push_back(arg);
+  }
+
+  // adjust async-wait inside the newForOp block
+  ttg::AsyncWaitOp asyncWait = nullptr;
+  newForOp.walk([&asyncWait](ttg::AsyncWaitOp op) {
+    asyncWait = op;
+    return WalkResult::interrupt();
+  });
+  assert(asyncWait != nullptr);
+  builder.setInsertionPointAfter(asyncWait);
+  auto newAsyncToken =
+      builder.create<ttg::AsyncWaitOp>(asyncWait->getLoc(), newAsyncTokens, 0);
+  asyncWait->replaceAllUsesWith(newAsyncToken);
+  asyncWait.erase();
+
+  forOp->erase();
   return success();
 }
 
@@ -1045,6 +1203,9 @@ void Pingponger::getDotPingponged() {
     LDBG("failed to slice global-to-local async copies");
   }
 
+  if (llvm::failed(updateForOpSignature(builder))) {
+    LDBG("failed to update forOp signature");
+  }
   // addAsymmetricSyncToLoop(builder, loc);
 
   return;
