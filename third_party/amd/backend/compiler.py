@@ -10,6 +10,7 @@ import re
 import subprocess
 import functools
 from pathlib import Path
+import os
 
 
 def get_min_dot_size(target: GPUTarget):
