@@ -238,7 +238,8 @@ class HIPBackend(BaseBackend):
 
         # passes.ttgpuir.add_pipeline(pm, options.num_stages, False)
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch)
-        amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy, use_block_pingpong)
+        amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
+                                               use_block_pingpong)
 
         if False:
             pm.run(mod)

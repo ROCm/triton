@@ -76,8 +76,8 @@ private:
                               Attribute dotEncoding, unsigned opIdx,
                               unsigned numSlices, int64_t sliceWidth);
   LogicalResult genLocalSliceScales(OpBuilder &builder, Value v,
-                              Attribute dotEncoding, unsigned opIdx,
-                              unsigned numSlices, int64_t sliceWidth);
+                                    Attribute dotEncoding, unsigned opIdx,
+                                    unsigned numSlices, int64_t sliceWidth);
   LogicalResult sliceDot(OpBuilder &builder, Location loc, tt::DotOp op,
                          unsigned numSlices);
   LogicalResult sliceDotScaled(OpBuilder &builder, Location loc,
@@ -723,8 +723,8 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
     }
     Value newSmem = builder.create<ttg::MemDescSubviewOp>(
         v.getLoc(), subviewDescType, memDesc, offsetsVal);
-    Value prefetchSlice =
-        builder.create<ttg::LocalLoadOp>(v.getLoc(), tensorType, newSmem, waitToken);
+    Value prefetchSlice = builder.create<ttg::LocalLoadOp>(
+        v.getLoc(), tensorType, newSmem, waitToken);
     subviews.push_back(newSmem.getDefiningOp());
     slices.push_back(prefetchSlice.getDefiningOp());
   }
@@ -1037,10 +1037,9 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
-      
   builder.setInsertionPointAfter(forOp);
 
-  //FIXME: This is duplicated code, need to refactorize.
+  // FIXME: This is duplicated code, need to refactorize.
   auto i32ty = builder.getIntegerType(32);
   auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
   workIDX->moveBefore(forOp);
@@ -1052,8 +1051,6 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
                                                warpIDX, constZero);
   auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
                                                 warpIDX, constZero);
- 
-
 
   builder.setInsertionPointAfter(dotSOps[0]);
 
@@ -1064,10 +1061,10 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  for (int j=0; j<4; j++){
-    for (int i=0; i<4; i++)
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++)
       appendOp(subViewOps[i][j]);
-    for (int i=0; i<4; i++)
+    for (int i = 0; i < 4; i++)
       appendOp(loadSliceOps[i][j]);
     appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
     appendOp(dotSliceOps[j]);
@@ -1075,7 +1072,6 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
-
 
   return success();
 }
@@ -1171,7 +1167,8 @@ void Pingponger::getDotPingponged() {
   // supported combination of operations because this transformation is very
   // tightly scheduling the latencies.
 
-  //FIXME: get better condition to enable pingpong either for dot or for dot_scaled
+  // FIXME: get better condition to enable pingpong either for dot or for
+  // dot_scaled
   if (dotSOps.size() > 0 && dotOps.size() > 0) {
     LDBG("Only handle either dot or dot_scaled in a single op");
     return;
@@ -1188,7 +1185,7 @@ void Pingponger::getDotPingponged() {
   }
 
   // FIXME: place tile size restriction here and obtain kWidth
-  if (dotSOps.size() == 1){
+  if (dotSOps.size() == 1) {
     kWidth = 16;
     auto dotSType = dotSOps[0].getType();
     auto dotSShape = dotSType.getShape();
@@ -1196,12 +1193,12 @@ void Pingponger::getDotPingponged() {
     auto aShape = aType.getShape();
     auto elemWidth = aType.getElementTypeBitWidth();
     int64_t tileSize = dotSShape[0] * dotSShape[1] * aShape[1];
-    if(tileSize != 8388608 || aShape[1] != 128 || elemWidth != 8)
+    if (tileSize != 8388608 || aShape[1] != 128 || elemWidth != 8)
       return;
 
     if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
       LDBG("Encountered failure when trying to execute the two ping pong "
-         "cluster transformation");
+           "cluster transformation");
       return;
     }
     addAsymmetricSyncToLoop(builder, loc);
