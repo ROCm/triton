@@ -231,7 +231,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   // 2 barriers between asyncWait and localLoad at start of loop S.T
   // we do not hit race conditions between warp-lo and warp-hi.
   if (useAsyncCopy && useBlockPingpong) {
-    stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_STORE];
+    stages[SCHED_ASYNC_WAIT] = std::max(0, stages[SCHED_LOCAL_LOAD] - 1);
   }
 
   LDBG(

@@ -1187,9 +1187,9 @@ void Pingponger::getDotPingponged() {
     return;
   }
 
-  //FIXME: place tile size restriction here and obtain kWidth
-  kWidth = 16;
+  // FIXME: place tile size restriction here and obtain kWidth
   if (dotSOps.size() == 1){
+    kWidth = 16;
     auto dotSType = dotSOps[0].getType();
     auto dotSShape = dotSType.getShape();
     auto aType = dotSOps[0].getA().getType();
@@ -1212,18 +1212,33 @@ void Pingponger::getDotPingponged() {
   // any memory operations that we find in conditionals.
   auto assumeNotTaken = isPersistentGemm(dotOps.size());
 
+  // Compute tile size, kWidth, and mfma type.
+  auto dotType = dotOps[0].getType();
+  auto dotShape = dotType.getShape();
+  auto aType = dotOps[0].getA().getType();
+  auto aShape = aType.getShape();
+  auto elemWidth = aType.getElementTypeBitWidth();
+  int64_t tileSize = dotShape[0] * dotShape[1] * aShape[1] * elemWidth;
+
+  const int64_t minTile = 262144;      // e.g. 32x128x64x16bit
+  const int64_t smallTile = 16777216;  // e.g. 128x128x64x16bit
+  const int64_t mediumTile = 33554432; // smallTile x 2
+  const int64_t largeTile = 67108864;  // e.g. 256x256x64x16bit
+
+  auto encoding = cast<RankedTensorType>(aType).getEncoding();
+  auto srcEncoding = cast<ttg::DotOperandEncodingAttr>(encoding);
+  kWidth = srcEncoding.getKWidth();
+  auto mfmaEncoding = cast<ttg::AMDMfmaEncodingAttr>(srcEncoding.getParent());
+  SmallVector<int64_t> intShape;
+  intShape.push_back(mfmaEncoding.getMDim());
+  intShape.push_back(mfmaEncoding.getNDim());
+
   if (dotOps.size() == 1 && useAsyncCopy) {
     if (numWarps != 8) {
       LDBG("Currently only support num_warp=8 for async PP");
       return;
     }
-    auto dotType = dotOps[0].getType();
-    auto dotShape = dotType.getShape();
-    auto aType = dotOps[0].getA().getType();
-    auto aShape = aType.getShape();
-    auto elemWidth = aType.getElementTypeBitWidth();
-    int64_t tileSize = dotShape[0] * dotShape[1] * aShape[1] * elemWidth;
-    if (tileSize != 67108864 || aShape[1] != 64 || elemWidth != 16) {
+    if (tileSize != largeTile || aShape[1] != 64 || elemWidth != 16) {
       LDBG("Only support tile size of 256x256x64 tile size for async PP");
       return;
     }
@@ -1305,26 +1320,6 @@ void Pingponger::getDotPingponged() {
   //
   // N.B., Tile size smaller than 128x128x64_FP16 is likely not compute-bound
   // that pingpong scheduling doesn't help much.
-
-  auto dotType = dotOps[0].getType();
-  auto dotShape = dotType.getShape();
-  auto aType = dotOps[0].getA().getType();
-  auto aShape = aType.getShape();
-  auto elemWidth = aType.getElementTypeBitWidth();
-  int64_t tileSize = dotShape[0] * dotShape[1] * aShape[1] * elemWidth;
-
-  const int64_t minTile = 262144;      // e.g. 32x128x64x16bit
-  const int64_t smallTile = 16777216;  // e.g. 128x128x64x16bit
-  const int64_t mediumTile = 33554432; // smallTile x 2
-  const int64_t largeTile = 67108864;  // e.g. 256x256x64x16bit
-
-  auto encoding = cast<RankedTensorType>(aType).getEncoding();
-  auto srcEncoding = cast<ttg::DotOperandEncodingAttr>(encoding);
-  kWidth = srcEncoding.getKWidth();
-  auto mfmaEncoding = cast<ttg::AMDMfmaEncodingAttr>(srcEncoding.getParent());
-  SmallVector<int64_t> intShape;
-  intShape.push_back(mfmaEncoding.getMDim());
-  intShape.push_back(mfmaEncoding.getNDim());
 
   if (numWarps == 4) { // Pingpong between warps from different blocks
     // Transform a loop with small tile size.
