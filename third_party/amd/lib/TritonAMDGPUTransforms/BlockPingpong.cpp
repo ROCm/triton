@@ -57,8 +57,7 @@ class Pingponger {
   SmallVector<tt::LoadOp> gLoadOps;
   SmallVector<ttg::LocalLoadOp> lLoadOps;
   SmallVector<ttg::LocalStoreOp> lStoreOps;
-  SmallVector<ttg::AsyncCopyGlobalToLocalOp> asyncCopies;
-  ttg::AsyncWaitOp asyncWait;
+  SmallVector<ttg::AsyncCopyGlobalToLocalOp> asyncCopyOps;
   DenseSet<Value> preservedAsyncCommits;
   DenseMap<int64_t, SmallVector<Value>> newAsyncGroups;
   DenseMap<Value, SmallVector<Value>> asyncTokenReassociation;
@@ -623,13 +622,13 @@ LogicalResult Pingponger::sliceDot(OpBuilder &builder, Location loc,
 }
 
 LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
-  if (asyncCopies.empty())
+  if (asyncCopyOps.empty())
     return success();
 
   auto &loopBody = forOp.getRegion().front();
   auto yieldOp = cast<scf::YieldOp>(loopBody.getTerminator());
 
-  for (auto asyncCopy : asyncCopies) {
+  for (auto asyncCopy : asyncCopyOps) {
     MLIRContext *ctx = asyncCopy->getContext();
     auto srcPointers = asyncCopy.getSrc();
     auto subView = cast<triton::gpu::MemDescSubviewOp>(
@@ -777,7 +776,7 @@ LogicalResult Pingponger::updateForOpSignature(OpBuilder &builder) {
   // Note: call this method at the very end when reference to the
   // original ops are not needed anymore
 
-  if (asyncCopies.empty())
+  if (asyncCopyOps.empty())
     return llvm::success();
 
   Block &oldBlock = forOp.getRegion().front();
@@ -1021,8 +1020,8 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
 
   if (!gLoadOps.empty())
     builder.setInsertionPointAfter(gLoadOps[0]);
-  else if (!asyncCopies.empty()) {
-    builder.setInsertionPointAfter(asyncCopies[0]);
+  else if (!asyncCopyOps.empty()) {
+    builder.setInsertionPointAfter(asyncCopyOps[0]);
   } else {
     return failure();
   }
@@ -1271,7 +1270,7 @@ void Pingponger::getDotPingponged() {
   MLIRContext *ctx = forOp.getContext();
   Location loc = forOp.getLoc();
 
-  SmallVector<ttg::AsyncWaitOp> asyncWaits;
+  SmallVector<ttg::AsyncWaitOp> asyncWaitsOps;
   forOp->walk([&](Operation *op) {
     if (auto gLoad = dyn_cast<tt::LoadOp>(op))
       gLoadOps.push_back(gLoad);
@@ -1292,28 +1291,17 @@ void Pingponger::getDotPingponged() {
     } else if (auto pingpongDot = dyn_cast<tt::DotScaledOp>(op)) {
       dotSOps.push_back(pingpongDot);
     } else if (auto asyncCopy = dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(op)) {
-      asyncCopies.push_back(asyncCopy);
+      asyncCopyOps.push_back(asyncCopy);
     } else if (auto wait = dyn_cast<ttg::AsyncWaitOp>(op)) {
-      asyncWaits.push_back(wait);
+      asyncWaitsOps.push_back(wait);
     }
   });
 
-  asyncWait = nullptr;
-  if (asyncWaits.size() > 1) {
+  if (asyncWaitsOps.size() != 1) {
     std::stringstream message;
     message << "Unable to match ping pong scheduling pattern. Details: "
-            << "found " << asyncWaits.size()
+            << "found " << asyncWaitsOps.size()
             << " AsyncWaitOp the scheduled region. Only one is allowed";
-    LDBG(message.str());
-    return;
-  } else if (asyncWaits.size() == 1) {
-    asyncWait = asyncWaits.pop_back_val();
-  }
-
-  if (!asyncCopies.empty() && asyncWait == nullptr) {
-    std::stringstream message;
-    message << "Unable to match ping pong scheduling pattern. Details: "
-            << "failed to find  AsyncWaitOp int the scheduled region";
     LDBG(message.str());
     return;
   }
@@ -1546,6 +1534,7 @@ public:
 } // namespace
 
 std::unique_ptr<Pass>
-mlir::createTritonAMDGPUBlockPingpongPass(int32_t numStages, bool useAsyncCopy) {
+mlir::createTritonAMDGPUBlockPingpongPass(int32_t numStages,
+                                          bool useAsyncCopy) {
   return std::make_unique<TritonAMDGPUBlockPingpongPass>(numStages);
 }
