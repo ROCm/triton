@@ -938,11 +938,6 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
 // cluster scheduling.
 LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
                                                  Location loc) {
-  // TODO: Add asyncOp support for two PP cluster.
-  if (useAsyncCopy) {
-    LDBG("Currently AsyncOp support not enabled for two PP cluster.");
-    return failure();
-  }
   // First, slice local_loads and dot into 2 parts
   if (sliceDot(builder, loc, dotOps[0], 2).failed())
     return failure();
