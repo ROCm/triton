@@ -690,12 +690,51 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
     auto newEncoding = ttg::BlockedEncodingAttr::get(
         ctx, sizePerThread, threadPerWarp, warpsPerCTA, encoding.getOrder(),
         encoding.getCTALayout());
-    auto newSrcType =
-        RankedTensorType::get(origShape, elementType, newEncoding);
-    auto newSrcPointers = builder.create<ttg::ConvertLayoutOp>(
-        srcPointers.getLoc(), newSrcType, srcPointers);
-    auto slicedSrcType =
-        RankedTensorType::get(slicedShape, elementType, newEncoding);
+
+    auto converTensor = [&](mlir::TypedValue<mlir::RankedTensorType> tensor) {
+      RankedTensorType newType = nullptr;
+      Value newTensor = nullptr;
+      RankedTensorType slicedTensorType = nullptr;
+      if (tensor) {
+        assert(encoding == tensor.getType().getEncoding());
+        auto elemType = tensor.getType().getElementType();
+        newType = RankedTensorType::get(origShape, elemType, newEncoding);
+        newTensor =
+            builder
+                .create<ttg::ConvertLayoutOp>(tensor.getLoc(), newType, tensor)
+                .getResult();
+        slicedTensorType =
+            RankedTensorType::get(slicedShape, elemType, newEncoding);
+      }
+
+      return std::make_tuple(newType, newTensor, slicedTensorType);
+    };
+
+    mlir::TypedValue<mlir::RankedTensorType> origMask = nullptr;
+    mlir::TypedValue<mlir::RankedTensorType> origOtherTensor = nullptr;
+
+    if (auto value = asyncCopy.getMask()) {
+      origMask = dyn_cast<decltype(origMask)>(value);
+    }
+    if (auto value = asyncCopy.getOther()) {
+      origOtherTensor = cast<decltype(origOtherTensor)>(value);
+    }
+
+    auto [newSrcType, newSrcPointers, slicedSrcType] =
+        converTensor(srcPointers);
+    auto [newMaskType, newMask, slicedMaskType] = converTensor(origMask);
+    auto [newOtherType, newOther, slicedOtherType] =
+        converTensor(origOtherTensor);
+
+    auto extract = [&builder](Type resType, Value src,
+                              DenseI64ArrayAttr &offset) {
+      Value resValue = nullptr;
+      if (src) {
+        resValue = builder.create<triton::amdgpu::ExtractSliceOp>(
+            src.getLoc(), resType, src, offset);
+      }
+      return resValue;
+    };
 
     assert(slicedDim != -1);
     SmallVector<Value> newCommits;
@@ -703,15 +742,15 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
     for (size_t rep = 0; rep < numReps; ++rep) {
       SmallVector<int64_t> offset(slicedShape.size(), 0);
       offset[slicedDim] = slicedShape[slicedDim] * rep;
+      auto offsetAttr = DenseI64ArrayAttr::get(ctx, offset);
 
-      auto extractedSrc = builder.create<triton::amdgpu::ExtractSliceOp>(
-          srcPointers.getLoc(), Type{slicedSrcType}, Value{newSrcPointers},
-          DenseI64ArrayAttr::get(ctx, offset));
+      auto extractedSrc = extract(slicedSrcType, newSrcPointers, offsetAttr);
+      auto extractedMask = extract(slicedMaskType, newMask, offsetAttr);
+      auto extractedOther = extract(slicedOtherType, newOther, offsetAttr);
 
       auto newAsyncCopy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-          asyncCopy->getLoc(), Value{extractedSrc},
-          Value{subViews[rep].getResult()}, Value{asyncCopy.getMask()},
-          Value{asyncCopy.getOther()}, asyncCopy.getCache(),
+          asyncCopy->getLoc(), extractedSrc, Value{subViews[rep].getResult()},
+          extractedMask, extractedOther, asyncCopy.getCache(),
           asyncCopy.getEvict(), asyncCopy.getIsVolatile());
 
       auto newCommit = builder.create<ttg::AsyncCommitGroupOp>(
