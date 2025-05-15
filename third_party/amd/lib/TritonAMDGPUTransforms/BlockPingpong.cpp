@@ -1546,6 +1546,6 @@ public:
 } // namespace
 
 std::unique_ptr<Pass>
-mlir::createTritonAMDGPUBlockPingpongPass(int32_t numStages) {
+mlir::createTritonAMDGPUBlockPingpongPass(int32_t numStages, bool useAsyncCopy) {
   return std::make_unique<TritonAMDGPUBlockPingpongPass>(numStages);
 }

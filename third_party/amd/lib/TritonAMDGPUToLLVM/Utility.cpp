@@ -4,12 +4,14 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/PatternMatch.h"
+#include "third_party/amd/include/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 
 namespace tt = mlir::triton;
 using mlir::triton::ModuleAxisInfoAnalysis;
+using mlir::triton::AMD::comesFromAsyncWait;
 using mlir::triton::AMD::DppCtrl;
 using mlir::triton::AMD::ISAFamily;
 using mlir::triton::gpu::appendOrGetExternFuncOp;
@@ -734,8 +736,9 @@ void addAsyncCopyAliasScope(AliasAnalysisOpInterface directToLdsOp) {
 void addLocalLoadNoAliasScope(triton::gpu::LocalLoadOp localLoadOp,
                               AliasAnalysisOpInterface llLoadOp) {
   auto token = localLoadOp.getToken();
-  if (!token || !token.getDefiningOp<tt::gpu::AsyncWaitOp>())
+  if (!token || !comesFromAsyncWait(token)) {
     return;
+  }
 
   return addLocalLoadNoAliasScope(llLoadOp);
 }

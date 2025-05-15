@@ -11,6 +11,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
@@ -120,9 +121,11 @@ class StreamPipeliner {
 
 public:
   StreamPipeliner(scf::ForOp _forOp, int _numStages, int _globalPrefetch,
-                  int _localPrefetch, bool _useAsyncCopy)
+                  int _localPrefetch, bool _useAsyncCopy,
+                  bool _useF16BlockPingpong)
       : forOp(_forOp), numStages(_numStages), numBuffers(1),
-        useAsyncCopy(_useAsyncCopy), schedule(numStages),
+        useAsyncCopy(_useAsyncCopy), useF16BlockPingpong(_useF16BlockPingpong),
+        schedule(numStages),
         axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
     int lastStage = numStages - 1;
     stages[SCHED_GLOBAL_LOAD] = 0;
@@ -175,6 +178,9 @@ private:
   // Directly store to shared memory with AsyncCopy when pipelining tt.loads
   bool useAsyncCopy;
 
+  // Whether or not we are intend to ping-pong.
+  bool useF16BlockPingpong;
+
   // Stage for each SchedType Op
   int stages[SCHED_SIZE];
   // Cluster for each SchedType Op
@@ -220,6 +226,15 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxIndirectionLevel;
 
+  // In useAsyncCopy + PingPong case, we'd want to hoist out first async_wait
+  // out of the loop, and async_wait within the loop be towards the end.
+  // This is beneficial for maximizing hiding of latency, while ensuring
+  // 2 barriers between asyncWait and localLoad at start of loop S.T
+  // we do not hit race conditions between warp-lo and warp-hi.
+  if (useAsyncCopy && useF16BlockPingpong) {
+    stages[SCHED_ASYNC_WAIT] = std::max(0, stages[SCHED_LOCAL_LOAD] - 1);
+  }
+
   LDBG(
       "Stage schedule:" << "  GLOBAL_LOAD stage = " << stages[SCHED_GLOBAL_LOAD]
                         << ", LOCAL_STORE stage = " << stages[SCHED_LOCAL_STORE]
@@ -247,9 +262,9 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
   // We place async wait as the first cluster because we want to have it being
-  // the first in the main loop after pipelining.
-  int asyncWaitCluster = 0;
-
+  // the first in the main loop after pipelining. However if we intend on doing
+  // PP then we set it near the end of the loop for reasons state above.
+  int asyncWaitCluster = useF16BlockPingpong ? 4 : 0;
   // If tt.load and ttg.local_store are in the same stage
   //   spread them apart to allow overlap with compute
   // else
@@ -1053,6 +1068,10 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
       return signalPassFailure();
     }
 
+    // TODO: Replace this with more stable argument/env, once we unify strategy
+    // between MXFP4 and FP16.
+    bool useF16BlockPingpong =
+        triton::tools::getBoolEnv("TRITON_HIP_ENABLE_F16_ASYNC_PINGPONG");
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
       labelLoadOpsForTritonDot(forOp);
@@ -1072,12 +1091,16 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
         (void)fsp.pipelineLoop();
       } else {
         StreamPipeliner sp(forOp, tt::getNumStagesOrDefault(forOp, numStages),
-                           globalPrefetch, localPrefetch, useAsyncCopy);
+                           globalPrefetch, localPrefetch, useAsyncCopy,
+                           useF16BlockPingpong);
         (void)sp.pipelineLoop();
       }
     }
 
-    if (useAsyncCopy) {
+    // This removes additional barrier but pingpong will add the barrier again.
+    // So we should just not do it to get a better vmcnt in front of each
+    // AsyncCopy.
+    if (useAsyncCopy && !useF16BlockPingpong) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
       tt::combineRedundantWaitOps(waitOps);

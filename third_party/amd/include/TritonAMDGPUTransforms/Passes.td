@@ -168,11 +168,12 @@ def TritonAMDGPUBlockPingpong: Pass<"tritonamdgpu-block-pingpong", "mlir::Module
 
   let dependentDialects = ["mlir::ROCDL::ROCDLDialect, mlir::triton::amdgpu::TritonAMDGPUDialect"];
 
-  let options = [
-    Option<"numStages", "num-stages",
-        "int32_t", /*default*/"2",
-        "Number of Pipeline stages">,
-    ];
+  let options =
+      [Option<"numStages", "num-stages", "int32_t", /*default*/ "2",
+              "Number of Pipeline stages">,
+       Option<"useAsyncCopy", "use_async_copy", "bool", /*default*/ "false",
+              "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
+  ];
 }
 
 def TritonAMDGPUInThreadTranspose: Pass<"tritonamdgpu-in-thread-transpose", "mlir::triton::FuncOp"> {
