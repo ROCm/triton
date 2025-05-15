@@ -1164,8 +1164,9 @@ void Pingponger::getDotPingponged() {
 
   // FIXME: get better condition to enable pingpong either for dot or for
   // dot_scaled
-  if (dotSOps.size() > 0 && dotOps.size() > 0) {
-    LDBG("Only handle either dot or dot_scaled in a single op");
+  int64_t numOfDotLikeOps = dotSOps.size() + dotOps.size();
+  if (numOfDotLikeOps != 1) {
+    LDBG("Only handle a single of either dot or dot_scaled op");
     return;
   }
   int64_t gloadSize = useAsyncCopy ? asyncCopyOps.size() : gLoadOps.size();
