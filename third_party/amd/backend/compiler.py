@@ -288,18 +288,27 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_remove_layout_conversions(pm)
         pm.run(mod)
         if "AMD_INSERT_TTGIR" in os.environ.keys():
-            fn = os.environ['AMD_INSERT_TTGIR']
-            if ':' in fn:
-                kernel_name, insert_module_path = fn.split(':')
-                print(f"Replace kernel {kernel_name}'s ttgir with {insert_module_path}")
-                if not mod.has_function(kernel_name):
-                    return mod
+            found_func = False
+            target_funcName = "gemm"
+            for line in str(mod).splitlines():
+                if line.lstrip().startswith("tt.func") and target_funcName in line:
+                    found_func = True
+                    break
+            if found_func:
+                fn = os.environ['AMD_INSERT_TTGIR']
+                if ':' in fn:
+                    kernel_name, insert_module_path = fn.split(':')
+                    print(f"Replace kernel {target_funcName}'s ttgir with {insert_module_path}")
+                    if not mod.has_function(kernel_name):
+                        return mod
+                else:
+                    insert_module_path = fn
+                    print(f"Replace kernel's ttgir with {insert_module_path}")
+                ctx = mod.context
+                mod = ir.parse_mlir_module(insert_module_path, ctx)
+                mod.context = ctx
             else:
-                insert_module_path = fn
-                print(f"Replace kernel's ttgir with {insert_module_path}")
-            ctx = mod.context
-            mod = ir.parse_mlir_module(insert_module_path, ctx)
-            mod.context = ctx
+                print(f"did not find {target_funcName}")
 
         return mod
 
