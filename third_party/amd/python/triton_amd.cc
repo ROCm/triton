@@ -78,13 +78,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                      mlir::createTritonAMDGPUFoldTrueCmpIPass);
   ADD_PASS_WRAPPER_2("add_block_pingpong",
                      mlir::createTritonAMDGPUBlockPingpongPass, int32_t, bool);
-  m.def("add_stream_pipeline",
-        [](mlir::PassManager &pm, int numStages, int globalPrefetch,
-           int localPrefetch, bool useAsyncCopy, bool useBlockPingpong) {
-          pm.addPass(mlir::createTritonAMDGPUStreamPipelinePass(
-              numStages, globalPrefetch, localPrefetch, useAsyncCopy,
-              useBlockPingpong));
-        });
+  ADD_PASS_WRAPPER_4("add_stream_pipeline",
+                     mlir::createTritonAMDGPUStreamPipelinePass, int, int, int,
+                     bool);
   ADD_PASS_WRAPPER_1("add_coalesce_async_copy",
                      mlir::createTritonAMDGPUCoalesceAsyncCopyPass,
                      std::string);

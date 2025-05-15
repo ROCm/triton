@@ -237,9 +237,7 @@ class HIPBackend(BaseBackend):
             global_prefetch = local_prefetch = 1
 
         # passes.ttgpuir.add_pipeline(pm, options.num_stages, False)
-        use_block_pingpong = is_pingpong_schedule_enabled(options.arch)
-        amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
-                                               use_block_pingpong)
+        amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy)
 
         if False:
             pm.run(mod)
@@ -262,6 +260,7 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_in_thread_transpose(pm)
             passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_reorder_instructions(pm)
+        use_block_pingpong = is_pingpong_schedule_enabled(options.arch)
         if use_block_pingpong and options.num_stages in [2, 4]:
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages, use_async_copy)
 
