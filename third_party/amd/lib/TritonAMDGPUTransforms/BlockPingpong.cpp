@@ -1034,7 +1034,7 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
   builder.setInsertionPointAfter(forOp);
 
-  // FIXME: This is duplicated code, need to refactorize.
+  //FIXME: This is duplicated code, need to refactorize.
   auto i32ty = builder.getIntegerType(32);
   auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
   workIDX->moveBefore(forOp);
@@ -1046,7 +1046,7 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
                                                warpIDX, constZero);
   auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
                                                 warpIDX, constZero);
-
+ 
   builder.setInsertionPointAfter(dotSOps[0]);
 
   if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
@@ -1056,17 +1056,39 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  for (int j = 0; j < 4; j++) {
-    for (int i = 0; i < 4; i++)
-      appendOp(subViewOps[i][j]);
-    for (int i = 0; i < 4; i++)
-      appendOp(loadSliceOps[i][j]);
-    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-    appendOp(dotSliceOps[j]);
+
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 0));
+  for (int i=0; i<4; i++){
+    appendOp(subViewOps[i][0]);
+    appendOp(loadSliceOps[i][0]);
+  }
+  appendOp(dotSliceOps[0]);
+
+  for (int i=0; i<4; i++){
+    appendOp(subViewOps[i][1]);
+    appendOp(loadSliceOps[i][1]);
   }
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 0));
+  appendOp(dotSliceOps[1]);
+
+  for (int i=0; i<4; i++){
+    appendOp(subViewOps[i][2]);
+    appendOp(loadSliceOps[i][2]);
+  }
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 0));
+  appendOp(dotSliceOps[2]);
+
+  for (int i=0; i<4; i++){
+    appendOp(subViewOps[i][3]);
+    appendOp(loadSliceOps[i][3]);
+  }
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(dotSliceOps[3]);
 
   return success();
 }
