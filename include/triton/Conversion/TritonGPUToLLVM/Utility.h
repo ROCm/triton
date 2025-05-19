@@ -698,13 +698,15 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
     Type elemLlvmTy, std::optional<int32_t> maxVecElems,
     const SharedMemoryObject &smemObj, Location loc, RewriterBase &rewriter,
     const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback);
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0 = false);
 
 [[nodiscard]] bool emitTransferBetweenRegistersAndShared(
     LinearLayout &regLayout, triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
     std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
     Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback);
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0 = false);
 
 SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
                                            Type elemLlvmTy,

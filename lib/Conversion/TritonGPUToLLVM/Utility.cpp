@@ -409,7 +409,8 @@ bool emitTransferBetweenRegistersAndShared(
     LinearLayout &regLayout, triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
     std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
     Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback) {
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0) {
   MLIRContext *ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -452,6 +453,17 @@ bool emitTransferBetweenRegistersAndShared(
 
   auto withCTAOffset = triton::gpu::getNumCTAs(sharedTy.getEncoding()) > 1;
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  if (forceLane0) {
+    laneId = b.i32_val(0);
+    // NFC it's copied from getLaneAndWarpId but we add a shuffleIdx(0) to the
+    // tid so LLVM sees that warpId is a scalar
+    // This is not optimal as it adds a readlane which is not necessary but
+    // better than getting readfirstlanes for every direct-to-lds load
+    Value tid = target.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+    int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
+    Value warpSizeVal = b.i32_val(threadsPerWarp);
+    warpId = b.udiv(tid, warpSizeVal);
+  }
   Value blockId =
       withCTAOffset ? target.getClusterCTAId(rewriter, loc) : b.i32_val(0);
 
@@ -486,12 +498,13 @@ bool emitTransferBetweenRegistersAndShared(
     Type elemLlvmTy, std::optional<int32_t> maxVecElems,
     const SharedMemoryObject &smemObj, Location loc, RewriterBase &rewriter,
     const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback) {
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0) {
   auto regLayout = triton::gpu::toLinearLayout(registerTy.getShape(),
                                                registerTy.getEncoding());
   return emitTransferBetweenRegistersAndShared(
       regLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj, loc, rewriter,
-      target, perVectorCallback);
+      target, perVectorCallback, forceLane0);
 }
 
 SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
