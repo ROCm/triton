@@ -1176,20 +1176,57 @@ public:
     }
 
     Location loc = extractSliceOp->getLoc();
-
+    RankedTensorType resultType = extractSliceOp.getResult().getType();
     const FatPointers::FatPtrAttrs &fatPtrAttrs =
         fatPtrs.at({fatPtrBase, fatPtrOffset});
-    auto newSrc = createTensorPointer(rewriter, fatPtrBase, fatPtrOffset, loc,
-                                      fatPtrAttrs);
 
-    RankedTensorType resType = extractSliceOp.getResult().getType();
-    tt::amdgpu::ExtractSliceOp newExtractSliceOp =
+    Value newFatPtrOffset = nullptr;
+    auto origFatOffsetType = dyn_cast<RankedTensorType>(fatPtrOffset.getType());
+    auto slicedFatOffsetType = RankedTensorType::get(
+        resultType.getShape(), origFatOffsetType.getElementType(),
+        origFatOffsetType.getEncoding());
+
+    tt::amdgpu::ExtractSliceOp slicedFatPtrOffset =
         rewriter.create<tt::amdgpu::ExtractSliceOp>(
-            loc, Type{resType}, Value{newSrc},
+            loc, Type{slicedFatOffsetType}, Value{fatPtrOffset},
             extractSliceOp.getStaticOffsetsAttr());
-    rewriter.replaceOp(extractSliceOp, newExtractSliceOp);
-    fatPtrs[{fatPtrBase, newExtractSliceOp}] =
+
+    auto newResultPtrType =
+        RankedTensorType::get(resultType.getShape(), fatPtrBase.getType(),
+                              origFatOffsetType.getEncoding());
+
+    // Scalar case: we only need to `tt.addptr %basePtr, %offset`
+    if (!origFatOffsetType) {
+      auto addPtrOp = rewriter.create<tt::AddPtrOp>(
+          loc, newResultPtrType, fatPtrBase, slicedFatPtrOffset);
+      for (const auto &attribute : fatPtrAttrs.attributes)
+        addPtrOp->setAttr(attribute.getFirst(), attribute.getSecond());
+      newFatPtrOffset = addPtrOp.getResult();
+    }
+
+    // Tensor case: splat the scalar pointer and add the (tensor) offset:
+    // ```
+    //    %tensorBasePtr = tt.splat %basePtr
+    //    %tensorPtr = tt.addptr %tensorBasePtr, %offset
+    // ```
+    if (fatPtrAttrs.canNarrow)
+      fatPtrOffset = createTruncIOffset(rewriter, loc, fatPtrOffset,
+                                        rewriter.getI32Type());
+
+    tt::SplatOp tensorPtr =
+        rewriter.create<tt::SplatOp>(loc, newResultPtrType, fatPtrBase);
+    tt::AddPtrOp addPtrOp = rewriter.create<tt::AddPtrOp>(
+        loc, newResultPtrType, tensorPtr, slicedFatPtrOffset);
+
+    for (const auto &attribute : fatPtrAttrs.attributes)
+      addPtrOp->setAttr(attribute.getFirst(), attribute.getSecond());
+    newFatPtrOffset = addPtrOp.getResult();
+
+    assert(newFatPtrOffset);
+    rewriter.replaceOp(extractSliceOp, newFatPtrOffset);
+    fatPtrs[{fatPtrBase, newFatPtrOffset}] =
         fatPtrs.at({fatPtrBase, fatPtrOffset});
+
     return success();
   }
 };

@@ -1518,6 +1518,12 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   builder.setInsertionPointAfter(dotSOps[0]);
   if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
     return failure();
+
+  if (genAsyncCopySlices(builder).failed()) {
+    LDBG("failed to slice global-to-local async copies");
+    return failure();
+  }
+
   updateOpInsertion(dotSliceOps[0]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
@@ -1660,7 +1666,8 @@ void Pingponger::getDotPingponged() {
   }
 
   // FIXME: place tile size restriction here and obtain kWidth
-  if (dotSOps.size() == 1) {
+  if (dotSOps.size() == 1 && numWarps == 8 && numStages == 2 &&
+      asyncCopyOps.size() > 0) {
     kWidth = 16;
     auto dotSType = dotSOps[0].getType();
     auto dotSShape = dotSType.getShape();
@@ -1668,36 +1675,45 @@ void Pingponger::getDotPingponged() {
     auto aShape = aType.getShape();
     auto elemWidth = aType.getElementTypeBitWidth();
     int64_t tileSize = dotSShape[0] * dotSShape[1] * aShape[1];
-    if (tileSize != 8388608 || aShape[1] != 128 || elemWidth != 8) {
-      LDBG("encountered large matrix for scale dot: "
-           << "TileSize==" << tileSize << "; aShape[1]==" << aShape[1]
-           << "; elemWidth: " << elemWidth);
-      return;
-    }
 
-    if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
-      LDBG("Encountered failure when trying to execute the two ping pong "
-           "cluster transformation");
-      return;
-    }
+    // 256x256x256 (128xi8)
+    if (tileSize == 8388608 && aShape[0] == 256 && aShape[1] == 128 &&
+        elemWidth == 8) {
+      kWidth = 16;
+      if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
+        return;
+      }
 
-    if (llvm::failed(genAsyncCopySlices(builder))) {
-      LDBG("failed to slice global-to-local async copies");
-    }
-
-    auto updateSignature = updateForOpSignature(builder);
-    if (llvm::failed(updateSignature)) {
-      LDBG("failed to update forOp signature");
-    }
-
-    if (llvm::succeeded(updateSignature)) {
-      if (llvm::failed(adjustRefinedAsyncTokens(builder))) {
+      auto updateSignature = updateForOpSignature(builder);
+      if (llvm::failed(updateSignature)) {
         LDBG("failed to update forOp signature");
       }
+
+      if (llvm::succeeded(updateSignature)) {
+        if (llvm::failed(adjustRefinedAsyncTokens(builder))) {
+          LDBG("failed to update forOp signature");
+        }
+      }
+
+      forOp->walk([](ttg::AsyncCommitGroupOp groupOp) {
+        auto users = groupOp.getResult().getUsers();
+        if (users.empty()) {
+          SmallVector<Operation *> toDeleteVec;
+          for (auto token : groupOp.getInputTokens()) {
+            toDeleteVec.push_back(token.getDefiningOp());
+          }
+          groupOp->erase();
+          llvm::for_each(toDeleteVec, [](Operation *op) { op->erase(); });
+        }
+      });
     }
+
     addAsymmetricSyncToLoop(builder, loc);
     return;
-  }
+  } else if (dotSOps.size() == 1)
+    return;
 
   // Determine if we have a persistent GEMM. This will decide how we interpret
   // any memory operations that we find in conditionals.
