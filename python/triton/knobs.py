@@ -447,7 +447,7 @@ class amd_knobs(base_knobs):
     local_prefetch: env_int = env_int("TRITON_HIP_LOCAL_PREFETCH")
     use_async_copy: env_bool = env_bool("TRITON_HIP_USE_ASYNC_COPY")
     scalarize_vector_fops: env_bool = env_bool("TRITON_HIP_SCALARIZE_VECTOR_FOPS")
-
+    pack_preshuffled_scale: env_bool= env_bool("TRITON_HIP_PACK_PRESHUFFLED_SCALE")
 
 class proton_knobs(base_knobs):
     cupti_path: env_opt_str = env_opt_str("TRITON_CUPTI_LIB_PATH")

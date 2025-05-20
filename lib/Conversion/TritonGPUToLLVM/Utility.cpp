@@ -417,8 +417,8 @@ bool emitTransferBetweenRegistersAndShared(
   StringAttr kRegister = str_attr("register");
   StringAttr kLane = str_attr("lane");
   StringAttr kWarp = str_attr("warp");
-  auto shape = sharedTy.getShape();
 
+  auto shape = sharedTy.getShape();
   LinearLayout sharedLayout =
       triton::gpu::toLinearLayout(shape, sharedTy.getEncoding());
   LinearLayout regToSharedLayout = regLayout.invertAndCompose(sharedLayout);

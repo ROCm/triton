@@ -414,7 +414,11 @@ struct DotOpMFMAConversionHelper {
           results = b.shl(i32_ty, b.zext(i32_ty, b.bitcast(vec, i8_ty)),
                           b.i32_val(23));
         } else {
-          results = b.bitcast(vec, i32_ty);
+          if (tools::getBoolEnv("TRITON_HIP_PACK_PRESHUFFLED_SCALE")) {
+            results = b.bitcast(vec, i32_ty);
+          } else {
+            results = b.zext(i32_ty, b.bitcast(vec, i8_ty));
+          }
         }
       }
       if (4 == kBase)
@@ -667,16 +671,26 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     ValueTable operandBScale;
     if (existBothScales) {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
-      operandAScale = getValuesFromDotOperandLayoutScaleStruct(
-          loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
-          aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant);
-
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
-      operandBScale = getValuesFromDotOperandLayoutScaleStruct(
-          loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
-          bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant);
+      if (tools::getBoolEnv("TRITON_HIP_PACK_PRESHUFFLED_SCALE")) {
+        operandAScale = getValuesFromDotOperandLayoutScaleStruct(
+            loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
+            aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
+            isAScaleConstant);
+        operandBScale = getValuesFromDotOperandLayoutScaleStruct(
+            loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
+            bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
+            isBScaleConstant);
+      } else {
+        operandAScale = getValuesFromDotOperandLayoutStruct(
+            loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
+            aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
+            isAScaleConstant);
+        operandBScale = getValuesFromDotOperandLayoutStruct(
+            loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
+            bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
+            isBScaleConstant);
+      }
     }
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -707,20 +721,24 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
           for (int k = 0; k < numVecInKBase; k++) {
             if (existBothScales) {
+              int kIter =
+                tools::getBoolEnv(("TRITON_HIP_PACK_PRESHUFFLED_SCALE")) ?
+                0 : k;
               if (mfmaLayout.getIsTransposed()) {
                 acc = generateScaledMFMAOp(
                     intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                    acc, operandBScale[{b, n, 0}], operandAScale[{b, m, 0}],
+                    acc, operandBScale[{b, n, kIter}],
+                    operandAScale[{b, m, kIter}],
                     maybeMfmaIntrinsic->bElementType,
                     maybeMfmaIntrinsic->aElementType,
-                    k);
+                    k - kIter);
               } else {
                 acc = generateScaledMFMAOp(
                     intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
                     acc, operandAScale[{b, m, 0}], operandBScale[{b, n, 0}],
                     maybeMfmaIntrinsic->aElementType,
                     maybeMfmaIntrinsic->bElementType,
-                    k);
+                    k - kIter);
               }
             } else {
               if (mfmaLayout.getIsTransposed()) {

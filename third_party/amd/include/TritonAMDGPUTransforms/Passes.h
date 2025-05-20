@@ -16,7 +16,7 @@ createTritonAMDGPUStreamPipelinePass(int numStages = 2, int globalPrefetch = 0,
 std::unique_ptr<Pass>
 createTritonAMDGPUAccelerateMatmulPass(std::string archGenName = std::string(),
                                        int matrixInstructionSize = 0,
-                                       int kpack = 1);
+                                       int kpack = 1, bool packScale = false);
 
 std::unique_ptr<Pass> createTritonAMDGPUCanonicalizeLoopsPass();
 

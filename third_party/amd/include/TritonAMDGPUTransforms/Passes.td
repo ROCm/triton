@@ -52,7 +52,10 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
            "enforce matrix instruction MN size">,
     Option<"kPack", "kPack",
            "int32_t", /*default*/"1",
-           "KWidth / kBase">
+           "KWidth / kBase">,
+    Option<"packScale", "pack_preshuffled_scale",
+           "bool", /*default*/"false",
+           "Assuming scale tensor is pre-shuffled, vectorize the memory access">
   ];
 }
 

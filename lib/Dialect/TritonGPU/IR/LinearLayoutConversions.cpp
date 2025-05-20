@@ -1451,7 +1451,9 @@ LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
 LinearLayout chooseScaledMfmaScaleLayout(
     MLIRContext *ctx, int dotOperandIdx,
     const std::vector<std::vector<int32_t>> &dotOperandWarpBasis,
-    ArrayRef<int64_t> dotOperandShape, unsigned mfmaMDim, unsigned mfmaKDim) {
+    ArrayRef<int64_t> dotOperandShape, unsigned mfmaMDim, unsigned mfmaKDim,
+    bool packScale) {
+  assert((mfmaMDim == 16) || (mfmaMDim == 32));
   using basisT = std::vector<std::vector<int32_t>>;
   unsigned rank = dotOperandShape.size();
   auto order = mlir::triton::gpu::getMatrixOrder(rank, /*rowMajor=*/true);
@@ -1460,12 +1462,61 @@ LinearLayout chooseScaledMfmaScaleLayout(
   StringAttr kLane = StringAttr::get(ctx, "lane");
   StringAttr kWarp = StringAttr::get(ctx, "warp");
   StringAttr kBlock = StringAttr::get(ctx, "block");
-  // Init register layout. Will be adjusted later
-  // TODO: update kVec for mfma16
-  // in 32x32 MFMA scaled, thread 0-31 holds k 0-31 and thread 32-64 holds
-  // k 32-64, so that means we always split the kDim to half
-  auto kVec = mfmaKDim / 2;
-  LinearLayout lanes = LinearLayout::empty();
+  // For ROCDL::mfma_scale_f32_32x32x64_f8f6f4 with fp4 input, each lane
+  // takes 32 consecutive elements from A alone K dimension. The first
+  // 32 lanes collectively handle A[0:32][0:32], and the other 32 lanes
+  // collectively handle A[0:32][32:64]. Each lane take 1 scale element
+  // accordingly. Similar to B and bScale.
+  //
+  // For ROCDL::mfma_scale_f32_16x16x128_f8f6f4 with fp4 input, each lane
+  // takes 32 consecutive elements from A alone K dimension. The first
+  // 16 lanes collectively handle A[0:16][0:32], and another 16 lanes
+  // collectively handle A[0:16][32:64] and so on. Each lane take 1 scale
+  // element accordingly. Similar to B and bScale.
+  //
+  // If we don't pack the scales each warp will require the scale layout
+  // like th following
+  // mfma_scale_f32_32x32x64_f8f6f4: scale tensor (32, 8)
+  // t0,  t32, t0,  t32, t0,  t32, t0,  t32
+  // t1,  t33, t1,  t33, t1,  t33, t1,  t33
+  // ...
+  // t31, t63, t31, t63, t31, t63, t31, t63
+  //
+  // mfma_scale_f32_16x16x128_f8f6f4: scale tensor (16, 16)
+  // t0,  t16, t32, t48, t0,  t16, t32, t48, t0,  t16, t32, t48, t0,  t16, t32, t48
+  // t1,  t17, t33, t49, t1,  t17, t33, t49, t1,  t17, t33, t49, t1,  t17, t33, t49
+  // ...
+  // t15, t31, t47, t63, t15, t31, t47, t63, t15, t31, t47, t63, t15, t31, t47, t63
+  //
+  // If we assume the scale tensor is pre-shuffled, then we can pack each
+  // thread's access to promote coalescing. The layout would then becomes the
+  // following
+  // mfma_scale_f32_32x32x64_f8f6f4: scale tensor (32, 8)
+  // t0,  t0,  t0,  t0,  t32, t32, t32, t32,
+  // t1,  t1,  t1,  t1,  t33, t33, t33, t33,
+  // ...
+  // t31, t31, t31, t31, t63, t63, t63, t63,
+  //
+  // mfma_scale_f32_16x16x128_f8f6f4: scale tensor (16, 16)
+  // t0,  t0,  t0,  t0,  t16, t16, t16, t16, t32, t32, t32, t32, t48, t48, t48, t48
+  // t1,  t1,  t1,  t1,  t17, t17, t17, t17, t33, t33, t33, t33, t49, t49, t49, t49
+  // ...
+  // t15, t15, t15, t15, t31, t31, t31, t31, t47, t47, t47, t47, t63, t63, t63, t63
+  basisT regs, lanes;
+  if (packScale) {
+    regs = {{1, 0}, {2, 0}};
+    if (mfmaMDim == 32)
+      lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}};
+    else
+      lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
+  } else {
+    regs = {{1, 0}};
+    if (mfmaMDim == 32)
+      lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
+    else
+      lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}};
+  }
+  LinearLayout newLL = LinearLayout::empty();
   // In scaled dot, the shapes of operands(without batch dimension) are,
   // respectively:
   // - A: [M, K]
@@ -1497,32 +1548,12 @@ LinearLayout chooseScaledMfmaScaleLayout(
   // For mxfp4, these 32 elements are consecutive, so only 1 scale element
   // is required. But for mxfp6/mxfp8, there are 2 16-consecutive elements
   // blocks, so 2 scale elements are required.
-  if (mfmaMDim == 32) {
-    // For ROCDL::mfma_scale_f32_32x32x64_f8f6f4 with fp4 input, each lane
-    // takes 32 consecutive elements from A alone K dimension. The first
-    // 32 lanes collectively handle A[0:32][0:32], and the other 32 lanes
-    // collectively handle A[0:32][32:64]. Each lane take 1 scale element
-    // accordingly. Similar to B and bScale.
-    lanes = LinearLayout(
-        {{kRegister, {{1, 0}, {2, 0}}},
-         {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}}},
-         {kWarp, warps},
-         {kBlock, {}}},
-        {standardOutDims[order[0]], standardOutDims[order[1]]});
-  } else {
-    assert(mfmaMDim == 16);
-    // For ROCDL::mfma_scale_f32_16x16x128_f8f6f4 with fp4 input, each lane
-    // takes 32 consecutive elements from A alone K dimension. The first
-    // 16 lanes collectively handle A[0:16][0:32], and another 16 lanes
-    // collectively handle A[0:16][32:64] and so on. Each lane take 1 scale
-    // element accordingly. Similar to B and bScale.
-    lanes =
-        LinearLayout({{kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}}},
-                      {kWarp, warps},
-                      {kBlock, {}}},
-                     {standardOutDims[order[0]], standardOutDims[order[1]]});
-  }
-  LinearLayout newLL = lanes;
+  newLL = LinearLayout(
+    {{kRegister, regs},
+     {kLane, lanes},
+     {kWarp, warps},
+     {kBlock, {}}},
+    {standardOutDims[order[0]], standardOutDims[order[1]]});
 
   // Adjust register-level layout to fill the shape, at this level, both
   // aScale and bScale should align with A operand.

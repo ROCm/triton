@@ -747,10 +747,12 @@ class ScaledBlockedToScaledMFMAF8F6F4 final
     : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
   int nonKDim;
+  bool packScale;
 
 public:
   ScaledBlockedToScaledMFMAF8F6F4(MLIRContext *context, int mfmaVersion,
-                                  int nonKDim, PatternBenefit benefit = 1)
+                                  int nonKDim, bool packScale,
+                                  PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
         nonKDim(nonKDim) {}
 
@@ -880,8 +882,8 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL =
-          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim, kDim);
+      LinearLayout newLL = chooseScaledMfmaScaleLayout(ctx, idx, warpBases,
+          shape, mDim, kDim, packScale);
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
@@ -1237,10 +1239,11 @@ class TritonAMDGPUAccelerateMatmulPass
 public:
   TritonAMDGPUAccelerateMatmulPass() = default;
   TritonAMDGPUAccelerateMatmulPass(StringRef archGen, int matrixInstructionSize,
-                                   int kPack) {
+                                   int kPack, int packScale) {
     this->archGenerationName = archGen.data();
     this->matrixInstructionSize = matrixInstructionSize;
     this->kPack = kPack;
+    this->packScale = packScale;
   }
   void runOnOperation() override {
 
@@ -1251,7 +1254,7 @@ public:
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
     case ISAFamily::CDNA4:
       patterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
-          context, getMfmaVersion(isaFamily), matrixInstructionSize,
+          context, getMfmaVersion(isaFamily), matrixInstructionSize, packScale,
           /*benefit=*/10);
       [[fallthrough]];
     case ISAFamily::CDNA1:
@@ -1277,7 +1280,7 @@ public:
 };
 
 std::unique_ptr<Pass> mlir::createTritonAMDGPUAccelerateMatmulPass(
-    std::string archGen, int matrixInstructionSize, int kPack) {
+    std::string archGen, int matrixInstructionSize, int kPack, bool packScale) {
   return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
-      archGen, matrixInstructionSize, kPack);
+      archGen, matrixInstructionSize, kPack, packScale);
 }
