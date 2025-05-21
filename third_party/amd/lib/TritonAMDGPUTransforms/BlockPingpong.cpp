@@ -1126,26 +1126,41 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
   Operation *gLoadRhs = useAsyncCopy ? asyncCopyOps[1] : gLoadOps[1];
   builder.setInsertionPointAfter(gLoadRhs);
 
+  // Combine asyncWaitOps
+  SmallVector<Value> tokens;
+  for (auto asyncWaitOp : asyncWaitOps) {
+    for (auto token : asyncWaitOp.getAsyncToken()) {
+      tokens.push_back(token);
+    }
+  }
+  auto newAsyncWaitOp = builder.create<ttg::AsyncWaitOp>(loc, tokens, 0);
+  asyncWaitOps[0].getResult().replaceAllUsesWith(newAsyncWaitOp.getResult());
+  asyncWaitOps[1].getResult().replaceAllUsesWith(newAsyncWaitOp.getResult());
+  asyncWaitOps[0]->erase();
+  asyncWaitOps[1]->erase();
+
   updateOpInsertion(gLoadRhs);
 
   appendOp(lLoadOps[0]);
-  appendOp(lLoadOps[1]);
-
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(asyncCopyOps[0]);
   appendOp(asyncCommitOps[0]);
 
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(lLoadOps[1]);
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(asyncCopyOps[1]);
   appendOp(asyncCommitOps[1]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(newAsyncWaitOp);
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
   appendOp(dotOps[0]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(asyncWaitOps[0]);
-  appendOp(asyncWaitOps[1]);
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
   return success();
 }
