@@ -195,9 +195,16 @@ void Pingponger::appendSlicedLoadAB(int slice) {
 SmallVector<Operation *> Pingponger::genClusterBarrier(OpBuilder &builder,
                                                        Location loc) {
   //  MembarAnalysis can recognize gpu::BarrierOp and skip inserting additional
-  auto barrierOp = builder.create<gpu::BarrierOp>(loc);
-  auto schedBarrierOp = builder.create<ROCDL::SchedBarrier>(loc, 0);
-  return {barrierOp, schedBarrierOp};
+  if (!useAsyncCopy) {
+    auto barrierOp = builder.create<gpu::BarrierOp>(loc);
+    auto schedBarrierOp = builder.create<ROCDL::SchedBarrier>(loc, 0);
+    return {barrierOp, schedBarrierOp};
+  } else {
+    auto preSchedBarrierOp = builder.create<ROCDL::SchedBarrier>(loc, 0);
+    auto barrierOp = builder.create<ROCDL::SBarrierOp>(loc);
+    auto postSchedBarrierOp = builder.create<ROCDL::SchedBarrier>(loc, 0);
+    return {preSchedBarrierOp, barrierOp, postSchedBarrierOp};
+  }
 }
 void Pingponger::appendClusterBarrier(OpBuilder &builder, Location loc) {
   for (auto &&op : genClusterBarrier(builder, loc))
@@ -583,7 +590,7 @@ LogicalResult Pingponger::pruneDotAsyncMemoryOps(
   // All PingPong Scheduler assumes there are 2 movable global loads and 2
   // movable local loads.
   if (asyncCopyOps.size() != 2 || lLoadOps.size() != 2 ||
-      asyncWaitOps.size() != 2) {
+      asyncWaitOps.size() != 1) {
     std::stringstream message;
     message << "Unable to match ping pong slicing pattern. Details: "
             << asyncCopyOps.size() << " global loads in dot computation, "
@@ -879,7 +886,14 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
   // set insertion point at the last global_load where all the addresses are
   // ready to be used.
   updateOpInsertion(gLoadRhs);
+
   appendSlicedLoadAB(/*slice=*/0);
+  if (useAsyncCopy) {
+    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+    // Move gloadLhs down if async copy.
+    appendOp(asyncCopyOps[0]);
+    appendOp(asyncCommitOps[0]);
+  }
   appendClusterBarrier(builder, loc);
 
   // dot0 (1/4)
@@ -887,11 +901,17 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
   appendClusterBarrier(builder, loc);
 
   // mem1: global load B, local load A(2/4), local load B(2/4)
-  appendOp(gLoadRhs);
-  if (useAsyncCopy) {
+  if (!useAsyncCopy) {
+    appendOp(gLoadRhs);
+    appendSlicedLoadAB(/*slice=*/1);
+  } else {
+    // If async, then set local load before global load
+    // to hide latency.
+    appendSlicedLoadAB(/*slice=*/1);
+    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+    appendOp(gLoadRhs);
     appendOp(asyncCommitOps[1]);
   }
-  appendSlicedLoadAB(/*slice=*/1);
   appendClusterBarrier(builder, loc);
 
   // dot1 (2/4)
@@ -900,7 +920,6 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
 
   // mem2: local load A(3/4, 4/4), local load B(3/4, 4/4)
   appendSlicedLoadAB(/*slice=*/2);
-  appendSlicedLoadAB(/*slice=*/3);
   appendClusterBarrier(builder, loc);
 
   // dot2 (3/4)
@@ -916,8 +935,10 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
     moveOpAndPredecessorsUpSameBlock(lStoreOps[1]);
     appendClusterBarrier(builder, loc);
   } else {
+    appendSlicedLoadAB(/*slice=*/3);
+    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
     appendOp(asyncWaitOps[0]);
-    appendOp(asyncWaitOps[1]);
+    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   }
   // dot3 (4/4)
   appendOpWithPrio(builder, dotSliceOps[3], loc);
