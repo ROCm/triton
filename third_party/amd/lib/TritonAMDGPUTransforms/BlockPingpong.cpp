@@ -117,6 +117,7 @@ private:
   LogicalResult transformTwoPPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFAv3(OpBuilder &builder, Location loc);
   LogicalResult transformFP4(OpBuilder &builder, Location loc);
+  LogicalResult transformFP4s(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -1498,6 +1499,54 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
   return success();
 }
 
+LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
+  // FIXME: support nonscale.
+  if (lLoadOps.size() != 4)
+    return failure();
+
+  auto tokens = asyncWaitOps[0].getAsyncToken();
+  Operation *aWait = asyncWaitOps[0];
+  builder.setInsertionPointToStart(forOp.getBody());
+  asyncWaitOps.clear();
+  for (int i = 0; i < 2; i++) {
+    auto newOp = builder.clone(*aWait);
+    newOp->eraseOperand(3 - i);
+    newOp->eraseOperand(1 - i);
+    asyncWaitOps.push_back(cast<ttg::AsyncWaitOp>(newOp));
+  }
+  lLoadOps[0]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[0]);
+  lLoadOps[2]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[0]);
+  lLoadOps[1]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[1]);
+  lLoadOps[3]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[1]);
+  aWait->erase();
+
+  builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(lLoadOps[0]);
+  appendOp(lLoadOps[2]);
+
+  appendOp(asyncWaitOps[1]);
+
+  appendOp(asyncCopyOps[1]);
+  appendOp(asyncCopyOps[3]);
+  appendOp(asyncCommitOps[1]);
+  appendOp(asyncCommitOps[3]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+
+  appendOp(lLoadOps[1]);
+  appendOp(lLoadOps[3]);
+  appendOp(dotSOps[0]);
+
+  return success();
+}
+
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
   builder.setInsertionPointAfter(forOp);
@@ -1668,7 +1717,6 @@ void Pingponger::getDotPingponged() {
   // FIXME: place tile size restriction here and obtain kWidth
   if (dotSOps.size() == 1 && numWarps == 8 && numStages == 2 &&
       asyncCopyOps.size() > 0) {
-    kWidth = 16;
     auto dotSType = dotSOps[0].getType();
     auto dotSShape = dotSType.getShape();
     auto aType = dotSOps[0].getA().getType();
@@ -1708,6 +1756,15 @@ void Pingponger::getDotPingponged() {
           llvm::for_each(toDeleteVec, [](Operation *op) { op->erase(); });
         }
       });
+    }
+    // 128x128x512 (256xi8)
+    else if (tileSize == 4194304 && aShape[0] == 128 && aShape[1] == 256 &&
+             elemWidth == 8) {
+      if (transformFP4s(builder, dotSOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
+        return;
+      }
     }
 
     addAsymmetricSyncToLoop(builder, loc);

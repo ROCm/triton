@@ -122,10 +122,10 @@ class StreamPipeliner {
 public:
   StreamPipeliner(scf::ForOp _forOp, int _numStages, int _globalPrefetch,
                   int _localPrefetch, bool _useAsyncCopy,
-                  bool _useF16BlockPingpong)
+                  bool _useF16BlockPingpong, bool _useAsyncCopyOverlap)
       : forOp(_forOp), numStages(_numStages), numBuffers(1),
         useAsyncCopy(_useAsyncCopy), useF16BlockPingpong(_useF16BlockPingpong),
-        schedule(numStages),
+        useAsyncCopyOverlap(_useAsyncCopyOverlap), schedule(numStages),
         axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
     int lastStage = numStages - 1;
     stages[SCHED_GLOBAL_LOAD] = 0;
@@ -180,6 +180,9 @@ private:
 
   // Whether or not we are intend to ping-pong.
   bool useF16BlockPingpong;
+
+  // Move AsyncCopy before AsyncWait.
+  bool useAsyncCopyOverlap;
 
   // Stage for each SchedType Op
   int stages[SCHED_SIZE];
@@ -295,6 +298,14 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   int computeCluster = 2;
   if (stages[SCHED_LOCAL_LOAD] == stages[SCHED_COMPUTE]) {
     computeCluster = localLoadCluster;
+  }
+
+  if (useAsyncCopyOverlap) {
+    globalLoadCluster = 0;
+    localStoreCluster = 1;
+    asyncWaitCluster = 2;
+    localLoadCluster = 3;
+    computeCluster = 3;
   }
 
   // Make assignments
@@ -1072,6 +1083,9 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
     // between MXFP4 and FP16.
     bool useF16BlockPingpong =
         triton::tools::getBoolEnv("TRITON_HIP_ENABLE_F16_ASYNC_PINGPONG");
+    bool useAsyncCopyOverlap =
+        triton::tools::getBoolEnv("TRITON_HIP_ASYNC_COPY_OVERLAP") &
+        useAsyncCopy;
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
       labelLoadOpsForTritonDot(forOp);
@@ -1092,7 +1106,7 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
       } else {
         StreamPipeliner sp(forOp, tt::getNumStagesOrDefault(forOp, numStages),
                            globalPrefetch, localPrefetch, useAsyncCopy,
-                           useF16BlockPingpong);
+                           useF16BlockPingpong, useAsyncCopyOverlap);
         (void)sp.pipelineLoop();
       }
     }

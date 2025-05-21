@@ -74,12 +74,6 @@ FourStagePipeliner::FourStagePipeliner(scf::ForOp _forOp, int _numStages,
 }
 
 bool FourStagePipeliner::checkPrecondition(scf::ForOp forOp, int numStages) {
-  // Skip the second loop (causual loop)
-  static bool isFirst = true;
-  if (!isFirst)
-    return false;
-  isFirst = false;
-
   unsigned dotCount{};
   unsigned reduceCount{};
 
