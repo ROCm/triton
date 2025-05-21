@@ -227,6 +227,11 @@ class Autotuner(KernelInterface):
                     bench_start = time.time()
                     timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
                     bench_end = time.time()
+                    timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+                    print("\nAutoTuning Results")
+                    for config, time_list in timings.items():
+                        print("t=", time_list[0], "; config={", config, "}")
+
                     self.bench_time = bench_end - bench_start
                     self.cache[key] = builtins.min(timings, key=timings.get)
                     full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs()}
