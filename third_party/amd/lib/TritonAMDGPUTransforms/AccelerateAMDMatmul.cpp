@@ -754,7 +754,7 @@ public:
                                   int nonKDim, bool packScale,
                                   PatternBenefit benefit = 1)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim) {}
+        nonKDim(nonKDim), packScale(packScale) {}
 
   LogicalResult matchAndRewrite(triton::DotScaledOp dotOp,
                                 PatternRewriter &rewriter) const override {
@@ -1239,7 +1239,7 @@ class TritonAMDGPUAccelerateMatmulPass
 public:
   TritonAMDGPUAccelerateMatmulPass() = default;
   TritonAMDGPUAccelerateMatmulPass(StringRef archGen, int matrixInstructionSize,
-                                   int kPack, int packScale) {
+                                   int kPack, bool packScale) {
     this->archGenerationName = archGen.data();
     this->matrixInstructionSize = matrixInstructionSize;
     this->kPack = kPack;

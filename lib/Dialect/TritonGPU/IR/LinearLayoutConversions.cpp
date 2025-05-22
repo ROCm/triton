@@ -1497,24 +1497,43 @@ LinearLayout chooseScaledMfmaScaleLayout(
   // ...
   // t31, t31, t31, t31, t63, t63, t63, t63,
   //
-  // mfma_scale_f32_16x16x128_f8f6f4: scale tensor (16, 16)
-  // t0,  t0,  t0,  t0,  t16, t16, t16, t16, t32, t32, t32, t32, t48, t48, t48, t48
-  // t1,  t1,  t1,  t1,  t17, t17, t17, t17, t33, t33, t33, t33, t49, t49, t49, t49
+  // mfma_scale_f32_16x16x128_f8f6f4: scale tensor (16, 8)
+  // The case for MFMA16 is more complicated since we want to pack more scale
+  // values across the nonK dimension. For K = 256, #elements of scale is still
+  // 256 / 32 = 8, but we have 4 threads spanning the K dimension now, as
+  // opposed to 2 threads in MFMA32. Naturally, each thread only can load 2 E8M0
+  // into a 32-bit bank. To better utilize the LDS bank and wider LDS access, we
+  // want to pack more scale elements along the nonK dimension. In the case of
+  // block size M-N-K = 256-256-256, warpsPerCTA = (2, 4), we will have
+  // 256 / (2 * 16) = 8 iterations for each warp on dim M. To pack more scales,
+  // we will have 0th and 1st iterations' scales together to fill the 4x E8M0.
+  //
+  // We also need to consider the pre-shuffling and have the shape conforming
+  // with the original shape, so the end we would have the thread access
+  // as the following. Even though we break the 4 threads per row into 2, since
+  // the access eventually would be 1D, it should still work.
+  // t0,  t0,  t0,  t0,  t16, t16, t16, t16,
+  // t32, t32, t32, t32, t48, t48, t48, t48
+  // t1,  t1,  t1,  t1,  t17, t17, t17, t17,
+  // t33, t33, t33, t33, t49, t49, t49, t49
   // ...
-  // t15, t15, t15, t15, t31, t31, t31, t31, t47, t47, t47, t47, t63, t63, t63, t63
+  // t15, t15, t15, t15, t31, t31, t31, t31,
+  // t47, t47, t47, t47, t63, t63, t63, t63
   basisT regs, lanes;
   if (packScale) {
     regs = {{1, 0}, {2, 0}};
-    if (mfmaMDim == 32)
+    if (mfmaMDim == 32) {
       lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}};
-    else
-      lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
+    } else {
+      lanes = {{0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}, {0, 1}};
+    }
   } else {
-    regs = {{1, 0}};
-    if (mfmaMDim == 32)
+    regs = {};
+    if (mfmaMDim == 32) {
       lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
-    else
+    } else {
       lanes = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}};
+    }
   }
   LinearLayout newLL = LinearLayout::empty();
   // In scaled dot, the shapes of operands(without batch dimension) are,
@@ -1538,6 +1557,14 @@ LinearLayout chooseScaledMfmaScaleLayout(
     for (auto &basis : warps) {
       std::reverse(basis.begin(), basis.end());
     }
+  }
+  // Because we pack scale elements across nonK dim, the warp layout of scale
+  // tensor won't follow data tensor, but to be stretched, i.e. the original
+  // warp layout assumes every thread loads 2 elements and we force it to load 4
+  // so we need to multiply the warp layout at the nonK dim by 2.
+  if (mfmaMDim == 16) {
+    for (auto &basis : warps)
+      basis[1] *= 2;
   }
   // In general, for both 32x32 and 16x16 scaled mfma, and no matter what
   // data type the A/B operand is, each lane takes 32 elements from A/B

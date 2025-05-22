@@ -439,24 +439,25 @@ struct DotOpMFMAConversionHelper {
 
   ValueTable getValuesFromDotOperandLayoutScaleStruct(
       Value value, int batch, int nonKRep, int kRepInKWidth, int kWidth,
-      int kBase, Type type, bool allowXF32, bool preserveBF16,
-      bool isConstantScale = false) const {
+      int kBase, Type type, int mfmaNonKDim) const {
     assert((type.getIntOrFloatBitWidth() == 8) && (type.isInteger()) &&
       (kBase == 1) && "Only support E8M0 scales in scaled_dot");
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     // number of kBase-element vectors
-    int numVecInKBase = kRepInKWidth * kWidth / kBase;
     ValueTable dotOpVals;
-    SmallVector<int64_t> bounds = {batch, nonKRep, numVecInKBase, kBase};
+    // Because we pack two iterations on nonK dim into one register, the actual
+    // nonKRep for the scale should only be half.
+    nonKRep /= (mfmaNonKDim == 16) ? 2 : 1;
+    SmallVector<int64_t> bounds = {batch, nonKRep, kWidth};
     SmallVector<int64_t> strides = computeStrides(bounds);
     for (int b = 0; b < batch; ++b) {
       for (int nonK = 0; nonK < nonKRep; nonK++) {
-        Value packedVec = tb.undef(vec_ty(i8_ty, numVecInKBase));
-        for (int kBaseVec = 0; kBaseVec < numVecInKBase; kBaseVec++) {
-          auto index = linearize({b, nonK, kBaseVec, 0}, strides);
+        Value packedVec = tb.undef(vec_ty(i8_ty, kWidth));
+        for (int k = 0; k < kWidth; k++) {
+          auto index = linearize({b, nonK, k}, strides);
           packedVec =
-              tb.insert_element(packedVec, elems[index], tb.i32_val(kBaseVec));
+              tb.insert_element(packedVec, elems[index], tb.i32_val(k));
         }
         Value input = tb.bitcast(packedVec, i32_ty);
         dotOpVals[{b, nonK, 0}] = input;
@@ -554,10 +555,12 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
   Value generateScaledMFMAOp(StringRef intrinsicName, Value valA, Value valB,
                              Value valC, Value valScaleA, Value valScaleB,
-                             Type elemTypeA, Type elemTypeB, int kIter) const {
+                             Type elemTypeA, Type elemTypeB,
+                             int opSelA, int opSelB) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
-    Value opSel = b.i32_val(kIter);
+    Value valOpSelA = b.i32_val(opSelA);
+    Value valOpSelB = b.i32_val(opSelB);
     Value zeroFlag = b.i32_val(0);
     OperationState loweredOp(loc, intrinsicName);
     int32_t cbsz = getMfmaF8F6F4MatrixFormat(elemTypeA);
@@ -565,7 +568,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert((cbsz != -1) && (blgp != -1));
     loweredOp.addTypes(resType);
     loweredOp.addOperands({valA, valB, valC, b.i32_val(cbsz), b.i32_val(blgp),
-                           opSel, valScaleA, opSel, valScaleB});
+                           valOpSelA, valScaleA, valOpSelB, valScaleB});
     return rewriter.create(loweredOp)->getResult(0);
   }
 
@@ -643,7 +646,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // For fp4 scaled mfma, each thread takes 1 element from scale. Will have
     // better way to get it when adapting other data types. Similar to
     // scaleKBase
-    constexpr int scaleKWidth = 1;
+    bool packScaleFlag = tools::getBoolEnv("TRITON_HIP_PACK_PRESHUFFLED_SCALE");
+    int scaleKWidth = packScaleFlag ? 4 : 1;
     constexpr int scaleKBase = 1;
 
     Value loadedA = adaptor.getA();
@@ -672,15 +676,13 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     if (existBothScales) {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
-      if (tools::getBoolEnv("TRITON_HIP_PACK_PRESHUFFLED_SCALE")) {
+      if (packScaleFlag) {
         operandAScale = getValuesFromDotOperandLayoutScaleStruct(
             loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
-            aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-            isAScaleConstant);
+            aScaleTensorTy.getElementType(), mDim);
         operandBScale = getValuesFromDotOperandLayoutScaleStruct(
             loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
-            bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-            isBScaleConstant);
+            bScaleTensorTy.getElementType(), nDim);
       } else {
         operandAScale = getValuesFromDotOperandLayoutStruct(
             loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
@@ -721,24 +723,38 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
           for (int k = 0; k < numVecInKBase; k++) {
             if (existBothScales) {
-              int kIter =
-                tools::getBoolEnv(("TRITON_HIP_PACK_PRESHUFFLED_SCALE")) ?
-                0 : k;
+              int kIter = packScaleFlag ? 0 : k;
+              int nonKPackFactor = (mDim == 16 && packScaleFlag) ? 2 : 1;
+              int opSelA, opSelB;
+              // In MFMA16, for every two iterations along nonK dim, the scales
+              // are packed into one 32bit register, so the 1st iteration
+              // (even iteration) it uses opSel 0, 1, and 2nd iteration it uses
+              // opSel 2, 3
+              if (packScaleFlag) {
+                opSelA = (mDim == 32) ? k : k + (m % 2) * 2;
+                opSelB = (nDim == 32) ? k : k + (n % 2) * 2;
+              } else {
+                opSelA = 0;
+                opSelB = 0;
+              }
               if (mfmaLayout.getIsTransposed()) {
                 acc = generateScaledMFMAOp(
                     intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                    acc, operandBScale[{b, n, kIter}],
-                    operandAScale[{b, m, kIter}],
+                    acc,
+                    operandBScale[{b, n / nonKPackFactor, kIter}],
+                    operandAScale[{b, m / nonKPackFactor, kIter}],
                     maybeMfmaIntrinsic->bElementType,
                     maybeMfmaIntrinsic->aElementType,
-                    k - kIter);
+                    opSelA, opSelB);
               } else {
                 acc = generateScaledMFMAOp(
                     intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                    acc, operandAScale[{b, m, 0}], operandBScale[{b, n, 0}],
+                    acc,
+                    operandAScale[{b, m / nonKPackFactor, kIter}],
+                    operandBScale[{b, n / nonKPackFactor, kIter}],
                     maybeMfmaIntrinsic->aElementType,
                     maybeMfmaIntrinsic->bElementType,
-                    k - kIter);
+                    opSelA, opSelB);
               }
             } else {
               if (mfmaLayout.getIsTransposed()) {
