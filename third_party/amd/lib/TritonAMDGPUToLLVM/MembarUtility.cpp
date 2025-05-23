@@ -23,6 +23,12 @@ bool filterAsyncLocalLoadsDeppendencies(Operation *op1, Operation *op2) {
     return true;
   };
 
+  // TODO (alex): WA because we get a barrier between sliced AsyncCopies because
+  // they write to the same LDS allocation
+  if (isAsyncLoad(op1) && isAsyncLoad(op2)) {
+    return true;
+  }
+
   // Early return if neither or both operands are an AsyncLoad
   if (isAsyncLoad(op1) == isAsyncLoad(op2)) {
     return false;

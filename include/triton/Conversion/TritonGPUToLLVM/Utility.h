@@ -376,9 +376,13 @@ public:
     return types;
   }
 
-  SmallVector<Value> getStrides(triton::gpu::MemDescType memDesc, Location loc,
-                                RewriterBase &rewriter) const {
+  SmallVector<Value>
+  getStrides(triton::gpu::MemDescType memDesc, Location loc,
+             RewriterBase &rewriter,
+             ArrayRef<int64_t> overwriteAllocSize = {}) const {
     auto allocShape = memDesc.getAllocShape();
+    if (!overwriteAllocSize.empty())
+      allocShape = overwriteAllocSize;
     auto allocShapePerCTA = triton::gpu::getAllocationShapePerCTA(
         memDesc.getEncoding(), allocShape);
     auto layoutOrder = triton::gpu::getOrder(memDesc);
@@ -698,13 +702,15 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
     Type elemLlvmTy, std::optional<int32_t> maxVecElems,
     const SharedMemoryObject &smemObj, Location loc, RewriterBase &rewriter,
     const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback);
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0 = false, ArrayRef<int64_t> overwriteAllocSize = {});
 
 [[nodiscard]] bool emitTransferBetweenRegistersAndShared(
     LinearLayout &regLayout, triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
     std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
     Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback);
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0 = false, ArrayRef<int64_t> overwriteAllocSize = {});
 
 SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
                                            Type elemLlvmTy,

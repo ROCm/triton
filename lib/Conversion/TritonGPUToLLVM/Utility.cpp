@@ -277,7 +277,8 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
                      const SharedMemoryObject &smemObj,
                      triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
                      Value regId, Value laneId, Value warpId, Value blockId,
-                     Location loc, RewriterBase &rewriter) {
+                     Location loc, RewriterBase &rewriter,
+                     ArrayRef<int64_t> overwriteAllocSize) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   MLIRContext *ctx = rewriter.getContext();
   StringAttr kBlock = str_attr("block");
@@ -292,7 +293,8 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
 
   auto smemBase = smemObj.getBase();
   auto smemOffsets = smemObj.getOffsets();
-  auto smemStrides = smemObj.getStrides(sharedTy, loc, rewriter);
+  auto smemStrides =
+      smemObj.getStrides(sharedTy, loc, rewriter, overwriteAllocSize);
   Value smemOffset;
   // When loading or storing to shared memory, we consider two cases for
   // performance reasons:
@@ -409,7 +411,8 @@ bool emitTransferBetweenRegistersAndShared(
     LinearLayout &regLayout, triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
     std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
     Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback) {
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0, ArrayRef<int64_t> overwriteAllocSize) {
   MLIRContext *ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -452,6 +455,17 @@ bool emitTransferBetweenRegistersAndShared(
 
   auto withCTAOffset = triton::gpu::getNumCTAs(sharedTy.getEncoding()) > 1;
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  if (forceLane0) {
+    laneId = b.i32_val(0);
+    // NFC it's copied from getLaneAndWarpId but we add a shuffleIdx(0) to the
+    // tid so LLVM sees that warpId is a scalar
+    // This is not optimal as it adds a readlane which is not necessary but
+    // better than getting readfirstlanes for every direct-to-lds load
+    Value tid = target.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+    int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
+    Value warpSizeVal = b.i32_val(threadsPerWarp);
+    warpId = b.udiv(tid, warpSizeVal);
+  }
   Value blockId =
       withCTAOffset ? target.getClusterCTAId(rewriter, loc) : b.i32_val(0);
 
@@ -473,9 +487,10 @@ bool emitTransferBetweenRegistersAndShared(
   SmallVector<Value> ret;
   for (int i = 0; i < numElems / vecElems; i++) {
     auto regId = b.i32_val(i * vecElems);
-    auto vecAddr = getSmemVecAddr(
-        regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-        sharedTy, elemLlvmTy, regId, laneId, warpId, blockId, loc, rewriter);
+    auto vecAddr =
+        getSmemVecAddr(regLayout, regToSharedLayout, invertAllocSharedLayout,
+                       smemObj, sharedTy, elemLlvmTy, regId, laneId, warpId,
+                       blockId, loc, rewriter, overwriteAllocSize);
     perVectorCallback(vecTy, vecAddr);
   }
   return true;
@@ -486,12 +501,13 @@ bool emitTransferBetweenRegistersAndShared(
     Type elemLlvmTy, std::optional<int32_t> maxVecElems,
     const SharedMemoryObject &smemObj, Location loc, RewriterBase &rewriter,
     const TargetInfoBase &target,
-    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback) {
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0, ArrayRef<int64_t> overwriteAllocSize) {
   auto regLayout = triton::gpu::toLinearLayout(registerTy.getShape(),
                                                registerTy.getEncoding());
   return emitTransferBetweenRegistersAndShared(
       regLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj, loc, rewriter,
-      target, perVectorCallback);
+      target, perVectorCallback, forceLane0, overwriteAllocSize);
 }
 
 SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
@@ -502,11 +518,28 @@ SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
   auto srcTy = localLoadOp.getSrc().getType();
   auto dstTy = localLoadOp.getResult().getType();
 
+  // We overwrite the alloc size if we are a subview to fix subviews in the
+  // fastest dim
+  SmallVector<int64_t> overwriteSmemAllocSize;
+  auto src = localLoadOp.getSrc();
+  if (auto subView = src.getDefiningOp<triton::gpu::MemDescSubviewOp>()) {
+    auto subViewSrcTy =
+        dyn_cast<triton::gpu::MemDescType>(subView.getSrc().getType());
+    if (subViewSrcTy) {
+      auto origAllocSize = subViewSrcTy.getAllocShape();
+      auto srcAllocSize = srcTy.getAllocShape();
+      if (origAllocSize.size() == 3 && srcAllocSize.size() == 2) {
+        overwriteSmemAllocSize = to_vector(origAllocSize.drop_front());
+      }
+    }
+  }
+
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> ret;
   bool success = emitTransferBetweenRegistersAndShared(
       dstTy, srcTy, elemLlvmTy, /*maxVecElems=*/std::nullopt, smemObj, loc,
-      rewriter, target, [&](VectorType vecTy, Value vecAddr) {
+      rewriter, target,
+      [&](VectorType vecTy, Value vecAddr) {
         auto vecVal = b.load(vecTy, vecAddr);
         target.localLoadOpAnnotation(localLoadOp, vecVal);
         vecVal.setAlignment(vecTy.getNumElements() *
@@ -515,7 +548,8 @@ SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
         for (int v = 0; v < vecTy.getNumElements(); v++) {
           ret.push_back(b.extract_element(elemLlvmTy, vecVal, b.i32_val(v)));
         }
-      });
+      },
+      false, overwriteSmemAllocSize);
   if (!success)
     llvm::report_fatal_error("Failed to emit transfer from shared to register");
 

@@ -200,6 +200,10 @@ bool verifyNonNegativeExpr(
             return verifyNonSmallerByAssumption(op.getLhs(), assumptions,
                                                 op.getRhs());
           })
+          .Case<triton::amdgpu::ExtractSliceOp>([&](auto op) {
+            return verifyNonNegativeExpr(op->getOperand(0), assumptions,
+                                         solver);
+          })
           .Default([&](Operation *) {
             // Conservatively assume that the expression is negative
             LDBG("  Unhandled op, cannot assume non-negative");
@@ -417,8 +421,20 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       auto splatOp = tensorPtr.getDefiningOp<triton::SplatOp>();
       Value basePtr = splatOp.getSrc();
       Value maybeOther{};
-      if (op.getOther() && !isZeroConst(op.getOther()))
-        maybeOther = op.getOther();
+
+      // We drop other if it's constant 0 because we can modify the offset to be
+      // OOB to produce zeros
+      if (Value other = op.getOther()) {
+        // WA: If we read from ExtractSliceOp we check if the source is constant
+        if (auto defExtractSliceOp =
+                other.getDefiningOp<triton::amdgpu::ExtractSliceOp>()) {
+          other = defExtractSliceOp.getSource();
+        }
+        if (!isZeroConst(other)) {
+          maybeOther = op.getOther();
+        }
+      }
+
       Value maybeMask{};
       if (op.getMask() && !isZeroConst(op.getMask()))
         maybeMask = op.getMask();

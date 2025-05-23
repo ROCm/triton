@@ -145,10 +145,12 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.thr
                                 %arg2: !ttg.memdesc<64xf32, #shared, #smem, mutable>) {
     %0 = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32, #blocked>
     // The first constant 0 skips the LDS offset which is also 0
-    // COMMON: llvm.getelementptr
+    // COMMON: rocdl.make.buffer.rsrc
+    // COMMON: llvm.select
     // COMMON: llvm.mlir.constant(0 : i32) : i32
     // COMMON: %[[aux_ca:.*]] = llvm.mlir.constant(0 : i32) : i32
-    // COMMON: rocdl.raw.ptr.buffer.load.lds {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, %[[aux_ca]]
+    // COMMON: llvm.mlir.constant(0 : i32) : i32
+    // COMMON-: rocdl.raw.ptr.buffer.load.lds {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, %[[aux_ca]]
     %1 = amdgpu.buffer_load_to_local %arg0[%0] cacheModifier = ca into %arg2: <f32>[tensor<64xi32, #blocked>] -> <64xf32, #shared, #smem, mutable>
     // COMMON: llvm.getelementptr
     // COMMON: %[[aux_cg:.*]] = llvm.mlir.constant(3 : i32) : i32

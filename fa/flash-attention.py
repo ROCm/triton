@@ -243,9 +243,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, OFFS_M: tl.constexpr, OFFS_N: tl.constexpr,
                     PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr, ENABLE_DROPOUT: tl.constexpr,
                     RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr,
-                    QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr, USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr):
+                    QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr, USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr,
+                    ENABLE_PIPELINING: tl.constexpr):
     # loop over k, v, and update accumulator
-    for start_n in range(block_min, block_max, BLOCK_N):
+    num_stages: tl.constexpr = None if ENABLE_PIPELINING else 1  # Set num_stages==1 if we want to disable pipelining
+    for start_n in tl.range(block_min, block_max, BLOCK_N, num_stages=num_stages):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
         if MASK_STEPS:
@@ -674,7 +676,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                                                     # _, MASK_STEPS, ...
                                                     PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX,
                                                     PADDED_HEAD, ACTUAL_BLOCK_DMODEL, QK_SCALE, INT8_GEMM, USE_P_SCALE,
-                                                    INT8_KV)
+                                                    INT8_KV, True)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
 
@@ -698,7 +700,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
                         p_scale, IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                         # _, MASK_STEPS, ...
                         PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD, ACTUAL_BLOCK_DMODEL,
-                        QK_SCALE, INT8_GEMM, USE_P_SCALE, INT8_KV)
+                        QK_SCALE, INT8_GEMM, USE_P_SCALE, INT8_KV, False)
 
                 if INT8 and not INT8_KV:
                     if USE_P_SCALE:

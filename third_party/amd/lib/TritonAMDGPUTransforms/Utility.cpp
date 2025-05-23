@@ -1,6 +1,7 @@
 #include "Utility.h"
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 #include <limits>
 
@@ -62,6 +63,12 @@ int deduceMinCountOnDefChain(Value defValue, Operation *consumerOp,
   // Break recursion if we arrive at the producer updating the path based on the
   // ops between producer and consumer
   if (Operation *defOp = defValue.getDefiningOp()) {
+    // If we come from an asyncwait we synced everything we depend on so we do
+    // not have to wait
+    if (isa<triton::gpu::AsyncWaitOp>(defOp)) {
+      pathSum = std::numeric_limits<int>::max();
+    }
+
     pathSum +=
         deduceMinCountBetweeOps(defOp->getNextNode(), consumerOp, countFunc);
     foundMin = std::min(foundMin, pathSum);
