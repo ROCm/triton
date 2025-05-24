@@ -203,6 +203,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   // However, these mismatches do not occur when the conversion is performed via
   // LL, which is the preferred anyway.
   // TODO: Deprecate and remove this path once fixing LLM performance issues.
+  return Value();
   for (auto op : tensor.getUsers()) {
     if (auto localLoadOp = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op)) {
       if (mlir::LLVM::AMD::isUsedByDotScaledOp(op))

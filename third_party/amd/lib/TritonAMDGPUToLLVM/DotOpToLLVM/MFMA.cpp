@@ -199,8 +199,9 @@ struct DotOpMFMAConversionHelper {
   /// with 1/duplicationRate constant.
   void adjustAccForSmallKDim(SmallVector<Value> &fc, Value &acc, Type dstElemTy,
                              int b, int m, int n, int64_t numRepM,
-                             int64_t numRepN, int64_t kDimInstrSize,
-                             int64_t kDimOperandSize,
+                             int64_t numRepN, int m_small, int n_small,
+                             int m_small_size, int n_small_size,
+                             int64_t kDimInstrSize, int64_t kDimOperandSize,
                              unsigned elemsPerVec) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     for (unsigned v = 0; v < elemsPerVec; ++v) {
@@ -223,7 +224,11 @@ struct DotOpMFMAConversionHelper {
         }
       }
       auto linearIdx = b * numRepM * numRepN * elemsPerVec +
-                       m * numRepN * elemsPerVec + n * elemsPerVec + v;
+                       m * m_small_size * numRepN * elemsPerVec +
+                       n * m_small_size * n_small_size * elemsPerVec +
+                       m_small * n_small_size * elemsPerVec +
+                       n_small * elemsPerVec + v;
+
       fc[linearIdx] = accElem;
     }
   }
@@ -290,7 +295,7 @@ struct DotOpMFMAConversionHelper {
       kWidth *= 2;
 
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
-
+    auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
     auto repA = mfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidth, 0);
     auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
 
@@ -328,29 +333,43 @@ struct DotOpMFMAConversionHelper {
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
-          Value acc = tb.undef(vecTy);
-          for (unsigned v = 0; v < elemsPerVec; ++v) {
-            acc = tb.insert_element(
-                vecTy, acc,
-                fc[b * numRepM * numRepN * elemsPerVec +
-                   m * numRepN * elemsPerVec + n * elemsPerVec + v],
-                tb.i32_val(v));
+      for (int m = 0; m < numRepM / tilesPerWarp[0]; ++m) {
+        for (int n = 0; n < numRepN / tilesPerWarp[1]; ++n) {
+          for (int m_small = 0; m_small < tilesPerWarp[0]; m_small++) {
+            for (int n_small = 0; n_small < tilesPerWarp[1]; n_small++) {
+
+              int m_lin = m * tilesPerWarp[0] + m_small;
+              int n_lin = n * tilesPerWarp[1] + n_small;
+
+              Value acc = tb.undef(vecTy);
+              for (unsigned v = 0; v < elemsPerVec; ++v) {
+                acc = tb.insert_element(
+                    vecTy, acc,
+                    fc[b * numRepM * numRepN * elemsPerVec +
+                       m * tilesPerWarp[0] * numRepN * elemsPerVec +
+                       n * tilesPerWarp[0] * tilesPerWarp[1] * elemsPerVec +
+                       m_small * tilesPerWarp[1] * elemsPerVec +
+                       n_small * elemsPerVec + v],
+                    tb.i32_val(v));
+              }
+              acc = zeroAuxiliarBlocks(subBlocks, acc);
+              for (int k = 0; k < numVecInKBase; k++) {
+                acc =
+                    mfmaLayout.getIsTransposed()
+                        ? generateMFMAOp(intrinsicName, operandB[{b, n_lin, k}],
+                                         operandA[{b, m_lin, k}], acc)
+                        : generateMFMAOp(intrinsicName, operandA[{b, m_lin, k}],
+                                         operandB[{b, n_lin, k}], acc);
+                if (!firstMfma)
+                  firstMfma = acc;
+              }
+              acc = reduceSubBlocks(subBlocks, acc);
+              adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM,
+                                    numRepN, m_small, n_small, tilesPerWarp[0],
+                                    tilesPerWarp[1], kDimInstrSize,
+                                    kDimOperandSize, elemsPerVec);
+            }
           }
-          acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numVecInKBase; k++) {
-            acc = mfmaLayout.getIsTransposed()
-                      ? generateMFMAOp(intrinsicName, operandB[{b, n, k}],
-                                       operandA[{b, m, k}], acc)
-                      : generateMFMAOp(intrinsicName, operandA[{b, m, k}],
-                                       operandB[{b, n, k}], acc);
-            if (!firstMfma)
-              firstMfma = acc;
-          }
-          acc = reduceSubBlocks(subBlocks, acc);
-          adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-                                kDimInstrSize, kDimOperandSize, elemsPerVec);
         }
       }
     }
@@ -661,55 +680,73 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
     int numVecInKBase = numRepK * aKWidth / aKBase;
 
+    auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
-          Value acc = tb.undef(vecTy);
-          for (unsigned v = 0; v < elemsPerVec; ++v) {
-            acc = tb.insert_element(
-                vecTy, acc,
-                fc[b * numRepM * numRepN * elemsPerVec +
-                   m * numRepN * elemsPerVec + n * elemsPerVec + v],
-                tb.i32_val(v));
-          }
-          acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numVecInKBase; k++) {
-            if (existBothScales) {
-              if (mfmaLayout.getIsTransposed()) {
-                acc = generateScaledMFMAOp(
-                    intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                    acc, operandBScale[{b, n, k}], operandAScale[{b, m, k}],
-                    maybeMfmaIntrinsic->bElementType,
-                    maybeMfmaIntrinsic->aElementType);
-              } else {
-                acc = generateScaledMFMAOp(
-                    intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                    acc, operandAScale[{b, m, k}], operandBScale[{b, n, k}],
-                    maybeMfmaIntrinsic->aElementType,
-                    maybeMfmaIntrinsic->bElementType);
+      for (int m = 0; m < numRepM / tilesPerWarp[0]; ++m) {
+        for (int n = 0; n < numRepN / tilesPerWarp[1]; ++n) {
+          for (int m_small = 0; m_small < tilesPerWarp[0]; m_small++) {
+            for (int n_small = 0; n_small < tilesPerWarp[1]; n_small++) {
+
+              int m_lin = m * tilesPerWarp[0] + m_small;
+              int n_lin = n * tilesPerWarp[1] + n_small;
+
+              Value acc = tb.undef(vecTy);
+              for (unsigned v = 0; v < elemsPerVec; ++v) {
+                acc = tb.insert_element(
+                    vecTy, acc,
+                    fc[b * numRepM * numRepN * elemsPerVec +
+                       m * tilesPerWarp[0] * numRepN * elemsPerVec +
+                       n * tilesPerWarp[0] * tilesPerWarp[1] * elemsPerVec +
+                       m_small * tilesPerWarp[1] * elemsPerVec +
+                       n_small * elemsPerVec + v],
+                    tb.i32_val(v));
               }
-            } else {
-              if (mfmaLayout.getIsTransposed()) {
-                acc = generateScaledMFMAOp(intrinsicName, operandB[{b, n, k}],
-                                           operandA[{b, m, k}], acc,
-                                           maybeMfmaIntrinsic->bElementType,
-                                           maybeMfmaIntrinsic->aElementType);
-              } else {
-                acc = generateScaledMFMAOp(intrinsicName, operandA[{b, m, k}],
-                                           operandB[{b, n, k}], acc,
-                                           maybeMfmaIntrinsic->aElementType,
-                                           maybeMfmaIntrinsic->bElementType);
+              acc = zeroAuxiliarBlocks(subBlocks, acc);
+              for (int k = 0; k < numVecInKBase; k++) {
+                if (existBothScales) {
+                  if (mfmaLayout.getIsTransposed()) {
+                    acc = generateScaledMFMAOp(
+                        intrinsicName, operandB[{b, n_lin, k}],
+                        operandA[{b, m_lin, k}], acc,
+                        operandBScale[{b, n_lin, k}],
+                        operandAScale[{b, m_lin, k}],
+                        maybeMfmaIntrinsic->bElementType,
+                        maybeMfmaIntrinsic->aElementType);
+                  } else {
+                    acc = generateScaledMFMAOp(
+                        intrinsicName, operandA[{b, m_lin, k}],
+                        operandB[{b, n_lin, k}], acc,
+                        operandAScale[{b, m_lin, k}],
+                        operandBScale[{b, n_lin, k}],
+                        maybeMfmaIntrinsic->aElementType,
+                        maybeMfmaIntrinsic->bElementType);
+                  }
+                } else {
+                  if (mfmaLayout.getIsTransposed()) {
+                    acc = generateScaledMFMAOp(
+                        intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
+                        acc, maybeMfmaIntrinsic->bElementType,
+                        maybeMfmaIntrinsic->aElementType);
+                  } else {
+                    acc = generateScaledMFMAOp(
+                        intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
+                        acc, maybeMfmaIntrinsic->aElementType,
+                        maybeMfmaIntrinsic->bElementType);
+                  }
+                }
+                if (!firstMfma)
+                  firstMfma = acc;
               }
+              acc = reduceSubBlocks(subBlocks, acc);
+              adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM,
+                                    numRepN, m_small, n_small, tilesPerWarp[0],
+                                    tilesPerWarp[1], kDimInstrSize,
+                                    kDimOperandSize, elemsPerVec);
             }
-            if (!firstMfma)
-              firstMfma = acc;
           }
-          acc = reduceSubBlocks(subBlocks, acc);
-          adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-                                kDimInstrSize, kDimOperandSize, elemsPerVec);
         }
       }
     }

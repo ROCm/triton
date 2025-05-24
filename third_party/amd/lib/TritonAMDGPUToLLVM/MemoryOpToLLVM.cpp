@@ -119,7 +119,7 @@ public:
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
 
-    if (canUseTransLoad(op, srcTy, dstTy)) {
+    if (false) {
       return lowerSharedToDotOperandTransLL(op, adaptor, getTypeConverter(),
                                             rewriter);
     }

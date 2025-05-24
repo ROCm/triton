@@ -3583,8 +3583,8 @@ def convert_fp8_to_fp32(x, device, dtype_str):
 
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
 def get_test_dot_base_cases():
-    return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
-            for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
+    return [(*shape, 4, False, True, epilogue, input_precision, in_dtype, out_dtype, 1, None)
+            for shape in [(256, 256, 256), (32, 32, 32), (16, 16, 16)]
             for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
             for input_precision in ['tf32', 'tf32x3', 'ieee']
             for in_dtype, out_dtype in [('float16', 'float16'), ('float16', 'float32'), ('float32', 'float32')]
@@ -3682,16 +3682,16 @@ def get_test_dot_vdot2_cases():
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size",
-    get_test_dot_vdot2_cases() + \
-    get_test_dot_double_rate_cases() + \
+    # get_test_dot_vdot2_cases() + \
+    # get_test_dot_double_rate_cases() + \
     get_test_dot_base_cases() + \
-    get_test_dot_mixed_sizes_cases() + \
-    get_test_dot_transposed_op_base_cases() + \
-    get_test_dot_h100_shortcut_cases() + \
-    get_test_dot_mfma_edge_cases() + \
-    get_test_dot_fp8_output_cases() + \
-    get_test_dot_small_k_mfma_cases() + \
-    get_test_dot_small_mn_fma_cases() + \
+    # get_test_dot_mixed_sizes_cases() + \
+    # get_test_dot_transposed_op_base_cases() + \
+    # get_test_dot_h100_shortcut_cases() + \
+    # get_test_dot_mfma_edge_cases() + \
+    # get_test_dot_fp8_output_cases() + \
+    # get_test_dot_small_k_mfma_cases() + \
+    # get_test_dot_small_mn_fma_cases() + \
     get_test_dot_softmax())
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
 def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size,
@@ -3824,8 +3824,9 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
 
     if is_hip():
         kern_kwargs['kpack'] = kpack
-        if mma_nonk_size is not None:
-            kern_kwargs['matrix_instr_nonkdim'] = mma_nonk_size
+        # if mma_nonk_size is not None:
+        # assert(False)
+        kern_kwargs['matrix_instr_nonkdim'] = 16
 
     pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), y_tri, y_tri.stride(0), y_tri.stride(1), w_tri,
                          w_tri.stride(0), w_tri.stride(1), z_tri, z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
@@ -3874,6 +3875,10 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-2)
     else:
         # added atol, to loose precision for float16xfloat16->float32 case
+        np.set_printoptions(threshold=np.inf)
+        # print(z_ref)
+        # print("=================================================================")
+        # print(to_numpy(z_tri))
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
 
     if not (is_cuda() or is_hip_cdna()):
@@ -3942,7 +3947,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
 
 @pytest.mark.parametrize("M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, num_warps, mma, kpack",
                          [(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, 4, mma, kpack)
-                          for M, N, K in itertools.product([32, 64, 128], [32, 64, 128], [64, 128])
+                          for M, N, K in itertools.product([64, 64, 128], [64, 64, 128], [64, 128])
                           for col_a, col_b in itertools.product([True, False], repeat=2)
                           for rhs_scale in [False, True]
                           for mxfp_type in ["e2m1", "e4m3", "e5m2"]

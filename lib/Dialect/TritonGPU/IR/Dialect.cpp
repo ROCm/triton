@@ -1287,6 +1287,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
   unsigned versionMajor = 0;
   unsigned versionMinor = 0;
   SmallVector<unsigned> warpsPerCTA;
+  SmallVector<unsigned> tilesPerWarp;
   SmallVector<unsigned> instrShape;
   bool isTransposed;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
@@ -1304,6 +1305,11 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
     }
     if (attr.getName() == "warpsPerCTA") {
       if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
+        return {};
+    }
+    if (attr.getName() == "tilesPerWarp") {
+      if (parseIntArrayAttr(parser, attr, tilesPerWarp, "tilesPerWarp")
+              .failed())
         return {};
     }
     if (attr.getName() == "instrShape") {
@@ -1339,7 +1345,7 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
   return parser.getChecked<AMDMfmaEncodingAttr>(
       parser.getContext(), versionMajor, versionMinor, warpsPerCTA,
-      instrShape[0], instrShape[1], isTransposed, *CTALayout);
+      tilesPerWarp, instrShape[0], instrShape[1], isTransposed, *CTALayout);
 }
 
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
@@ -1347,6 +1353,7 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
           << "versionMajor = " << getVersionMajor()                      //
           << ", versionMinor = " << getVersionMinor()                    //
           << ", warpsPerCTA = [" << getWarpsPerCTA() << "]"              //
+          << ", tilesPerWarp = [" << getTilesPerWarp() << "]"            //
           << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
           << ", isTransposed = " << getIsTransposed();
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
@@ -1354,12 +1361,11 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "}>";
 }
 
-LogicalResult
-AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
-                            unsigned versionMajor, unsigned versionMinor,
-                            llvm::ArrayRef<unsigned int> warpsPerCTA,
-                            unsigned mDim, unsigned nDim, bool isTransposed,
-                            mlir::triton::gpu::CTALayoutAttr) {
+LogicalResult AMDMfmaEncodingAttr::verify(
+    function_ref<mlir::InFlightDiagnostic()> emitError, unsigned versionMajor,
+    unsigned versionMinor, llvm::ArrayRef<unsigned int> warpsPerCTA,
+    llvm::ArrayRef<unsigned int> tilesPerWarp, unsigned mDim, unsigned nDim,
+    bool isTransposed, mlir::triton::gpu::CTALayoutAttr) {
   if (!(versionMajor >= 0 && versionMajor <= 4)) {
     return emitError() << "major version must be in the [0, 4] range";
   }

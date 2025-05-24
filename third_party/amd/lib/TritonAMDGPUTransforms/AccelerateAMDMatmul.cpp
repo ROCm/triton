@@ -458,9 +458,14 @@ public:
                            Float8E4M3FNType, Float8E5M2Type>(aElemTy);
     bool isTransposed =
         isChainDotHead(dotOp) || isChainDotTail(dotOp) || !isFP8;
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
     Type mfmaAccType;
@@ -660,8 +665,13 @@ public:
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < mfmaWarpsPerCTA.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType = RankedTensorType::get(
@@ -818,8 +828,13 @@ public:
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType =
@@ -880,8 +895,8 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL =
-          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim);
+      LinearLayout newLL = chooseScaledMfmaScaleLayout(
+          ctx, idx, warpBases, shape, mDim, tilesPerWarp, warpsPerTile);
 
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
