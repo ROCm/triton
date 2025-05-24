@@ -655,6 +655,7 @@ struct BufferLoadToLocalOpConversion
           useFastSwizzling ? ldsBaseAddresses[i] : coalescedShmemAddr[i];
 
       Value pred = mask ? maskElems[srcIdx] : b.true_val();
+      Value nonSwizzledPred = mask ? maskElems[srcIdx] : b.true_val();
 
       if (hasSwizzling) {
         // Apply swizzling to the src offsets
@@ -690,9 +691,8 @@ struct BufferLoadToLocalOpConversion
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
-        llStore(rewriter, loc,
-                hasSwizzling ? swizzledShmemAddr[i] : coalescedShmemAddr[i],
-                storeVal, b.icmp_ne(pred, b.true_val()), op.getCache(),
+        llStore(rewriter, loc, coalescedShmemAddr[i], storeVal,
+                b.icmp_ne(pred, b.true_val()), op.getCache(),
                 /*forceNoAliasAsyncLoads=*/true);
       }
     }
@@ -838,10 +838,9 @@ struct AsyncCopyGlobalToLocalOpConversion
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
-        llStore(rewriter, loc,
-                hasSwizzling ? swizzledShmemAddr[i] : coalescedShmemAddr[i],
-                storeVal, b.icmp_ne(maskElems[srcIdx], b.true_val()),
-                op.getCache(), /*forceNoAliasAsyncLoads=*/true);
+        llStore(rewriter, loc, coalescedShmemAddr[i], storeVal,
+                b.icmp_ne(pred, b.true_val()), op.getCache(),
+                /*forceNoAliasAsyncLoads=*/true);
       }
     }
 
