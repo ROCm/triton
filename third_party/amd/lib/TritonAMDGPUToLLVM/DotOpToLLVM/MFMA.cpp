@@ -461,9 +461,14 @@ struct DotOpMFMAConversionHelper {
   virtual ValueTable getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int nonKRep, int kRepInKWidth, int kWidth,
       int kBase, Type type, bool allowXF32, bool preserveBF16,
-      bool isConstantScale = false) const {
+      bool isConstantScale = false, bool preshuffle = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
+    if (preshuffle) {
+      for (size_t i = 0; i + 3 < elems.size(); i += 4) {
+        std::swap(elems[i + 1], elems[i + 2]);
+      }
+    }
     // number of kBase-element vectors
     int numVecInKBase = kRepInKWidth * kWidth / kBase;
     ValueTable dotOpVals;
@@ -664,13 +669,13 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       operandAScale = getValuesFromDotOperandLayoutStruct(
           loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
           aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant);
+          isAScaleConstant, /*preshuffle*/ true);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
           loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
           bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant);
+          isBScaleConstant, /*preshuffle*/ true);
     }
 
     auto dstElemTy = dTensorTy.getElementType();

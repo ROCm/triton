@@ -1491,6 +1491,9 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
       registerBase.emplace_back(std::vector<int32_t>{0, elem});
   }
   if (mfmaMDim == 32) {
+    if (preshuffleScales) {
+      assert(false && "Preshuffling scales not yet implemented for mDim == 32");
+    }
     // For ROCDL::mfma_scale_f32_32x32x64_f8f6f4 with fp4 input, each lane
     // takes 32 consecutive elements from A alone K dimension. The first
     // 32 lanes collectively handle A[0:32][0:32], and the other 32 lanes
@@ -1500,7 +1503,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   } else {
     assert(mfmaMDim == 16);
     if (preshuffleScales) {
-      laneBase = {{0, 2}, {0, 4}, {0, 8}, {0, 16}, {4, 0}, {0, 1}};
+      laneBase = {{4, 0}, {0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}};
     } else {
       // For ROCDL::mfma_scale_f32_16x16x128_f8f6f4 with fp4 input, each lane
       // takes 32 consecutive elements from A alone K dimension. The first
