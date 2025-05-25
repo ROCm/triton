@@ -664,6 +664,23 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+
+  auto i32ty = rewriter.getIntegerType(32);
+  auto workIDX = rewriter.create<ROCDL::ThreadIdXOp>(loc, i32ty);
+  auto constZero = tb.i32_val(0);
+  auto constWarpSize = tb.i32_val(256);
+  auto warpIDX = tb.sdiv(workIDX, constWarpSize);
+  auto warpLow = tb.icmp_eq(warpIDX, constZero);
+  auto warpHigh = tb.icmp_ne(warpIDX, constZero);
+
+    
+  for (int k = 0; k < numVecInKBase; k++) {
+    if (k == numVecInKBase/2) {
+          rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+          rewriter.create<triton::amdgpu::CondBarrierOp>(loc, warpLow);
+          //rewriter.create<ROCDL::SBarrierOp>(loc);
+          rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+	}
     for (int b = 0; b < numRepB; ++b) {
       for (int m = 0; m < numRepM; ++m) {
         for (int n = 0; n < numRepN; ++n) {
@@ -676,7 +693,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                 tb.i32_val(v));
           }
           acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numVecInKBase; k++) {
+              //for (int k = 0; k < numVecInKBase; k++) {
+	      if(1){
             if (existBothScales) {
               if (mfmaLayout.getIsTransposed()) {
                 acc = generateScaledMFMAOp(
@@ -713,7 +731,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         }
       }
     }
-
+  }
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
     // to the first mfma leaving the first mfma staying at the low priority. In

@@ -203,6 +203,9 @@ struct ConvertTritonAMDGPUToLLVM
     mlir::triton::AMD::populateUpcastMXFPToLLVMPatterns(typeConverter, patterns,
                                                         targetInfo, AMDBenefit);
 
+    // Hack for 2step pingpong.
+    mlir::triton::populateSPMDOpToLLVMPattern(typeConverter, patterns,
+                                              targetInfo, commonBenefit);
     // TODO(thomas): this should probably be done in a separate step to not
     // interfere with our own lowering of arith ops. Add arith/math's patterns
     // to help convert scalar expression to LLVM.

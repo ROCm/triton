@@ -1097,25 +1097,24 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
                                                 warpIDX, constZero);
 
   builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
 
-  if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
-    return failure();
-  updateOpInsertion(dotSliceOps[0]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
+  //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  //appendOp(builder.create<ROCDL::SBarrierOp>(loc));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  for (int j = 0; j < 4; j++) {
-    for (int i = 0; i < 4; i++)
-      appendOp(subViewOps[i][j]);
-    for (int i = 0; i < 4; i++)
-      appendOp(loadSliceOps[i][j]);
-    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-    appendOp(dotSliceOps[j]);
-  }
 
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
+  appendOp(lLoadOps[0]);
+  appendOp(lLoadOps[1]);
+  appendOp(lLoadOps[2]);
+  appendOp(lLoadOps[3]);
+
+  appendOp(dotSOps[0]);
+
+  //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  //appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
 
   return success();
 }
