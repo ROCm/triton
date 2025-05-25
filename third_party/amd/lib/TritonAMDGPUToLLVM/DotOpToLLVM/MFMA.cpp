@@ -693,6 +693,13 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+
+  for (int k = 0; k < numVecInKBase; k++) {
+    if (k == numVecInKBase/2) {
+          rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+          rewriter.create<ROCDL::SBarrierOp>(loc);
+          rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+	}    
     for (int b = 0; b < numRepB; ++b) {
       for (int mBlock = 0; mBlock < numRepM / tilesPerWarp[0]; ++mBlock) {
         for (int nBlock = 0; nBlock < numRepN / tilesPerWarp[1]; ++nBlock) {
@@ -717,7 +724,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                     tb.i32_val(v));
               }
               acc = zeroAuxiliarBlocks(subBlocks, acc);
-              for (int k = 0; k < numVecInKBase; k++) {
+              //for (int k = 0; k < numVecInKBase; k++) {
+	      if(1){
                 if (existBothScales) {
                   if (mfmaLayout.getIsTransposed()) {
                     acc = generateScaledMFMAOp(
@@ -758,6 +766,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         }
       }
     }
+  }
 
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
