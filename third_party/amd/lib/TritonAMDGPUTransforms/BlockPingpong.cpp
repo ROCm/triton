@@ -961,6 +961,14 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
       return resValue;
     };
 
+    auto origSubViewType = subView.getType();
+    auto subViewDescType = ttg::MemDescType::get(
+        slicedShape, origSubViewType.getElementType(),
+        origSubViewType.getEncoding(), origSubViewType.getMemorySpace(),
+        origSubViewType.getMutableMemory(),
+        subView.getSrc().getType().getShape());
+    Value subViewSelector = subView.getOffsets().front();
+
     assert(slicedDim != -1);
     SmallVector<Value> newCommits;
     auto numReps = origShape[slicedDim] / slicedShape[slicedDim];
@@ -973,20 +981,34 @@ LogicalResult Pingponger::genAsyncCopySlices(OpBuilder &builder) {
       auto extractedMask = extract(slicedMaskType, newMask, offsetAttr);
       auto extractedOther = extract(slicedOtherType, newOther, offsetAttr);
 
+      SmallVector<Value> newSubviewOffset = {subViewSelector};
+      llvm::for_each(offset, [&](auto off) {
+        newSubviewOffset.push_back(
+            builder.create<arith::ConstantIntOp>(subView.getLoc(), off, 32));
+      });
+
+      auto newSlicedSubView = builder.create<ttg::MemDescSubviewOp>(
+          subView.getLoc(), subViewDescType, subView.getSrc(),
+          newSubviewOffset);
+
       auto newAsyncCopy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-          asyncCopy->getLoc(), extractedSrc, Value{subViews[rep].getResult()},
-          extractedMask, extractedOther, asyncCopy.getCache(),
-          asyncCopy.getEvict(), asyncCopy.getIsVolatile());
+          asyncCopy->getLoc(), extractedSrc,
+          Value{newSlicedSubView.getResult()}, extractedMask, extractedOther,
+          asyncCopy.getCache(), asyncCopy.getEvict(),
+          asyncCopy.getIsVolatile());
 
       auto newCommit = builder.create<ttg::AsyncCommitGroupOp>(
           asyncCopy->getLoc(), newAsyncCopy.getToken());
 
       // propagate all attributes from `mem-view` to the commit token
+      newSlicedSubView->setAttrs(subViews[rep]->getAttrs());
       newAsyncCopy->setAttrs(subViews[rep]->getAttrs());
       newCommit->setAttrs(subViews[rep]->getAttrs());
 
       newAsyncGroups[rep].push_back(newCommit);
       newCommits.push_back(newCommit);
+
+      subViews[rep]->erase();
     }
 
     auto origCommitGroup = getSingleUserOf<ttg::AsyncCommitGroupOp>(asyncCopy);
@@ -1739,11 +1761,11 @@ void Pingponger::getDotPingponged() {
         LDBG("failed to update forOp signature");
       }
 
-      if (llvm::succeeded(updateSignature)) {
-        if (llvm::failed(adjustRefinedAsyncTokens(builder))) {
-          LDBG("failed to update forOp signature");
-        }
-      }
+      // if (llvm::succeeded(updateSignature)) {
+      //   if (llvm::failed(adjustRefinedAsyncTokens(builder))) {
+      //     LDBG("failed to update forOp signature");
+      //   }
+      // }
 
       forOp->walk([](ttg::AsyncCommitGroupOp groupOp) {
         auto users = groupOp.getResult().getUsers();
