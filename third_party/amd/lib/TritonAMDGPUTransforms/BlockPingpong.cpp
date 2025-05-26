@@ -42,6 +42,7 @@ class Pingponger {
   SmallVector<ttg::AsyncCommitGroupOp> asyncCommitOps;
   SmallVector<tt::DotOp> dotOps;
   SmallVector<tt::DotScaledOp> dotSOps;
+  SmallVector<tt::ReshapeOp> reshapeOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
   SmallVector<SmallVector<Operation *>> loadSliceOps;
   SmallVector<Operation *> dotSliceOps;
@@ -1032,41 +1033,28 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
-  builder.setInsertionPointAfter(forOp);
-
-  // FIXME: This is duplicated code, need to refactorize.
-  auto i32ty = builder.getIntegerType(32);
-  auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
-  workIDX->moveBefore(forOp);
-  builder.setInsertionPointAfter(workIDX);
-  auto constZero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-  auto constWarpSize = builder.create<arith::ConstantIntOp>(loc, 256, 32);
-  auto warpIDX = builder.create<arith::DivSIOp>(loc, workIDX, constWarpSize);
-  auto warpLow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                               warpIDX, constZero);
-  auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
-                                                warpIDX, constZero);
-
   builder.setInsertionPointAfter(dotSOps[0]);
   updateOpInsertion(dotSOps[0]);
 
-
-  //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  //appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<ROCDL::SBarrierOp>(loc));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
-  appendOp(lLoadOps[0]);
-  appendOp(lLoadOps[1]);
-  appendOp(lLoadOps[2]);
-  appendOp(lLoadOps[3]);
+  for (auto llop : lLoadOps)
+    appendOp(llop);
+
+  for (auto rop : reshapeOps)
+    appendOp(rop);
 
   appendOp(dotSOps[0]);
+  dotSOps[0]->setAttr("pingpong_2step", builder.getUnitAttr());
 
-  //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  //appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
-
+  /*
+  // alternatively, set wait at the end of the loop, location of the extra instructions might be different.
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  for (auto wop : asyncWaitOps)
+    appendOp(wop);
+  */
   return success();
 }
 
@@ -1142,6 +1130,8 @@ void Pingponger::getDotPingponged() {
       asyncCommitOps.push_back(asyncCommitGroupOp);
     } else if (auto asyncOp = dyn_cast<ttg::AsyncWaitOp>(op))
       asyncWaitOps.push_back(asyncOp);
+    else if (auto reshapeOp = dyn_cast<tt::ReshapeOp>(op))
+      reshapeOps.push_back(reshapeOp);
   });
 
   // Fixme : use proper condition to identify FAv3
