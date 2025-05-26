@@ -57,10 +57,15 @@ FailureOr<ScaleDotElemType> mlirTypeToScaledElemType(Type type) {
       .Default([](Type) { return failure(); });
 }
 
-SmallVector<unsigned, 3>
-warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-             std::pair<int64_t, int64_t> shapePerWarp) {
+SmallVector<unsigned, 3> warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape,
+                                      int numWarps,
+                                      std::pair<int64_t, int64_t> shapePerWarp,
+                                      bool preshuffleScales = false) {
   auto rank = shape.size();
+
+  if (preshuffleScales)
+    return {1, static_cast<unsigned>(numWarps)};
+
   // Case 1: Early exit for batched matmul
   if (rank == 3)
     return {static_cast<unsigned>(numWarps), 1, 1};
@@ -122,8 +127,9 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
 
 SmallVector<unsigned, 3>
 warpsPerTileMFMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
-                 std::pair<int64_t, int64_t> shapePerWarp) {
-  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp);
+                 std::pair<int64_t, int64_t> shapePerWarp,
+                 bool preshuffleScales = false) {
+  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp, preshuffleScales);
 }
 
 SmallVector<unsigned, 3>
@@ -456,9 +462,14 @@ public:
                            Float8E4M3FNType, Float8E5M2Type>(aElemTy);
     bool isTransposed =
         isChainDotHead(dotOp) || isChainDotTail(dotOp) || !isFP8;
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
     Type mfmaAccType;
@@ -658,8 +669,13 @@ public:
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < mfmaWarpsPerCTA.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType = RankedTensorType::get(
@@ -745,12 +761,13 @@ class ScaledBlockedToScaledMFMAF8F6F4 final
     : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
   int nonKDim;
-
+  bool preshuffleScales;
 public:
   ScaledBlockedToScaledMFMAF8F6F4(MLIRContext *context, int mfmaVersion,
-                                  int nonKDim, PatternBenefit benefit = 1)
+                                  int nonKDim, PatternBenefit benefit = 1,
+                                  bool preshuffleScales = false)
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
-        nonKDim(nonKDim) {}
+        nonKDim(nonKDim), preshuffleScales(preshuffleScales) {}
 
   LogicalResult matchAndRewrite(triton::DotScaledOp dotOp,
                                 PatternRewriter &rewriter) const override {
@@ -811,13 +828,18 @@ public:
     auto kBase = mfmaInstr->kBase;
     assert(mDim == nDim);
 
-    auto warpsPerTile =
-        warpsPerTileMFMA(dotOp, oldShape, numWarps, {mDim, nDim});
+    auto warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
+                                         {mDim, nDim}, preshuffleScales);
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType =
@@ -864,9 +886,6 @@ public:
       if (bothScalesAbsent)
         return Value();
 
-      LinearLayout::BasesT scaleBases = dotLL.getBases();
-      auto &warpBases = scaleBases[kWarp];
-
       SmallVector<int64_t> shape;
       if (!scale) {
         int64_t nonKDim = idx == 0 ? valShape[0] : valShape[1];
@@ -878,8 +897,8 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL =
-          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim);
+      LinearLayout newLL = chooseScaledMfmaScaleLayout(
+          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile, preshuffleScales);
 
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
@@ -1231,10 +1250,11 @@ class TritonAMDGPUAccelerateMatmulPass
 public:
   TritonAMDGPUAccelerateMatmulPass() = default;
   TritonAMDGPUAccelerateMatmulPass(StringRef archGen, int matrixInstructionSize,
-                                   int kPack) {
+                                   int kPack, bool preshuffleScales) {
     this->archGenerationName = archGen.data();
     this->matrixInstructionSize = matrixInstructionSize;
     this->kPack = kPack;
+    this->preshuffleScales = preshuffleScales;
   }
   void runOnOperation() override {
 
@@ -1246,7 +1266,7 @@ public:
     case ISAFamily::CDNA4:
       patterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize,
-          /*benefit=*/10);
+          /*benefit=*/10, preshuffleScales);
       [[fallthrough]];
     case ISAFamily::CDNA1:
     case ISAFamily::CDNA2:
@@ -1271,7 +1291,7 @@ public:
 };
 
 std::unique_ptr<Pass> mlir::createTritonAMDGPUAccelerateMatmulPass(
-    std::string archGen, int matrixInstructionSize, int kPack) {
+    std::string archGen, int matrixInstructionSize, int kPack, bool preshuffleScales) {
   return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
-      archGen, matrixInstructionSize, kPack);
+      archGen, matrixInstructionSize, kPack, preshuffleScales);
 }

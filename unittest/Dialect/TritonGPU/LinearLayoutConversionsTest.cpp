@@ -59,9 +59,13 @@ public:
     SmallVector<unsigned> cSplit(warps.size(), 1u);
     SmallVector<unsigned> cOrd(warps.size());
     std::iota(cOrd.begin(), cOrd.end(), 0);
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warps.size(); i++) {
+      tilesPerWarp.push_back(1);
+    }
     return AMDMfmaEncodingAttr::get(
-        &ctx, /*versionMajor=*/2, /*versionMinor=*/0, warps, mDim, nDim,
-        isTransposed, CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd));
+        &ctx, /*versionMajor=*/2, /*versionMinor=*/0, warps, tilesPerWarp, mDim,
+        nDim, isTransposed, CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd));
   }
 
   DotOperandEncodingAttr mfmaDotOp(AMDMfmaEncodingAttr mfma, unsigned opIdx,
