@@ -462,9 +462,10 @@ public:
                            Float8E4M3FNType, Float8E5M2Type>(aElemTy);
     bool isTransposed =
         isChainDotHead(dotOp) || isChainDotTail(dotOp) || !isFP8;
+
     SmallVector<unsigned> tilesPerWarp;
     for (int i = 0; i < warpsPerTile.size(); i++) {
-      tilesPerWarp.push_back(2);
+      tilesPerWarp.push_back(1);
     }
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
@@ -667,12 +668,13 @@ public:
     SmallVector<unsigned, 2> mfmaWarpsPerCTA(rank, 1);
     mfmaWarpsPerCTA[aScale ? 0 : 1] = numWarps;
 
-    // Always use transposed mfma layout. This enables larger vectorization
-    // for global store instructions.
     SmallVector<unsigned> tilesPerWarp;
     for (int i = 0; i < mfmaWarpsPerCTA.size(); i++) {
-      tilesPerWarp.push_back(2);
+      tilesPerWarp.push_back(1);
     }
+
+    // Always use transposed mfma layout. This enables larger vectorization
+    // for global store instructions.
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
         tilesPerWarp,
@@ -762,6 +764,7 @@ class ScaledBlockedToScaledMFMAF8F6F4 final
   int mfmaVersion;
   int nonKDim;
   bool preshuffleScales;
+
 public:
   ScaledBlockedToScaledMFMAF8F6F4(MLIRContext *context, int mfmaVersion,
                                   int nonKDim, PatternBenefit benefit = 1,
@@ -831,12 +834,16 @@ public:
     auto warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
                                          {mDim, nDim}, preshuffleScales);
 
+    SmallVector<unsigned> tilesPerWarp;
+    auto tilesPerWarpVal = 1;
+    if (preshuffleScales)
+      tilesPerWarpVal = 2;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(tilesPerWarpVal);
+    }
+
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
-    SmallVector<unsigned> tilesPerWarp;
-    for (int i = 0; i < warpsPerTile.size(); i++) {
-      tilesPerWarp.push_back(2);
-    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
         tilesPerWarp,
@@ -1290,8 +1297,10 @@ public:
   }
 };
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUAccelerateMatmulPass(
-    std::string archGen, int matrixInstructionSize, int kPack, bool preshuffleScales) {
+std::unique_ptr<Pass>
+mlir::createTritonAMDGPUAccelerateMatmulPass(std::string archGen,
+                                             int matrixInstructionSize,
+                                             int kPack, bool preshuffleScales) {
   return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
       archGen, matrixInstructionSize, kPack, preshuffleScales);
 }

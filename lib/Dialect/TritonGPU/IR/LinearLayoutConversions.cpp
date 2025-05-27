@@ -650,10 +650,11 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
 
   int32_t kWidth = dotMfmaLayout.getKWidth();
   auto kDim = dotMfmaLayout.getOpIdx() == 0 ? rank - 1 : rank - 2;
+  auto nonKDim = dotMfmaLayout.getOpIdx() == 0 ? rank - 2 : rank - 1;
   int32_t kSize = shape[kDim];
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
   auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
-  auto tilePerWarpNonK = tilesPerWarp[kDim];
+  auto tilePerWarpNonK = tilesPerWarp[nonKDim];
 
   MLIRContext *ctx = dotMfmaLayout.getContext();
   SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
@@ -1450,7 +1451,8 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   StringAttr kWarp = StringAttr::get(ctx, "warp");
   StringAttr kBlock = StringAttr::get(ctx, "block");
   auto kDim = dotOperandIdx == 0 ? rank - 1 : rank - 2;
-  auto tilePerWarpNonK = tilesPerWarp[kDim];
+  auto nonKDim = dotOperandIdx == 0 ? rank - 2 : rank - 1;
+  auto tilePerWarpNonK = tilesPerWarp[nonKDim];
 
   // In scaled dot, the shapes of operands(without batch dimension) are,
   // respectively:
@@ -1461,13 +1463,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   //
   // In general, for both 32x32 and 16x16 scaled mfma, and no matter what
   // data type the A/B operand is, each lane takes 32 elements from A/B
-  // alone K dim, and 1 or 2 elements from scale accordingly. The number of
-  // scale's elements in a lane varies because the 32 elements from A/B may
-  // not be consecutive.
-  //
-  // For mxfp4, these 32 elements are consecutive, so only 1 scale element
-  // is required. But for mxfp6/mxfp8, there are 2 16-consecutive elements
-  // blocks, so 2 scale elements are required.
+  // alone K dim, and 1 element from scale accordingly.
   int32_t kSize = dotOperandShape[1];
 
   std::vector<std::vector<int32_t>> registerBase;

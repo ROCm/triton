@@ -26,6 +26,7 @@
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -464,6 +465,11 @@ struct DotOpMFMAConversionHelper {
       bool isConstantScale = false, bool preshuffle = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
+    /// Preshuffling puts 4 scale values of the same thread in contiguous
+    /// memory addresses. However, the 4 scale values are corresponding to
+    /// 4 16x128 operand sub-tiles in nonK order.
+    ///
+    /// Note that this only works when BLOCK_K = 256 for mxfp4 inputs.
     if (preshuffle) {
       for (size_t i = 0; i + 3 < elems.size(); i += 4) {
         std::swap(elems[i + 1], elems[i + 2]);
@@ -664,18 +670,19 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // operands.
     ValueTable operandAScale;
     ValueTable operandBScale;
+    bool preshuffle = tools::getBoolEnv("TRITON_HIP_PRESHUFFLE_SCALES");
     if (existBothScales) {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
       operandAScale = getValuesFromDotOperandLayoutStruct(
           loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
           aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant, /*preshuffle*/ true);
+          isAScaleConstant, preshuffle);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
           loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
           bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant, /*preshuffle*/ true);
+          isBScaleConstant, preshuffle);
     }
 
     auto dstElemTy = dTensorTy.getElementType();
