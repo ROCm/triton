@@ -536,8 +536,8 @@ bool emitTransferBetweenRegistersAndShared(
   if (splitAddressCalulcation) {
     baseOffset =
         getSmemVecOffset(regLayout, regToSharedLayout, invertAllocSharedLayout,
-                         smemObj, sharedTy, elemLlvmTy, b.i32_val(0), laneId,
-                         warpId, blockId, loc, rewriter);
+                         smemObj, sharedTy, elemLlvmTy, b.i32_val(0),
+                         b.i32_val(0), warpId, blockId, loc, rewriter);
   }
 
   for (int i = 0; i < numElems / vecElems; i++) {
@@ -547,8 +547,8 @@ bool emitTransferBetweenRegistersAndShared(
       // Compute the offset of the i'th register
       Value perRegOffset = getSmemVecOffset(
           regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
-          sharedTy, elemLlvmTy, regId, b.i32_val(0), b.i32_val(0), b.i32_val(0),
-          loc, rewriter);
+          sharedTy, elemLlvmTy, regId, laneId, b.i32_val(0), b.i32_val(0), loc,
+          rewriter);
       // Xor with the base to obtain the final offset
       Value smemOffset = b.xor_(baseOffset, perRegOffset);
 
