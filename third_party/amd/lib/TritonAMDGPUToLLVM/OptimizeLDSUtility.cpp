@@ -52,10 +52,14 @@ triton::gpu::DistributedEncodingTrait
 createTmpLayout(triton::gpu::DistributedEncodingTrait layout,
                 ArrayRef<unsigned> warpsPerCTA) {
   auto ctx = layout.getContext();
+  SmallVector<unsigned> tilesPerWarp;
+  for (int i = 0; i < warpsPerCTA.size(); i++) {
+    tilesPerWarp.push_back(1);
+  }
   if (auto src = dyn_cast<triton::gpu::AMDMfmaEncodingAttr>(layout))
     return triton::gpu::AMDMfmaEncodingAttr::get(
         ctx, src.getVersionMajor(), src.getVersionMinor(), warpsPerCTA,
-        src.getMDim(), src.getNDim(), src.getIsTransposed(),
+        tilesPerWarp, src.getMDim(), src.getNDim(), src.getIsTransposed(),
         src.getCTALayout());
   if (auto src = dyn_cast<triton::gpu::AMDWmmaEncodingAttr>(layout))
     return triton::gpu::AMDWmmaEncodingAttr::get(
