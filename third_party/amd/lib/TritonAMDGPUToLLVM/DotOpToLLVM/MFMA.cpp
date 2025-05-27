@@ -462,22 +462,40 @@ struct DotOpMFMAConversionHelper {
   virtual ValueTable getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int nonKRep, int kRepInKWidth, int kWidth,
       int kBase, Type type, bool allowXF32, bool preserveBF16,
-      bool isConstantScale = false, bool preshuffle = false) const {
+      bool isConstantScale = false, bool preshuffle = false,
+      int nonKDimShuffle = -1) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
-    /// Preshuffling puts 4 scale values of the same thread in contiguous
-    /// memory addresses. However, the 4 scale values are corresponding to
-    /// 4 16x128 operand sub-tiles in nonK order.
-    ///
-    /// Note that this only works when BLOCK_K = 256 for mxfp4 inputs.
-    if (preshuffle) {
-      for (size_t i = 0; i + 3 < elems.size(); i += 4) {
-        std::swap(elems[i + 1], elems[i + 2]);
-      }
-    }
     // number of kBase-element vectors
     int numVecInKBase = kRepInKWidth * kWidth / kBase;
     ValueTable dotOpVals;
+
+    /// Preshuffling puts 4 scale values of the same thread in contiguous
+    /// memory addresses. However, the 4 scale values are corresponding to
+    /// 4 16x128 operand sub-tiles in nonK order.
+    if (preshuffle) {
+      assert(nonKDimShuffle != -1);
+      const size_t rows = nonKDimShuffle;
+      const size_t cols = numVecInKBase;
+      const size_t shuffSubTensorSize = rows * cols;
+      const size_t numShuffSubTensors = elems.size() / shuffSubTensorSize;
+      SmallVector<Value> subTensor(shuffSubTensorSize);
+
+      for (size_t subTensorId = 0; subTensorId < numShuffSubTensors;
+           ++subTensorId) {
+        size_t base = subTensorId * shuffSubTensorSize;
+
+        for (size_t c = 0; c < cols; ++c) {
+          for (size_t r = 0; r < rows; ++r) {
+            subTensor[c * rows + r] = elems[base + r * cols + c];
+          }
+        }
+
+        for (size_t i = 0; i < shuffSubTensorSize; ++i) {
+          elems[base + i] = std::move(subTensor[i]);
+        }
+      }
+    }
 
     SmallVector<int64_t> bounds = {batch, nonKRep, numVecInKBase, kBase};
     SmallVector<int64_t> strides = computeStrides(bounds);
@@ -670,19 +688,20 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // operands.
     ValueTable operandAScale;
     ValueTable operandBScale;
-    bool preshuffle = tools::getBoolEnv("TRITON_HIP_PRESHUFFLE_SCALES");
+    auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
+
     if (existBothScales) {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
       operandAScale = getValuesFromDotOperandLayoutStruct(
           loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
           aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant, preshuffle);
+          isAScaleConstant, /*preshuffle*/ true, tilesPerWarp[0]);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
           loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
           bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant, preshuffle);
+          isBScaleConstant, /*preshuffle*/ true, tilesPerWarp[1]);
     }
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -696,7 +715,6 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
     int numVecInKBase = numRepK * aKWidth / aKBase;
 
-    auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
