@@ -731,8 +731,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                   if (preshuffle) {
                     int tileIdm = m / 2 * 2 * numVecInKBase + m % 2 + k * 2;
                     int tileIdn = n / 2 * 2 * numVecInKBase + n % 2 + k * 2;
-                    opSelA = tileIdm % 4;
-                    opSelB = tileIdn % 4;
+                    opSelA = (tileIdn) % 4;
+                    opSelB = (tileIdm) % 4;
                     int newKSize = numVecInKBase / 4;
                     newKSize = newKSize == 0 ? 1 : newKSize;
                     int tileLeaderIdm = tileIdm / 4;
