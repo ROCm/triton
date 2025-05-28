@@ -1822,8 +1822,10 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
 
   // Disable swizzling for scales
   if (operandIdx >= 2) {
-    return SwizzledSharedEncodingAttr::get(getContext(), 1, 1, 1, sharedOrder,
-                                           ctaLayout);
+    // Disable swizzling for scales only when it's not K-contiguous
+    unsigned vecSize = sharedOrder[0] == 1 ? vectorSize : 1;
+    return SwizzledSharedEncodingAttr::get(getContext(), vecSize, 1, 1,
+                                           sharedOrder, ctaLayout);
   }
 
   return SwizzledSharedEncodingAttr::get(getContext(), vectorSize, perPhase,

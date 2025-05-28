@@ -564,7 +564,20 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         // op for the mfma layout to deduce operand index and other information.
         unsigned opIdx;
         if (auto dotEnc = getDotEncoding(userResult, &opIdx)) {
-          unsigned vecSize = llEnc.getLinearLayout().getNumConsecutiveInOut();
+          // unsigned vecSize =
+          // llEnc.getLinearLayout().getNumConsecutiveInOut();
+          // TODO: It only checks scales for now (opIdx 2, 3), need to make sure
+          // opA, opB in fp8 works as well.
+          auto layout = llEnc.getLinearLayout();
+          // scales are K-minor, but in linearLayout outDims are dim0 (M or N),
+          // dim1 (K), we need to flip it first to get the vectorization.
+          if (opIdx >= 2) {
+            auto outNames = layout.getOutDimNames();
+            SmallVector<StringAttr> revOut(outNames.begin(), outNames.end());
+            std::reverse(revOut.begin(), revOut.end());
+            layout = layout.transposeOuts(revOut);
+          }
+          unsigned vecSize = layout.getNumConsecutiveInOut();
           LDBG("deduced opIdx: " << opIdx << "; deduced vecSize: " << vecSize);
           tempAttr = dotEnc.composeSharedLayoutForOperand(
               ctaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
