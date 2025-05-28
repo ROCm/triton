@@ -1087,6 +1087,7 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   builder.setInsertionPointAfter(asyncCopyOps[0]);
   updateOpInsertion(asyncCopyOps[0]);
 
+  // mem cluster contains async_copies and tt.load if LDS bypassed.
   for(auto cop : asyncCommitOps)
     moveOpAndPredecessorsUpSameBlock(cop);
   for(auto glop : gLoadOps)
@@ -1095,23 +1096,11 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<ROCDL::SBarrierOp>(loc));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-/*
-  for (auto llop : lLoadOps)
-    appendOp(llop);
 
-  for (auto rop : reshapeOps)
-    appendOp(rop);
-
-  appendOp(dotSOps[0]);
-  */
+  // all other ops are placed in the second cluster
+  // set unit attr, so it can trigger the second step in the ttg to llvm lowering pass.
   dotSOps[0]->setAttr("pingpong_2step", builder.getUnitAttr());
 
-  /*
-  // alternatively, set wait at the end of the loop, location of the extra instructions might be different.
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  for (auto wop : asyncWaitOps)
-    appendOp(wop);
-  */
   return success();
 }
 
