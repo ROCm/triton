@@ -842,12 +842,13 @@ public:
     auto warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
                                          {mDim, nDim}, preshuffleScales);
 
-    SmallVector<unsigned> tilesPerWarp;
-    auto tilesPerWarpVal = 1;
-    if (preshuffleScales)
-      tilesPerWarpVal = 2;
-    for (int i = 0; i < warpsPerTile.size(); i++) {
-      tilesPerWarp.push_back(tilesPerWarpVal);
+    SmallVector<unsigned> tilesPerWarp{1, 1};
+    /// Preshuffling of scales is enabled only if nonK BLOCK size is larger than
+    /// 32. When preshuffling is enabled for a scale, tilesPerWarp needs to be 2
+    /// for that scale
+    if (preshuffleScales) {
+      tilesPerWarp[0] = oldShape[0] >= 32 ? 2 : 1;
+      tilesPerWarp[1] = oldShape[1] >= 32 ? 2 : 1;
     }
 
     // Always use transposed mfma layout. This enables larger vectorization

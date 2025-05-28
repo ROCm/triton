@@ -462,7 +462,7 @@ struct DotOpMFMAConversionHelper {
   virtual ValueTable getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int nonKRep, int kRepInKWidth, int kWidth,
       int kBase, Type type, bool allowXF32, bool preserveBF16,
-      bool isConstantScale = false, bool preshuffle = false) const {
+      bool isConstantScale = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     // number of kBase-element vectors
@@ -640,12 +640,16 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(repA[2] == repB[1]);
 
     bool preshuffle = tools::getBoolEnv("TRITON_HIP_PRESHUFFLE_SCALES");
+    auto rank = aTensorTy.getShape().size();
+    auto BLOCK_M = aTensorTy.getShape()[rank - 2];
+    auto BLOCK_N = bTensorTy.getShape()[rank - 1];
 
     // For fp4 scaled mfma, each thread takes 1 element from scale. Will have
     // better way to get it when adapting other data types. Similar to
     // scaleKBase
     constexpr int scaleKWidth = 1;
-    int scaleKBase = preshuffle ? 4 : 1;
+    int scaleKBaseA = (preshuffle && BLOCK_M >= 32) ? 4 : 1;
+    int scaleKBaseB = (preshuffle && BLOCK_N >= 32) ? 4 : 1;
 
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
@@ -674,15 +678,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     if (existBothScales) {
       auto aScaleTensorTy = cast<RankedTensorType>(aScale.getType());
       operandAScale = getValuesFromDotOperandLayoutStruct(
-          loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
+          loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBaseA,
           aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isAScaleConstant, preshuffle);
+          isAScaleConstant);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
-          loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBase,
+          loadedBScale, numRepB, numRepN, numRepK, scaleKWidth, scaleKBaseB,
           bScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
-          isBScaleConstant, preshuffle);
+          isBScaleConstant);
     }
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -745,28 +749,29 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                 for (innerK = 0; innerK < innerKBound; innerK++) {
                   int k = is2Step ? outerK : innerK;
                   if (existBothScales) {
-                    int m_new, n_new, km_new, kn_new;
-                    int opSelA, opSelB;
+                    int m_new = m;
+                    int n_new = n;
+                    int km_new = k;
+                    int kn_new = k;
+                    int opSelA = 0;
+                    int opSelB = 0;
                     if (preshuffle) {
-                      int tileIdm = m / 2 * 2 * numVecInKBase + m % 2 + k * 2;
-                      int tileIdn = n / 2 * 2 * numVecInKBase + n % 2 + k * 2;
-                      opSelA = (tileIdn) % 4;
-                      opSelB = (tileIdm) % 4;
                       int newKSize = numVecInKBase / 4;
                       newKSize = newKSize == 0 ? 1 : newKSize;
-                      int tileLeaderIdm = tileIdm / 4;
-                      int tileLeaderIdn = tileIdn / 4;
-                      m_new = tileLeaderIdm / newKSize;
-                      n_new = tileLeaderIdn / newKSize;
-                      km_new = tileLeaderIdm % newKSize;
-                      kn_new = tileLeaderIdn % newKSize;
-                    } else {
-                      m_new = m;
-                      n_new = n;
-                      km_new = k;
-                      kn_new = k;
-                      opSelA = 0;
-                      opSelB = 0;
+                      if (BLOCK_M >= 32) {
+                        int tileIdm = m / 2 * 2 * numVecInKBase + m % 2 + k * 2;
+                        opSelA = (tileIdm) % 4;
+                        int tileLeaderIdm = tileIdm / 4;
+                        m_new = tileLeaderIdm / newKSize;
+                        km_new = tileLeaderIdm % newKSize;
+                      }
+                      if (BLOCK_N >= 32) {
+                        int tileIdn = n / 2 * 2 * numVecInKBase + n % 2 + k * 2;
+                        opSelB = (tileIdn) % 4;
+                        int tileLeaderIdn = tileIdn / 4;
+                        n_new = tileLeaderIdn / newKSize;
+                        kn_new = tileLeaderIdn % newKSize;
+                      }
                     }
                     if (mfmaLayout.getIsTransposed()) {
                       acc = generateScaledMFMAOp(
@@ -775,7 +780,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                           operandBScale[{b, n_new, kn_new}],
                           operandAScale[{b, m_new, km_new}],
                           maybeMfmaIntrinsic->bElementType,
-                          maybeMfmaIntrinsic->aElementType, opSelA, opSelB);
+                          maybeMfmaIntrinsic->aElementType, opSelB, opSelA);
                     } else {
                       acc = generateScaledMFMAOp(
                           intrinsicName, operandA[{b, m, k}],

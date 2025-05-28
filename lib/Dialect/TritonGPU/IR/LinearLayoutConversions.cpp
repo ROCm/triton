@@ -1465,13 +1465,16 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   // data type the A/B operand is, each lane takes 32 elements from A/B
   // alone K dim, and 1 element from scale accordingly.
   int32_t kSize = dotOperandShape[1];
+  int32_t nonKSize = dotOperandShape[0];
 
   std::vector<std::vector<int32_t>> registerBase;
   std::vector<std::vector<int32_t>> laneBase;
 
   auto kTileSize = mfmaMDim == 32 ? 2 : 4;
 
-  if (preshuffleScales) {
+  if (preshuffleScales && nonKSize >= 32) {
+    /// Preshuffling requires BLOCK_M/N >=32
+    ///
     /// In the case of preshuffling, each thread holds 4 contiguous scales
     /// along the kdim. threads are also distributed along kdim first.
     /// Therefore, each row has kSize/4 threads. And each tile can cover
@@ -1505,7 +1508,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
     laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}};
   } else {
     assert(mfmaMDim == 16);
-    if (preshuffleScales) {
+    if (preshuffleScales && nonKSize >= 32) {
       // laneBase in the first row
       for (int32_t tid = 1; tid < kSize / 4; tid *= 2)
         laneBase.emplace_back(std::vector<int32_t>{tid * 4, 0});
