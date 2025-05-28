@@ -700,91 +700,116 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
-    for (int b = 0; b < numRepB; ++b) {
-      for (int mBlock = 0; mBlock < numRepM / tilesPerWarp[0]; ++mBlock) {
-        for (int nBlock = 0; nBlock < numRepN / tilesPerWarp[1]; ++nBlock) {
-          for (int mTilesPerWarp = 0; mTilesPerWarp < tilesPerWarp[0];
-               mTilesPerWarp++) {
-            for (int nTilesPerWarp = 0; nTilesPerWarp < tilesPerWarp[1];
-                 nTilesPerWarp++) {
 
-              int m = mBlock * tilesPerWarp[0] + mTilesPerWarp;
-              int n = nBlock * tilesPerWarp[1] + nTilesPerWarp;
+    int dividePoint = numVecInKBase * numRepB * numRepM * numRepN / 2;
+    int currIter = 0;
+    bool is2Step = false;
+    int innerK = 0, outerK = 0, innerKBound = 1, outerKBound = 1;
+    if (auto pingpongUnitAttr = op->getAttr("pingpong_2step")) {
+      is2Step = true;
+      outerKBound = numVecInKBase;
+    } else
+      innerKBound = numVecInKBase;
 
-              Value acc = tb.undef(vecTy);
-              for (unsigned v = 0; v < elemsPerVec; ++v) {
-                acc = tb.insert_element(
-                    vecTy, acc,
-                    fc[b * numRepM * numRepN * elemsPerVec +
-                       mBlock * tilesPerWarp[0] * numRepN * elemsPerVec +
-                       nBlock * tilesPerWarp[0] * tilesPerWarp[1] *
-                           elemsPerVec +
-                       mTilesPerWarp * tilesPerWarp[1] * elemsPerVec +
-                       nTilesPerWarp * elemsPerVec + v],
-                    tb.i32_val(v));
-              }
-              acc = zeroAuxiliarBlocks(subBlocks, acc);
-              for (int k = 0; k < numVecInKBase; k++) {
-                if (existBothScales) {
-                  int m_new, n_new, km_new, kn_new;
-                  int opSelA, opSelB;
-                  if (preshuffle) {
-                    int tileIdm = m / 2 * 2 * numVecInKBase + m % 2 + k * 2;
-                    int tileIdn = n / 2 * 2 * numVecInKBase + n % 2 + k * 2;
-                    opSelA = (tileIdn) % 4;
-                    opSelB = (tileIdm) % 4;
-                    int newKSize = numVecInKBase / 4;
-                    newKSize = newKSize == 0 ? 1 : newKSize;
-                    int tileLeaderIdm = tileIdm / 4;
-                    int tileLeaderIdn = tileIdn / 4;
-                    m_new = tileLeaderIdm / newKSize;
-                    n_new = tileLeaderIdn / newKSize;
-                    km_new = tileLeaderIdm % newKSize;
-                    kn_new = tileLeaderIdn % newKSize;
-                  } else {
-                    m_new = m;
-                    n_new = n;
-                    km_new = k;
-                    kn_new = k;
-                    opSelA = 0;
-                    opSelB = 0;
-                  }
-                  if (mfmaLayout.getIsTransposed()) {
-                    acc = generateScaledMFMAOp(
-                        intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                        acc, operandBScale[{b, n_new, kn_new}],
-                        operandAScale[{b, m_new, km_new}],
-                        maybeMfmaIntrinsic->bElementType,
-                        maybeMfmaIntrinsic->aElementType, opSelA, opSelB);
-                  } else {
-                    acc = generateScaledMFMAOp(
-                        intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                        acc, operandAScale[{b, m_new, km_new}],
-                        operandBScale[{b, n_new, kn_new}],
-                        maybeMfmaIntrinsic->aElementType,
-                        maybeMfmaIntrinsic->bElementType, opSelA, opSelB);
-                  }
-                } else {
-                  if (mfmaLayout.getIsTransposed()) {
-                    acc = generateScaledMFMAOp(
-                        intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                        acc, maybeMfmaIntrinsic->bElementType,
-                        maybeMfmaIntrinsic->aElementType);
-                  } else {
-                    acc = generateScaledMFMAOp(
-                        intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                        acc, maybeMfmaIntrinsic->aElementType,
-                        maybeMfmaIntrinsic->bElementType);
-                  }
+    for (outerK = 0; outerK < outerKBound; outerK++) {
+      for (int b = 0; b < numRepB; ++b) {
+        for (int mBlock = 0; mBlock < numRepM / tilesPerWarp[0]; ++mBlock) {
+          for (int nBlock = 0; nBlock < numRepN / tilesPerWarp[1]; ++nBlock) {
+            for (int mTilesPerWarp = 0; mTilesPerWarp < tilesPerWarp[0];
+                 mTilesPerWarp++) {
+              for (int nTilesPerWarp = 0; nTilesPerWarp < tilesPerWarp[1];
+                   nTilesPerWarp++) {
+                // Insert pingpong cluster barrier when needed.
+                if (is2Step && currIter++ == dividePoint) {
+                  rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+                  rewriter.create<ROCDL::SBarrierOp>(loc);
+                  rewriter.create<ROCDL::SchedBarrier>(loc, 0);
                 }
-                if (!firstMfma)
-                  firstMfma = acc;
+
+                int m = mBlock * tilesPerWarp[0] + mTilesPerWarp;
+                int n = nBlock * tilesPerWarp[1] + nTilesPerWarp;
+
+                Value acc = tb.undef(vecTy);
+                for (unsigned v = 0; v < elemsPerVec; ++v) {
+                  acc = tb.insert_element(
+                      vecTy, acc,
+                      fc[b * numRepM * numRepN * elemsPerVec +
+                         mBlock * tilesPerWarp[0] * numRepN * elemsPerVec +
+                         nBlock * tilesPerWarp[0] * tilesPerWarp[1] *
+                             elemsPerVec +
+                         mTilesPerWarp * tilesPerWarp[1] * elemsPerVec +
+                         nTilesPerWarp * elemsPerVec + v],
+                      tb.i32_val(v));
+                }
+                acc = zeroAuxiliarBlocks(subBlocks, acc);
+                for (innerK = 0; innerK < innerKBound; innerK++) {
+                  int k = is2Step ? outerK : innerK;
+                  if (existBothScales) {
+                    int m_new, n_new, km_new, kn_new;
+                    int opSelA, opSelB;
+                    if (preshuffle) {
+                      int tileIdm = m / 2 * 2 * numVecInKBase + m % 2 + k * 2;
+                      int tileIdn = n / 2 * 2 * numVecInKBase + n % 2 + k * 2;
+                      opSelA = (tileIdn) % 4;
+                      opSelB = (tileIdm) % 4;
+                      int newKSize = numVecInKBase / 4;
+                      newKSize = newKSize == 0 ? 1 : newKSize;
+                      int tileLeaderIdm = tileIdm / 4;
+                      int tileLeaderIdn = tileIdn / 4;
+                      m_new = tileLeaderIdm / newKSize;
+                      n_new = tileLeaderIdn / newKSize;
+                      km_new = tileLeaderIdm % newKSize;
+                      kn_new = tileLeaderIdn % newKSize;
+                    } else {
+                      m_new = m;
+                      n_new = n;
+                      km_new = k;
+                      kn_new = k;
+                      opSelA = 0;
+                      opSelB = 0;
+                    }
+                    if (mfmaLayout.getIsTransposed()) {
+                      acc = generateScaledMFMAOp(
+                          intrinsicName, operandB[{b, n, k}],
+                          operandA[{b, m, k}], acc,
+                          operandBScale[{b, n_new, kn_new}],
+                          operandAScale[{b, m_new, km_new}],
+                          maybeMfmaIntrinsic->bElementType,
+                          maybeMfmaIntrinsic->aElementType, opSelA, opSelB);
+                    } else {
+                      acc = generateScaledMFMAOp(
+                          intrinsicName, operandA[{b, m, k}],
+                          operandB[{b, n, k}], acc,
+                          operandAScale[{b, m_new, km_new}],
+                          operandBScale[{b, n_new, kn_new}],
+                          maybeMfmaIntrinsic->aElementType,
+                          maybeMfmaIntrinsic->bElementType, opSelA, opSelB);
+                    }
+                  } else {
+                    if (mfmaLayout.getIsTransposed()) {
+                      acc = generateScaledMFMAOp(
+                          intrinsicName, operandB[{b, n, k}],
+                          operandA[{b, m, k}], acc,
+                          maybeMfmaIntrinsic->bElementType,
+                          maybeMfmaIntrinsic->aElementType);
+                    } else {
+                      acc = generateScaledMFMAOp(
+                          intrinsicName, operandA[{b, m, k}],
+                          operandB[{b, n, k}], acc,
+                          maybeMfmaIntrinsic->aElementType,
+                          maybeMfmaIntrinsic->bElementType);
+                    }
+                  }
+                  if (!firstMfma)
+                    firstMfma = acc;
+                }
+                acc = reduceSubBlocks(subBlocks, acc);
+                adjustAccForSmallKDim(fc, acc, dstElemTy, b, mBlock, nBlock,
+                                      numRepM, numRepN, mTilesPerWarp,
+                                      nTilesPerWarp, tilesPerWarp[0],
+                                      tilesPerWarp[1], kDimInstrSize,
+                                      kDimOperandSize, elemsPerVec);
               }
-              acc = reduceSubBlocks(subBlocks, acc);
-              adjustAccForSmallKDim(
-                  fc, acc, dstElemTy, b, mBlock, nBlock, numRepM, numRepN,
-                  mTilesPerWarp, nTilesPerWarp, tilesPerWarp[0],
-                  tilesPerWarp[1], kDimInstrSize, kDimOperandSize, elemsPerVec);
             }
           }
         }
