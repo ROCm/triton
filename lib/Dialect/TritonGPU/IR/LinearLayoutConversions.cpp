@@ -1472,11 +1472,19 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   auto kTileSize = mfmaMDim == 32 ? 2 : 4;
 
   if (preshuffleScales) {
-    auto sizePerThreadPerTile = 1;
-    auto numKTiles = kSize / kTileSize;
-    for (int32_t elem = 1;
-         elem < sizePerThreadPerTile * numKTiles * tilePerWarpNonK; elem *= 2)
+    /// In the case of preshuffling, each thread holds 4 contiguous scales
+    /// along the kdim. threads are also distributed along kdim first.
+    /// Therefore, each row has kSize/4 threads. And each tile can cover
+    /// 64 / (kSize/4) = 256/kSize rows.
+    /// The number of tiles is determined by kSize/8
+    auto sizePerThreadPerTile = 4;
+    auto numTiles = kSize / 8;
+    //  register bases in the first tile
+    for (int32_t elem = 1; elem < 4; elem *= 2)
       registerBase.emplace_back(std::vector<int32_t>{elem, 0});
+    // register bases in the following tiles
+    for (int32_t tile = 1; tile < numTiles; tile *= 2)
+      registerBase.emplace_back(std::vector<int32_t>{0, 256 * tile / kSize});
   } else {
     for (int32_t elem = kTileSize; elem < kSize; elem *= 2)
       registerBase.emplace_back(std::vector<int32_t>{elem, 0});
@@ -1484,6 +1492,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
     for (int32_t elem = mfmaMDim; elem < tilePerWarpNonK * mfmaMDim; elem *= 2)
       registerBase.emplace_back(std::vector<int32_t>{0, elem});
   }
+
   if (mfmaMDim == 32) {
     if (preshuffleScales) {
       assert(false && "Preshuffling scales not yet implemented for mDim == 32");
@@ -1497,7 +1506,12 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   } else {
     assert(mfmaMDim == 16);
     if (preshuffleScales) {
-      laneBase = {{4, 0}, {0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}};
+      // laneBase in the first row
+      for (int32_t tid = 1; tid < kSize / 4; tid *= 2)
+        laneBase.emplace_back(std::vector<int32_t>{tid * 4, 0});
+      // laneBase in the following rows
+      for (int32_t row = 1; row < 256 / kSize; row *= 2)
+        laneBase.emplace_back(std::vector<int32_t>{0, row});
     } else {
       // For ROCDL::mfma_scale_f32_16x16x128_f8f6f4 with fp4 input, each lane
       // takes 32 consecutive elements from A alone K dimension. The first

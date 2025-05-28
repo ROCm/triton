@@ -63,8 +63,16 @@ SmallVector<unsigned, 3> warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape,
                                       bool preshuffleScales = false) {
   auto rank = shape.size();
 
-  if (preshuffleScales)
-    return {1, static_cast<unsigned>(numWarps)};
+  /// Todo: run experiments to compare the impact of the following options
+  /// for prefill gemm kernels (E.g. numWarps=8)
+  ///   - warpsPerCTA = [1, 8]. This leads to more ds_read inst but has
+  ///     the potential to bypassLDS for B/scaleB tensor
+  ///   - warpsPerCTA = [2, 4]. This minimize the number of ds_read instr,
+  ///     but cannot bypass LDS since both A and B tensor are shared
+  ///     among waves.
+  /// For now, we will let the shape to decide warpsPerCTA
+  // if (preshuffleScales)
+  //   return {1, static_cast<unsigned>(numWarps)};
 
   // Case 1: Early exit for batched matmul
   if (rank == 3)

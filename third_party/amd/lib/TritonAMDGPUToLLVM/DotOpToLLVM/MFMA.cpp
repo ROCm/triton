@@ -465,16 +465,6 @@ struct DotOpMFMAConversionHelper {
       bool isConstantScale = false, bool preshuffle = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
-    /// Preshuffling puts 4 scale values of the same thread in contiguous
-    /// memory addresses. However, the 4 scale values are corresponding to
-    /// 4 16x128 operand sub-tiles in nonK order.
-    ///
-    /// Note that this only works when BLOCK_K = 256 for mxfp4 inputs.
-    if (preshuffle) {
-      for (size_t i = 0; i + 3 < elems.size(); i += 4) {
-        std::swap(elems[i + 1], elems[i + 2]);
-      }
-    }
     // number of kBase-element vectors
     int numVecInKBase = kRepInKWidth * kWidth / kBase;
     ValueTable dotOpVals;
@@ -726,16 +716,33 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               acc = zeroAuxiliarBlocks(subBlocks, acc);
               for (int k = 0; k < numVecInKBase; k++) {
                 if (existBothScales) {
+                  int m_new, n_new, km_new, kn_new;
+                  if (preshuffle) {
+                    /// Due to preshuffle, scale values and their corresponding
+                    /// operand values are of differnt order. The following
+                    /// calculation is to adjust the order of scale values.
+                    m_new = m / 2 * 2 + (m % 2 + k * 2) / numVecInKBase;
+                    n_new = n / 2 * 2 + (n % 2 + k * 2) / numVecInKBase;
+                    km_new = (m % 2 + k * 2) % numVecInKBase;
+                    kn_new = (n % 2 + k * 2) % numVecInKBase;
+                  } else {
+                    m_new = m;
+                    n_new = n;
+                    km_new = k;
+                    kn_new = k;
+                  }
                   if (mfmaLayout.getIsTransposed()) {
                     acc = generateScaledMFMAOp(
                         intrinsicName, operandB[{b, n, k}], operandA[{b, m, k}],
-                        acc, operandBScale[{b, n, k}], operandAScale[{b, m, k}],
+                        acc, operandBScale[{b, n_new, kn_new}],
+                        operandAScale[{b, m_new, km_new}],
                         maybeMfmaIntrinsic->bElementType,
                         maybeMfmaIntrinsic->aElementType);
                   } else {
                     acc = generateScaledMFMAOp(
                         intrinsicName, operandA[{b, m, k}], operandB[{b, n, k}],
-                        acc, operandAScale[{b, m, k}], operandBScale[{b, n, k}],
+                        acc, operandAScale[{b, m_new, km_new}],
+                        operandBScale[{b, n_new, kn_new}],
                         maybeMfmaIntrinsic->aElementType,
                         maybeMfmaIntrinsic->bElementType);
                   }
