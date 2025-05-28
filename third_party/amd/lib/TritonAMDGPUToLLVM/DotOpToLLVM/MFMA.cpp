@@ -690,6 +690,18 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value firstMfma;
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+
+    int dividePoint = numVecInKBase * numRepB * numRepM * numRepN / 2;
+    int currIter = 0;
+    bool is2Step = false;
+    int innerK = 0, outerK = 0, innerKBound = 1, outerKBound = 1;
+    if (auto pingpongUnitAttr = op->getAttr("pingpong_2step")) {
+      is2Step = true;
+      outerKBound = numVecInKBase;
+    } else
+      innerKBound = numVecInKBase;
+
+    for (outerK = 0; outerK < outerKBound; outerK++) {
     for (int b = 0; b < numRepB; ++b) {
       for (int mBlock = 0; mBlock < numRepM / tilesPerWarp[0]; ++mBlock) {
         for (int nBlock = 0; nBlock < numRepN / tilesPerWarp[1]; ++nBlock) {
@@ -697,6 +709,12 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                mTilesPerWarp++) {
             for (int nTilesPerWarp = 0; nTilesPerWarp < tilesPerWarp[1];
                  nTilesPerWarp++) {
+                // Insert pingpong cluster barrier when needed.
+                if (is2Step && currIter++ == dividePoint) {
+                  rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+                  rewriter.create<ROCDL::SBarrierOp>(loc);
+                  rewriter.create<ROCDL::SchedBarrier>(loc, 0);
+                }
 
               int m = mBlock * tilesPerWarp[0] + mTilesPerWarp;
               int n = nBlock * tilesPerWarp[1] + nTilesPerWarp;
@@ -714,7 +732,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                     tb.i32_val(v));
               }
               acc = zeroAuxiliarBlocks(subBlocks, acc);
-              for (int k = 0; k < numVecInKBase; k++) {
+                for (innerK = 0; innerK < innerKBound; innerK++) {
+                  int k = is2Step ? outerK : innerK;
                 if (existBothScales) {
                   int m_new, n_new, km_new, kn_new;
                   if (preshuffle) {
@@ -767,6 +786,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                   fc, acc, dstElemTy, b, mBlock, nBlock, numRepM, numRepN,
                   mTilesPerWarp, nTilesPerWarp, tilesPerWarp[0],
                   tilesPerWarp[1], kDimInstrSize, kDimOperandSize, elemsPerVec);
+
+              }
             }
           }
         }
