@@ -42,7 +42,6 @@ class Pingponger {
   SmallVector<ttg::AsyncCommitGroupOp> asyncCommitOps;
   SmallVector<tt::DotOp> dotOps;
   SmallVector<tt::DotScaledOp> dotSOps;
-  SmallVector<tt::ReshapeOp> reshapeOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
   SmallVector<SmallVector<Operation *>> loadSliceOps;
   SmallVector<Operation *> dotSliceOps;
@@ -89,6 +88,7 @@ private:
   LogicalResult transformFAv3(OpBuilder &builder, Location loc);
   LogicalResult transformFP4(OpBuilder &builder, Location loc);
   LogicalResult transformFP4s(OpBuilder &builder, Location loc);
+  LogicalResult transformNS3(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -590,8 +590,7 @@ LogicalResult Pingponger::pruneDotAsyncMemoryOps(
   asyncWaitOps.erase(asyncWaitIt, asyncWaitOps.end());
   // All PingPong Scheduler assumes there are 2 movable global loads and 2
   // movable local loads.
-  if (asyncCopyOps.size() != 2 || lLoadOps.size() != 2 ||
-      asyncWaitOps.size() != 1) {
+  if (asyncCopyOps.size() != 2 || lLoadOps.size() != 2) {
     std::stringstream message;
     message << "Unable to match ping pong slicing pattern. Details: "
             << asyncCopyOps.size() << " global loads in dot computation, "
@@ -1126,6 +1125,49 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   return success();
 }
 
+LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
+
+  Operation *gLoadRhs = useAsyncCopy ? asyncCopyOps[1] : gLoadOps[1];
+  builder.setInsertionPointAfter(gLoadRhs);
+  updateOpInsertion(gLoadRhs);
+ 
+  // Combine asyncWaitOps
+  SmallVector<Value> tokens;
+  for (auto asyncWaitOp : asyncWaitOps) {
+    for (auto token : asyncWaitOp.getAsyncToken()) {
+      tokens.push_back(token);
+    }
+  }
+  auto newAsyncWaitOp = builder.create<ttg::AsyncWaitOp>(loc, tokens, 0);
+  asyncWaitOps[0].getResult().replaceAllUsesWith(newAsyncWaitOp.getResult());
+  asyncWaitOps[1].getResult().replaceAllUsesWith(newAsyncWaitOp.getResult());
+  asyncWaitOps[0]->erase();
+  asyncWaitOps[1]->erase();
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(lLoadOps[0]);
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(asyncCopyOps[0]);
+  appendOp(asyncCommitOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(lLoadOps[1]);
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(asyncCopyOps[1]);
+  appendOp(asyncCommitOps[1]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(newAsyncWaitOp);
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+
+  appendOp(dotOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+
+  return success();
+}
 // This function wraps forOp with cond_barrier. First, hold half of the warps
 // (warpHigh) in a block before the loop so the barriers in the loop synchronize
 // warps at the different point per the warp groups. After the loop, hold
@@ -1158,7 +1200,7 @@ void Pingponger::addAsymmetricSyncToLoop(OpBuilder &builder, Location loc) {
 }
 
 void Pingponger::getDotPingponged() {
-  if (numStages != 2 && numStages != 4) {
+  if (numStages == 1 || numStages > 4) {
     std::stringstream message;
     message << "All ping pong scheduling requires 2 or 4 stages. Found "
             << numStages << " stages";
@@ -1198,8 +1240,6 @@ void Pingponger::getDotPingponged() {
       asyncCommitOps.push_back(asyncCommitGroupOp);
     } else if (auto asyncOp = dyn_cast<ttg::AsyncWaitOp>(op))
       asyncWaitOps.push_back(asyncOp);
-    else if (auto reshapeOp = dyn_cast<tt::ReshapeOp>(op))
-      reshapeOps.push_back(reshapeOp);
   });
 
   // Fixme : use proper condition to identify FAv3
@@ -1212,6 +1252,7 @@ void Pingponger::getDotPingponged() {
     addAsymmetricSyncToLoop(builder, loc);
     return;
   }
+
 
   // Currently, pingpong scheduling is known as helpful under limited condition.
   // Individual conditions are checked while collecting each operation such as
@@ -1302,11 +1343,19 @@ void Pingponger::getDotPingponged() {
       LDBG("Currently only support num_warp=8 for async PP");
       return;
     }
+    if (numStages == 3 && dotOps.size() == 1 && tileSize == mediumTile && aShape[1] == 32 && elemWidth == 16) {
+      if (transformNS3(builder, loc).failed()) {
+        LDBG("Encountered failure when trying to execute the NS3 ping pong "
+            "cluster transformation");
+        return;
+      }
+      addAsymmetricSyncToLoop(builder, loc);
+      return;
+    }
     if (tileSize != largeTile || aShape[1] != 64 || elemWidth != 16) {
       LDBG("Only support tile size of 256x256x64 tile size for async PP");
       return;
     }
-
     auto encoding = cast<RankedTensorType>(aType).getEncoding();
     auto srcEncoding = cast<ttg::DotOperandEncodingAttr>(encoding);
     kWidth = srcEncoding.getKWidth();
