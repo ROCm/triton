@@ -14,6 +14,7 @@
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
+#include "triton/Tools/LayoutUtils.h"
 
 //===----------------------------------------------------------------------===//
 // This file will create a schedule that will be handed over to the pipeline
@@ -672,7 +673,40 @@ void StreamPipeliner::assignMemoryLayouts() {
       // Only use shared memory when feeding into a dot op.
       loadInfo.usedByDot = true;
       // If the max continugous bits we can read is < 32, buffer in registers.
-      if (width >= 32) {
+      bool bypassLDS = width < 32;
+      // Skip LDS for the scale B tensor when warpsPerCTA is {1, numWarps} and
+      // the load layout matches the expected layout for scale B in the
+      // dotScaled op.
+      if (auto scaledDot = dyn_cast<tt::DotScaledOp>(use)) {
+        auto scaleB = scaledDot.getBScale();
+        SetVector<Operation *> slices;
+        mlir::getForwardSlice(op, &slices);
+        if (llvm::find_if(slices, [&](Operation *depOp) {
+              return scaleB.getDefiningOp() == depOp;
+            }) != slices.end()) {
+
+          auto scaleBTy = dyn_cast<RankedTensorType>(scaleB.getType());
+          auto dotTy = dyn_cast<RankedTensorType>(scaledDot.getType());
+          auto mfmaEnc = cast<ttg::AMDMfmaEncodingAttr>(dotTy.getEncoding());
+          auto warpsPerCTA = mfmaEnc.getWarpsPerCTA();
+
+          auto loadOpTy = dyn_cast<RankedTensorType>(loadOp.getType());
+
+          mlir::triton::LinearLayout loadOpLayout =
+              mlir::triton::gpu::toLinearLayout(loadOpTy.getShape(),
+                                                loadOpTy.getEncoding());
+          auto reshapedLayout = reshapeLayout(loadOp.getContext(), loadOpLayout,
+                                              scaleBTy.getShape());
+
+          mlir::triton::LinearLayout scaleBLayout =
+              mlir::triton::gpu::toLinearLayout(scaleBTy.getShape(),
+                                                scaleBTy.getEncoding());
+          bypassLDS = bypassLDS ||
+                      (warpsPerCTA[0] == 1 && reshapedLayout == scaleBLayout);
+        }
+      }
+
+      if (!bypassLDS) {
         loadInfo.sharedEncoding =
             getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
       }
