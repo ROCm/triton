@@ -1434,8 +1434,8 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     # compare
     if layout == 'bshd':
         ref_out = ref_out.transpose(1, 2).clone()
-    ref_out = ref_out + 1
-    # torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+    ref_out = ref_out
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
     print("✅ Triton and Torch match")
 
 
@@ -1928,13 +1928,13 @@ def run_benchmark(custom, args):
     head_size = 128 if not args.d else args.d
     mode = 'fwd'
     x_names = ['BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K']
-    causal = args.causal if not args.model else True
+    causal = (args.causal == 1) if not args.model else True
     int8 = args.int8
     quantize_p = args.quantize_p and int8
     int8_kv = args.int8_kv and int8
     varlen = True if args.model else args.layout == 'thd'
     configs = []
-    plot_name = f'fused-attention-{mode}-d{head_size}-layout{args.layout}'
+    plot_name = f'fused-attention-{mode}-d{head_size}-layout{args.layout}-causal{args.causal}'
     extra_args = {'D_HEAD': head_size, 'dtype': dtype, 'causal': causal, 'mode': mode}
     if custom:
         x_vals_list = [(args.b, args.hq, hk, args.sq, sk)]
@@ -2060,7 +2060,7 @@ def run_benchmark(custom, args):
         else:
             return total_flops / ms * 1e-9
 
-    bench_flash_attention.run(save_path=".", print_data=True, show_plots=True)
+    bench_flash_attention.run(save_path="out/", print_data=True, show_plots=False)
 
 
 def supported_layouts():
@@ -2093,7 +2093,7 @@ def parse_args():
                         help='If specified, each context within the thd layout' \
                             ' has same seqlen as sq and sk')
     parser.add_argument("-d", type=int, default=0)
-    parser.add_argument("-causal", action='store_true', default=False)
+    parser.add_argument("-causal", type=int, default=0)
     parser.add_argument("-int8", action='store_true', default=False)
     parser.add_argument("-quantize_p", action='store_true', default=False)
     parser.add_argument("-int8_kv", action='store_true', default=False)
@@ -2135,5 +2135,5 @@ def main():
 
 
 if __name__ == '__main__':
-    test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
+    #test_op_fwd(2, 48, 48, 16384, 8192, 128, False, False, 'bshd', dtype=torch.float16)
     sys.exit(main())
