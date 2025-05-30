@@ -1025,6 +1025,7 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 
   // dot cluster 0 operations here.
 
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 10));
   updateOpInsertion(asyncWaitOps[0]);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
@@ -1039,6 +1040,7 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 
   // dot cluster 1 operations here.
 
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 10));
   updateOpInsertion(asyncWaitOps[1]);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
