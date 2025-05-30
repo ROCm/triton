@@ -839,9 +839,6 @@ public:
     auto kBase = mfmaInstr->kBase;
     assert(mDim == nDim);
 
-    auto warpsPerTile = warpsPerTileMFMA(dotOp, oldShape, numWarps,
-                                         {mDim, nDim}, preshuffleScales);
-
     SmallVector<unsigned> tilesPerWarp{1, 1};
     /// Preshuffling of scales is enabled only if nonK BLOCK size is larger than
     /// 32. When preshuffling is enabled for a scale, tilesPerWarp needs to be 2
@@ -850,6 +847,10 @@ public:
       tilesPerWarp[0] = oldShape[0] >= 32 ? 2 : 1;
       tilesPerWarp[1] = oldShape[1] >= 32 ? 2 : 1;
     }
+
+    auto warpsPerTile = warpsPerTileMFMA(
+        dotOp, oldShape, numWarps,
+        {mDim * tilesPerWarp[0], nDim * tilesPerWarp[1]}, preshuffleScales);
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
