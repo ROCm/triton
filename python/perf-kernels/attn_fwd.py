@@ -6,6 +6,7 @@ from jit_or_aot_types import (
     constexpr_or_f32,
     u64,
 )
+from dropout import PHILOX_RN_PER_OFFSET
 
 autotune_configs, autotune_keys = get_autotune_configs()
 
@@ -84,14 +85,17 @@ def attn_fwd(
     IS_CAUSAL: tl.constexpr = CAUSAL_TYPE != 0
     IS_CAUSAL_BOTTOM_RIGHT: tl.constexpr = CAUSAL_TYPE == 2
     USE_BIAS: tl.constexpr = (BIAS_TYPE == 1)
+    PERSISTENT : tl.constexpr = (PERSISTENT_TYPE > 0)
+    PERSISTENT_DYNAMIC : tl.constexpr = (PERSISTENT_TYPE == 2)
     tl.static_assert(BIAS_TYPE == 0 or BIAS_TYPE == 1, f'Unsupported BIAS_TYPE {BIAS_TYPE}')
     L_not_null = L.cast(dtype=tl.uint64, bitcast=True) != 0  # Allows null L for training=False
-    PERSISTENT: tl.constexpr = (PERSISTENT_TYPE > 0)
-    PERSISTENT_DYNAMIC: tl.constexpr = (PERSISTENT_TYPE == 2)
+    INT8_GEMM: tl.constexpr = INT8 and (not INT8_KV)
 
     ## philox
+    idropout_p = ((dropout_p - 0.5) * 0xFFFFFFFF).to(tl.int32) if ENABLE_DROPOUT else 0
     philox_seed = 0
     philox_offset_base = philox_offset2 if ENABLE_DROPOUT else 0
+    philox_offset_stride = tl.cdiv(Max_seqlen_k, PHILOX_RN_PER_OFFSET)
     if ENABLE_DROPOUT:
         philox_seed = tl.load(philox_seed_ptr)
         philox_offset_base += tl.load(philox_offset1)
@@ -99,7 +103,8 @@ def attn_fwd(
             if philox_seed_output.cast(dtype=tl.uint64, bitcast=True) != 0:
                 tl.store(philox_seed_output, philox_seed)
             if philox_offset_output.cast(dtype=tl.uint64, bitcast=True) != 0:
-                tl.store(philox_offset_output, philox_offset_base.to(dtype=philox_seed_output.type.element_ty))
+                tl.store(philox_offset_output,
+                         philox_offset_base.to(dtype=philox_seed_output.type.element_ty))
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         Num_WG = Num_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -230,7 +235,6 @@ def attn_fwd(
                 v_ptrs = v_offset + offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vn
                 # Compute pointers for all the scale tensors used in this kernel.
 
-                INT8_GEMM: tl.constexpr = INT8 and (not INT8_KV)
                 if INT8:
                     k_descale_ptrs = K_descale + off_h_k
                     v_descale_ptrs = V_descale + off_h_k
