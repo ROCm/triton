@@ -312,7 +312,7 @@ def attn_fwd(
 
                 if USE_ALIBI:
                     a_offset = off_z * stride_az + off_h_q * stride_ah
-                    alibi_slope = tl.load(alibi_slopes + a_offset)
+                    alibi_slope = tl.load(A + a_offset)
                 else:
                     alibi_slope = None
 
@@ -328,7 +328,7 @@ def attn_fwd(
                 else:
                     encoded_sm_base = None
                 # initialize pointer to m and l
-                m_i = tl.full([BLOCK_M], -3.40282e+38, dtype=tl.float32)  # FILEPR
+                m_i = tl.full([BLOCK_M], -3.40282e+38, dtype=tl.float32)
                 l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
                 acc0, acc1, acc2 = composed_zeros_2d(BLOCK_M, BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
                 # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
@@ -476,6 +476,7 @@ def attn_fwd(
                             INT8_KV=INT8_KV,
                             USE_P_SCALE=USE_P_SCALE,
                             )
+                    # yapf: enable
 
                 if INT8 and not INT8_KV:
                     if USE_P_SCALE:
@@ -487,12 +488,9 @@ def attn_fwd(
                 l_recip = 1 / l_i[:, None]
                 if ENABLE_DROPOUT:  # Should make dropout faster?
                     l_recip *= 1.0 / (1 - dropout_p)
-                # tl.device_print('l_i', l_i)
-                # tl.device_print('acc0 no recip', acc0)
                 acc0, acc1, acc2 = composed_mul_lhs(acc0, acc1, acc2,
                                                     l_recip,
                                                     BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
-                # tl.device_print('acc0 after recip', acc0)
                 # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
                 # then we have one block with a row of all NaNs which come from computing
                 # softmax over a row of all -infs (-inf - inf = NaN). We check for that here

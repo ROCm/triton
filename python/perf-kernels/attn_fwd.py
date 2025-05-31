@@ -7,6 +7,17 @@ from jit_or_aot_types import (
     u64,
 )
 from dropout import PHILOX_RN_PER_OFFSET
+from composed_tensors import (
+    composed_offs_1d,
+    composed_zeros_2d,
+    composed_ptrs,
+    composed_load,
+    composed_advance,
+    composed_to,
+    composed_store,
+    composed_mul_lhs,
+    composed_casual_mask,
+)
 
 autotune_configs, autotune_keys = get_autotune_configs()
 
@@ -80,6 +91,22 @@ def attn_fwd(
         PRE_LOAD_V: tl.constexpr,
         ):
     # yapf: enable
+    # TODO: Put this decomposition into a @triton.jit function when tuple support is more complete
+    tl.static_assert(BLOCK_DMODEL > 0, 'BLOCK_DMODEL must be greater than 0')
+    BLOCK_DMODEL_R0 : tl.constexpr = BLOCK_DMODEL
+    BLOCK_DMODEL0 : tl.constexpr = 2 ** (BLOCK_DMODEL_R0.bit_length() - 1)
+    BLOCK_DMODEL_R1 : tl.constexpr = BLOCK_DMODEL_R0 - BLOCK_DMODEL0
+    BLOCK_DMODEL1 : tl.constexpr = 2 ** (BLOCK_DMODEL_R1.bit_length() - 1) if BLOCK_DMODEL_R1 > 0 else 0
+    BLOCK_DMODEL_R2 : tl.constexpr = BLOCK_DMODEL_R1 - BLOCK_DMODEL1
+    BLOCK_DMODEL2 : tl.constexpr = 2 ** (BLOCK_DMODEL_R2.bit_length() - 1) if BLOCK_DMODEL_R2 > 0 else 0
+    BLOCK_DMODEL_R3 : tl.constexpr = BLOCK_DMODEL_R2 - BLOCK_DMODEL2
+
+    # tl.static_print('BLOCK_DMODEL0', BLOCK_DMODEL0)
+    # tl.static_print('BLOCK_DMODEL1', BLOCK_DMODEL1)
+    # tl.static_print('BLOCK_DMODEL2', BLOCK_DMODEL2)
+
+    tl.static_assert(BLOCK_DMODEL_R3 == 0, f'BLOCK_DMODEL = {BLOCK_DMODEL} = 0b{BLOCK_DMODEL:b} cannot be factored into <= 3 power of two values')
+    tl.static_assert(BLOCK_DMODEL1 > 0 or BLOCK_DMODEL2 == 0, 'Only trailing BLOCK_DMODELx can be 0')
     # Adaptor code for AOTriton, to minimize main body code change
     ## tl.constexpr to variable
     IS_CAUSAL: tl.constexpr = CAUSAL_TYPE != 0
@@ -139,7 +166,6 @@ def attn_fwd(
 
         offs_m = start_M + tl.arange(0, BLOCK_M)
         offs_n = tl.arange(0, BLOCK_N)
-        offs_d = tl.arange(0, BLOCK_DMODEL)
 
         if Num_seqlens > 0:
             cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
@@ -181,6 +207,7 @@ def attn_fwd(
             # inf written to LSE. We don't need to do any GEMMs in this case.
             # This block of code determines what N is, and if this WG is operating
             # on those M rows.
+            o_base = Out + batch_index * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
             n_blocks = cdiv_fn(seqlen_k, BLOCK_N)
             if IS_CAUSAL:
                 # If seqlen_q == seqlen_k, the attn scores are a square matrix.
@@ -201,12 +228,19 @@ def attn_fwd(
                 # If we have no blocks after adjusting for seqlen deltas, this WG is part of
                 # the blocks that are all 0. We exit early.
                 if n_blocks <= 0:
-                    o_offset = Out + batch_index * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
-                    o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_on
-                    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=Out.type.element_ty)
-                    o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to([BLOCK_M, BLOCK_DMODEL])
-                    # We still need to write 0s to the result
-                    tl.store(o_ptrs, acc, mask=o_ptrs_mask)
+                    acc0, acc1, acc2 = composed_zeros_2d(BLOCK_M, BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2, dtype=Out.type.element_ty)
+                    composed_store(acc0, acc1, acc2,
+                                   BLOCK_M,
+                                   BLOCK_DMODEL0,
+                                   BLOCK_DMODEL1,
+                                   BLOCK_DMODEL2,
+                                   o_base=o_base,
+                                   o_start_row=start_M,
+                                   o_start_col=0,
+                                   o_rows=seqlen_q,
+                                   o_cols=BLOCK_DMODEL,
+                                   stride_row=stride_om,
+                                   stride_col=stride_on)
                     # The tensor allocated for L is based on Max_seqlen_q as that is
                     # statically known.
                     if L_not_null:
@@ -231,12 +265,19 @@ def attn_fwd(
                     n_extra_tokens = seqlen_k % BLOCK_N
 
                 # Compute pointers for all the tensors used in this kernel.
-                q_offset = Q + batch_index * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
-                q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
-                k_offset = K + batch_index * stride_kz + off_h_k * stride_kh + cu_seqlens_k_start * stride_kn
-                k_ptrs = k_offset + offs_d[:, None] * stride_kk + offs_n[None, :] * stride_kn
-                v_offset = V + batch_index * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
-                v_ptrs = v_offset + offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vn
+                q_ptrs0, q_ptrs1, q_ptrs2 = composed_ptrs(Q,
+                                                          stride_qz, stride_qh, stride_qm, stride_qk,
+                                                          batch_index, off_h_q, cu_seqlens_q_start + offs_m,
+                                                          BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
+                k_ptrs0, k_ptrs1, k_ptrs2 = composed_ptrs(K,
+                                                          stride_kz, stride_kh, stride_kn, stride_kk,
+                                                          batch_index, off_h_k, cu_seqlens_k_start + offs_n,
+                                                          BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2,
+                                                          TRANSPOSED=True)
+                v_ptrs0, v_ptrs1, v_ptrs2 = composed_ptrs(V,
+                                                          stride_vz, stride_vh, stride_vk, stride_vn,
+                                                          batch_index, off_h_k, cu_seqlens_k_start + offs_n,
+                                                          BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
                 # Compute pointers for all the scale tensors used in this kernel.
 
                 if INT8:
@@ -263,7 +304,7 @@ def attn_fwd(
 
                 off_zh = off_z * Num_head_q + off_h_q
                 if ENABLE_DROPOUT:
-                    batch_philox_offset = philox_offset_base + off_zh * Max_seqlen_q * Max_seqlen_k
+                    batch_philox_offset = philox_offset_base + off_zh * Max_seqlen_q * philox_offset_stride
                 else:
                     batch_philox_offset = 0
                 # We can ask to return the dropout mask without actually doing any dropout. In
@@ -275,15 +316,29 @@ def attn_fwd(
                 # initialize pointer to m and l
                 m_i = tl.full([BLOCK_M], -3.40282e+38, dtype=tl.float32)
                 l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-                acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+                acc0, acc1, acc2 = composed_zeros_2d(BLOCK_M, BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
                 # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
                 # have native e^x support in HW.
-                Qk_scale: constexpr_or_f32 = Sm_scale * 1.44269504089
+                Qk_scale : constexpr_or_f32 = Sm_scale * 1.44269504089
                 # Q is loaded once at the beginning and shared by all N blocks.
-                q_ptrs_mask = offs_m[:, None] < seqlen_q
-                if PADDED_HEAD:
-                    q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < Head_dim)
-                q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
+                if start_M + BLOCK_M > seqlen_q:
+                    q0, q1, q2 = composed_load(q_ptrs0, q_ptrs1, q_ptrs2,
+                                               offs_m,
+                                               BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2,
+                                               seqlen_q, Head_dim,
+                                               other=0.0,
+                                               PADDED_ROW=True,
+                                               PADDED_COL=PADDED_HEAD,
+                                               TRANSPOSED=False)
+                else:
+                    q0, q1, q2 = composed_load(q_ptrs0, q_ptrs1, q_ptrs2,
+                                               offs_m,
+                                               BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2,
+                                               seqlen_q, Head_dim,
+                                               other=0.0,
+                                               PADDED_ROW=False,
+                                               PADDED_COL=PADDED_HEAD,
+                                               TRANSPOSED=False)
 
                 if INT8:
                     k_descale = tl.load(k_descale_ptrs)
@@ -325,13 +380,13 @@ def attn_fwd(
                 if n_full_blocks > 0:
                     block_max = (n_blocks - masked_blocks) * BLOCK_N
                     # yapf: disable
-                    acc, l_i, m_i = _attn_fwd_inner(
+                    acc0, acc1, acc2, l_i, m_i = _attn_fwd_inner(
                             # Inputs
-                            acc,
+                            acc0, acc1, acc2,
                             l_i, m_i, Qk_scale,
-                            q,
-                            k_ptrs,
-                            v_ptrs,
+                            q0, q1, q2,
+                            k_ptrs0, k_ptrs1, k_ptrs2,
+                            v_ptrs0, v_ptrs1, v_ptrs2,
                             bias_ptrs,
                             stride_kn, stride_vk, stride_bn,
                             # Task positions
@@ -339,7 +394,7 @@ def attn_fwd(
                             seqlen_k, seqlen_q, Head_dim,
                             # Dropout
                             idropout_p, philox_seed, batch_philox_offset, philox_offset_stride,
-                            encoded_sm_base,
+                            encoded_sm_base, Max_seqlen_k,
                             # offs_n_causal, masked_blocks, n_extra_tokens, _
                             0, 0, 0,
                             # Alibi
@@ -349,7 +404,9 @@ def attn_fwd(
                             # constexpr
                             IS_CAUSAL=False,
                             BLOCK_M=BLOCK_M,
-                            BLOCK_DMODEL=BLOCK_DMODEL,
+                            BLOCK_DMODEL0=BLOCK_DMODEL0,
+                            BLOCK_DMODEL1=BLOCK_DMODEL1,
+                            BLOCK_DMODEL2=BLOCK_DMODEL2,
                             BLOCK_N=BLOCK_N,
                             OFFS_M=offs_m,
                             OFFS_N=offs_n,
@@ -373,18 +430,24 @@ def attn_fwd(
                         offs_n_causal = offs_n + (seqlen_q - seqlen_k) if IS_CAUSAL_BOTTOM_RIGHT else offs_n
                     else:
                         offs_n_causal = 0
-                    k_ptrs += n_full_blocks * BLOCK_N * stride_kn
-                    v_ptrs += n_full_blocks * BLOCK_N * stride_vk
+                    k_ptrs0, k_ptrs1, k_ptrs2 = composed_advance(k_ptrs0, k_ptrs1, k_ptrs2,
+                                                                 n_full_blocks * BLOCK_N * stride_kn,
+                                                                 BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2
+                                                                )
+                    v_ptrs0, v_ptrs1, v_ptrs2 = composed_advance(v_ptrs0, v_ptrs1, v_ptrs2,
+                                                                 n_full_blocks * BLOCK_N * stride_vk,
+                                                                 BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2
+                                                                )
                     if USE_BIAS:
                         bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
                     # yapf: disable
-                    acc, l_i, m_i = _attn_fwd_inner(
+                    acc0, acc1, acc2, l_i, m_i = _attn_fwd_inner(
                             # Inputs
-                            acc,
+                            acc0, acc1, acc2,
                             l_i, m_i, Qk_scale,
-                            q,
-                            k_ptrs,
-                            v_ptrs,
+                            q0, q1, q2,
+                            k_ptrs0, k_ptrs1, k_ptrs2,
+                            v_ptrs0, v_ptrs1, v_ptrs2,
                             bias_ptrs,
                             stride_kn, stride_vk, stride_bn,
                             # Task positions
@@ -392,7 +455,7 @@ def attn_fwd(
                             seqlen_k, seqlen_q, Head_dim,
                             # Dropout
                             idropout_p, philox_seed, batch_philox_offset, philox_offset_stride,
-                            encoded_sm_base,
+                            encoded_sm_base, Max_seqlen_k,
                             # CAUSAL: offs_n_causal, masked_blocks, n_extra_tokens, _
                             offs_n_causal, masked_blocks, n_extra_tokens,
                             # Alibi
@@ -402,7 +465,9 @@ def attn_fwd(
                             # constexpr
                             IS_CAUSAL=IS_CAUSAL,
                             BLOCK_M=BLOCK_M,
-                            BLOCK_DMODEL=BLOCK_DMODEL,
+                            BLOCK_DMODEL0=BLOCK_DMODEL0,
+                            BLOCK_DMODEL1=BLOCK_DMODEL1,
+                            BLOCK_DMODEL2=BLOCK_DMODEL2,
                             BLOCK_N=BLOCK_N,
                             OFFS_M=offs_m,
                             OFFS_N=offs_n,
@@ -427,21 +492,26 @@ def attn_fwd(
                 l_recip = 1 / l_i[:, None]
                 if ENABLE_DROPOUT:  # Should make dropout faster?
                     l_recip *= 1.0 / (1 - dropout_p)
-                acc = acc * l_recip
+                acc0, acc1, acc2 = composed_mul_lhs(acc0, acc1, acc2,
+                                                    l_recip,
+                                                    BLOCK_DMODEL0, BLOCK_DMODEL1, BLOCK_DMODEL2)
                 # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
                 # then we have one block with a row of all NaNs which come from computing
                 # softmax over a row of all -infs (-inf - inf = NaN). We check for that here
                 # and store 0s where there are NaNs as these rows should've been zeroed out.
                 end_M = start_M + BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k if IS_CAUSAL_BOTTOM_RIGHT else 0
-                acc = acc.to(Out.type.element_ty)
+                acc0, acc1, acc2 = composed_to(acc0, acc1, acc2, Out.type.element_ty)
                 if IS_CAUSAL:
                     if causal_start_idx > start_M and causal_start_idx < end_M:
-                        out_mask_boundary = tl.full((BLOCK_DMODEL, ), causal_start_idx, dtype=tl.int32)
                         mask_m_offsets = start_M + tl.arange(0, BLOCK_M)
-                        out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
                         z = 0.0
-                        acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
+                        acc0, acc1, acc2 = composed_casual_mask(acc0, acc1, acc2,
+                                                                mask_m_offsets, causal_start_idx,
+                                                                z.to(acc0.type.element_ty),
+                                                                BLOCK_DMODEL0,
+                                                                BLOCK_DMODEL1,
+                                                                BLOCK_DMODEL2)
 
                 overflow_size = end_M - seqlen_q
                 if L_not_null:
@@ -455,16 +525,18 @@ def attn_fwd(
                         tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
                     else:
                         tl.store(l_ptrs, m_i + tl.math.log2(l_i))
-
-                # write back O
-                o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
-                o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_on
-                o_ptrs_mask = tl.full([BLOCK_M, BLOCK_DMODEL], 1, dtype=tl.int1)
-                if overflow_size > 0:
-                    o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
-                if PADDED_HEAD:
-                    o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < Head_dim)
-                tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+                composed_store(acc0, acc1, acc2,
+                               BLOCK_M,
+                               BLOCK_DMODEL0,
+                               BLOCK_DMODEL1,
+                               BLOCK_DMODEL2,
+                               o_base=o_base,
+                               o_start_row=start_m * BLOCK_M,
+                               o_start_col=0,
+                               o_rows=seqlen_q,
+                               o_cols=Head_dim,
+                               stride_row=stride_om,
+                               stride_col=stride_on)
 
         if not PERSISTENT or unsupported_by_persistent:
             tile_id = num_tiles_total  # break after single tile
