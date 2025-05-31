@@ -43,7 +43,11 @@ class CausalType:
     NONE = 0
     TOP_LEFT = 1
     BOTTOM_RIGHT = 2
+    WINDOWED = 3
 
+class WindowedValues:
+    TOP_LEFT = -2147483647
+    BOTTOM_RIGHT = -2147483646
 
 class BiasType:
     NONE = 0
@@ -713,7 +717,9 @@ class _attention(torch.autograd.Function):
                 RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
                 encoded_softmax=encoded_softmax,
                 # causal, (Planned Feature) windowed attention
-                CAUSAL_TYPE=CausalType.BOTTOM_RIGHT if metadata.causal else CausalType.NONE,
+                CAUSAL_TYPE=CausalType.WINDOWED if metadata.causal else CausalType.NONE,
+                Window_left=WindowedValues.TOP_LEFT,
+                Window_right=WindowedValues.TOP_LEFT,
                 # bias
                 BIAS_TYPE=BiasType.NONE if metadata.bias is None else BiasType.MATRIX,
                 # alibi

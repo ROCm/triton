@@ -9,7 +9,6 @@ from fwd_kernel_inner import (
 )
 from dropout import PHILOX_RN_PER_OFFSET
 from masked_load_store import (
-    mstore2d,
     closed_interval_isect,
     is_closed_interval_empty,
     closed_interval_size,
@@ -377,6 +376,7 @@ def attn_fwd(
                 # value because there is no masking. Similarly we do not need padding.
                 if not fb_empty:
                     nblocks_1 = closed_interval_size(fb_lo, fb_hi)
+                    # yapf: disable
                     acc0, acc1, acc2, l_i, m_i = _attn_fwd_inner(
                             # Inputs
                             acc0, acc1, acc2,
@@ -416,6 +416,7 @@ def attn_fwd(
                             INT8_KV=INT8_KV,
                             USE_P_SCALE=USE_P_SCALE,
                             )
+                    # yapf: enable
 
                 tl.debug_barrier()
                 # masked blocks
@@ -435,6 +436,7 @@ def attn_fwd(
                     #                                             )
                     # if USE_BIAS:
                     #     bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
+                    # yapf: disable
                     nblocks_1 = closed_interval_size(lb_lo, lb_hi)
                     nblocks_2 = closed_interval_size(rb_lo, rb_hi)
                     acc0, acc1, acc2, l_i, m_i = _attn_fwd_inner(
