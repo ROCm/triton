@@ -106,21 +106,27 @@ def attn_fwd(
                 tl.store(philox_offset_output,
                          philox_offset_base.to(dtype=philox_seed_output.type.element_ty))
 
-    if PERSISTENT:  # if persistent, kernel loops over multiple tiles
-        Num_WG = Num_CU * GRID_CU_MULTIP  # number of workgroups launched
+    # Default values for standard kernel
+    tile_id = 0
+    num_tiles_total = 1
+    num_tiles_per_head = 1
+    num_tiles_per_sample = 1
+    Num_WG = Num_CU * GRID_CU_MULTIP  # number of workgroups launched
+    unsupported_by_persistent = Num_seqlens != 0
+    if PERSISTENT and not unsupported_by_persistent:  # Only enable for non-varlen
+        # if persistent, kernel loops over multiple tiles
         num_tiles_per_head = tl.cdiv(Max_seqlen_q, BLOCK_M)  # the number of work units (tiles) of a single head
         num_tiles_per_sample = num_tiles_per_head * Num_head_q  # times the number of heads
         num_tiles_total = num_tiles_per_sample * Batch  # times the number of samples
         if PERSISTENT_DYNAMIC:
-            tile_id = persistent_atomic_counter.atomic_add(1)  # retuns the value BEFORE the atomic operation
+            tile_id = persistent_atomic_counter.atomic_add(1)  # returns the value BEFORE the atomic operation
         else:
             tile_id = tl.program_id(0)
-    else:  # standard, kernel processes only one tile
-        tile_id = 0
-        num_tiles_total = 1
+
+    continue_condition : tl.int1 = True  # as we can't have return statements inside while loop in Triton
 
     while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
-        if PERSISTENT:
+        if PERSISTENT_DYNAMIC and not unsupported_by_persistent:
             # tile id basically tells us the Q block we are handling
             off_z = tile_id // num_tiles_per_sample  # at which batch sample are we
             off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head  # at which head are we inside the sample
@@ -129,12 +135,11 @@ def attn_fwd(
             start_m = tl.program_id(2)
             off_h_q = tl.program_id(1)
             off_z = tl.program_id(0)
+        start_M = start_m * BLOCK_M
 
-        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = start_M + tl.arange(0, BLOCK_M)
         offs_n = tl.arange(0, BLOCK_N)
         offs_d = tl.arange(0, BLOCK_DMODEL)
-
-        continue_condition = True  # as we can't have return statements inside while loop in Triton
 
         if Num_seqlens > 0:
             cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
@@ -142,7 +147,7 @@ def attn_fwd(
             seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
             # We have a one-size-fits-all grid in id(0). Some seqlens might be too
             # small for all start_m so for those we return early.
-            if start_m * BLOCK_M >= seqlen_q:
+            if start_M >= seqlen_q:
                 continue_condition = False
                 # return
             cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z)
@@ -153,7 +158,7 @@ def attn_fwd(
             cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
             cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
             seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
-            if start_m * BLOCK_M >= seqlen_q:
+            if start_M >= seqlen_q:
                 continue_condition = False
             cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z)
             cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1)

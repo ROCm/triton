@@ -182,8 +182,8 @@ def attn_fwd(
             cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z)
             cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1)
             seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
-            batch_index = 0  # FILEPR
-        elif Num_seqlens < 0: # FILEPR
+            batch_index = 0
+        elif Num_seqlens < 0:
             cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
             cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
             seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
