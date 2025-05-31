@@ -678,7 +678,7 @@ class _attention(torch.autograd.Function):
             grid = lambda META: (min(NUM_CU * META['GRID_CU_MULTIP'],
                                      triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']) * nheads_q * batch), )
         else:
-            grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
+            grid = lambda META: (batch, nheads_q, triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']))
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 

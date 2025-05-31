@@ -121,9 +121,9 @@ def attn_fwd(
             off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head  # at which head are we inside the sample
             start_m = tile_id % num_tiles_per_sample % num_tiles_per_head  # at which tile are we inside the head
         else:
-            start_m = tl.program_id(0)
+            start_m = tl.program_id(2)
             off_h_q = tl.program_id(1)
-            off_z = tl.program_id(2)
+            off_z = tl.program_id(0)
 
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_n = tl.arange(0, BLOCK_N)
