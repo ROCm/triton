@@ -523,10 +523,6 @@ def attn_fwd(
                         tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
                     else:
                         tl.store(l_ptrs, m_i + tl.math.log2(l_i))
-                # tl.device_print('final acc0', acc0)
-                # tl.device_print('acc1', acc1)
-                # tl.device_print('acc2', acc2)
-                # write back O
                 composed_store(acc0, acc1, acc2,
                                BLOCK_M,
                                BLOCK_DMODEL0,

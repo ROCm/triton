@@ -218,7 +218,6 @@ def attn_fwd(
                         tl.store(l_ptrs, l, mask=l_ptrs_mask)
                     # TODO: Should dropout and return encoded softmax be handled here too?
                     continue_condition = False
-                    # return
 
             if continue_condition:
                 # MQA / GQA has different K and V head offsets.
@@ -426,27 +425,25 @@ def attn_fwd(
                 # epilogue
                 # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
                 l_recip = 1 / l_i[:, None]
+                if ENABLE_DROPOUT:  # Should make dropout faster?
+                    l_recip *= 1.0 / (1 - dropout_p)
                 acc = acc * l_recip
-
-                if ENABLE_DROPOUT:
-                    acc = acc / (1 - dropout_p)
                 # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
                 # then we have one block with a row of all NaNs which come from computing
                 # softmax over a row of all -infs (-inf - inf = NaN). We check for that here
                 # and store 0s where there are NaNs as these rows should've been zeroed out.
-                end_m_idx = (start_m + 1) * BLOCK_M
-                start_m_idx = start_m * BLOCK_M
+                end_M = start_M + BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k if IS_CAUSAL_BOTTOM_RIGHT else 0
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:
-                    if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
+                    if causal_start_idx > start_M and causal_start_idx < end_M:
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ), causal_start_idx, dtype=tl.int32)
-                        mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
+                        mask_m_offsets = start_M + tl.arange(0, BLOCK_M)
                         out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
                         z = 0.0
                         acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
 
-                overflow_size = end_m_idx - seqlen_q
+                overflow_size = end_M - seqlen_q
                 if L_not_null:
                     # write back LSE
                     l_ptrs = L + off_z * Num_head_q * Max_seqlen_q + off_h_q * Max_seqlen_q + offs_m
@@ -469,12 +466,10 @@ def attn_fwd(
                     o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < Head_dim)
                 tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
-        if PERSISTENT:
+        if not PERSISTENT or unsupported_by_persistent:
+            tile_id = num_tiles_total  # break after single tile
+        else:
             if PERSISTENT_DYNAMIC:
                 tile_id = persistent_atomic_counter.atomic_add(1)
             else:
                 tile_id += Num_WG
-        else:
-            tile_id = num_tiles_total  # break after single tile
-
-
