@@ -1144,22 +1144,30 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
   asyncWaitOps[0]->erase();
   asyncWaitOps[1]->erase();
 
+  // try to interleave address calculation better by inserting sched.barrier
+  // beween ds_reads. Helps reducing salu/valu stalls.
+  moveOpAndPredecessorsUpSameBlock(lLoadOps[0]);
+  moveOpAndPredecessorsUpSameBlock(lLoadOps[1]);
+  lLoadOps[0]->setAttr("split_dsread", builder.getUnitAttr());
+  lLoadOps[1]->setAttr("split_dsread", builder.getUnitAttr());
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(lLoadOps[0]);
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  
   appendOp(asyncCopyOps[0]);
   appendOp(asyncCommitOps[0]);
-
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(lLoadOps[1]);
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(asyncCopyOps[1]);
-  appendOp(asyncCommitOps[1]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(newAsyncWaitOp);
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
+  //appendOp(builder.create<ROCDL::IglpOpt>(loc, 3));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 3, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 3, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+
+  appendOp(asyncCopyOps[1]);
+  appendOp(asyncCommitOps[1]);  
   appendOp(dotOps[0]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
@@ -1168,6 +1176,7 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
 
   return success();
 }
+
 // This function wraps forOp with cond_barrier. First, hold half of the warps
 // (warpHigh) in a block before the loop so the barriers in the loop synchronize
 // warps at the different point per the warp groups. After the loop, hold
@@ -1343,7 +1352,7 @@ void Pingponger::getDotPingponged() {
       LDBG("Currently only support num_warp=8 for async PP");
       return;
     }
-    if (numStages == 3 && dotOps.size() == 1 && tileSize == mediumTile && aShape[1] == 32 && elemWidth == 16) {
+    if (numStages > 2 && dotOps.size() == 1 && tileSize == mediumTile && aShape[1] == 32 && elemWidth == 16) {
       if (transformNS3(builder, loc).failed()) {
         LDBG("Encountered failure when trying to execute the NS3 ping pong "
             "cluster transformation");
