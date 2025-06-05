@@ -3,6 +3,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -636,6 +637,34 @@ public:
   }
 };
 
+class ConvertUBPoisonOp : public PointerCanonicalizationPattern<ub::PoisonOp> {
+public:
+  using PointerCanonicalizationPattern::PointerCanonicalizationPattern;
+
+  LogicalResult
+  matchAndRewrite_(ub::PoisonOp poisonOp, OneToNOpAdaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+    auto resultTy = dyn_cast<RankedTensorType>(poisonOp.getResult().getType());
+    if (!resultTy)
+      return success();
+
+    auto loc = poisonOp->getLoc();
+    auto elemTy = resultTy.getElementType();
+    auto newBase =
+        rewriter.create<ub::PoisonOp>(loc, elemTy, poisonOp.getValue());
+
+    auto intTy = mlir::IntegerType::get(poisonOp->getContext(), 64);
+    auto offsetTy = RankedTensorType::get(resultTy.getShape(), intTy,
+                                          resultTy.getEncoding());
+    auto newOffset = createTensorZero(rewriter, loc, offsetTy);
+    rewriter.replaceOpWithMultiple(poisonOp, {{newBase, newOffset}});
+    auto dummy = FatPointers::FatPtrAttrs();
+    dummy.canNarrow = true;
+    fatPtrs[{newBase, newOffset}] = dummy;
+    return success();
+  }
+};
+
 using ConversionCallbackFn =
     std::function<std::optional<LogicalResult>(Type, SmallVectorImpl<Type> &)>;
 
@@ -723,6 +752,7 @@ public:
                    ConversionPatternRewriter &rewriter) const override {
     ArrayRef<ValueRange> remappedYields = adaptor.getOperands();
     SmallVector<Value> newYieldedValues = flattenValues(remappedYields);
+
     // have to mutate here because otherwise scf.if, scf.for, and scf.while will
     // get confused about which yield is the "correct" yield (since there will
     // be two of them before the rewriter DCEs)
@@ -1475,6 +1505,12 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
     return signalPassFailure();
 
   llvm::SetVector<Operation *> opsToRewrite;
+  func->walk([&](ub::PoisonOp op) {
+    opsToRewrite.insert(op);
+    for (auto &use : op->getUses())
+      getForwardSliceImpl(&use, use.getOwner(), &opsToRewrite);
+  });
+
   for (auto arg : func.getArguments()) {
     if (llvm::isa<tt::PointerType>(arg.getType())) {
       // NB: reusing the same SetVector invalidates the topo order implied by
@@ -1508,6 +1544,7 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
   target.addDynamicallyLegalDialect<scf::SCFDialect>(isLegal);
   target.addDynamicallyLegalDialect<cf::ControlFlowDialect>(isLegal);
   target.addDynamicallyLegalDialect<arith::ArithDialect>(isLegal);
+  target.addDynamicallyLegalDialect<ub::UBDialect>(isLegal);
 
   // Rewrite the rest of the ops.
   // Note we *do not* declare unrealized_cast an illegal op here in order that
@@ -1519,7 +1556,7 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
   RewritePatternSet patterns(&getContext());
   patterns.add<
       ConvertFuncOpArgsUnrealizedCasts, ConvertBroadcastOp, ConvertSplatOp,
-      ConvertConvertLayoutOp, ConvertAddPtrOp,
+      ConvertConvertLayoutOp, ConvertAddPtrOp, ConvertUBPoisonOp,
       MaterializeFatPointer<tt::AtomicCASOp>,
       MaterializeFatPointer<tt::AtomicRMWOp>,
       MaterializeFatPointer<tt::BitcastOp>, MaterializeFatPointer<tt::LoadOp>,
