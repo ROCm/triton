@@ -117,12 +117,12 @@ SmallVector<unsigned, 3> warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape,
     if (tensorShape[0] / (shapePerWarp.first * 2) / ret[0] >=
         tensorShape[1] / shapePerWarp.second / ret[1]) {
       if (ret[0] < tensorShape[0] / shapePerWarp.first) {
-        ret[0] *= 2;
+        ret[0] *= numWarps; // 2
       } else {
-        ret[1] *= 2;
+        ret[1] *= numWarps; // 2
       }
     } else {
-      ret[1] *= 2;
+      ret[1] *= numWarps; // 2
     }
   } while (true);
 
