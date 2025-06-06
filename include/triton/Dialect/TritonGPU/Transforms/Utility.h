@@ -250,6 +250,9 @@ void eraseLoopCarriedValues(scf::ForOp &loop, llvm::BitVector indices);
 
 // Get a boolean if the Value is an arith::ConstantOp
 std::optional<bool> getBoolFromConstant(Value cst);
+
+// Convert \param op operands and results to layout \param encoding.
+void convertOpEncoding(Attribute encoding, Operation *op);
 } // namespace mlir
 
 namespace mlir::triton {

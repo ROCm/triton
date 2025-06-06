@@ -672,11 +672,10 @@ void StreamPipeliner::assignMemoryLayouts() {
     if (isa<tt::DotOpInterface>(use)) {
       // Only use shared memory when feeding into a dot op.
       loadInfo.usedByDot = true;
-      // If the max continugous bits we can read is < 32, buffer in registers.
-      bool bypassLDS = width < 32;
       // Skip LDS for the scale B tensor when warpsPerCTA is {1, numWarps} and
       // the load layout matches the expected layout for scale B in the
       // dotScaled op.
+      bool bypassLDS = false;
       if (auto scaledDot = dyn_cast<tt::DotScaledOp>(use)) {
         auto scaleB = scaledDot.getBScale();
         SetVector<Operation *> slices;
@@ -701,12 +700,12 @@ void StreamPipeliner::assignMemoryLayouts() {
           mlir::triton::LinearLayout scaleBLayout =
               mlir::triton::gpu::toLinearLayout(scaleBTy.getShape(),
                                                 scaleBTy.getEncoding());
-          bypassLDS = bypassLDS ||
-                      (warpsPerCTA[0] == 1 && reshapedLayout == scaleBLayout);
+          bypassLDS = warpsPerCTA[0] == 1 && reshapedLayout == scaleBLayout;
         }
       }
 
-      if (!bypassLDS) {
+      // If the max continugous bits we can read is < 32, buffer in registers.
+      if (width >= 32 && !bypassLDS) {
         loadInfo.sharedEncoding =
             getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
       }

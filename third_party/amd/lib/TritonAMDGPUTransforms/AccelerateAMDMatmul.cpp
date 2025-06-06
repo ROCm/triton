@@ -8,7 +8,9 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/TypeSwitch.h"
 #include <memory>
 
@@ -71,8 +73,9 @@ SmallVector<unsigned, 3> warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape,
   ///     but cannot bypass LDS since both A and B tensor are shared
   ///     among waves.
   /// For now, we will let the shape to decide warpsPerCTA
-  // if (preshuffleScales)
-  //   return {1, static_cast<unsigned>(numWarps)};
+  bool bypassLDS = tools::getBoolEnv("TRITON_HIP_BYPASS_LDS_FOR_SCALES");
+  if (preshuffleScales && bypassLDS)
+    return {1, static_cast<unsigned>(numWarps)};
 
   // Case 1: Early exit for batched matmul
   if (rank == 3)
@@ -767,6 +770,22 @@ public:
   }
 };
 
+SmallVector<triton::LoadOp> getAllLoadOpsReachingOp(Operation *op) {
+  SmallVector<triton::LoadOp> loadOpsVec;
+  SetVector<Operation *> backwardSlice;
+  BackwardSliceOptions opt;
+  opt.omitBlockArguments = true;
+  getBackwardSlice(op, &backwardSlice, opt);
+
+  for (auto op : backwardSlice) {
+    if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
+      loadOpsVec.push_back(loadOp);
+    }
+  }
+
+  return loadOpsVec;
+}
+
 class ScaledBlockedToScaledMFMAF8F6F4 final
     : public OpRewritePattern<triton::DotScaledOp> {
   int mfmaVersion;
@@ -849,6 +868,41 @@ public:
     if (preshuffleScales) {
       tilesPerWarp[0] = oldShape[0] >= 32 ? 2 : 1;
       tilesPerWarp[1] = oldShape[1] >= 32 ? 2 : 1;
+    }
+
+    bool bypassLDS = tools::getBoolEnv("TRITON_HIP_BYPASS_LDS_FOR_SCALES");
+    // Change blocked layout of scaleB load to enable bypassing LDS
+    // optimization.
+    if (bypassLDS && preshuffleScales) {
+      // 1) Find the single load op that reaches dotOp.getBScale()
+      auto scaleBOp = dotOp.getBScale().getDefiningOp();
+      auto loadInsts = getAllLoadOpsReachingOp(scaleBOp);
+      assert(loadInsts.size() == 1 &&
+             "Expected exactly one load reaching scaleBOp");
+
+      auto scaleBLoad = loadInsts.front();
+      auto loadType =
+          dyn_cast<RankedTensorType>(scaleBLoad.getResult().getType());
+      auto loadShape = loadType.getShape();
+      assert(loadShape.size() == 2 && "Expected a 2D tensor here");
+
+      // 2) Compute new threadsPerWarp parameter
+      SmallVector<unsigned, 2> threadsPerWarpNew(2);
+      constexpr int numThreads = 64;
+      constexpr int sizePerThreadPreshuffle = 4;
+      threadsPerWarpNew[1] = std::min(
+          static_cast<int>(loadShape[1] / sizePerThreadPreshuffle), numThreads);
+      threadsPerWarpNew[0] = numThreads / threadsPerWarpNew[1];
+
+      // 3) Build a new BlockedEncodingAttr
+      auto blockedEnc =
+          dyn_cast<ttg::BlockedEncodingAttr>(loadType.getEncoding());
+      auto newBlockedEnc = ttg::BlockedEncodingAttr::get(
+          ctx, {1, 4}, threadsPerWarpNew, blockedEnc.getWarpsPerCTA(),
+          blockedEnc.getOrder(), blockedEnc.getCTALayout());
+
+      // 4) Apply the new encoding to the load
+      convertOpEncoding(newBlockedEnc, scaleBLoad);
     }
 
     // Always use transposed mfma layout. This enables larger vectorization
