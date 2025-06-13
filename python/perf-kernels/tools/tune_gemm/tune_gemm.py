@@ -178,7 +178,8 @@ def need_split_k(SIZE_M, SIZE_N, SIZE_K):
 
 def extract_kernel_time(M, N, K, config, df):
     configStr = gen_configStr(config)
-    df = df[df['KernelName'].str.contains(configStr)]
+    df['DurationNs'] = df['End_Timestamp'] - df['Start_Timestamp']
+    df = df[df['Kernel_Name'].str.contains(configStr)]
 
     first_value = df['DurationNs'].iloc[0]
     filtered_data = df['DurationNs'][df['DurationNs'] <= first_value]
@@ -204,7 +205,7 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
             print(f"profiling {kernel_name} on GPU {gpuid}")
         here = Path(__file__).parent
         run_bash_command_wrapper(
-            f"PYTHONPATH={here} rocprof --stats -o {get_output_dir()}/results_{jobId}.csv python {get_filename_profile_driver(M, N, K, jobId)}",
+            f"PYTHONPATH={here} rocprofv3 --kernel-trace -o {get_output_dir()}/{jobId} --log-level fatal -- python {get_filename_profile_driver(M, N, K, jobId)}",
             capture=(verbose < 2))
         jobId += ngpus
 
@@ -251,7 +252,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, init_type
     thread_pool = multiprocessing.Pool(processes=num_threads)
     tasks = []
     idx = 0
-    df_prof = [pd.read_csv(f"{get_output_dir()}/results_{i}.csv") for i in range(jobs)]
+    df_prof = [pd.read_csv(f"{get_output_dir()}/{i}_kernel_trace.csv") for i in range(jobs)]
     for config in configs:
         file_idx = idx % jobs
         tasks += [thread_pool.apply_async(extract_kernel_time, args=(M, N, K, config, df_prof[file_idx]))]
