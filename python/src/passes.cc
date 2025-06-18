@@ -1,5 +1,6 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "passes.h"
@@ -32,6 +33,12 @@ void init_triton_passes_common(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_cse", createCSEPass);
   ADD_PASS_WRAPPER_0("add_licm", createLoopInvariantCodeMotionPass);
   ADD_PASS_WRAPPER_0("print_ir", createPrintIRPass);
+  m.def("add_int_range_narrowing", [](mlir::PassManager &pm) {
+    std::vector<unsigned> bitWidths = {1, 8, 16, 32, 64};
+    mlir::arith::ArithIntRangeNarrowingOptions arithOps;
+    arithOps.bitwidthsSupported = llvm::to_vector(bitWidths);
+    pm.addPass(mlir::arith::createArithIntRangeNarrowing(arithOps));
+  });
 }
 
 void init_triton_passes_ttir(py::module &&m) {
