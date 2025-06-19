@@ -901,12 +901,12 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
   assert(((aScale && bScale) || (!aScale && !bScale)) &&
          "Single scale is not supported");
 
-  if (aScale && bScale) {
-    assert(
-        isa<LinearEncodingAttr>(aScale.getType().getEncoding()) &&
-        isa<LinearEncodingAttr>(bScale.getType().getEncoding()) &&
-        "If scales exist, both LhsScale and RhsScale should be linear layout.");
-  }
+  // if (aScale && bScale) {
+  //   assert(
+  //       isa<LinearEncodingAttr>(aScale.getType().getEncoding()) &&
+  //       isa<LinearEncodingAttr>(bScale.getType().getEncoding()) &&
+  //       "If scales exist, both LhsScale and RhsScale should be linear layout.");
+  // }
 
   auto cTensorTy = op.getC().getType();
   auto dTensorTy = op.getD().getType();

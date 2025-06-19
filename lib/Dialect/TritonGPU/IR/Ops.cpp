@@ -219,10 +219,26 @@ struct CanonicalizeConvertFromConvert
   matchAndRewrite(ConvertLayoutOp op,
                   PatternRewriter &rewriter) const override {
     // Convert to the same layout is redundant.
-    if (op->getResultTypes() == op->getOperandTypes()) {
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
+    auto resTy = cast<RankedTensorType>(op.getResult().getType());
+    auto dstEnc = resTy.getEncoding();
+    auto srcEnc = srcTy.getEncoding();
+
+    mlir::triton::LinearLayout srcOpLayout = mlir::triton::gpu::toLinearLayout(
+        srcTy.getShape(), srcTy.getEncoding());
+    mlir::triton::LinearLayout dstOpLayout = mlir::triton::gpu::toLinearLayout(
+        resTy.getShape(), resTy.getEncoding());
+
+    if (srcTy.getElementType() == resTy.getElementType() &&
+        srcTy.getShape() == resTy.getShape() && srcOpLayout == dstOpLayout) {
       rewriter.replaceOp(op, op->getOperands());
       return success();
     }
+
+    // if (op->getResultTypes() == op->getOperandTypes()) {
+    //   rewriter.replaceOp(op, op->getOperands());
+    //   return success();
+    // }
 
     // We don't handle conversions to DotOperandEncodingAttr.  This is a
     // heuristic to accommodate fused attention.
