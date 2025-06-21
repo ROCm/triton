@@ -126,7 +126,7 @@ LogicalResult FourStagePipeliner::initSchedule(int maxIndirectionLevel) {
   if (useAsyncCopy) {
     numBuffers += 1;
   }
-  numBuffers = 2;
+  numBuffers = 1;
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
@@ -177,6 +177,8 @@ LogicalResult FourStagePipeliner::initSchedule(int maxIndirectionLevel) {
   softmaxClusters[0] = schedule.clusters.newAtBack();
   // Wait for V, LRV
   localReadClusters[0] = schedule.clusters.newAtBack();
+  // LWK
+  localWriteClusters[0] = schedule.clusters.newAtBack();
   // ACK
   asyncCopyClusters[0] = schedule.clusters.newAtBack();
   // DOT2
@@ -185,6 +187,8 @@ LogicalResult FourStagePipeliner::initSchedule(int maxIndirectionLevel) {
   softmaxClusters[1] = schedule.clusters.newAtBack();
   // Wait for K, LRK
   localReadClusters[1] = schedule.clusters.newAtBack();
+  // LWV
+  localWriteClusters[1] = schedule.clusters.newAtBack();
   // ACV
   asyncCopyClusters[1] = schedule.clusters.newAtBack();
 
@@ -363,18 +367,25 @@ void FourStagePipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   for (auto alloc : allocsToErase)
     alloc.erase();
 
+  // 4-stage pipeliner scheduleing
+  auto localLoadStage = stage == 0 ? 1 : 3;
+  auto localStoreStage = stage == 0 ? 1 : 2;
+  auto localLoadCluster = stage == 0 ? 1 : 0;
+  auto localStoreCluster = stage == 0 ? 0 : 1;
+
   // Prefetch load ahead of the dot stage if is used by the dot.
   auto storeOp =
       builder.create<ttg::LocalStoreOp>(loc, copy->getResult(0), viewLoad);
-  scheduleOp(viewLoad, SCHED_LOCAL_STORE);
-  scheduleOp(storeOp, SCHED_LOCAL_STORE);
+  schedule.insert(viewLoad, localStoreStage, localWriteClusters[localStoreCluster]);
+  schedule.insert(storeOp, localStoreStage, localWriteClusters[localStoreCluster]);
 
   // Create local load
   auto sharedLoad =
       builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad);
   Value result = sharedLoad.getResult();
-  if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
-    scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
+  schedule.insert(sharedLoad, localLoadStage, localReadClusters[localLoadCluster]);
+  //if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
+  //  scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
 
   // If the currently processed `LoadOp` is labeled with an index regarding
   // to which `DotOp` operand the corresponding data belongs to, then label the
@@ -387,9 +398,18 @@ void FourStagePipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   loadOp->replaceAllUsesWith(ValueRange{result});
 
+  // Make sure that a possible cvt is in the same stage or otherwise it will not
+  // get folded
+  if (sharedLoad->hasOneUse()) {
+    if (auto cvt = dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
+      LDBG("Change cvt layout stage and cluster");
+      schedule.insert(cvt, localLoadStage, localReadClusters[localLoadCluster]);
+    }
+  }
+
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE] && result.hasOneUse()) {
     if (auto cvt = dyn_cast<ttg::ConvertLayoutOp>(*result.getUsers().begin()))
-      scheduleOp(cvt, SCHED_LOCAL_LOAD);
+      schedule.insert(cvt, localLoadStage, localReadClusters[localLoadCluster]);
   }
 
   loadOp.erase();
@@ -877,7 +897,7 @@ LogicalResult FourStagePipeliner::preprocessLoopAndBuildSchedule() {
   // Convert the loads into shared memory allocations and loads from them.
   createStreamOps();
   LLVM_DEBUG({
-    LDBG("Coarse schedule with replaced laod ops:");
+    LDBG("Coarse schedule with replaced load ops:");
     schedule.dump();
   });
 

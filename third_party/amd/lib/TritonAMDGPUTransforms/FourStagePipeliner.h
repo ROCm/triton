@@ -136,6 +136,7 @@ private:
   std::array<triton::CoarseSchedule::Cluster, 2> softmaxClusters;
   std::array<triton::CoarseSchedule::Cluster, 2> asyncCopyClusters;
   std::array<triton::CoarseSchedule::Cluster, 2> dotClusters;
+  std::array<triton::CoarseSchedule::Cluster, 2> localWriteClusters;
 
   // Scheduling clusters
   triton::CoarseSchedule schedule;
