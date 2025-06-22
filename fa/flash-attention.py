@@ -385,7 +385,7 @@ def get_cdna_autotune_configs():
     return [
         # triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 0, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
         #               num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'waves_per_eu': 2, 'kpack': 2, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
                       num_stages=4, num_warps=8),
         # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False, 'GRID_CU_MULTIP': 2},
         #               num_stages=2, num_warps=4),
