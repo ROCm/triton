@@ -166,15 +166,17 @@ def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
 
 def extract_kernel_time(M, N, K, config, df, bias_size):
     configStr = gen_configStr(config)
-    df = df[df['KernelName'].str.contains(configStr)]
+    df = df[df['Kernel_Name'].str.contains(configStr)]
     if df.empty:
         print("No data available after filtering. Returning mean time as 0.")
         #        raise ValueError("No data available after filtering.")
         new_meanTime = 0
         return config, new_meanTime
 
-    first_value = df['DurationNs'].iloc[0]
-    filtered_data = df['DurationNs'][df['DurationNs'] <= first_value]
+    filtered_df = df.copy()
+    filtered_df['DurationNs'] = filtered_df['End_Timestamp'] - filtered_df['Start_Timestamp']
+    first_value = filtered_df['DurationNs'].iloc[0]
+    filtered_data = filtered_df['DurationNs'][filtered_df['DurationNs'] <= first_value]
     new_meanTime = filtered_data.tail(100).mean()
 
     return config, new_meanTime
@@ -213,7 +215,8 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
         if verbose:
             print(f"profiling {kernelname} on GPU {gpuid}")
         run_bash_command_wrapper(
-            f"rocprof --stats -o results_{jobId}.csv python {get_filename_profile_driver(M, N, K, jobId)}",
+            #f"rocprof --stats -o results_{jobId}.csv python {get_filename_profile_driver(M, N, K, jobId)}",
+            f"rocprofv3 --stats --kernel-trace -o results_{jobId} -- python {get_filename_profile_driver(M, N, K, jobId)}",
             #            f"rocprofv2 --plugin file --plugin-version 1 --kernel-trace -o {jobId} python {get_filename_profile_driver(M, N, K, jobId)}",
             capture=(verbose < 2))
         jobId += ngpus
@@ -270,7 +273,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, 
     #                    quotechar='"',
     #                    escapechar='\\') for i in range(jobs)
     #    ]
-    df_prof = [pd.read_csv(f"results_{i}.csv") for i in range(jobs)]
+    df_prof = [pd.read_csv(f"results_{i}_kernel_trace.csv") for i in range(jobs)]
     for config in configs:
         file_idx = idx % jobs
         #        tasks += [
