@@ -248,7 +248,7 @@ struct DotOpMFMAConversionHelper {
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
     auto mDim = mfmaLayout.getMDim();
     auto nDim = mfmaLayout.getNDim();
-    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    auto mfmaVersion = mfmaLayout.getVersion();
     assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
            (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
@@ -540,7 +540,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
     auto mDim = mfmaLayout.getMDim();
     auto nDim = mfmaLayout.getNDim();
-    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    auto mfmaVersion = mfmaLayout.getVersion();
     assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
            (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
