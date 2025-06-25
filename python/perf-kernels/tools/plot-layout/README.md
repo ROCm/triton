@@ -167,7 +167,7 @@ python3 plot_layout.py lds --layout swizzle --access none --tensorShape 128 128 
 python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 128 --kWidth 16 --dtype bf8 --banks 64
 python3 plot_layout.py lds --layout swizzle --access write --tensorShape 128 128 --kWidth 16 --dtype f4 --banks 32
 python3 plot_layout.py lds --layout none --access read --tensorShape 128 32 --kWidth 4 --dtype fp16 --banks 64 --mnContig
-python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma_trans_load
+python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma-trans-load
 python3 plot_layout.py lds --layout padding --access none --tensorShape 128 32 --kWidth 8 --dtype fp16 --banks 32 --padInterval 128 --padAmount 16
 ```
 
