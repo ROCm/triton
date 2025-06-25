@@ -975,24 +975,38 @@ Bf16_to_Fp8E4M3FN_SW(Location loc, ConversionPatternRewriter &rewriter,
     e = b.select(isBf16Nan, b.i16_val(0x000F), e);
     m = b.select(isBf16Nan, b.i16_val(0x0007), m);
     if constexpr (UZ) {
-      sign = b.select(isBf16Nan, b.i16_val(0x0000), sign);
+      sign = b.select(isBf16Nan, b.i16_val(0x0001), sign);
     }
 
     Value isBf16Inf = b.and_(isBf16ExpFull, isBf16MantissaZero);
     e = b.select(isBf16Inf, b.i16_val(0x000F), e);
     if constexpr (UZ) {
       m = b.select(isBf16Inf, b.i16_val(0x0007), m);
-      sign = b.select(isBf16Inf, b.i16_val(0x0000), sign);
+      sign = b.select(isBf16Inf, b.i16_val(0x0001), sign);
     } else {
       m = b.select(isBf16Inf, b.i16_val(0x0006), m);
     }
 
     Value isGreaterFP8Max = b.icmp_sge(exp, b.i16_val(0x000F));
+    Value fp8MantissaMax;
+    Value fp8MantissaMaxLShifted;
+
+    if constexpr (UZ)
+    {
+      fp8MantissaMaxLShifted = b.i16_val(0x0070);
+      fp8MantissaMax = b.i16_val(0x0007);
+    }
+    else
+    {
+      fp8MantissaMaxLShifted = b.i16_val(0x0060);
+      fp8MantissaMax = b.i16_val(0x0006);
+    }
+
     isGreaterFP8Max =
-        b.and_(isGreaterFP8Max, b.icmp_sge(mantissa, b.i16_val(0x0060)));
+        b.and_(isGreaterFP8Max, b.icmp_sge(mantissa, fp8MantissaMaxLShifted));
 
     e = b.select(isGreaterFP8Max, b.i16_val(0x000F), e);
-    m = b.select(isGreaterFP8Max, b.i16_val(0x0006), m);
+    m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
 
     Value result = b.or_(b.or_(sign, b.shl(e, b.i16_val(3))), m);
     auto fp8x2VecTy = vec_ty(i8_ty, 2);
