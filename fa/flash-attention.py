@@ -339,7 +339,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         else:
             if INT8_KV:
                 v = (v * v_descale).to(p.type.element_ty)
-            acc += tl.dot(p.to(v.type.element_ty), v)
+            acc += tl.dot(p.to(v.type.element_ty, "rtz"), v)
 
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
