@@ -1015,9 +1015,9 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
 // Fixme : document the scheduling.
 // Assuming pipeliner already ordered the ops.
 LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
-  if (asyncWaitOps.size() != 2) {
-    return llvm::failure();
-  }
+    //if (asyncWaitOps.size() != 2) {
+    //return llvm::failure();
+    //}
 
   builder.setInsertionPointToStart(forOp.getBody());
   updateOpInsertion(dotOps[0]);
@@ -1025,23 +1025,26 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 
   // dot cluster 0 operations here.
 
-  updateOpInsertion(asyncWaitOps[0]);
+  appendOp(builder.create<ROCDL::IglpOpt>(loc, 10));
+  updateOpInsertion(lLoadOps[0]);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
 
   // mem cluster 0 operations here.
 
   updateOpInsertion(dotOps[1]);
   // below ops are inserted backward
+  prependOp(builder.create<ROCDL::IglpOpt>(loc, 10), true);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority), true);
   prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
   prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
 
   // dot cluster 1 operations here.
 
-  updateOpInsertion(asyncWaitOps[1]);
+  updateOpInsertion(lLoadOps[1]);
   prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
 
   // mem cluster 1 operations here.
 
@@ -1176,14 +1179,15 @@ void Pingponger::getDotPingponged() {
     if (auto asyncCopy = dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(op))
       asyncCopyOps.push_back(asyncCopy);
     else if (auto lLoad = dyn_cast<ttg::LocalLoadOp>(op)) {
+      lLoadOps.push_back(lLoad);
       // This scheduling doesn't help hiding intra-warp latency. So, we only
       // collect local_load ops that are software pipelined, which means their
       // source is from loop carried values
-      auto src = lLoad.getSrc();
-      if (auto arg = mlir::dyn_cast<BlockArgument>(src))
-        if (auto tiedLoopInit = forOp.getTiedLoopInit(arg))
-          if (tiedLoopInit->get())
-            lLoadOps.push_back(lLoad);
+      //auto src = lLoad.getSrc();
+      //if (auto arg = mlir::dyn_cast<BlockArgument>(src))
+           //  if (auto tiedLoopInit = forOp.getTiedLoopInit(arg))
+             //    if (tiedLoopInit->get())
+               //      lLoadOps.push_back(lLoad);
     } else if (auto lStore = dyn_cast<ttg::LocalStoreOp>(op))
       lStoreOps.push_back(lStore);
     else if (auto pingpongDot = dyn_cast<tt::DotOp>(op)) {
