@@ -160,28 +160,28 @@ options:
 ```
 Examples:
 ```bash
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 8
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 32 --dtype f4
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access read --tensorShape 128 128 --kWidth 16 --dtype bf8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access write --tensorShape 128 128 --kWidth 16 --dtype f4 --banks 32
-python3 plot_layout.py lds --lds-layout none --lds-access read --tensorShape 128 32 --kWidth 4 --dtype fp16 --banks 64 --mnContig
-python3 plot_layout.py lds --lds-layout swizzle --lds-access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma_trans_load
-python3 plot_layout.py lds --lds-layout padding --lds-access none --tensorShape 128 32 --kWidth 8 --dtype fp16 --banks 32 --padInterval 128 --padAmount 16
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 8
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 32 --dtype f4
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 128 --kWidth 16 --dtype bf8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access write --tensorShape 128 128 --kWidth 16 --dtype f4 --banks 32
+python3 plot_layout.py lds --layout none --access read --tensorShape 128 32 --kWidth 4 --dtype fp16 --banks 64 --mnContig
+python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma_trans_load
+python3 plot_layout.py lds --layout padding --access none --tensorShape 128 32 --kWidth 8 --dtype fp16 --banks 32 --padInterval 128 --padAmount 16
 ```
 
 Knobs
 - `kWidth`: the vector size (in unit of elements) when accessing LDS
 - `banks`: the number of banks in LDS. (64 for gfx950, 32 for pre-gfx950)
 - `dtype_a`: element data type
-- Three options for `--lds-layout`:
+- Three options for `--layout`:
   - `none`: no swizzling, no padding
   - `swizzle`: apply the swizzling pattern, which is derived from tensor shape and kWidth.
   - `padding`: pad `padAmount` bytes for every `padInterval` bytes of data
     - `padAmount`: default is 0
     - `padInterval`: default is 1
-- Three options for `--lds-access`:
+- Three options for `--access`:
   - `none`: do not plot access pattern
   - `read`: plot accessed elements at the first cycle of ds_read
   - `write`: plot accessed elements during ds_write. For global load access, we assume
