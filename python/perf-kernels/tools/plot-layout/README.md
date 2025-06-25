@@ -82,6 +82,7 @@ options:
   -h, --help                                  show this help message and exit
   --dotShape M N K                            Dot op shape in the form of M, N, K (default: (32, 128, 64))
   --warpsPerCTA w0 w1                         how warps tile the dot result matrix (default: (1, 4))
+  --tilesPerWarp y0 y1                        how many contiguous tiles per warp (default: (1, 1))
   --nonKDim {16,32}                           mfma instruction dimension of M/N (default: 16)
   --kWidth {4,8,16,32}                        number of contiguous elements each thread owns during MFMA (default: 4)
   --kGroup {1,2}                              total number of elements / kWidth per mfma instruction (default: 1)
@@ -94,21 +95,21 @@ options:
 Examples:
 ```bash
 ## i8 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a i8 --dtype-b i8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtype-a i8 --dtype-b i8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA i8 --dtypeB i8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtypeA i8 --dtypeB i8
 ## fp16/bf16 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 4 --dtype-a fp16 --dtype-b fp16
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a fp16 --dtype-b fp16
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 4 --dtypeA fp16 --dtypeB fp16
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA fp16 --dtypeB fp16
 ## fp8/bf8 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a fp8 --dtype-b bf8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtype-a fp8 --dtype-b bf8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp8 --dtype-b bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA fp8 --dtypeB bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtypeA fp8 --dtypeB bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp8 --dtypeB bf8
 ## f4 and fp6/bf6 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 32 --kGroup 1 --dtype-a f4 --dtype-b bf6
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 32 --kGroup 1 --dtypeA f4 --dtypeB bf6
 ## fp8/bf8 and fp6/bf6/f4 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp6 --dtype-b bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp6 --dtypeB bf8
 ## mixed precision with scaling
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp6 --dtype-b bf8 --scale
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp6 --dtypeB bf8 --scale
 ```
 
 One can add `--nonKDim [16,32]` and `--mfmaTrans` to all of the above examples.
@@ -125,7 +126,7 @@ Knobs
    with fp8 input types (CBSZ=0 or 1 and/or BLGP=0 or 1)
 - `--nonKDim [16,32]`: mfma instruction size. The default is set to 16.
 - `--mfmaTrans`: if set, the transposed mfma layout will be plotted.
-- `--dtype-a` and `-dtype-b`: element types of operand A and B. The default value is fp16.
+- `--dtypeA` and `-dtypeB`: element types of operand A and B. The default value is fp16.
 - `--scale`: plot scale tensors for A and B. This is only supported with f4/f6 and f8 with `kGroup=2`.
   If `--scale` is set but not supported, it's ignored.
 
