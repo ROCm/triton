@@ -1162,15 +1162,31 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     m = b.select(isBf16NanOrInf, b.i16_val(0x0000), m);
     sign = b.select(isBf16NanOrInf, b.i16_val(0x0001), sign);
 
+    // RTNE
+    // Round bit, the next bit after the top 2 MSBs of mantissa (M2)
+    // Lower bits, the lower bits just after the round bit
+    // m_lsb, the lsb of M2 mantissa
+    // NC stands for Not Care
+    // roundBit | lowerBits | m_lsb
+    //   0      |   NC      |  NC    Truncate
+    //   1      |   != 0    |  NC    Round up
+    //   1      |   0       |  1     Number is odd -> Round up
+    //   1      |   0       |  0     Number is even -> Truncate
+
+    Value roundBit = b.and_(b.lshr(mantissa, b.i16_val(7 - 2 - 1)), b.i16_val(0x0001));
+    Value lowerBits = b.and_(mantissa, b.i16_val(0x000F));
+    Value m_lsb = b.and_(m, b.i16_val(0x0001));
+    Value lowOrLsbSet = b.icmp_ne(b.or_(lowerBits, m_lsb), b.i16_val(0x0000));
+    Value roundUp = b.and_(b.icmp_ne(roundBit, b.i16_val(0x0000)), lowOrLsbSet);
+    m = b.select(roundUp, b.add(i16_ty, m, b.i16_val(0x0001)), m);
+
     // Clamp value to +-FLT_MAX if needed
     Value fp8ExponentMax = b.i16_val(0x001F);
-    // Keep the 2 MSBs from the fp16 mantissa
-    Value fp16MantissaMsb = b.i16_val(0x0060);
     Value fp8MantissaMax = b.i16_val(0x0003);
 
-    Value isGreaterFP8Max = b.icmp_sge(exp, fp8ExponentMax);
+    Value isGreaterFP8Max = b.icmp_sge(e, fp8ExponentMax);
     isGreaterFP8Max =
-        b.and_(isGreaterFP8Max, b.icmp_sge(mantissa, fp16MantissaMsb));
+        b.and_(isGreaterFP8Max, b.icmp_sge(m, fp8MantissaMax));
 
     e = b.select(isGreaterFP8Max, fp8ExponentMax, e);
     m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
