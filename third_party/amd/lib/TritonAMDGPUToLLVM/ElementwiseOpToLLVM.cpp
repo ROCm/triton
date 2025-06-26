@@ -1124,12 +1124,80 @@ Fp8E5M2FNUZ_to_Bf16(Location loc, ConversionPatternRewriter &rewriter,
 
 // bf16 to fp8e5m2fnuz
 static SmallVector<Value>
-Bf16_to_Fp8E5M2FNUZ(Location loc, ConversionPatternRewriter &rewriter,
+Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
+                     const SmallVector<Value> &v) {
+  assert(v.size() == 2);
+
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto convert = [&](Value v) {
+    auto i16 = b.bitcast(v, i16_ty);
+    Value sign = b.lshr(b.and_(i16_ty, i16, b.i16_val(0x8000)), b.i16_val(8));
+    Value exp = b.lshr(b.and_(i16_ty, i16, b.i16_val(0x7F80)), b.i16_val(7));
+    Value mantissa = b.and_(i16_ty, i16, b.i16_val(0x007F));
+
+    Value e = b.i16_val(0x0000);
+    Value m = b.i16_val(0x0000);
+
+    Value newExp = b.sub(exp, b.i16_val(112));
+
+    e = b.and_(newExp, b.i16_val(0x001F));
+    m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
+
+    // handle special cases
+    Value isBf16ExprZero = b.icmp_eq(exp, b.i16_val(0x0000));
+    Value isBf16MantissaZero = b.icmp_eq(mantissa, b.i16_val(0x0000));
+    Value isBf16Null = b.and_(isBf16ExprZero, isBf16MantissaZero);
+
+    sign = b.select(isBf16Null, b.i16_val(0x0000), sign);
+
+
+    Value isBf16ExpFull = b.icmp_eq(exp, b.i16_val(0x00FF));
+    Value isBf16Nan =
+        b.and_(isBf16ExpFull, b.icmp_ne(mantissa, b.i16_val(0x0000)));
+    Value isBf16Inf = b.and_(isBf16ExpFull, isBf16MantissaZero);
+    // Conversion with saturation, convert also Inf to NaN
+    Value isBf16NanOrInf = b.or_(isBf16Nan, isBf16Inf);
+    // NaN is represented as 1.00000.00
+    e = b.select(isBf16NanOrInf, b.i16_val(0x0000), e);
+    m = b.select(isBf16NanOrInf, b.i16_val(0x0000), m);
+    sign = b.select(isBf16NanOrInf, b.i16_val(0x0001), sign);
+
+    // Clamp value to +-FLT_MAX if needed
+    Value fp8ExponentMax = b.i16_val(0x001F);
+    // Keep the 2 MSBs from the fp16 mantissa
+    Value fp16MantissaMsb = b.i16_val(0x0060);
+    Value fp8MantissaMax = b.i16_val(0x0003);
+
+    Value isGreaterFP8Max = b.icmp_sge(exp, fp8ExponentMax);
+    isGreaterFP8Max =
+        b.and_(isGreaterFP8Max, b.icmp_sge(mantissa, fp16MantissaMsb));
+
+    e = b.select(isGreaterFP8Max, fp8ExponentMax, e);
+    m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
+
+    Value result = b.or_(b.or_(sign, b.shl(e, b.i16_val(2))), m);
+    auto fp8x2VecTy = vec_ty(i8_ty, 2);
+    result = b.bitcast(result, fp8x2VecTy);
+    return b.extract_element(i8_ty, result, b.i32_val(0));
+  };
+
+  SmallVector<Value> results{convert(v[0]), convert(v[1])};
+  return results;
+}
+
+static SmallVector<Value>
+Bf16_to_Fp8E5M2FNUZ_HW(Location loc, ConversionPatternRewriter &rewriter,
                     const SmallVector<Value> &v) {
   assert(v.size() == 2);
   auto v0 = convertBf16ToFp32(loc, rewriter, v[0]);
   auto v1 = convertBf16ToFp32(loc, rewriter, v[1]);
   return cvtPkFp32ToF8<ROCDL::CvtPkBf8F32Op>(loc, rewriter, v0, v1);
+}
+
+static ConverterT Bf16_to_Fp8E5M2FNUZ(AMD::ISAFamily isaFamily) {
+  return isaFamily == AMD::ISAFamily::CDNA4
+             ? Bf16_to_Fp8E5M2FNUZ_SW
+             : Bf16_to_Fp8E5M2FNUZ_HW;
 }
 
 static Value Fp8E4M3FNUZ_to_Fp16_oneValue(Location loc,
@@ -1339,7 +1407,7 @@ struct FpToFpOpConversion
             {{BF16TyID, F8E4M3FNTyID, RoundingMode::RTNE},
              Bf16_to_Fp8E4M3FN(isaFamily)},
             {{BF16TyID, F8E5M2FNUZTyID, RoundingMode::RTNE},
-             Bf16_to_Fp8E5M2FNUZ},
+             Bf16_to_Fp8E5M2FNUZ(isaFamily)},
             {{BF16TyID, F8E4M3FNUZTyID, RoundingMode::RTNE},
              Bf16_to_Fp8E4M3FNUZ(isaFamily)},
             // F32 <-> F8
