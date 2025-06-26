@@ -88,4 +88,33 @@ def TritonAMDGPU_SchedHintsEnum : TritonAMDGPU_I32Enum<
 def TritonAMDGPU_SchedHintVariantAttr :
   TritonAMDGPU_I32EnumAttr<"SchedHintVariant", TritonAMDGPU_SchedHintsEnum>;
 
+def TritonAMDGPU_DotTile : TritonAMDGPU_Attr<"DotTile"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "DotTile";
+  let summary = "Information regarding the dot-tile this op belongs to.";
+  let description = [{
+    The attribute is a way to describe which input argument of the target
+    operation (e.g., `tt.dot`) the result of a given operation belongs to.
+    The parameters tile{M,N,K,Serial} refer to the dot-tile's id within the dot,
+    while the element{M,N,K,Serial} refer to the element's id within the dot-tile.
+
+  }];
+  let parameters = (ins "int32_t":$tileM, "int32_t":$tileN, "int32_t":$tileK, "int32_t":$tileSerial, "int32_t":$elementM, "int32_t":$elementN, "int32_t":$elementK, "int32_t":$elementSerial );
+  let assemblyFormat = "`<` $tileM `,` $tileN `,` $tileK `>` `[` $tileSerial `]` `,` `<` $elementM `,` $elementN `,` $elementK `>` `[` $elementSerial `]`";
+}
+
+def TritonAMDGPU_RefinedOpOrder : TritonAMDGPU_Attr<"RefinedOpOrder"> {
+  let cppNamespace = "::mlir::triton::amdgpu";
+  let mnemonic = "RefinedOpOrder";
+  let summary = "Stores an id for the input op and an id for the refined id.";
+  let description = [{
+    During refinement, an original op is sliced into multiple refined ops.
+    This attribute stores the original id of the refined op, and the refined id.
+    Ops with same original id came from the same original op, and the refined id
+    determines the order which they should be scheduled.
+  }];
+  let parameters = (ins "int32_t":$idOriginalOp, "int32_t":$idRefinedOp );
+  let assemblyFormat = "`[` $idOriginalOp `,` $idRefinedOp `]`";
+}
+
 #endif
