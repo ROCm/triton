@@ -955,8 +955,14 @@ Bf16_to_Fp8E4M3FN_SW(Location loc, ConversionPatternRewriter &rewriter,
 
     Value e = b.i16_val(0x0000);
     Value m = b.i16_val(0x0000);
-
-    Value newExp = b.sub(exp, b.i16_val(120));
+    Value newExp = b.i16_val(0x0000);
+    if constexpr (UZ) {
+      newExp = b.sub(exp, b.i16_val(119));
+    }
+    else
+    {
+      newExp = b.sub(exp, b.i16_val(120));
+    }
 
     e = b.and_(newExp, b.i16_val(0x000F));
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 3)), b.i16_val(0x0007));
@@ -1107,8 +1113,8 @@ Bf16_to_Fp8E4M3FNUZ_HW(Location loc, ConversionPatternRewriter &rewriter,
 static ConverterT Bf16_to_Fp8E4M3FNUZ(AMD::ISAFamily isaFamily) {
   constexpr bool enableUZMode = true;
   return isaFamily == AMD::ISAFamily::CDNA4
-             ? Bf16_to_Fp8E4M3FNUZ_HW
-             : Bf16_to_Fp8E4M3FN_SW<enableUZMode>;
+             ? Bf16_to_Fp8E4M3FN_SW<enableUZMode>
+             : Bf16_to_Fp8E4M3FNUZ_HW;
 }
 
 // fp8e5m2fnuz to bf16
@@ -1138,7 +1144,7 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value e = b.i16_val(0x0000);
     Value m = b.i16_val(0x0000);
 
-    Value newExp = b.sub(exp, b.i16_val(112));
+    Value newExp = b.sub(exp, b.i16_val(111));
 
     e = b.and_(newExp, b.i16_val(0x001F));
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
