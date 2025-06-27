@@ -1145,6 +1145,9 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value m = b.i16_val(0x0000);
 
     Value newExp = b.sub(exp, b.i16_val(111));
+    // Flush to 0 in case exponent is out of range
+    mantissa = b.select(b.icmp_sge(newExp, b.i16_val(0xFFF0)) , mantissa, b.i16_val(0x0000));
+    newExp = b.select(b.icmp_sge(newExp, b.i16_val(0xFFF0)) , newExp, b.i16_val(0x0000));
 
     e = b.and_(newExp, b.i16_val(0x001F));
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
