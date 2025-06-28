@@ -368,7 +368,11 @@ from icache_flush import icache_flush
         matmul_call_str += f"""
             current_locks = locks[i]
             current_P = P[i]
-            d = matmul_{configStr}(a, b, c, bias, current_P, current_locks, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1), bias_stride)"""
+            try:
+                d = matmul_{configStr}(a, b, c, bias, current_P, current_locks, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1), bias_stride)
+            except triton.runtime.errors.OutOfResources as e:
+                print(f"Error: {{e}}")
+                break"""
         f_kernel[idx % jobs].write(matmul_call_str + "\n")
         idx += 1
     # post string

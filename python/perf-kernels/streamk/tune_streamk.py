@@ -166,12 +166,13 @@ def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
 
 def extract_kernel_time(M, N, K, config, df, bias_size):
     configStr = gen_configStr(config)
-    df = df[df['KernelName'].str.contains(configStr)]
+    df['DurationNs'] = df['End_Timestamp'] - df['Start_Timestamp']
+    df = df[df['Kernel_Name'].str.contains(configStr)]
     if df.empty:
         print("No data available after filtering. Returning mean time as 0.")
         #        raise ValueError("No data available after filtering.")
         new_meanTime = 0
-        return config, new_meanTime
+        return config, None
 
     first_value = df['DurationNs'].iloc[0]
     filtered_data = df['DurationNs'][df['DurationNs'] <= first_value]
@@ -213,8 +214,7 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
         if verbose:
             print(f"profiling {kernelname} on GPU {gpuid}")
         run_bash_command_wrapper(
-            f"rocprof --stats -o results_{jobId}.csv python {get_filename_profile_driver(M, N, K, jobId)}",
-            #            f"rocprofv2 --plugin file --plugin-version 1 --kernel-trace -o {jobId} python {get_filename_profile_driver(M, N, K, jobId)}",
+            f"rocprofv3 --kernel-trace -o {jobId} --log-level fatal -- python {get_filename_profile_driver(M, N, K, jobId)}",
             capture=(verbose < 2))
         jobId += ngpus
 
@@ -270,7 +270,7 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, 
     #                    quotechar='"',
     #                    escapechar='\\') for i in range(jobs)
     #    ]
-    df_prof = [pd.read_csv(f"results_{i}.csv") for i in range(jobs)]
+    df_prof = [pd.read_csv(f"{i}_kernel_trace.csv") for i in range(jobs)]
     for config in configs:
         file_idx = idx % jobs
         #        tasks += [
@@ -291,7 +291,8 @@ def tune_gemm_config(M, N, K, col_a, col_b, dtype_a, dtype_b, dtype_c, dtype_p, 
                 minTime = min_us
                 bestConfig = config
         else:
-            min_us = -1
+            minTime = -1
+            bestConfig = config
             print(f"invalid config(post processing): SIZE {M} {N} {K}: {config}", flush=True)
     post_end = datetime.now()
     post_time = post_end - profile_end
@@ -524,6 +525,9 @@ def type_name_to_bytes(ty_name):
 
 
 def format_output(unformatted):
+    if unformatted <= 0:
+        return unformatted
+
     if unformatted < 0.0001:
         formatted = "{:.3e}".format(unformatted)
     elif unformatted > 1000:
@@ -700,7 +704,7 @@ def main():
             icache_flush=icache_flush)
 
         # post processing the numbers
-        perf_tflops = lambda us: 2 * M * N * K * 1e-12 / (us * 1e-6)
+        perf_tflops = lambda us: 2 * M * N * K * 1e-12 / (us * 1e-6) if us != -1 else 0
         tri_tflops = perf_tflops(minTime)
         formatted_tflops = format_output(tri_tflops)
         minTime = format_output(minTime)
@@ -713,7 +717,8 @@ def main():
 
         # write best config to tuning_results.yaml
         if run_bench:
-            print(f"{formatted_tflops}     {minTime}")
+            if minTime != -1:
+                print(f"{formatted_tflops}     {minTime}")
             f_results.write(f"{formatted_tflops},{minTime}\n")
 
         sizeDict = {'M': M, 'N': N, 'K': K, 'rowMajorA': row_a_str, 'rowMajorB': row_b_str}

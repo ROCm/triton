@@ -37,7 +37,10 @@ def run_bash_command_wrapper(commandstring, capture=True):
     except subprocess.CalledProcessError:
         if not capture:
             print(f"running {commandstring} one more time")
-        run_bash_command(commandstring, capture)
+        try:
+            run_bash_command(commandstring, capture)
+        except subprocess.CalledProcessError:
+            print("failed again!!!!")
 
 
 def run_bash_command(commandstring, capture=True):
