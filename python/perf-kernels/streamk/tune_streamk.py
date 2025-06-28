@@ -169,7 +169,7 @@ def extract_kernel_time(M, N, K, config, df, bias_size):
     df['DurationNs'] = df['End_Timestamp'] - df['Start_Timestamp']
     df = df[df['Kernel_Name'].str.contains(configStr)]
     if df.empty:
-        print("No data available after filtering. Returning mean time as 0.")
+        print("Empty df. Returning mean time as None")
         #        raise ValueError("No data available after filtering.")
         new_meanTime = 0
         return config, None
@@ -660,6 +660,8 @@ def main():
         patch_triton_compiler()
 
     configs = []
+    ## record the failed configs
+    status = 0
 
     ## Big for loop of tuning
     ## Each iteration performs tuning for one gemm size
@@ -724,6 +726,10 @@ def main():
         sizeDict = {'M': M, 'N': N, 'K': K, 'rowMajorA': row_a_str, 'rowMajorB': row_b_str}
         sizeDict.update(bestConfig)
         sizeDict.update({'TFLOPS': formatted_tflops, 'time(us)': minTime})
+
+        if minTime == -1:
+            status -= minTime
+
         if not run_bench:
             f_results.write("- " + str(sizeDict) + " ")
 
@@ -766,6 +772,10 @@ def main():
 
     if hack_triton:
         print("Triton compiler is hacked, don't forget to git restore the changes :)")
+
+    ## Raise an error if there are failed configs
+    if status > 0:
+        raise AssertionError(f"got {status} failed configs")
 
 
 if __name__ == '__main__':
