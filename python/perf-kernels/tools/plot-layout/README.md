@@ -82,6 +82,7 @@ options:
   -h, --help                                  show this help message and exit
   --dotShape M N K                            Dot op shape in the form of M, N, K (default: (32, 128, 64))
   --warpsPerCTA w0 w1                         how warps tile the dot result matrix (default: (1, 4))
+  --tilesPerWarp y0 y1                        how many contiguous tiles per warp (default: (1, 1))
   --nonKDim {16,32}                           mfma instruction dimension of M/N (default: 16)
   --kWidth {4,8,16,32}                        number of contiguous elements each thread owns during MFMA (default: 4)
   --kGroup {1,2}                              total number of elements / kWidth per mfma instruction (default: 1)
@@ -94,21 +95,21 @@ options:
 Examples:
 ```bash
 ## i8 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a i8 --dtype-b i8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtype-a i8 --dtype-b i8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA i8 --dtypeB i8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtypeA i8 --dtypeB i8
 ## fp16/bf16 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 4 --dtype-a fp16 --dtype-b fp16
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a fp16 --dtype-b fp16
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 4 --dtypeA fp16 --dtypeB fp16
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA fp16 --dtypeB fp16
 ## fp8/bf8 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtype-a fp8 --dtype-b bf8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtype-a fp8 --dtype-b bf8
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp8 --dtype-b bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 8 --dtypeA fp8 --dtypeB bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --dtypeA fp8 --dtypeB bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp8 --dtypeB bf8
 ## f4 and fp6/bf6 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 32 --kGroup 1 --dtype-a f4 --dtype-b bf6
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 32 --kGroup 1 --dtypeA f4 --dtypeB bf6
 ## fp8/bf8 and fp6/bf6/f4 inputs
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp6 --dtype-b bf8
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp6 --dtypeB bf8
 ## mixed precision with scaling
-python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtype-a fp6 --dtype-b bf8 --scale
+python3 plot_layout.py dot --dotShape 128 128 128 --warpsPerCTA 2 4 --kWidth 16 --kGroup 2 --dtypeA fp6 --dtypeB bf8 --scale
 ```
 
 One can add `--nonKDim [16,32]` and `--mfmaTrans` to all of the above examples.
@@ -125,7 +126,7 @@ Knobs
    with fp8 input types (CBSZ=0 or 1 and/or BLGP=0 or 1)
 - `--nonKDim [16,32]`: mfma instruction size. The default is set to 16.
 - `--mfmaTrans`: if set, the transposed mfma layout will be plotted.
-- `--dtype-a` and `-dtype-b`: element types of operand A and B. The default value is fp16.
+- `--dtypeA` and `-dtypeB`: element types of operand A and B. The default value is fp16.
 - `--scale`: plot scale tensors for A and B. This is only supported with f4/f6 and f8 with `kGroup=2`.
   If `--scale` is set but not supported, it's ignored.
 
@@ -159,28 +160,28 @@ options:
 ```
 Examples:
 ```bash
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 8
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 32 --dtype f4
-python3 plot_layout.py lds --lds-layout none --lds-access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access read --tensorShape 128 128 --kWidth 16 --dtype bf8 --banks 64
-python3 plot_layout.py lds --lds-layout swizzle --lds-access write --tensorShape 128 128 --kWidth 16 --dtype f4 --banks 32
-python3 plot_layout.py lds --lds-layout none --lds-access read --tensorShape 128 32 --kWidth 4 --dtype fp16 --banks 64 --mnContig
-python3 plot_layout.py lds --lds-layout swizzle --lds-access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma_trans_load
-python3 plot_layout.py lds --lds-layout padding --lds-access none --tensorShape 128 32 --kWidth 8 --dtype fp16 --banks 32 --padInterval 128 --padAmount 16
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 8
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 32 --dtype f4
+python3 plot_layout.py lds --layout none --access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access none --tensorShape 128 128 --kWidth 16 --dtype fp8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 128 --kWidth 16 --dtype bf8 --banks 64
+python3 plot_layout.py lds --layout swizzle --access write --tensorShape 128 128 --kWidth 16 --dtype f4 --banks 32
+python3 plot_layout.py lds --layout none --access read --tensorShape 128 32 --kWidth 4 --dtype fp16 --banks 64 --mnContig
+python3 plot_layout.py lds --layout swizzle --access read --tensorShape 128 32 --kWidth 16 --dtype fp8 --banks 64 --mnContig --mfma-trans-load
+python3 plot_layout.py lds --layout padding --access none --tensorShape 128 32 --kWidth 8 --dtype fp16 --banks 32 --padInterval 128 --padAmount 16
 ```
 
 Knobs
 - `kWidth`: the vector size (in unit of elements) when accessing LDS
 - `banks`: the number of banks in LDS. (64 for gfx950, 32 for pre-gfx950)
 - `dtype_a`: element data type
-- Three options for `--lds-layout`:
+- Three options for `--layout`:
   - `none`: no swizzling, no padding
   - `swizzle`: apply the swizzling pattern, which is derived from tensor shape and kWidth.
   - `padding`: pad `padAmount` bytes for every `padInterval` bytes of data
     - `padAmount`: default is 0
     - `padInterval`: default is 1
-- Three options for `--lds-access`:
+- Three options for `--access`:
   - `none`: do not plot access pattern
   - `read`: plot accessed elements at the first cycle of ds_read
   - `write`: plot accessed elements during ds_write. For global load access, we assume
