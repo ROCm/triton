@@ -11,6 +11,8 @@ class TensorDescriptor:
     block_shape: List[int]
 
     def __post_init__(self):
+        from torch._subclasses.fake_tensor import FakeTensor
+        from torch._subclasses.functional_tensor import FunctionalTensor
         rank = len(self.shape)
         assert len(self.strides) == rank, f"rank mismatch: {self}"
         assert len(self.block_shape) == rank, f"rank mismatch: {self}"
