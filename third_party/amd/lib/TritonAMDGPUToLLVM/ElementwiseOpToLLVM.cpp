@@ -37,7 +37,9 @@ template <typename FPType> struct FPTypeInfo {
       return i16_ty;
     }
     if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
-                  std::is_same_v<FPType, Float8E5M2Type>) {
+                  std::is_same_v<FPType, Float8E5M2Type> ||
+                  std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
       return i8_ty;
     }
     return nullptr;
@@ -51,7 +53,9 @@ template <typename FPType> struct FPTypeInfo {
       return b.i16_val(0x8000);
     }
     if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
-                  std::is_same_v<FPType, Float8E5M2Type>) {
+                  std::is_same_v<FPType, Float8E5M2Type> ||
+                  std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
       return b.i8_val(0x80);
     }
     return nullptr;
@@ -66,10 +70,12 @@ template <typename FPType> struct FPTypeInfo {
     if constexpr (std::is_same_v<FPType, BFloat16Type>) {
       return b.i16_val(0x7F80);
     }
-    if constexpr (std::is_same_v<FPType, Float8E4M3FNType>) {
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
+                  std::is_same_v<FPType, Float8E4M3FNUZType>) {
       return b.i8_val(0x78);
     }
-    if constexpr (std::is_same_v<FPType, Float8E5M2Type>) {
+    if constexpr (std::is_same_v<FPType, Float8E5M2Type> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
       return b.i8_val(0x7C);
     }
     return nullptr;
@@ -84,16 +90,23 @@ template <typename FPType> struct FPTypeInfo {
     if constexpr (std::is_same_v<FPType, BFloat16Type>) {
       return b.i16_val(0x007F);
     }
-    if constexpr (std::is_same_v<FPType, Float8E4M3FNType>) {
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
+                  std::is_same_v<FPType, Float8E4M3FNUZType>) {
       return b.i8_val(0x07);
     }
-    if constexpr (std::is_same_v<FPType, Float8E5M2Type>) {
+    if constexpr (std::is_same_v<FPType, Float8E5M2Type> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
       return b.i8_val(0x03);
     }
     return nullptr;
   }
   bool allowedNegativeZero() {
     // Note: all `FPType` which are prefixed with UZ must return false;
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
+      return false;
+    }
+
     return true;
   }
   float getMaxAsFloat() {
@@ -111,6 +124,12 @@ template <typename FPType> struct FPTypeInfo {
       value = 0x43E00000;
     }
     if constexpr (std::is_same_v<FPType, Float8E5M2Type>) {
+      value = 0x47600000;
+    }
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNUZType>) {
+      value = 0x43700000;
+    }
+    if constexpr (std::is_same_v<FPType, Float8E5M2FNUZType>) {
       value = 0x47600000;
     }
     return *(reinterpret_cast<float *>(&value));
@@ -133,6 +152,12 @@ template <typename FPType> struct FPTypeInfo {
     if constexpr (std::is_same_v<FPType, Float8E5M2Type>) {
       value = 0xC7600000;
     }
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNUZType>) {
+      value = 0xC3700000;
+    }
+    if constexpr (std::is_same_v<FPType, Float8E5M2FNUZType>) {
+      value = 0xC7600000;
+    }
     return *(reinterpret_cast<float *>(&value));
   }
 
@@ -149,6 +174,11 @@ template <typename FPType> struct FPTypeInfo {
     if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
                   std::is_same_v<FPType, Float8E5M2Type>) {
       return toLLVMIntValue(0x7F);
+    }
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
+      // Only one NaN value which is represented with sign = 1
+      return toLLVMIntValue(0x80);
     }
     return nullptr;
   }
@@ -169,6 +199,10 @@ template <typename FPType> struct FPTypeInfo {
     if constexpr (std::is_same_v<FPType, Float8E5M2Type>) {
       return toLLVMIntValue(0x7B);
     }
+    if constexpr (std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
+      return toLLVMIntValue(0x7F);
+    }
     return nullptr;
   }
 
@@ -181,7 +215,9 @@ template <typename FPType> struct FPTypeInfo {
       return b.i16_val(val);
     }
     if constexpr (std::is_same_v<FPType, Float8E4M3FNType> ||
-                  std::is_same_v<FPType, Float8E5M2Type>) {
+                  std::is_same_v<FPType, Float8E5M2Type> ||
+                  std::is_same_v<FPType, Float8E4M3FNUZType> ||
+                  std::is_same_v<FPType, Float8E5M2FNUZType>) {
       return b.i8_val(val);
     }
     return nullptr;
@@ -239,21 +275,22 @@ Value clampOCP(Location loc, ConversionPatternRewriter &rewriter, Value orig,
       b.fcmp_olt(orig, srcFpInfo.toLLVMFloatValue(dstFpInfo.getMinAsFloat()));
   Value isSrcOverflow = b.or_(isSrcOverflowMax, isSrcOverflowMin);
 
-  Value clamped =
-      b.select(isSrcNan, b.or_(dstSign, dstFpInfo.getPositiveNan()), converted);
+  Value clamped = converted;
+
   if (dstFpInfo.allowedNegativeZero()) {
+    clamped = b.select(isSrcNan, b.or_(dstSign, dstFpInfo.getPositiveNan()), clamped);
     clamped = b.select(isSrcInf, b.or_(dstSign, dstFpInfo.getMaxPositive()),
-                       converted);
+                       clamped);
   } else {
-    clamped = b.select(isSrcInf, dstFpInfo.getPositiveNan(), converted);
+    clamped = b.select(b.or_(isSrcNan, isSrcInf), dstFpInfo.getPositiveNan(), clamped);
   }
   clamped = b.select(isSrcOverflow, b.or_(dstSign, dstFpInfo.getMaxPositive()),
-                     converted);
+                     clamped);
   if (!dstFpInfo.allowedNegativeZero()) {
     Value isSrcNegativieZero =
         b.and_(b.and_(isSrcExpZero, isSrcMantissaZero), isSrcNegative);
     clamped =
-        b.select(isSrcNegativieZero, dstFpInfo.toLLVMIntValue(0), converted);
+        b.select(isSrcNegativieZero, dstFpInfo.toLLVMIntValue(0), clamped);
   }
   return clamped;
 }
@@ -1421,23 +1458,23 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
 
     // handle special cases
-    Value isBf16ExprZero = b.icmp_eq(exp, b.i16_val(0x0000));
-    Value isBf16MantissaZero = b.icmp_eq(mantissa, b.i16_val(0x0000));
-    Value isBf16Null = b.and_(isBf16ExprZero, isBf16MantissaZero);
+    // Value isBf16ExprZero = b.icmp_eq(exp, b.i16_val(0x0000));
+    // Value isBf16MantissaZero = b.icmp_eq(mantissa, b.i16_val(0x0000));
+    // Value isBf16Null = b.and_(isBf16ExprZero, isBf16MantissaZero);
 
-    sign = b.select(isBf16Null, b.i16_val(0x0000), sign);
+    // sign = b.select(isBf16Null, b.i16_val(0x0000), sign);
 
 
-    Value isBf16ExpFull = b.icmp_eq(exp, b.i16_val(0x00FF));
-    Value isBf16Nan =
-        b.and_(isBf16ExpFull, b.icmp_ne(mantissa, b.i16_val(0x0000)));
-    Value isBf16Inf = b.and_(isBf16ExpFull, isBf16MantissaZero);
-    // Conversion with saturation, convert also Inf to NaN
-    Value isBf16NanOrInf = b.or_(isBf16Nan, isBf16Inf);
-    // NaN is represented as 1.00000.00
-    e = b.select(isBf16NanOrInf, b.i16_val(0x0000), e);
-    m = b.select(isBf16NanOrInf, b.i16_val(0x0000), m);
-    sign = b.select(isBf16NanOrInf, b.i16_val(0x0001), sign);
+    // Value isBf16ExpFull = b.icmp_eq(exp, b.i16_val(0x00FF));
+    // Value isBf16Nan =
+    //     b.and_(isBf16ExpFull, b.icmp_ne(mantissa, b.i16_val(0x0000)));
+    // Value isBf16Inf = b.and_(isBf16ExpFull, isBf16MantissaZero);
+    // // Conversion with saturation, convert also Inf to NaN
+    // Value isBf16NanOrInf = b.or_(isBf16Nan, isBf16Inf);
+    // // NaN is represented as 1.00000.00
+    // e = b.select(isBf16NanOrInf, b.i16_val(0x0000), e);
+    // m = b.select(isBf16NanOrInf, b.i16_val(0x0000), m);
+    // sign = b.select(isBf16NanOrInf, b.i16_val(0x0001), sign);
 
     // RTNE
     // Round bit, the next bit after the top 2 MSBs of mantissa (M2)
@@ -1457,16 +1494,16 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value roundUp = b.and_(b.icmp_ne(roundBit, b.i16_val(0x0000)), lowOrLsbSet);
     m = b.select(roundUp, b.add(i16_ty, m, b.i16_val(0x0001)), m);
 
-    // Clamp value to +-FLT_MAX if needed
-    Value fp8ExponentMax = b.i16_val(0x001F);
-    Value fp8MantissaMax = b.i16_val(0x0003);
+    // // Clamp value to +-FLT_MAX if needed
+    // Value fp8ExponentMax = b.i16_val(0x001F);
+    // Value fp8MantissaMax = b.i16_val(0x0003);
 
-    Value isGreaterFP8Max = b.icmp_sge(e, fp8ExponentMax);
-    isGreaterFP8Max =
-        b.and_(isGreaterFP8Max, b.icmp_sge(m, fp8MantissaMax));
+    // Value isGreaterFP8Max = b.icmp_sge(e, fp8ExponentMax);
+    // isGreaterFP8Max =
+    //     b.and_(isGreaterFP8Max, b.icmp_sge(m, fp8MantissaMax));
 
-    e = b.select(isGreaterFP8Max, fp8ExponentMax, e);
-    m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
+    // e = b.select(isGreaterFP8Max, fp8ExponentMax, e);
+    // m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
 
     Value result = b.or_(b.or_(sign, b.shl(e, b.i16_val(2))), m);
     auto fp8x2VecTy = vec_ty(i8_ty, 2);
@@ -1475,6 +1512,11 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
   };
 
   SmallVector<Value> results{convert(v[0]), convert(v[1])};
+  results[0] = clampOCP<BFloat16Type, Float8E5M2FNUZType>(
+    loc, rewriter, v[0], results[0]);
+  results[1] = clampOCP<BFloat16Type, Float8E5M2FNUZType>(
+    loc, rewriter, v[1], results[1]);
+
   return results;
 }
 
