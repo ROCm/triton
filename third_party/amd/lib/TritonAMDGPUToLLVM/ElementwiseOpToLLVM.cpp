@@ -65,17 +65,6 @@ static SmallVector<Value>
 cvtScalePkDowncastToFp8(Location loc, ConversionPatternRewriter &rewriter,
                         Value v0, Value v1) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-  // This is the location of the fp16_ovfl flag in the Mode register. It's
-  // calculated following this formula:
-  //     (mode register ID = 1) | (Offset << 6) | ((Width - 1) << 11)
-  // In this case, Offset = 23 and Width = 1.
-  // When the bit is 0/1, the conversion from fp32/fp16/bf16 to fp8/bf8 is in
-  // non-saturation/saturation mode.
-  Value fp16OVFLModeRegLoc = b.i32_val(1473);
-  LLVM::createLLVMIntrinsicCallOp(rewriter, loc, "llvm.amdgcn.s.setreg", {},
-                                  {fp16OVFLModeRegLoc, b.i32_val(1)});
-
   Type v2I16Ty = vec_ty(i16_ty, 2);
   Value v2I16Vec = b.undef(v2I16Ty);
   Value scale = b.f32_val(1);
@@ -1838,6 +1827,38 @@ private:
   bool ftz;
 };
 
+// This pass sets the state of the SIMD units regarding FP calculation.
+struct AdjustFPSIMDUnitState : public ConvertOpToLLVMPattern<ModuleOp> {
+  AdjustFPSIMDUnitState(LLVMTypeConverter &typeConverter,
+                        PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<ModuleOp>(typeConverter, benefit) {}
+
+  LogicalResult
+  matchAndRewrite(ModuleOp mod, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    Location loc = mod->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+    mod->walk([&](LLVM::LLVMFuncOp func) {
+      auto firstBlock = &(*(func.getBody().begin()));
+      auto firstOp = &(*(firstBlock->begin()));
+      rewriter.setInsertionPoint(firstOp);
+
+      // This is the location of the fp16_ovfl flag in the Mode register. It's
+      // calculated following this formula:
+      //     (mode register ID = 1) | (Offset << 6) | ((Width - 1) << 11)
+      // In this case, Offset = 23 and Width = 1.
+      // When the bit is 0/1, the conversion from fp32/fp16/bf16 to fp8/bf8 is
+      // in non-saturation/saturation mode.
+      Value fp16OVFLModeRegLoc = b.i32_val(1473);
+      LLVM::createLLVMIntrinsicCallOp(rewriter, loc, "llvm.amdgcn.s.setreg", {},
+                                      {fp16OVFLModeRegLoc, b.i32_val(1)});
+    });
+
+    return success();
+  }
+};
+
 } // namespace
 
 namespace mlir::triton::AMD {
@@ -1882,6 +1903,9 @@ void populateElementwiseOpToLLVMPatterns(
   patterns.add<SqrtOpConversion>(typeConverter, axisInfoAnalysis, ftz, benefit);
   patterns.add<PreciseSqrtOpConversion>(typeConverter, axisInfoAnalysis, ftz,
                                         benefit);
+
+  patterns.add<AdjustFPSIMDUnitState>(typeConverter, benefit);
+
   triton::populateElementwiseOpToLLVMPatterns(
       typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
   bool hwNanPropagationSupported = targetInfo.supportMaximumMinimum();
