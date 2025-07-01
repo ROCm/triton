@@ -1146,21 +1146,31 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
 
     Value newExp = b.sub(exp, b.i16_val(111));
     // Flush to 0 in case exponent is out of range
-    mantissa = b.select(b.icmp_sge(newExp, b.i16_val(0xFFF0)) , mantissa, b.i16_val(0x0000));
-    newExp = b.select(b.icmp_sge(newExp, b.i16_val(0xFFF0)) , newExp, b.i16_val(0x0000));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , mantissa, b.i16_val(0x0000));
+    sign = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , sign, b.i16_val(0x0000));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , newExp, b.i16_val(0x0000));
+
+    // Make exponent nonnegative
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)) , mantissa, b.lshr(mantissa, b.i16_val(8)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)) , newExp, b.add(i16_ty, newExp, b.i16_val(8)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)) , mantissa, b.lshr(mantissa, b.i16_val(4)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)) , newExp, b.add(i16_ty, newExp, b.i16_val(4)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)) , mantissa, b.lshr(mantissa, b.i16_val(2)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)) , newExp, b.add(i16_ty, newExp, b.i16_val(2)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)) , mantissa, b.lshr(mantissa, b.i16_val(1)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)) , newExp, b.add(i16_ty, newExp, b.i16_val(1)));
 
     e = b.and_(newExp, b.i16_val(0x001F));
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
 
-    // handle special cases
-    Value isBf16ExprZero = b.icmp_eq(exp, b.i16_val(0x0000));
+    // // handle special cases
+    Value isBf16ExprZero = b.icmp_eq(newExp, b.i16_val(0x0000));
     Value isBf16MantissaZero = b.icmp_eq(mantissa, b.i16_val(0x0000));
     Value isBf16Null = b.and_(isBf16ExprZero, isBf16MantissaZero);
 
     sign = b.select(isBf16Null, b.i16_val(0x0000), sign);
 
-
-    Value isBf16ExpFull = b.icmp_eq(exp, b.i16_val(0x00FF));
+    Value isBf16ExpFull = b.icmp_eq(newExp, b.i16_val(0x00FF));
     Value isBf16Nan =
         b.and_(isBf16ExpFull, b.icmp_ne(mantissa, b.i16_val(0x0000)));
     Value isBf16Inf = b.and_(isBf16ExpFull, isBf16MantissaZero);
@@ -1188,6 +1198,10 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value lowOrLsbSet = b.icmp_ne(b.or_(lowerBits, m_lsb), b.i16_val(0x0000));
     Value roundUp = b.and_(b.icmp_ne(roundBit, b.i16_val(0x0000)), lowOrLsbSet);
     m = b.select(roundUp, b.add(i16_ty, m, b.i16_val(0x0001)), m);
+    m = b.and_(m, b.i16_val(0x0003));
+    // Handle overflow in case of rounding up
+    Value hasOverflow = b.and_(b.icmp_eq(roundUp, b.i1_val(1)), b.icmp_eq(m, b.i16_val(0x0000)));
+    e = b.select(hasOverflow, b.add(i16_ty, e, b.i16_val(1)), e);
 
     // Clamp value to +-FLT_MAX if needed
     Value fp8ExponentMax = b.i16_val(0x001F);
