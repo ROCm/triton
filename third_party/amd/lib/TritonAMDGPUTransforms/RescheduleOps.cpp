@@ -350,7 +350,7 @@ bool opCategoryBarrier(SchedDagNode *node) {
 ******************************************************************************/
 struct BasicBlockNodeMap {
   BasicBlockNodeMap(Block *mlirBlock) {
-    LDBG("Node to Op mapping for BB");
+    //LDBG("Node to Op mapping for BB");
     for (auto it = mlirBlock->begin(); it != mlirBlock->end(); ++it) {
       Operation *op = &(*it);
       // same as calling new
@@ -540,9 +540,200 @@ struct DataDependencyCalculator : DependencyCalculator {
     }
   }
 
+  // Which ops allowed to cross the barrier.
+  enum SchedBarOpType : int32_t {
+    None =        0, // No ops can cross barrier.
+    All =         1, // All, non-memory, non-side-effect producing 
+    Valu =        2,
+    Salu =        4,
+    Mfma =        8,
+    VmemAll =    16,
+    VmemRead =   32,
+    VmemWrite =  64,
+    LdsAll =    128,
+    LdsRead =   256,
+    LdsWrite =  512,
+    Trans =    1024,
+  };
+
+  // Return true if node matches sched bar op type;
+  // doing so means this op is allowed to cross the barrier.
+  // Returning false means this nop isn't allowed to cross the barrier.
+  bool isaSchedBarOpType(SchedDagNode *node, SchedBarOpType sbTy) {
+
+    if (sbTy == SchedBarOpType::None) {
+      return false;
+    }
+
+    // Mfma
+    if (isa<triton::DotOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::All ||
+        sbTy == SchedBarOpType::Mfma);
+    
+    // Lds Read
+    } else if (isa<triton::gpu::LocalLoadOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::LdsRead ||
+        sbTy == SchedBarOpType::LdsAll);
+    
+    // Lds Write
+    } else if (isa<triton::gpu::LocalStoreOp,
+                   triton::gpu::LocalAllocOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::LdsWrite ||
+        sbTy == SchedBarOpType::LdsAll);
+
+    // Global Load
+    } else if (isa<triton::LoadOp,
+                   triton::amdgpu::BufferLoadOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::VmemRead ||
+        sbTy == SchedBarOpType::VmemAll);
+    
+    // Global Store
+    } else if (isa<triton::StoreOp,
+                   triton::amdgpu::BufferStoreOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::VmemWrite ||
+        sbTy == SchedBarOpType::VmemAll);
+
+    // Transcendental
+    } else if (isa<math::ExpOp,
+                   math::Exp2Op>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::All ||
+        sbTy == SchedBarOpType::Valu ||
+        sbTy == SchedBarOpType::Salu ||
+        sbTy == SchedBarOpType::Trans
+        );
+
+    // Alu
+    } else if (isa<math::SqrtOp,
+                   math::RsqrtOp,
+                   arith::DivFOp,
+                   triton::ReduceOp,
+                   arith::TruncFOp,
+                   arith::ExtFOp,
+                   arith::FPToSIOp,
+                   arith::SIToFPOp,
+                   triton::FpToFpOp,
+                   triton::PreciseSqrtOp,
+                   math::SqrtOp,
+                   arith::SubIOp,
+                   arith::AddIOp,
+                   arith::MulIOp,
+                   arith::DivSIOp,
+                   arith::DivUIOp,
+                   arith::RemFOp,
+                   arith::RemSIOp,
+                   arith::RemUIOp,
+                   arith::AndIOp,
+                   arith::OrIOp,
+                   arith::XOrIOp,
+                   arith::ShLIOp,
+                   arith::ShRSIOp,
+                   arith::ShRUIOp,
+                   arith::MinNumFOp,
+                   arith::MaxNumFOp,
+                   arith::MinSIOp,
+                   arith::MaxSIOp,
+                   arith::MinUIOp,
+                   arith::MaxUIOp,
+                   arith::AddFOp,
+                   arith::SubFOp,
+                   arith::MulFOp,
+                   arith::MaximumFOp,
+                   arith::MinimumFOp,
+                   triton::gpu::ConvertLayoutOp>(node->getOp())) {
+      return (
+        sbTy == SchedBarOpType::All ||
+        sbTy == SchedBarOpType::Valu ||
+        sbTy == SchedBarOpType::Salu
+        );
+
+    } else {
+      // Unrecognized ops, assume they're simple alu.
+      return (
+        sbTy == SchedBarOpType::All ||
+        sbTy == SchedBarOpType::Valu ||
+        sbTy == SchedBarOpType::Salu
+        );
+    }
+  }
+
+
   // Sched.bars block ops based on type.
   void calcDepsSchedBar() {
-    // TODO(dtanner)
+    LDBG("calcDepsSchedBar()");
+    // For each node and type, track which nodes don't match the type.
+    // This means any sched.bar, for each bit in the mask,
+    // create deps between the bit
+    DenseMap<SchedBarOpType, SchedDagNodeList> visitedNodes;
+    DenseMap<SchedBarOpType, SchedDagNodeList> visitedBarriers;
+
+    visitedNodes[SchedBarOpType::None] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::All] = SchedDagNodeList();
+    /* 
+    Valu =        2,
+    Salu =        4,
+    Mfma =        8,
+    VmemAll =    16,
+    VmemRead =   32,
+    VmemWrite =  64,
+    LdsAll =    128,
+    LdsRead =   256,
+    LdsWrite =  512,
+    Trans
+    */
+    
+/*
+  def ROCDL_SchedBarrier : ROCDL_ConcreteNonMemIntrOp<"sched.barrier", [], 0, [0],["mask"]>,
+  Arguments<(ins I32Attr:$mask)> {
+  let assemblyFormat = "$mask attr-dict";
+}
+*/
+    //appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+    //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+
+    for (auto node : *nodeList) {
+      LDBG("Visiting " << *node);
+      Operation *op = node->getOp();
+      if (isa<ROCDL::SchedBarrier>(node->getOp())) {
+        IntegerAttr maskAttr = op->getAttrOfType<IntegerAttr>("mask");
+        int32_t mask = maskAttr.getInt();
+        LDBG("Found sched.barrier w/ mask=" << mask);
+        for (auto entry : visitedNodes) {
+          SchedBarOpType sbType = entry.getFirst();
+          SchedDagNodeList visitedList = entry.getSecond();
+          if (!(mask & sbType)) {
+            LDBG("Adding deps for sbType=" << sbType);
+            for (auto v : visitedNodes[sbType]) {
+              SchedDep schedDep;
+              schedDep.parent = v;
+              schedDep.child = node;
+              LDBG("Adding: " << schedDep);
+              depList.push_back(schedDep);
+            }
+            // Make this barrier the only thing in this visited list.
+            visitedNodes[sbType].clear();
+            visitedNodes[sbType].push_back(node);
+          }
+        }
+      } else {
+        // Add op to every matching visiting list.
+        for (auto entry : visitedNodes) {
+          SchedBarOpType sbType = entry.getFirst();
+          SchedDagNodeList visitedList = entry.getSecond();
+          if (!isaSchedBarOpType(node, sbType)) {
+            LDBG(*node << " blocked by sbType=" << sbType);
+            visitedNodes[sbType].push_back(node);
+          }
+        }
+      }
+    }
+    // Now that we went through the list top-down, we need to go from
+    // the last sched.bar to the last region.
   }
 
   // SetPrio is like sched.bar(0), no instructions can move past.
@@ -556,6 +747,7 @@ struct DataDependencyCalculator : DependencyCalculator {
     calcDepsLdsGpuBar<SchedDirection::TopDown>();
     calcDepsGpuBarGpuBar();
     calcDepsCfBr();
+    calcDepsSchedBar();
     calcDepsSetPrio();
   }
 
@@ -1160,7 +1352,7 @@ struct SchedManager {
   void addDeps(std::unique_ptr<DependencyCalculator> depCalc) {
     deps[depCalc->depName] = depCalc->calcDepsForNodes(nodeList, nodeMap);
     dag.addDeps(deps[depCalc->depName]);
-    dumpDagDotFormat(llvm::dbgs(), nodeList);
+    depOrder.push_back(depCalc->depName);
   }
 
   void printNodes() {
@@ -1183,6 +1375,9 @@ struct SchedManager {
 
     LDBG("NodeList before reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(printNodes());
+
+    LDBG("SchedDag before reschedule(" << rescheduleId << ")");
+    LLVM_DEBUG(dumpDagDotFormat(llvm::dbgs()));
 
     // Node readiness is based on direction.
     dag.initReadyNodes<Direction>();
@@ -1255,12 +1450,71 @@ struct SchedManager {
     return opList;
   }
 
+  llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out) {
+    out << "digraph \"dep-dag\" {\n";
+    out << "rankdir=\"BT\"\n";
+    for (auto node : nodeList) {
+      std::string color = "none";
+      if (llvm::isa<DotOp>(node->getOp())) {
+        color = "deepskyblue";
+      } else if (llvm::isa<triton::gpu::LocalLoadOp>(node->getOp())) {
+        color = "gold";
+      } else if (llvm::isa<triton::gpu::LocalStoreOp>(node->getOp())) {
+        color = "orangered";
+      } else if (opCategoryGlobalLoad(node)) {
+        color = "maroon";
+      } else if (opCategoryGlobalStore(node)) {
+        color = "green";
+      } else if (opCategoryBarrier(node)) {
+        color = "magenta";
+      } else if (opCategoryNop(node)) {
+        color = "none";
+      } else {
+        color = "gray80";
+      }
+      std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+      out << addr << "\t[label=\"[@" << node->id << " " << node->opStr << "]\""
+        << ", style=filled, fillcolor=" << color << "]\n";
+    }
+
+    // https://graphviz.org/doc/info/colors.html
+    // https://graphviz.org/doc/info/shapes.html
+
+    std::map<StringRef, std::pair<std::string, std::string>> format;
+    // Assume later deps are more important to visualize b/c complex.
+    format["Data"]                    = std::make_pair("gray70", "dotted");
+    format["RefinedOrder"]            = std::make_pair("black", "dashed");
+    format["LocalLoadTypeOrder"]      = std::make_pair("darkgreen", "solid");
+    format["LocalStoreTypeOrder"]     = std::make_pair("darkgreen", "solid");
+    format["GlobalLoadCategoryOrder"] = std::make_pair("darkgreen", "solid");
+    format["MemOrder"]                = std::make_pair("blue", "solid");
+    format["MemInterleave"]           = std::make_pair("red", "solid");
+
+    for (StringRef depTypeName : depOrder) {      
+      std::string color = format[depTypeName].first;
+      std::string style = format[depTypeName].second;
+      DepList depList = deps[depTypeName];
+      for (auto dep : depList) {
+        std::string parentAddr = std::to_string(reinterpret_cast<intptr_t>(dep.parent));
+        std::string childAddr = std::to_string(reinterpret_cast<intptr_t>(dep.child));
+        out << "\t" << childAddr
+          << " -> " << parentAddr
+          << " [color=" << color
+          << ", style=" << style
+          << "]\n";
+      }
+    }
+    out << "}\n";
+    return out;
+  }
+
 private:
   BasicBlockNodeMap nodeMap; // does not get changed; contains shared_ptrs.
   SchedDagNodeList nodeList; // rewritten every rescheduling.
   SchedDag dag;
   bool readyToAddDeps;
   DepMap deps;
+  SmallVector<StringRef> depOrder;
   DenseMap<SchedDagNode *, size_t> nodeIndices;
   int32_t rescheduleId;
 }; // SchedManager
