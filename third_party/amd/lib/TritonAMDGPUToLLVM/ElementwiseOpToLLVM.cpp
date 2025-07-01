@@ -958,9 +958,7 @@ Bf16_to_Fp8E4M3FN_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value newExp = b.i16_val(0x0000);
     if constexpr (UZ) {
       newExp = b.sub(exp, b.i16_val(119));
-    }
-    else
-    {
+    } else {
       newExp = b.sub(exp, b.i16_val(120));
     }
 
@@ -997,13 +995,10 @@ Bf16_to_Fp8E4M3FN_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value fp8MantissaMax;
     Value fp8MantissaMaxLShifted;
 
-    if constexpr (UZ)
-    {
+    if constexpr (UZ) {
       fp8MantissaMaxLShifted = b.i16_val(0x0070);
       fp8MantissaMax = b.i16_val(0x0007);
-    }
-    else
-    {
+    } else {
       fp8MantissaMaxLShifted = b.i16_val(0x0060);
       fp8MantissaMax = b.i16_val(0x0006);
     }
@@ -1112,9 +1107,8 @@ Bf16_to_Fp8E4M3FNUZ_HW(Location loc, ConversionPatternRewriter &rewriter,
 
 static ConverterT Bf16_to_Fp8E4M3FNUZ(AMD::ISAFamily isaFamily) {
   constexpr bool enableUZMode = true;
-  return isaFamily == AMD::ISAFamily::CDNA4
-             ? Bf16_to_Fp8E4M3FN_SW<enableUZMode>
-             : Bf16_to_Fp8E4M3FNUZ_HW;
+  return isaFamily == AMD::ISAFamily::CDNA4 ? Bf16_to_Fp8E4M3FN_SW<enableUZMode>
+                                            : Bf16_to_Fp8E4M3FNUZ_HW;
 }
 
 // fp8e5m2fnuz to bf16
@@ -1131,7 +1125,7 @@ Fp8E5M2FNUZ_to_Bf16(Location loc, ConversionPatternRewriter &rewriter,
 // bf16 to fp8e5m2fnuz
 static SmallVector<Value>
 Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
-                     const SmallVector<Value> &v) {
+                       const SmallVector<Value> &v) {
   assert(v.size() == 2);
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -1146,19 +1140,30 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
 
     Value newExp = b.sub(exp, b.i16_val(111));
     // Flush to 0 in case exponent is out of range
-    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , mantissa, b.i16_val(0x0000));
-    sign = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , sign, b.i16_val(0x0000));
-    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)) , newExp, b.i16_val(0x0000));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)), mantissa,
+                        b.i16_val(0x0000));
+    sign = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)), sign,
+                    b.i16_val(0x0000));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)), newExp,
+                      b.i16_val(0x0000));
 
     // Make exponent nonnegative
-    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)) , mantissa, b.lshr(mantissa, b.i16_val(8)));
-    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)) , newExp, b.add(i16_ty, newExp, b.i16_val(8)));
-    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)) , mantissa, b.lshr(mantissa, b.i16_val(4)));
-    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)) , newExp, b.add(i16_ty, newExp, b.i16_val(4)));
-    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)) , mantissa, b.lshr(mantissa, b.i16_val(2)));
-    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)) , newExp, b.add(i16_ty, newExp, b.i16_val(2)));
-    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)) , mantissa, b.lshr(mantissa, b.i16_val(1)));
-    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)) , newExp, b.add(i16_ty, newExp, b.i16_val(1)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)), mantissa,
+                        b.lshr(mantissa, b.i16_val(8)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF8)), newExp,
+                      b.add(i16_ty, newExp, b.i16_val(8)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)), mantissa,
+                        b.lshr(mantissa, b.i16_val(4)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFC)), newExp,
+                      b.add(i16_ty, newExp, b.i16_val(4)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)), mantissa,
+                        b.lshr(mantissa, b.i16_val(2)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFE)), newExp,
+                      b.add(i16_ty, newExp, b.i16_val(2)));
+    mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)), mantissa,
+                        b.lshr(mantissa, b.i16_val(1)));
+    newExp = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFFF)), newExp,
+                      b.add(i16_ty, newExp, b.i16_val(1)));
 
     e = b.and_(newExp, b.i16_val(0x001F));
     m = b.and_(b.lshr(mantissa, b.i16_val(7 - 2)), b.i16_val(0x0003));
@@ -1192,7 +1197,8 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     //   1      |   0       |  1     Number is odd -> Round up
     //   1      |   0       |  0     Number is even -> Truncate
 
-    Value roundBit = b.and_(b.lshr(mantissa, b.i16_val(7 - 2 - 1)), b.i16_val(0x0001));
+    Value roundBit =
+        b.and_(b.lshr(mantissa, b.i16_val(7 - 2 - 1)), b.i16_val(0x0001));
     Value lowerBits = b.and_(mantissa, b.i16_val(0x000F));
     Value m_lsb = b.and_(m, b.i16_val(0x0001));
     Value lowOrLsbSet = b.icmp_ne(b.or_(lowerBits, m_lsb), b.i16_val(0x0000));
@@ -1200,7 +1206,8 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     m = b.select(roundUp, b.add(i16_ty, m, b.i16_val(0x0001)), m);
     m = b.and_(m, b.i16_val(0x0003));
     // Handle overflow in case of rounding up
-    Value hasOverflow = b.and_(b.icmp_eq(roundUp, b.i1_val(1)), b.icmp_eq(m, b.i16_val(0x0000)));
+    Value hasOverflow = b.and_(b.icmp_eq(roundUp, b.i1_val(1)),
+                               b.icmp_eq(m, b.i16_val(0x0000)));
     e = b.select(hasOverflow, b.add(i16_ty, e, b.i16_val(1)), e);
 
     // Clamp value to +-FLT_MAX if needed
@@ -1208,8 +1215,7 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value fp8MantissaMax = b.i16_val(0x0003);
 
     Value isGreaterFP8Max = b.icmp_sge(e, fp8ExponentMax);
-    isGreaterFP8Max =
-        b.and_(isGreaterFP8Max, b.icmp_sge(m, fp8MantissaMax));
+    isGreaterFP8Max = b.and_(isGreaterFP8Max, b.icmp_sge(m, fp8MantissaMax));
 
     e = b.select(isGreaterFP8Max, fp8ExponentMax, e);
     m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
@@ -1226,7 +1232,7 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
 
 static SmallVector<Value>
 Bf16_to_Fp8E5M2FNUZ_HW(Location loc, ConversionPatternRewriter &rewriter,
-                    const SmallVector<Value> &v) {
+                       const SmallVector<Value> &v) {
   assert(v.size() == 2);
   auto v0 = convertBf16ToFp32(loc, rewriter, v[0]);
   auto v1 = convertBf16ToFp32(loc, rewriter, v[1]);
@@ -1234,9 +1240,8 @@ Bf16_to_Fp8E5M2FNUZ_HW(Location loc, ConversionPatternRewriter &rewriter,
 }
 
 static ConverterT Bf16_to_Fp8E5M2FNUZ(AMD::ISAFamily isaFamily) {
-  return isaFamily == AMD::ISAFamily::CDNA4
-             ? Bf16_to_Fp8E5M2FNUZ_SW
-             : Bf16_to_Fp8E5M2FNUZ_HW;
+  return isaFamily == AMD::ISAFamily::CDNA4 ? Bf16_to_Fp8E5M2FNUZ_SW
+                                            : Bf16_to_Fp8E5M2FNUZ_HW;
 }
 
 static Value Fp8E4M3FNUZ_to_Fp16_oneValue(Location loc,
