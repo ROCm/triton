@@ -15,8 +15,8 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-// #undef LLVM_DEBUG
-// #define LLVM_DEBUG(X) X
+#undef LLVM_DEBUG
+#define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule"
@@ -338,10 +338,9 @@ bool opCategoryNop(SchedDagNode *node) {
 
 bool opCategoryBarrier(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<mlir::gpu::BarrierOp
-                   // sched.barrier
-                   // setprio
-                   >(op);
+  return llvm::isa<mlir::gpu::BarrierOp,
+                   ROCDL::SchedBarrier,
+                   ROCDL::SetPrioOp>(op);
 }
 
 /******************************************************************************
@@ -620,13 +619,14 @@ struct DataDependencyCalculator : DependencyCalculator {
   }
 
   // Sched.bars block ops based on type.
-  void calcDepsSchedBar() {
+#if 0
+  void calcDepsSchedBarMasks() {
     LDBG("calcDepsSchedBar()");
     // For each node and type, track which nodes don't match the type.
     // This means any sched.bar, for each bit in the mask,
     // create deps between the bit
     DenseMap<SchedBarOpType, SchedDagNodeList> visitedNodes;
-    DenseMap<SchedBarOpType, SchedDagNodeList> visitedBarriers;
+    DenseMap<SchedBarOpType, SchedDagNode *> visitedBarriers;
 
     visitedNodes[SchedBarOpType::None] = SchedDagNodeList();
     visitedNodes[SchedBarOpType::All] = SchedDagNodeList();
@@ -640,13 +640,16 @@ struct DataDependencyCalculator : DependencyCalculator {
     visitedNodes[SchedBarOpType::LdsRead] = SchedDagNodeList();
     visitedNodes[SchedBarOpType::LdsWrite] = SchedDagNodeList();
     visitedNodes[SchedBarOpType::Trans] = SchedDagNodeList();
+    // Visit every node top-down.
     for (auto node : *nodeList) {
       LDBG("Visiting " << *node);
       Operation *op = node->getOp();
+      // if Sched.Barrier
       if (isa<ROCDL::SchedBarrier>(node->getOp())) {
         IntegerAttr maskAttr = op->getAttrOfType<IntegerAttr>("mask");
         int32_t mask = maskAttr.getInt();
         LDBG("Found sched.barrier w/ mask=" << mask);
+        // Add deps for all prev matching nodes before sched.bar.
         for (auto entry : visitedNodes) {
           SchedBarOpType sbType = entry.getFirst();
           SchedDagNodeList visitedList = entry.getSecond();
@@ -664,25 +667,76 @@ struct DataDependencyCalculator : DependencyCalculator {
             visitedNodes[sbType].push_back(node);
           }
         }
+        // Update this as most recent barrier visited.
+        for (auto entry : visitedBarrier) {
+          SchedBarOpType sbType = entry.getFirst();
+          // SchedDagNode *prevBar = entry.getSecond();
+          if (!(mask & sbType)) {
+            visitedBarriers[sbType] = node;
+          }
+        }
       } else {
+        // Non Sched.Barrier
+
         // Add op to every matching visiting list.
         for (auto entry : visitedNodes) {
           SchedBarOpType sbType = entry.getFirst();
-          SchedDagNodeList visitedList = entry.getSecond();
+          // SchedDagNode *prevBar = entry.getSecond();
           if (!isaSchedBarOpType(node, sbType)) {
-            LDBG(*node << " blocked by sbType=" << sbType);
             visitedNodes[sbType].push_back(node);
           }
+        }
+        // Add dep for node after prev sched.bar.
+        for (auto entry : visitedBarriers) {
+          SchedBarOpType sbType = entry.getFirst();
+          SchedDagNode *prevBar = entry.getSecond();
+          if (prevBar) {
+            if (!isaSchedBarOpType(node, sbType)) {
+              SchedDep schedDep;
+              schedDep.parent = prevBar;
+              schedDep.child = node;
+              LDBG("Adding: " << schedDep);
+              depList.push_back(schedDep);
+            }
+          } 
         }
       }
     }
     // Now that we went through the list top-down, we need to go from
     // the last sched.bar to the last region.
   }
+#endif
 
-  // SetPrio is like sched.bar(0), no instructions can move past.
-  void calcDepsSetPrio() {
-    // TODO(dtanner)
+  // Interpret any OpType as full scheduling barrier that no ops can cross.
+  void calcDepsFullBars() {
+    SchedDagNode *prevBar = nullptr;
+    SchedDagNodeList prevNodes;
+
+    for (auto node : *nodeList) {
+      if (isa<ROCDL::SchedBarrier, ROCDL::SetPrioOp>(node->getOp())) {
+        // prevNodes must be before this barrier.
+        for (auto p : prevNodes) {
+          SchedDep schedDep;
+          schedDep.parent = p;
+          schedDep.child = node;
+          LDBG("Adding: " << schedDep);
+          depList.push_back(schedDep);
+        }
+        // Barrier becomes only previous node.
+        prevNodes.clear();
+        prevNodes.push_back(node);
+        prevBar = node;
+      } else {
+        prevNodes.push_back(node);
+        if (prevBar) {
+          SchedDep schedDep;
+          schedDep.parent = prevBar;
+          schedDep.child = node;
+          LDBG("Adding: " << schedDep);
+          depList.push_back(schedDep);
+        }
+      }
+    }
   }
 
   void calcDeps() {
@@ -691,8 +745,8 @@ struct DataDependencyCalculator : DependencyCalculator {
     calcDepsLdsGpuBar<SchedDirection::TopDown>();
     calcDepsGpuBarGpuBar();
     calcDepsCfBr();
-    calcDepsSchedBar();
-    calcDepsSetPrio();
+    calcDepsFullBars();
+    // calcDepsSchedBarMasks();
   }
 };
 
@@ -1572,12 +1626,11 @@ struct TritonAMDGPURescheduleOps
     LDBG(hr);
     LDBG("Rescheduled Ops:");
     // Print op (and not node) list.
-    LLVM_DEBUG(std::string outStr; llvm::raw_string_ostream outStream(outStr);
+    LLVM_DEBUG(
                for (auto op : rescheduledOps) {
-                 op->print(outStream);
-                 outStream << "\n";
-               } LDBG(outStream.str()););
-
+                 op->print(llvm::dbgs());
+                 llvm::dbgs() << "\n";
+               });
     // Apply schedule to basic block.
     for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
       (*it)->moveBefore(mlirBlock, mlirBlock->begin());
@@ -1596,7 +1649,17 @@ struct TritonAMDGPURescheduleOps
 
     for (auto block : blocks) {
       if (succeeded(verify(block))) {
+        LDBG("OpList before applyReschedulingPasses()");
+        for (auto it = block->begin(); it != block->end(); ++it) {
+          (*it).print(llvm::dbgs());
+          llvm::dbgs() << "\n";
+        }
         applyReschedulingPasses(block);
+        LDBG("OpList after applyReschedulingPasses()");
+        for (auto it = block->begin(); it != block->end(); ++it) {
+          (*it).print(llvm::dbgs());
+          llvm::dbgs() << "\n";
+        }
       }
     }
   }
