@@ -13,8 +13,8 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-//#undef LLVM_DEBUG
-//#define LLVM_DEBUG(X) X
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
@@ -149,7 +149,8 @@ struct RefinedOpOrderTracker {
     idRefinedOp = 0;
   }
   triton::amdgpu::RefinedOpOrderAttr getRefinedOpOrderAttr() {
-    auto refinedOpOrderAttr = triton::amdgpu::RefinedOpOrderAttr::get(ctx, idOriginalOp, idRefinedOp);
+    auto refinedOpOrderAttr =
+        triton::amdgpu::RefinedOpOrderAttr::get(ctx, idOriginalOp, idRefinedOp);
     ++idRefinedOp;
     return refinedOpOrderAttr;
   }
@@ -565,7 +566,7 @@ struct LocalLoadOpPattern
         auto refinedLoad = rewriter.create<ttg::LocalLoadOp>(
             loc, refinedTensorType, refinedView);
         refinedLoad->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-            refinedOpOrder.getRefinedOpOrderAttr());
+                             refinedOpOrder.getRefinedOpOrderAttr());
         subtiles.push_back(refinedLoad);
       }
     }
@@ -628,11 +629,11 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
       auto slice = rewriter.create<triton::amdgpu::ExtractSliceOp>(
           loc, Type{refinedBlock.tensorType}, Value{origSrc}, offset);
 
-      auto loadOp = rewriter.create<triton::LoadOp>(
-          loc, slice, mask, other, boundaryCheck, padding, cache, evict,
-          isVolatile);
+      auto loadOp = rewriter.create<triton::LoadOp>(loc, slice, mask, other,
+                                                    boundaryCheck, padding,
+                                                    cache, evict, isVolatile);
       loadOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-          refinedOpOrder.getRefinedOpOrderAttr());
+                      refinedOpOrder.getRefinedOpOrderAttr());
       refinedTensors.push_back(loadOp);
     }
 
@@ -727,7 +728,7 @@ struct AMDGCNBufferLoadOp
           loc, refinedTensorType, origBasePtr, slicedOffset, origStride,
           origCache, slicedMask, slicedOtherTensor);
       refinedOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-          refinedOpOrder.getRefinedOpOrderAttr());
+                         refinedOpOrder.getRefinedOpOrderAttr());
       refinedOps.push_back(refinedOp);
     }
 
@@ -799,9 +800,10 @@ struct LocalStoreOpPattern
       auto slice = rewriter.create<triton::amdgpu::ExtractSliceOp>(
           loc, Type{refinedBlock.tensorType}, Value{origSrc}, offset);
 
-      auto storeOp = rewriter.create<ttg::LocalStoreOp>(loc, slice, slicedSharedMemView);
+      auto storeOp =
+          rewriter.create<ttg::LocalStoreOp>(loc, slice, slicedSharedMemView);
       storeOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-          refinedOpOrder.getRefinedOpOrderAttr());
+                       refinedOpOrder.getRefinedOpOrderAttr());
     }
 
     rewriter.eraseOp(op);

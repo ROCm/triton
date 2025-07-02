@@ -15,8 +15,8 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule"
@@ -29,7 +29,8 @@ namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
 /******************************************************************************
-  Reschedule ttgir after refine-ops-pass to interleave refined ops at the ttgir level.
+  Reschedule ttgir after refine-ops-pass to interleave refined ops at the ttgir
+  level.
 
   The goals of rescheduling the basic block are:
   (1) Triton scheduling only needs to compliment LLVM scheduler,
@@ -62,7 +63,9 @@ Operation *createSchedBarrier(OpBuilder &rewriter, Location loc,
 
 // For abbreviated debug printing during scheduling,
 // only print the portion of the op string which contains operands.
-std::string opStringShort(Operation *op) {
+StringRef opStringShort(Operation *op) {
+#if 0
+  // This is very slow and takes 0.5s per op
   // Get full op string.
   std::string dbgStr;
   llvm::raw_string_ostream dbgStream(dbgStr);
@@ -70,7 +73,7 @@ std::string opStringShort(Operation *op) {
   flags.getLargeResourceStringLimit();
   op->print(dbgStream);
   std::string opStrFull = dbgStream.str();
-  // If no operands, return full string. E.g. 
+  // If no operands, return full string. E.g.
   if (op->getNumResults() == 0 && op->getNumOperands() == 0) {
     return opStrFull;
   }
@@ -105,6 +108,9 @@ std::string opStringShort(Operation *op) {
       idxLastOperand = idx;
   }
   return opStrFull.substr(0, idxLastOperand);
+#else
+  return op->getName().getStringRef();
+#endif
 }
 
 enum class SchedDirection { TopDown, BottomUp };
@@ -138,9 +144,11 @@ struct SchedDagNode {
   }
 
   // Copy constructor.
-  SchedDagNode(const SchedDagNode& node) : op(node.op), id(node.id), opStr(node.opStr), children(node.children), parents(node.parents) {}
+  SchedDagNode(const SchedDagNode &node)
+      : op(node.op), id(node.id), opStr(node.opStr), children(node.children),
+        parents(node.parents) {}
 
-  void addChild(SchedDagNode *node) {children.insert(node); }
+  void addChild(SchedDagNode *node) { children.insert(node); }
   void addParent(SchedDagNode *node) { parents.insert(node); }
   Operation *getOp() { return op; }
   bool hasChildren() { return !children.empty(); }
@@ -149,13 +157,13 @@ struct SchedDagNode {
   int32_t numParents() { return parents.size(); }
 
   /*
-    When scheduling top-down, a node is ready to schedule when it has no parents.
-    When scheduling bottom-up, a node is ready to schedule when it has no children.
+    When scheduling top-down, a node is ready to schedule when it has no
+    parents. When scheduling bottom-up, a node is ready to schedule when it has
+    no children.
   */
-  template <SchedDirection Direction>
-  bool isReady() {
+  template <SchedDirection Direction> bool isReady() {
     if constexpr (Direction == SchedDirection::TopDown) {
-     return parents.empty();
+      return parents.empty();
     } else {
       return children.empty();
     }
@@ -163,7 +171,6 @@ struct SchedDagNode {
 
   const llvm::SetVector<SchedDagNode *> &getChildren() { return children; }
   const llvm::SetVector<SchedDagNode *> &getParents() { return parents; }
-
 
   bool removeChild(SchedDagNode *node) {
     if (children.contains(node)) {
@@ -186,38 +193,41 @@ struct SchedDagNode {
     parents.clear();
   }
 
-  // returns true of this is ancestor (by recursively checking children) of other.
+  // returns true of this is ancestor (by recursively checking children) of
+  // other.
   bool isAncestor(SchedDagNode *other) const {
     for (SchedDagNode *child : children) {
       if (child == other) {
         // this is ancestor of other if other is my child
         return true;
       } else if (child->isAncestor(other)) {
-        // this is ancestor of other if one of my children are ancestor of other.
+        // this is ancestor of other if one of my children are ancestor of
+        // other.
         return true;
       }
     }
     return false;
   }
 
-  // returns true of this is posterity (by recursively checking parents) of other.
+  // returns true of this is posterity (by recursively checking parents) of
+  // other.
   bool isPosterity(SchedDagNode *other) const {
     for (SchedDagNode *parent : parents) {
       if (parent == other) {
         // this is posterity of other if other is my parent
         return true;
       } else if (parent->isPosterity(other)) {
-        // this is posterity of other if one of its parents are posterity of other.
+        // this is posterity of other if one of its parents are posterity of
+        // other.
         return true;
       }
     }
     return false;
   }
 
-
   Operation *op;
   int32_t id; // for debug printing
-  std::string opStr;
+  StringRef opStr;
 
   // Children depend on this node; this node must be scheduled before children.
   llvm::SetVector<SchedDagNode *> children;
@@ -248,12 +258,14 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
   return out;
 }
 
-llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
+llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out,
+                                    SchedDagNodeList &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
   for (auto node : nodes) {
     std::string name = std::to_string(reinterpret_cast<intptr_t>(node));
-    out << name << "\t[label=\"[@" << node->id << " " << node->opStr << "]\"]\n";
+    out << name << "\t[label=\"[@" << node->id << " " << node->opStr
+        << "]\"]\n";
   }
   for (auto node : nodes) {
     std::string name = std::to_string(reinterpret_cast<intptr_t>(node));
@@ -266,12 +278,15 @@ llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out, SchedDagNodeList &no
   return out;
 }
 
-llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out, llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
+llvm::raw_ostream &
+dumpDagDotFormat(llvm::raw_ostream &out,
+                 llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
   for (auto node : nodes) {
     std::string name = std::to_string(reinterpret_cast<intptr_t>(node.get()));
-    out << name << "\t[label=\"[@" << node.get()->id << " " << node.get()->opStr << "]\"]\n";
+    out << name << "\t[label=\"[@" << node.get()->id << " " << node.get()->opStr
+        << "]\"]\n";
   }
   for (auto node : nodes) {
     std::string name = std::to_string(reinterpret_cast<intptr_t>(node.get()));
@@ -284,7 +299,9 @@ llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out, llvm::SmallVector<st
   return out;
 }
 
-llvm::raw_ostream &operator<<(llvm::raw_ostream &out, llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
+llvm::raw_ostream &
+operator<<(llvm::raw_ostream &out,
+           llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
   for (auto node : nodes) {
     out << *(node.get()) << "\n";
   }
@@ -293,18 +310,12 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, llvm::SmallVector<std::sha
 
 bool opCategoryLoad(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-      triton::LoadOp,
-      triton::gpu::LocalLoadOp,
-      triton::amdgpu::BufferLoadOp
-    >(op);
+  return llvm::isa<triton::LoadOp, triton::gpu::LocalLoadOp,
+                   triton::amdgpu::BufferLoadOp>(op);
 }
 bool opCategoryStore(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-  triton::StoreOp,
-  triton::gpu::LocalStoreOp
-    >(op);
+  return llvm::isa<triton::StoreOp, triton::gpu::LocalStoreOp>(op);
 }
 bool opCategoryMem(SchedDagNode *node) {
   return opCategoryLoad(node) || opCategoryStore(node);
@@ -312,37 +323,26 @@ bool opCategoryMem(SchedDagNode *node) {
 
 bool opCategoryGlobalLoad(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-      triton::LoadOp,
-      triton::amdgpu::BufferLoadOp
-    >(op);
+  return llvm::isa<triton::LoadOp, triton::amdgpu::BufferLoadOp>(op);
 }
 bool opCategoryGlobalStore(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-  triton::StoreOp
-    >(op);
+  return llvm::isa<triton::StoreOp>(op);
 }
 
 bool opCategoryNop(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-      triton::gpu::MemDescSubviewOp,
-      triton::gpu::MemDescTransOp,
-      tt::amdgpu::ExtractSliceOp,
-      tt::amdgpu::ConcatOp
-    >(op);
+  return llvm::isa<triton::gpu::MemDescSubviewOp, triton::gpu::MemDescTransOp,
+                   tt::amdgpu::ExtractSliceOp, tt::amdgpu::ConcatOp>(op);
 }
 
 bool opCategoryBarrier(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<
-  mlir::gpu::BarrierOp
-  // sched.barrier
-  // setprio
-    >(op);
+  return llvm::isa<mlir::gpu::BarrierOp
+                   // sched.barrier
+                   // setprio
+                   >(op);
 }
-
 
 /******************************************************************************
   Creates list of nodes using shared_ptr to keep a single copy.
@@ -350,16 +350,15 @@ bool opCategoryBarrier(SchedDagNode *node) {
 ******************************************************************************/
 struct BasicBlockNodeMap {
   BasicBlockNodeMap(Block *mlirBlock) {
-    //LDBG("Node to Op mapping for BB");
     for (auto it = mlirBlock->begin(); it != mlirBlock->end(); ++it) {
       Operation *op = &(*it);
       // same as calling new
       std::shared_ptr<SchedDagNode> node = std::make_shared<SchedDagNode>(op);
 
-      //std::string dbgStr;
-      //llvm::raw_string_ostream dbgStream(dbgStr);
-      //op->print(dbgStream);
-      //LDBG(*node << " -> " << dbgStream.str());
+      // std::string dbgStr;
+      // llvm::raw_string_ostream dbgStream(dbgStr);
+      // op->print(dbgStream);
+      // LDBG(*node << " -> " << dbgStream.str());
 
       lookup.insert({op, node.get()});
       nodes.push_back(std::move(node));
@@ -376,7 +375,7 @@ struct BasicBlockNodeMap {
   }
 
   // Lookup node by op.
-  SchedDagNode * operator[]( Operation * op) const {
+  SchedDagNode *operator[](Operation *op) const {
     if (!lookup.contains(op))
       return nullptr;
     return lookup.find(op)->second;
@@ -396,11 +395,11 @@ struct BasicBlockNodeMap {
 ******************************************************************************/
 struct SchedDep {
   SchedDagNode *parent; // dst
-  SchedDagNode *child; // src
+  SchedDagNode *child;  // src
 };
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDep &dep) {
-  return  out << *(dep.child) << " -> " << *(dep.parent);
+  return out << *(dep.child) << " -> " << *(dep.parent);
 }
 
 typedef SmallVector<SchedDep> DepList;
@@ -408,14 +407,16 @@ typedef DenseMap<StringRef, DepList> DepMap;
 
 /******************************************************************************
   Abstract base class.
-  calcDeps() gets to see the nodeList with all currently known deps applied to nodes.
+  calcDeps() gets to see the nodeList with all currently known deps applied to
+  nodes.
 ******************************************************************************/
 struct DependencyCalculator {
   DependencyCalculator(StringRef name) : depName(name) {}
 
   virtual void calcDeps() = 0;
 
-  DepList calcDepsForNodes(SchedDagNodeList& currentNodeList, BasicBlockNodeMap currentNodeMap) {
+  DepList calcDepsForNodes(SchedDagNodeList &currentNodeList,
+                           BasicBlockNodeMap currentNodeMap) {
     LDBG("DependencyCalculator::calcDepsForNodes() - " << depName);
     depList.clear();
     nodeList = &currentNodeList;
@@ -431,15 +432,13 @@ struct DependencyCalculator {
   BasicBlockNodeMap *nodeMap;
 };
 
-
 /******************************************************************************
   Create data dependencies based on def-use chains.
   Also creates dependencies based on various barriers.
   This class represents the minimum set of dependencies needed for correctness.
 ******************************************************************************/
 struct DataDependencyCalculator : DependencyCalculator {
-  DataDependencyCalculator() :
-      DependencyCalculator("Data") {}
+  DataDependencyCalculator() : DependencyCalculator("Data") {}
 
   // There is an implied data dependency between LDS ops and GPUBarrier.
   template <SchedDirection Direction> void calcDepsLdsGpuBar() {
@@ -529,7 +528,8 @@ struct DataDependencyCalculator : DependencyCalculator {
   // Nodes without results still must come before cf.br.
   void calcDepsCfBr() {
     SchedDagNode *lastNode = (*(nodeList->rbegin())); // cf.br
-    for (auto it = std::next(nodeList->rbegin()); it != nodeList->rend(); ++it) {
+    for (auto it = std::next(nodeList->rbegin()); it != nodeList->rend();
+         ++it) {
       SchedDagNode *node = (*it);
       if (node->getOp()->getNumResults() == 0) {
         SchedDep dep;
@@ -542,18 +542,18 @@ struct DataDependencyCalculator : DependencyCalculator {
 
   // Which ops allowed to cross the barrier.
   enum SchedBarOpType : int32_t {
-    None =        0, // No ops can cross barrier.
-    All =         1, // All, non-memory, non-side-effect producing 
-    Valu =        2,
-    Salu =        4,
-    Mfma =        8,
-    VmemAll =    16,
-    VmemRead =   32,
-    VmemWrite =  64,
-    LdsAll =    128,
-    LdsRead =   256,
-    LdsWrite =  512,
-    Trans =    1024,
+    None = 0, // No ops can cross barrier.
+    All = 1,  // All, non-memory, non-side-effect producing
+    Valu = 2,
+    Salu = 4,
+    Mfma = 8,
+    VmemAll = 16,
+    VmemRead = 32,
+    VmemWrite = 64,
+    LdsAll = 128,
+    LdsRead = 256,
+    LdsWrite = 512,
+    Trans = 1024,
   };
 
   // Return true if node matches sched bar op type;
@@ -567,101 +567,58 @@ struct DataDependencyCalculator : DependencyCalculator {
 
     // Mfma
     if (isa<triton::DotOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::All ||
-        sbTy == SchedBarOpType::Mfma);
-    
-    // Lds Read
+      return (sbTy == SchedBarOpType::All || sbTy == SchedBarOpType::Mfma);
+
+      // Lds Read
     } else if (isa<triton::gpu::LocalLoadOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::LdsRead ||
-        sbTy == SchedBarOpType::LdsAll);
-    
-    // Lds Write
-    } else if (isa<triton::gpu::LocalStoreOp,
-                   triton::gpu::LocalAllocOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::LdsWrite ||
-        sbTy == SchedBarOpType::LdsAll);
+      return (sbTy == SchedBarOpType::LdsRead ||
+              sbTy == SchedBarOpType::LdsAll);
 
-    // Global Load
-    } else if (isa<triton::LoadOp,
-                   triton::amdgpu::BufferLoadOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::VmemRead ||
-        sbTy == SchedBarOpType::VmemAll);
-    
-    // Global Store
-    } else if (isa<triton::StoreOp,
-                   triton::amdgpu::BufferStoreOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::VmemWrite ||
-        sbTy == SchedBarOpType::VmemAll);
+      // Lds Write
+    } else if (isa<triton::gpu::LocalStoreOp, triton::gpu::LocalAllocOp>(
+                   node->getOp())) {
+      return (sbTy == SchedBarOpType::LdsWrite ||
+              sbTy == SchedBarOpType::LdsAll);
 
-    // Transcendental
-    } else if (isa<math::ExpOp,
-                   math::Exp2Op>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::All ||
-        sbTy == SchedBarOpType::Valu ||
-        sbTy == SchedBarOpType::Salu ||
-        sbTy == SchedBarOpType::Trans
-        );
+      // Global Load
+    } else if (isa<triton::LoadOp, triton::amdgpu::BufferLoadOp>(
+                   node->getOp())) {
+      return (sbTy == SchedBarOpType::VmemRead ||
+              sbTy == SchedBarOpType::VmemAll);
 
-    // Alu
-    } else if (isa<math::SqrtOp,
-                   math::RsqrtOp,
-                   arith::DivFOp,
-                   triton::ReduceOp,
-                   arith::TruncFOp,
-                   arith::ExtFOp,
-                   arith::FPToSIOp,
-                   arith::SIToFPOp,
-                   triton::FpToFpOp,
-                   triton::PreciseSqrtOp,
-                   math::SqrtOp,
-                   arith::SubIOp,
-                   arith::AddIOp,
-                   arith::MulIOp,
-                   arith::DivSIOp,
-                   arith::DivUIOp,
-                   arith::RemFOp,
-                   arith::RemSIOp,
-                   arith::RemUIOp,
-                   arith::AndIOp,
-                   arith::OrIOp,
-                   arith::XOrIOp,
-                   arith::ShLIOp,
-                   arith::ShRSIOp,
-                   arith::ShRUIOp,
-                   arith::MinNumFOp,
-                   arith::MaxNumFOp,
-                   arith::MinSIOp,
-                   arith::MaxSIOp,
-                   arith::MinUIOp,
-                   arith::MaxUIOp,
-                   arith::AddFOp,
-                   arith::SubFOp,
-                   arith::MulFOp,
-                   arith::MaximumFOp,
-                   arith::MinimumFOp,
+      // Global Store
+    } else if (isa<triton::StoreOp, triton::amdgpu::BufferStoreOp>(
+                   node->getOp())) {
+      return (sbTy == SchedBarOpType::VmemWrite ||
+              sbTy == SchedBarOpType::VmemAll);
+
+      // Transcendental
+    } else if (isa<math::ExpOp, math::Exp2Op>(node->getOp())) {
+      return (sbTy == SchedBarOpType::All || sbTy == SchedBarOpType::Valu ||
+              sbTy == SchedBarOpType::Salu || sbTy == SchedBarOpType::Trans);
+
+      // Alu
+    } else if (isa<math::SqrtOp, math::RsqrtOp, arith::DivFOp, triton::ReduceOp,
+                   arith::TruncFOp, arith::ExtFOp, arith::FPToSIOp,
+                   arith::SIToFPOp, triton::FpToFpOp, triton::PreciseSqrtOp,
+                   math::SqrtOp, arith::SubIOp, arith::AddIOp, arith::MulIOp,
+                   arith::DivSIOp, arith::DivUIOp, arith::RemFOp,
+                   arith::RemSIOp, arith::RemUIOp, arith::AndIOp, arith::OrIOp,
+                   arith::XOrIOp, arith::ShLIOp, arith::ShRSIOp, arith::ShRUIOp,
+                   arith::MinNumFOp, arith::MaxNumFOp, arith::MinSIOp,
+                   arith::MaxSIOp, arith::MinUIOp, arith::MaxUIOp,
+                   arith::AddFOp, arith::SubFOp, arith::MulFOp,
+                   arith::MaximumFOp, arith::MinimumFOp,
                    triton::gpu::ConvertLayoutOp>(node->getOp())) {
-      return (
-        sbTy == SchedBarOpType::All ||
-        sbTy == SchedBarOpType::Valu ||
-        sbTy == SchedBarOpType::Salu
-        );
+      return (sbTy == SchedBarOpType::All || sbTy == SchedBarOpType::Valu ||
+              sbTy == SchedBarOpType::Salu);
 
     } else {
       // Unrecognized ops, assume they're simple alu.
-      return (
-        sbTy == SchedBarOpType::All ||
-        sbTy == SchedBarOpType::Valu ||
-        sbTy == SchedBarOpType::Salu
-        );
+      return (sbTy == SchedBarOpType::All || sbTy == SchedBarOpType::Valu ||
+              sbTy == SchedBarOpType::Salu);
     }
   }
-
 
   // Sched.bars block ops based on type.
   void calcDepsSchedBar() {
@@ -674,28 +631,16 @@ struct DataDependencyCalculator : DependencyCalculator {
 
     visitedNodes[SchedBarOpType::None] = SchedDagNodeList();
     visitedNodes[SchedBarOpType::All] = SchedDagNodeList();
-    /* 
-    Valu =        2,
-    Salu =        4,
-    Mfma =        8,
-    VmemAll =    16,
-    VmemRead =   32,
-    VmemWrite =  64,
-    LdsAll =    128,
-    LdsRead =   256,
-    LdsWrite =  512,
-    Trans
-    */
-    
-/*
-  def ROCDL_SchedBarrier : ROCDL_ConcreteNonMemIntrOp<"sched.barrier", [], 0, [0],["mask"]>,
-  Arguments<(ins I32Attr:$mask)> {
-  let assemblyFormat = "$mask attr-dict";
-}
-*/
-    //appendOp(builder.create<ROCDL::SBarrierOp>(loc));
-    //appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-
+    visitedNodes[SchedBarOpType::Valu] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::Salu] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::Mfma] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::VmemAll] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::VmemRead] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::VmemWrite] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::LdsAll] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::LdsRead] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::LdsWrite] = SchedDagNodeList();
+    visitedNodes[SchedBarOpType::Trans] = SchedDagNodeList();
     for (auto node : *nodeList) {
       LDBG("Visiting " << *node);
       Operation *op = node->getOp();
@@ -750,21 +695,20 @@ struct DataDependencyCalculator : DependencyCalculator {
     calcDepsSchedBar();
     calcDepsSetPrio();
   }
-
 };
 
 /******************************************************************************
-  Create order dependencies between ops which were refined from same original op.
+  Create order dependencies between ops which were refined from same original
+  op.
 ******************************************************************************/
 struct RefinedOpDependencyCalculator : DependencyCalculator {
-  RefinedOpDependencyCalculator() :
-      DependencyCalculator("RefinedOrder") {}
+  RefinedOpDependencyCalculator() : DependencyCalculator("RefinedOrder") {}
 
   /*
     Add dependencies between all dots; it is assumed that they were originally
     created in the ideal order during refinement.
-    If it changes that they aren't created in ideal order, then we would need to enhance this
-    to place dependencies according to dot tiling.
+    If it changes that they aren't created in ideal order, then we would need to
+    enhance this to place dependencies according to dot tiling.
   */
   void calcDepsDot() {
     SchedDagNode *prevDot = nullptr;
@@ -774,11 +718,14 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
       SchedDagNode *node = *it;
       if (DotOp op = dyn_cast<DotOp>(node->getOp())) {
         if (op->hasAttr(triton::amdgpu::DotTileAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(triton::amdgpu::DotTileAttr::getMnemonic());
-          //int32_t tileSerial = attr.getTileSerial();
-          //int32_t elemSerial = attr.getElementSerial();
-          //LDBG("Found DotOp w/ DotTileAttr " << tileSerial << ", " << elemSerial);
-          // When both tile and element serial ids decrease, it means we've started a new dot.
+          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(
+              triton::amdgpu::DotTileAttr::getMnemonic());
+          // int32_t tileSerial = attr.getTileSerial();
+          // int32_t elemSerial = attr.getElementSerial();
+          // LDBG("Found DotOp w/ DotTileAttr " << tileSerial << ", " <<
+          // elemSerial);
+          //  When both tile and element serial ids decrease, it means we've
+          //  started a new dot.
           if (prevDot /*&& (tileSerial >= prevTileSerial || elemSerial >= prevElemSerial)*/) {
             SchedDep dep;
             dep.parent = prevDot;
@@ -786,8 +733,8 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
             depList.push_back(dep);
           }
           prevDot = node;
-          //prevTileSerial = tileSerial;
-          //prevElemSerial = elemSerial;
+          // prevTileSerial = tileSerial;
+          // prevElemSerial = elemSerial;
         } else {
           LDBG("WARNING DotOp has no DotTileAttr:" << *node);
         }
@@ -799,10 +746,10 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
     Add dependencies between local loads which
     (1) Belong to the same dot.
     (2) Belong to the same operand of the dot.
-    It is assumed that the above two criterial mean the local loads would have been refined
-    from the same unrefined local load.
-    It is also assumed that the ideal relative order of refined local loads
-    is monotonically increasing addresses.
+    It is assumed that the above two criterial mean the local loads would have
+    been refined from the same unrefined local load. It is also assumed that the
+    ideal relative order of refined local loads is monotonically increasing
+    addresses.
   */
   void calcDepsLocalLoad() {
     SchedDagNode *prevNode = nullptr;
@@ -813,16 +760,21 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
       SchedDagNode *node = *it;
       if (ttg::LocalLoadOp op = dyn_cast<ttg::LocalLoadOp>(node->getOp())) {
         auto resultType = cast<RankedTensorType>(op.getType());
-        auto resultEncode = cast<DotOperandEncodingAttr>(resultType.getEncoding());
+        auto resultEncode =
+            cast<DotOperandEncodingAttr>(resultType.getEncoding());
         auto opdIdx = resultEncode.getOpIdx();
         LDBG("Found LocalLoadOp w/ opdIdx=" << opdIdx << "; " << *node);
         if (op->hasAttr(triton::amdgpu::DotTileAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(triton::amdgpu::DotTileAttr::getMnemonic());
+          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(
+              triton::amdgpu::DotTileAttr::getMnemonic());
           int32_t tileSerial = attr.getTileSerial();
           int32_t elemSerial = attr.getElementSerial();
-          LDBG("Found LocalLoadOp w/ DotTileAttr " << tileSerial << ", " << elemSerial);
+          LDBG("Found LocalLoadOp w/ DotTileAttr " << tileSerial << ", "
+                                                   << elemSerial);
 
-          if (prevNode && (tileSerial >= prevTileSerial || elemSerial >= prevElemSerial) && opdIdx == prevOpdIdx) {
+          if (prevNode &&
+              (tileSerial >= prevTileSerial || elemSerial >= prevElemSerial) &&
+              opdIdx == prevOpdIdx) {
             SchedDep dep;
             dep.parent = prevNode;
             dep.child = node;
@@ -841,7 +793,8 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
 
   /*
     Add dependencies between ops which were refined from the same op.
-    It is assumed that the ideal relative order of refines ops is the order created during refinement.
+    It is assumed that the ideal relative order of refines ops is the order
+    created during refinement.
   */
   void calcDepsRefinedOp() {
     SchedDagNode *prevNode = nullptr;
@@ -850,7 +803,8 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
       SchedDagNode *node = *it;
       Operation *op = node->getOp();
       if (op->hasAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic())) {
-        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
+        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(
+            triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
         int32_t idOriginalOp = attr.getIdOriginalOp();
         int32_t idRefinedOp = attr.getIdRefinedOp();
         LDBG("Found RefinedOp: " << idOriginalOp << ", " << idRefinedOp);
@@ -868,17 +822,18 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
 
   void calcDeps() {
     calcDepsDot();
-    calcDepsLocalLoad(); // TODO(dtanner) add me and verify Ravil's canonicalizer passing forward attributes.
+    calcDepsLocalLoad(); // TODO(dtanner) add me and verify Ravil's
+                         // canonicalizer passing forward attributes.
     calcDepsRefinedOp();
   }
-
 };
 
 /*
-  Simple DependencyCalculators based on op types (or category) and serializes all ops of that type.
+  Simple DependencyCalculators based on op types (or category) and serializes
+  all ops of that type.
 */
-template<typename OpType>
-void calcDepsOpType(SchedDagNodeList *nodeList, DepList& depList) {
+template <typename OpType>
+void calcDepsOpType(SchedDagNodeList *nodeList, DepList &depList) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
@@ -895,7 +850,8 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepList& depList) {
   }
 }
 
-void calcDepsOpCategory(SchedDagNodeList *nodeList, DepList& depList, bool (*category)(SchedDagNode *)) {
+void calcDepsOpCategory(SchedDagNodeList *nodeList, DepList &depList,
+                        bool (*category)(SchedDagNode *)) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
@@ -913,29 +869,28 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepList& depList, bool (*cat
 }
 
 struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
-  LocalLoadOrderDependencyCalculator() :
-      DependencyCalculator("LocalLoadTypeOrder") {}
+  LocalLoadOrderDependencyCalculator()
+      : DependencyCalculator("LocalLoadTypeOrder") {}
   void calcDeps() {
     calcDepsOpType<triton::gpu::LocalLoadOp>(nodeList, depList);
   }
 };
 
 struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
-  LocalStoreOrderDependencyCalculator() :
-      DependencyCalculator("LocalStoreTypeOrder") {}
+  LocalStoreOrderDependencyCalculator()
+      : DependencyCalculator("LocalStoreTypeOrder") {}
   void calcDeps() {
     calcDepsOpType<triton::gpu::LocalStoreOp>(nodeList, depList);
   }
 };
 
 struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
-  GlobalLoadOrderDependencyCalculator() :
-      DependencyCalculator("GlobalLoadCategoryOrder") {}
+  GlobalLoadOrderDependencyCalculator()
+      : DependencyCalculator("GlobalLoadCategoryOrder") {}
   void calcDeps() {
     calcDepsOpCategory(nodeList, depList, opCategoryGlobalLoad);
   }
 };
-
 
 /******************************************************************************
   SchedDag consists of nodes containing edges to other nodes.
@@ -953,8 +908,8 @@ public:
     return copy;
   }
 
-  void addDeps(const DepMap & deps) {
-    for (auto& depType : deps) {
+  void addDeps(const DepMap &deps) {
+    for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
       DepList depList = depType.getSecond();
       for (auto dep : depList) {
@@ -964,7 +919,7 @@ public:
     }
   }
 
-  void addDeps(const DepList & depList) {
+  void addDeps(const DepList &depList) {
     for (auto dep : depList) {
       dep.child->addParent(dep.parent);
       dep.parent->addChild(dep.child);
@@ -977,8 +932,7 @@ public:
     }
   }
 
-  template <SchedDirection Direction>
-  void initReadyNodes() {
+  template <SchedDirection Direction> void initReadyNodes() {
     readyNodes.clear();
     for (auto node : nodes) {
       if (node->isReady<Direction>()) {
@@ -990,9 +944,10 @@ public:
   bool finished() { return readyNodes.empty(); }
 
   /*
-  * After scheduling a node top-down, mark it's children as dependency-fulfilled.
-  * After scheduling a node bottom-up, mark it's parents as dependency-fulfilled.
-  */
+   * After scheduling a node top-down, mark it's children as
+   * dependency-fulfilled. After scheduling a node bottom-up, mark it's parents
+   * as dependency-fulfilled.
+   */
   template <SchedDirection Direction>
   void removeScheduledNode(SchedDagNode *node) {
     assert(node->isReady<Direction>());
@@ -1015,24 +970,22 @@ public:
     }
   }
 
-  SetVector<SchedDagNode *> &getReadyNodes() {
-    return readyNodes;
-  }
+  SetVector<SchedDagNode *> &getReadyNodes() { return readyNodes; }
 
 private:
-
   SchedDagNodeList nodes;
   SetVector<SchedDagNode *> readyNodes;
-
 };
 
 /******************************************************************************
-Create high-level dependencies between the different memory ops where there aren't data deps.
-A basic block has a collection of refined memory ops, GL, LS, LL.
+Create high-level dependencies between the different memory ops where there
+aren't data deps. A basic block has a collection of refined memory ops, GL, LS,
+LL.
 
 for num_stages=2 without local_prefetch
-the GL and LS have data dependencies, and both can be co-scheduled with the local_loads.
-So we need to specify that the GL should overlap the LL. The LS can't overlap LL because of anti-dep enforced by gpu.bar.
+the GL and LS have data dependencies, and both can be co-scheduled with the
+local_loads. So we need to specify that the GL should overlap the LL. The LS
+can't overlap LL because of anti-dep enforced by gpu.bar.
 
 Example:
 GLA01
@@ -1054,13 +1007,18 @@ LSA01 LSB01
 
 https://github.com/ROCm/triton-internal/issues/736
 Determine Memory Op Order & Co-Scheduling
-We need to determine the relative ordering between or overlap of different memory op types; e.g. if global_loads and local_loads can both be scheduled, which should have higher priority. The ordering of memory ops have implications for performance and register use. This applies to loops where data can be prefetched, and also to regions with multiple dots.
-First, data dependencies determine order.
-Second, critical-path analysis determines order, meaning the memory ops which need to be scheduled to get to the mfmas sooner have highest priority.
-Note that for local_loads, some may be on the critical path to get us to the first 1-2 dot-tiles, but after other dot-tiles' local_loads can be delayed
-Third, based on scheduling mode:
-Min-Vgpr mode: preferred order is local_store, global_load, local_load.
-Max-Latency mode: preferred order is global_load, local_load, local_store.
+We need to determine the relative ordering between or overlap of different
+memory op types; e.g. if global_loads and local_loads can both be scheduled,
+which should have higher priority. The ordering of memory ops have implications
+for performance and register use. This applies to loops where data can be
+prefetched, and also to regions with multiple dots. First, data dependencies
+determine order. Second, critical-path analysis determines order, meaning the
+memory ops which need to be scheduled to get to the mfmas sooner have highest
+priority. Note that for local_loads, some may be on the critical path to get us
+to the first 1-2 dot-tiles, but after other dot-tiles' local_loads can be
+delayed Third, based on scheduling mode: Min-Vgpr mode: preferred order is
+local_store, global_load, local_load. Max-Latency mode: preferred order is
+global_load, local_load, local_store.
 ========================================================================
 This applies to loops where data can be prefetched.
 This should also apply to regions with multiple dots.
@@ -1085,13 +1043,17 @@ Need to distinguish between vgpr vs latency for global separate from LDS ops?
 The above logic is hyper-focused on gemm, and we need to abstract much more.
 
 ==========================================================================
-This is actually mostly determined during StreamPipeliner via clustering and num_stages. We need to decide the optimal memoy op ordering (via cluster) during StreamPipeliner and covey it forward via the IR.
-Additionally, we also need StreamPipeliner to specify whether op A should fully preceed op B, or whether op A and op B can overlap and therefore be interleaved after refining.
+This is actually mostly determined during StreamPipeliner via clustering and
+num_stages. We need to decide the optimal memoy op ordering (via cluster) during
+StreamPipeliner and covey it forward via the IR. Additionally, we also need
+StreamPipeliner to specify whether op A should fully preceed op B, or whether op
+A and op B can overlap and therefore be interleaved after refining.
 ==========================================================================
 
 
 
-This first issue has mostly to do with when everything is prefetched, what order should they be in.
+This first issue has mostly to do with when everything is prefetched, what order
+should they be in.
 
 
 
@@ -1099,12 +1061,21 @@ AddDeps: Order deps between different memory types #738
 https://github.com/ROCm/triton-internal/issues/738
 Memory Opr Order Deps
 
-With this ordering of ops, we can create order dependencies between op types so we only schedule the ones at a time that we want. E.g. for local prefetch, scheduler shouldn’t even see local_loads until very late in the loop.
+With this ordering of ops, we can create order dependencies between op types so
+we only schedule the ones at a time that we want. E.g. for local prefetch,
+scheduler shouldn’t even see local_loads until very late in the loop.
 
 Insert order dependencies to serialize certain memory ops.
 
-This may need information to be communicated from the stream-pipeliner (or other places) to the scheduler. Some examples of what this task means:
-(1) A gemm with num_stages=2 wants local_loads close to the top of the kernel and global_loads to come after the first few local_loads but interleaved among later local_loads. Whereas enabling local_prefetch puts all the local_loads at the bottom of the loop after the global_loads and local_stores. The scheduler needs to know "delay the local_loads as much as possible" after most mfmas which have freed registers which the local_local loads can then use. The backend gets this wrong because it schedules the local_loads early and uses too many vgprs.
+This may need information to be communicated from the stream-pipeliner (or other
+places) to the scheduler. Some examples of what this task means: (1) A gemm with
+num_stages=2 wants local_loads close to the top of the kernel and global_loads
+to come after the first few local_loads but interleaved among later local_loads.
+Whereas enabling local_prefetch puts all the local_loads at the bottom of the
+loop after the global_loads and local_stores. The scheduler needs to know "delay
+the local_loads as much as possible" after most mfmas which have freed registers
+which the local_local loads can then use. The backend gets this wrong because it
+schedules the local_loads early and uses too many vgprs.
 
 (2) For FA num_stages=2 maxDepth=1, the memory structure looks like
 global_load
@@ -1117,7 +1088,7 @@ This second issue takes
 GLA01 GLB01 LLA0123 LLB0123
 LSA01 LSB01
 
-and further narrows it to 
+and further narrows it to
 
 LLA0
 LLB0
@@ -1136,7 +1107,7 @@ LSA1
 LSB0
 LSB1
 
-Later will AddDeps between the mem ops and 
+Later will AddDeps between the mem ops and
 
 
 global_load before/after local_loads
@@ -1145,17 +1116,16 @@ local_load[A] before/after local_load[B]
 global_load[K] before/after global_load[K]
 
 
-Determines which memory ops should overlap other memory ops (vs being co-scheduled)
-when data dependencies allow them to be.
+Determines which memory ops should overlap other memory ops (vs being
+co-scheduled) when data dependencies allow them to be.
 
-if we have all dots in order, and we do a scheduling with delaying all local loads
-then we can just grab the order of local_loads from that.
-Can we just keep the relative order of local stores as being final?
-Then have the relative order of global loads to match (with loop wrap around).
+if we have all dots in order, and we do a scheduling with delaying all local
+loads then we can just grab the order of local_loads from that. Can we just keep
+the relative order of local stores as being final? Then have the relative order
+of global loads to match (with loop wrap around).
 ******************************************************************************/
 struct MemOrderDependencyCalculator : DependencyCalculator {
-  MemOrderDependencyCalculator() :
-      DependencyCalculator("MemOrder") {}
+  MemOrderDependencyCalculator() : DependencyCalculator("MemOrder") {}
 
   // get memory ops only from the graph; keep them in order.
   llvm::SmallVector<std::shared_ptr<SchedDagNode>> getMemNodes() const {
@@ -1165,23 +1135,27 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
         // Verify unrefined op not already in list.
         Operation *op = node->getOp();
         if (op->hasAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
+          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(
+              triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
           int32_t idOriginalOp = attr.getIdOriginalOp();
           int32_t idRefinedOp = attr.getIdRefinedOp();
           if (idRefinedOp == 0) {
             LDBG("Found MemNode: " << *node);
-            // create a copy of the new node, since we don't want to disturb the old graph's deps.
-            std::shared_ptr<SchedDagNode> nodeClone = std::make_shared<SchedDagNode>(*node);
+            // create a copy of the new node, since we don't want to disturb the
+            // old graph's deps.
+            std::shared_ptr<SchedDagNode> nodeClone =
+                std::make_shared<SchedDagNode>(*node);
             nodeClone.get()->clearDeps();
             memNodes.push_back(nodeClone);
           }
         } else {
-          llvm::dbgs() << "Found memory op without RefinedOpOrderAttr: " << op << "\n";
+          LDBG("Found memory op without RefinedOpOrderAttr: " << op);
         }
       }
     }
 
     // Add edges directly into simplified memory graph.
+    // TODO(dtanner) - this is prohibitively expensive!
     for (auto it0 = memNodes.begin(); it0 != memNodes.end(); ++it0) {
       SchedDagNode *memNode0 = it0->get();
       Operation *memOp0 = memNode0->getOp();
@@ -1199,9 +1173,10 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     }
     return memNodes;
   }
-    
+
   /*
-  Need to traverse graph to determine which memory ops can be co-scheduled with which other memory ops.
+  Need to traverse graph to determine which memory ops can be co-scheduled with
+  which other memory ops.
 
   aiter gemm has 2 decisions to be made
   Should buffer load come before/after local_loads.
@@ -1211,12 +1186,10 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     llvm::SmallVector<std::shared_ptr<SchedDagNode>> memNodes = getMemNodes();
     LDBG("Simplified Graph of MemNodes");
     LDBG(memNodes);
-    dumpDagDotFormat(llvm::dbgs(), memNodes);
+    LLVM_DEBUG(dumpDagDotFormat(llvm::dbgs(), memNodes));
 
-    // If memory ops' data are used in strict order, then 
-
+    // If memory ops' data are used in strict order, then
   }
-
 };
 
 /******************************************************************************
@@ -1226,11 +1199,13 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
 // Prefer op based on type.
 template <typename OpType>
 bool preferOpType(SchedDagNode *a, SchedDagNode *b, bool prefer = true) {
-  return (llvm::isa<OpType>(a->getOp()) and !llvm::isa<OpType>(b->getOp())) == prefer;
+  return (llvm::isa<OpType>(a->getOp()) and !llvm::isa<OpType>(b->getOp())) ==
+         prefer;
 }
 
 template <typename OpType>
-SchedDagNode *findPreferredOpType(SchedDagNode *a, SchedDagNode *b, bool prefer = true) {
+SchedDagNode *findPreferredOpType(SchedDagNode *a, SchedDagNode *b,
+                                  bool prefer = true) {
   if (preferOpType<OpType>(a, b, prefer)) {
     return a;
   } else if (preferOpType<OpType>(b, a, prefer)) {
@@ -1240,11 +1215,14 @@ SchedDagNode *findPreferredOpType(SchedDagNode *a, SchedDagNode *b, bool prefer 
 }
 
 // Prefer op based on category (e.g. opCategoryLoad()).
-bool preferOpCategory(SchedDagNode *a, SchedDagNode *b, bool (*category)(SchedDagNode *), bool prefer = true) {
+bool preferOpCategory(SchedDagNode *a, SchedDagNode *b,
+                      bool (*category)(SchedDagNode *), bool prefer = true) {
   return (category(a) and !category(b)) == prefer;
 }
 
-SchedDagNode *findPreferredOpCategory(SchedDagNode *a, SchedDagNode *b, bool (*category)(SchedDagNode *), bool prefer = true) {
+SchedDagNode *findPreferredOpCategory(SchedDagNode *a, SchedDagNode *b,
+                                      bool (*category)(SchedDagNode *),
+                                      bool prefer = true) {
   if (preferOpCategory(a, b, category, prefer)) {
     return a;
   } else if (preferOpCategory(b, a, category, prefer)) {
@@ -1254,11 +1232,12 @@ SchedDagNode *findPreferredOpCategory(SchedDagNode *a, SchedDagNode *b, bool (*c
 }
 
 bool preferLocalLoad(SchedDagNode *a, SchedDagNode *b, bool prefer = true) {
-  return (llvm::isa<triton::gpu::LocalLoadOp>(a->getOp()) and !llvm::isa<triton::gpu::LocalLoadOp>(b->getOp())) == prefer;
+  return (llvm::isa<triton::gpu::LocalLoadOp>(a->getOp()) and
+          !llvm::isa<triton::gpu::LocalLoadOp>(b->getOp())) == prefer;
 }
 
 // Returns ops in original mlir block order.
-template<SchedDirection Direction>
+template <SchedDirection Direction>
 SchedDagNode *getOriginalOrder(SchedDagNode *a, SchedDagNode *b) {
   return (a->id < b->id) == (Direction == SchedDirection::TopDown) ? a : b;
 }
@@ -1267,19 +1246,19 @@ SchedDagNode *getOriginalOrder(SchedDagNode *a, SchedDagNode *b) {
   Abstract Base class for a scheduling heuristic recipe.
   E.g. TopDown, schedule global_loads early and local_stores late.
 */
-template<SchedDirection Direction>
-struct SchedHeuristic {
+template <SchedDirection Direction> struct SchedHeuristic {
   virtual SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) = 0;
   virtual StringRef name() = 0;
 };
 
 /******************************************************************************
-  Delay LocalLoads as much as possible so they're adjacent to the dot which needs them.
-  This will then allow for placing deps between local loads.
+  Delay LocalLoads as much as possible so they're adjacent to the dot which
+  needs them. This will then allow for placing deps between local loads.
   Also delay other memory ops so that order deps can be placed between them too.
   SchedDirection = BottomUp
 ******************************************************************************/
-struct SchedHeuristicLocalLoadAdjacentDotOps : public SchedHeuristic<SchedDirection::BottomUp> {
+struct SchedHeuristicLocalLoadAdjacentDotOps
+    : public SchedHeuristic<SchedDirection::BottomUp> {
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     // Schedule local loads asap.
@@ -1322,7 +1301,8 @@ struct SchedHeuristicLocalLoadAdjacentDotOps : public SchedHeuristic<SchedDirect
   Schedule original order (insomuch as dependencies allowed).
   Also hoist nops (which groups together) for ease of reading.
 ******************************************************************************/
-struct SchedHeuristicOriginalOrder : public SchedHeuristic<SchedDirection::TopDown> {
+struct SchedHeuristicOriginalOrder
+    : public SchedHeuristic<SchedDirection::TopDown> {
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     if (auto selected = findPreferredOpCategory(a, b, opCategoryNop)) {
@@ -1341,11 +1321,9 @@ struct SchedHeuristicOriginalOrder : public SchedHeuristic<SchedDirection::TopDo
   - Runs scheduler.
 ******************************************************************************/
 struct SchedManager {
-  SchedManager(Block *block) :
-      nodeMap(block),
-      nodeList(nodeMap.getNodeList()),
-      dag(nodeList),
-      rescheduleId(0) {}
+  SchedManager(Block *block)
+      : nodeMap(block), nodeList(nodeMap.getNodeList()), dag(nodeList),
+        rescheduleId(0) {}
 
   // Calculate new deps based on op order and previously determined deps.
   // Insert new deps into dep map and apply them to dat.
@@ -1363,14 +1341,14 @@ struct SchedManager {
     }
   }
 
-  template<SchedDirection Direction>
+  template <SchedDirection Direction>
   void reschedule(SchedHeuristic<Direction> *heuristic) {
     LDBG("");
     LDBG(hr);
-    LDBG("SchedManager::reschedule(" << rescheduleId << "), Direction="
-        << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
-        << ", Heuristic=" << heuristic->name()
-    );
+    LDBG("SchedManager::reschedule("
+         << rescheduleId << "), Direction="
+         << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
+         << ", Heuristic=" << heuristic->name());
     LDBG(hr);
 
     LDBG("NodeList before reschedule(" << rescheduleId << ")");
@@ -1399,10 +1377,12 @@ struct SchedManager {
         for (auto node : readyNodes) {
           dbgStream << "    " << *node << "\n";
         }
-        dbgStream << "reschedule(" << rescheduleId << ") Selected: " << *selectedNode << "\n";
+        dbgStream << "reschedule(" << rescheduleId
+                  << ") Selected: " << *selectedNode << "\n";
         LDBG(dbgStream.str());
       }
-      // Place selected node in list, remove it from dag which updates readyList.
+      // Place selected node in list, remove it from dag which updates
+      // readyList.
       rescheduledNodes.push_back(selectedNode);
       dag.removeScheduledNode<Direction>(selectedNode);
     }
@@ -1415,7 +1395,8 @@ struct SchedManager {
       nodeList = rescheduledNodes;
     } else {
       nodeList.clear();
-      for (auto it = rescheduledNodes.rbegin(); it != rescheduledNodes.rend(); ++it) {
+      for (auto it = rescheduledNodes.rbegin(); it != rescheduledNodes.rend();
+           ++it) {
         auto &node = *it;
         nodeList.push_back(node);
       }
@@ -1431,10 +1412,12 @@ struct SchedManager {
     rescheduleId++;
   }
 
-  template<SchedDirection Direction>
-  SchedDagNode *selectFromReadyNodes(SetVector<SchedDagNode *> readyNodes, SchedHeuristic<Direction> *heuristic) {
+  template <SchedDirection Direction>
+  SchedDagNode *selectFromReadyNodes(SetVector<SchedDagNode *> readyNodes,
+                                     SchedHeuristic<Direction> *heuristic) {
     SchedDagNode *selected = readyNodes.front();
-    for (auto it = std::next(readyNodes.begin()); it != readyNodes.end(); ++it) {
+    for (auto it = std::next(readyNodes.begin()); it != readyNodes.end();
+         ++it) {
       SchedDagNode *node = *it;
       selected = (*heuristic)(selected, node);
     }
@@ -1474,7 +1457,7 @@ struct SchedManager {
       }
       std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
       out << addr << "\t[label=\"[@" << node->id << " " << node->opStr << "]\""
-        << ", style=filled, fillcolor=" << color << "]\n";
+          << ", style=filled, fillcolor=" << color << "]\n";
     }
 
     // https://graphviz.org/doc/info/colors.html
@@ -1482,26 +1465,25 @@ struct SchedManager {
 
     std::map<StringRef, std::pair<std::string, std::string>> format;
     // Assume later deps are more important to visualize b/c complex.
-    format["Data"]                    = std::make_pair("gray70", "dotted");
-    format["RefinedOrder"]            = std::make_pair("black", "dashed");
-    format["LocalLoadTypeOrder"]      = std::make_pair("darkgreen", "solid");
-    format["LocalStoreTypeOrder"]     = std::make_pair("darkgreen", "solid");
+    format["Data"] = std::make_pair("gray70", "dotted");
+    format["RefinedOrder"] = std::make_pair("black", "dashed");
+    format["LocalLoadTypeOrder"] = std::make_pair("darkgreen", "solid");
+    format["LocalStoreTypeOrder"] = std::make_pair("darkgreen", "solid");
     format["GlobalLoadCategoryOrder"] = std::make_pair("darkgreen", "solid");
-    format["MemOrder"]                = std::make_pair("blue", "solid");
-    format["MemInterleave"]           = std::make_pair("red", "solid");
+    format["MemOrder"] = std::make_pair("blue", "solid");
+    format["MemInterleave"] = std::make_pair("red", "solid");
 
-    for (StringRef depTypeName : depOrder) {      
+    for (StringRef depTypeName : depOrder) {
       std::string color = format[depTypeName].first;
       std::string style = format[depTypeName].second;
       DepList depList = deps[depTypeName];
       for (auto dep : depList) {
-        std::string parentAddr = std::to_string(reinterpret_cast<intptr_t>(dep.parent));
-        std::string childAddr = std::to_string(reinterpret_cast<intptr_t>(dep.child));
-        out << "\t" << childAddr
-          << " -> " << parentAddr
-          << " [color=" << color
-          << ", style=" << style
-          << "]\n";
+        std::string parentAddr =
+            std::to_string(reinterpret_cast<intptr_t>(dep.parent));
+        std::string childAddr =
+            std::to_string(reinterpret_cast<intptr_t>(dep.child));
+        out << "\t" << childAddr << " -> " << parentAddr << " [color=" << color
+            << ", style=" << style << "]\n";
       }
     }
     out << "}\n";
@@ -1550,7 +1532,7 @@ struct TritonAMDGPURescheduleOps
     if (!dyn_cast<mlir::cf::BranchOp>(&(mlirBlock->back()))) {
       return failure();
     }
-    
+
     // don't schedule if there is not enough operations in a block
     if (mlirBlock->getOperations().size() < 3)
       return failure();
@@ -1560,47 +1542,46 @@ struct TritonAMDGPURescheduleOps
   void applyReschedulingPasses(Block *mlirBlock) {
     LDBG("");
     LDBG("");
-    LDBG("TritonAMDGPURescheduleOps::applyReschedulingPasses()");
+    llvm::outs() << "TritonAMDGPURescheduleOps::applyReschedulingPasses()\n";
 
     SchedManager schedManager(mlirBlock);
 
     // (0) Add basic deps.
-    // DataDependencyCalculator dataDepCalc;
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
     schedManager.addDeps(std::make_unique<RefinedOpDependencyCalculator>());
 
-    // (1) Considering mfmas are in optimal order, find optimal local_load order.
+    // (1) Considering mfmas are in optimal order, find optimal local_load
+    // order.
     SchedHeuristicLocalLoadAdjacentDotOps sh0;
     schedManager.reschedule<SchedDirection::BottomUp>(&sh0);
-    schedManager.addDeps(std::make_unique<LocalLoadOrderDependencyCalculator>());
-    schedManager.addDeps(std::make_unique<LocalStoreOrderDependencyCalculator>());
-    schedManager.addDeps(std::make_unique<GlobalLoadOrderDependencyCalculator>());
-    schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
+    schedManager.addDeps(
+        std::make_unique<LocalLoadOrderDependencyCalculator>());
+    schedManager.addDeps(
+        std::make_unique<LocalStoreOrderDependencyCalculator>());
+    schedManager.addDeps(
+        std::make_unique<GlobalLoadOrderDependencyCalculator>());
+    // TODO(dtanner) MemOrder is very expensive.
+    // schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
 
     // (F) Final rescheduling restores original order except for dependencies.
-    SchedHeuristicOriginalOrder shF;
-    schedManager.reschedule<SchedDirection::TopDown>(&shF);
+    SchedHeuristicOriginalOrder shOo;
+    schedManager.reschedule<SchedDirection::TopDown>(&shOo);
 
     SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
 
-    // Print op (and not node) list.
-    std::string outStr;
-    llvm::raw_string_ostream outStream(outStr);
-    for (auto op : rescheduledOps) {
-      op->print(outStream);
-      outStream << "\n";
-    }
     LDBG("");
     LDBG(hr);
     LDBG("Rescheduled Ops:");
-    LDBG(outStream.str());
+    // Print op (and not node) list.
+    LLVM_DEBUG(std::string outStr; llvm::raw_string_ostream outStream(outStr);
+               for (auto op : rescheduledOps) {
+                 op->print(outStream);
+                 outStream << "\n";
+               } LDBG(outStream.str()););
 
     // Apply schedule to basic block.
     for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
       (*it)->moveBefore(mlirBlock, mlirBlock->begin());
-    }
-    for (auto &op : mlirBlock->getOperations()) {
-      LLVM_DEBUG(op.dump());
     }
   }
 
