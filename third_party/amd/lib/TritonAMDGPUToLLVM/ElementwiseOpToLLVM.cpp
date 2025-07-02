@@ -1233,6 +1233,10 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     m = b.select(isGreaterFP8Max, fp8MantissaMax, m);
 
     Value result = b.or_(b.or_(sign, b.shl(e, b.i16_val(2))), m);
+    // In case of NaN, flush to 0 to match launch_downcast_emulated
+    // (test_conversions.py)
+    Value isNaN = b.icmp_eq(result, b.i16_val(0x0080));
+    result = b.select(isNaN, b.i16_val(0), result);
     auto fp8x2VecTy = vec_ty(i8_ty, 2);
     result = b.bitcast(result, fp8x2VecTy);
     return b.extract_element(i8_ty, result, b.i32_val(0));
