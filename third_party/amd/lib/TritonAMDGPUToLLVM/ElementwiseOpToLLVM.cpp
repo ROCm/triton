@@ -1138,7 +1138,19 @@ Bf16_to_Fp8E5M2FNUZ_SW(Location loc, ConversionPatternRewriter &rewriter,
     Value e = b.i16_val(0x0000);
     Value m = b.i16_val(0x0000);
 
+    // Add implicit leading 1 in case the number is normal
+    mantissa = b.select(b.icmp_eq(exp, b.i16_val(0x0000)), mantissa,
+                        b.or_(mantissa, b.i16_val(0x0080)));
+    exp = b.select(b.icmp_eq(exp, b.i16_val(0x0000)), exp,
+                   b.sub(exp, b.i16_val(1)));
+
     Value newExp = b.sub(exp, b.i16_val(111));
+    // In case exponent >= 0, revert implicit 1
+    mantissa = b.select(b.icmp_sge(newExp, b.i16_val(0)),
+                        b.and_(mantissa, b.i16_val(0xFF7F)), mantissa);
+    newExp = b.select(b.icmp_sge(newExp, b.i16_val(0)),
+                      b.add(newExp, b.i16_val(1)), newExp);
+
     // Flush to 0 in case exponent is out of range
     mantissa = b.select(b.icmp_sgt(newExp, b.i16_val(0xFFF0)), mantissa,
                         b.i16_val(0x0000));
