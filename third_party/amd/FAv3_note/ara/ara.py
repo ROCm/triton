@@ -38,12 +38,14 @@ def main():
         "PP": run_python(analyze_script, output_dir / "cluster_2_exp.txt", 0),
         "P":  run_python(analyze_script, output_dir / "cluster_0_cvt.txt", 0),
         "V":  run_python(analyze_script, output_dir / "cluster_2_mfma.txt", 1),
+        "Q":  run_python(analyze_script, output_dir / "cluster_0_mfma.txt", 2),
+        "ACC":  run_python(analyze_script, output_dir / "cluster_2_mfma.txt", 0),
     }
 
     # Write register usage summary
     reg_usage_path = script_dir / "reg_usage.txt"
     with open(reg_usage_path, "w") as f:
-        for key in ["QK", "PP", "P", "K", "V"]:
+        for key in ["QK", "PP", "P", "K", "V", "Q", "ACC"]:
             f.write(f"{key}: {results[key]}\n")
 
     # Run overlap.py
