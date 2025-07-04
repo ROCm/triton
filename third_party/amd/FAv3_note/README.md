@@ -61,6 +61,9 @@ Base on impl1, we have the following experiments
 - `impl1_TritonInterleaveAndRematRebase0_scalarized_annotEpiloguePrologue` has the same settings as
   `impl1_TritonInterleaveAndRematRebase0_scalarized` plus
   - insert `sched.barrier` in the prologue and epilogue to separate ops from different clusters
+- `disable_vector_combine` has the same settings as `impl1_TritonInterleaveAndRematRebase0_scalarized_annotEpiloguePrologue` plus `DISABLE_LLVM_OPT="disable-vector-combine"`
+- `disable_vector_combine_hack` has the same settings as `disable_vector_combine` plus manual hack
+  of llvm ir to restore the order of ops into their designated clusters in the epilogue.
   
 ### Advanced Register Analyzer `ara.py`
 
@@ -125,18 +128,108 @@ setting | reg usage inside the loop | kernel reg spill
 `impl1_rtz_annot` | 235 | 70
 `impl1_TritonInterleaveAndRematRebase0_scalarized` | 214 | 72
 `impl1_TritonInterleaveAndRematRebase0_scalarized_annotEpiloguePrologue` | 210 | 43
+`disable_vector_combine` | 210 | 48
+`disable_vector_combine_hack` | 226 | 68
 
 From the above table, we can see
 - The `TritonInterleaveAndRematRebase0` really helps a lot in reducing the register
   usage **inside the loop**.
 - The kernel spills a lot. Annotating the pro and epilogue with `sched.barrier`
   to separate the ops from different clusters helps a lot in reducing the spills.
+  
 
 ### Investigation of the epilogue
 
 The VectorCombine pass moves some op across `sched.barrier`.
 It moves the accUpdate op, i.e. `v_fmul` from cluster 0 to right before the mfma
 instructions in cluster 2. Why??
+
+Disabling the vectorCombine pass only helps keep `mul` (updateAcc) in its
+designated cluster. Some other ops are still pushed into later clusters.
+```bash
+DISABLE_LLVM_OPT="disable-vector-combine" AMDGCN_SCALARIZE_PACKED_FOPS=1 python fa/flash-attention.py
+```
+
+The SLPVectorizerPass moves sub and exp across sched.barrier.
+However, disabling this pass causes even more spilling. :(
+
+The epilogue scheduling with vectorCombine and SLP passes is as follows
+```
+E0
+E0-Cluster0(DOT1[2]+VEC2[1])
+DOT1[2]: 32 x mfma
+VEC2[1]: 32 x add
+VEC2[1]: 64 x mul <--- missing
+VEC2[1]: 16 x cvtrtz
+
+E0-Cluster1
+LRV[1]: 32 x load<4 x half>
+LWK[3]: 2  x store<8 x half>
+
+E0-Cluster2(DOT2[1]+VEC1[2])
+VEC2[1]: 64 x mul <--- From E0-Cluster0
+DOT2[1]: 32 x mfma
+VEC1[2]: 32 x max
+VEC1[2]: 32 x mul
+
+VEC1[2]: 32 x sub <--- missing
+VEC1[2]: 32 x exp <--- missing
+
+E0-Cluster3
+LRK[3]: 16 x load<8 x half>
+LWV[2]: 8  x store<2 x half>
+GRV[3]
+
+///////////////////////////////////////////////////
+E1
+E1-Cluster0(DOT2[3]+VEC2[2])
+DOT2[3]: 32 x mfma
+
+VEC2[2]: 32 x add <--- missing
+VEC2[2]: 64 x mul <--- missing
+VEC2[2]: 16 x cvtrtz <--- missing
+
+E1-Cluster1(LRV[2])
+LRV[2]: 32 x load<4 x half>
+
+E1-Cluster2(DOT2[2]+VEC1[3])
+VEC1[3]: 32 x max
+
+VEC1[2]: 32 x sub <--- From E0-Cluster2
+VEC1[2]: 32 x exp <--- From E0-Cluster2
+
+VEC2[2]: 32 x add <--- From E1-Cluster0
+VEC2[2]: 16 x cvtrtz <--- From E1-Cluster0
+VEC2[2]: 64 x mul <--- From E1-Cluster0
+
+VEC1[3]: 32 x mul
+VEC1[3]: 32 x sub
+VEC1[3]: 32 x exp
+
+E1-Cluster3(LWV[3])
+LWV[3]: 8 x store<2 x half>
+
+/////////////////////////////////////////////////////
+E2
+E2-Cluster0(VEC2[3])
+VEC2[3]: 32 x add
+VEC2[3]: 16 x cvtrtz
+
+VEC2[3]: 64 x mul <--- missing
+
+E2-Cluster1(LRV[3])
+LRV[3]: 32 x load<4 x half>
+
+E2-Cluster2(DOT2[3])
+VEC2[3]: 64 x mul <--- From E2-Cluster0
+DOT2[3]: 32 x mfma
+
+```
+
+Disabling `vector-combine` pass can restore `mul` to its designated cluster. 
+I have to manually restore other ops. The hacked llvm ir is
+`/var/lib/jenkins/OAI-triton/third_party/amd/FAv3_note/disable_vector_combine/attn_fwd.llir.hack`.
+The result IR dump dir is `disable_vector_combine_hack`.
 
 
 ### Investigation of `ds_read` for V tensor
@@ -146,3 +239,20 @@ instructions in cluster 2. Why??
   This only reduces register spill from 73 to 63.
 - [PR#7355](https://github.com/triton-lang/triton/pull/7355). The new lowering of localLdSt
   improves the xor computation for the addresses of ds instructions.
+  - Cherry picked PR7201 --> 6921 --> 7036 --> 6982 --> 7218 --> 7241 --> 7248 --> 7355
+  - new branch: `FAv3_gfx942_noAsyncCopy_newLowerLdSt`
+  - This makes things worse. Now the kernel has 113 spills :( 
+
+
+
+### Add some basic blocks?
+
+The experiments seem to tell us that
+- The backend is not doing well if the basic block has too many instructions.
+  This is aligned with the observations when we unroll the loop, in which case
+  there are many spills.
+- The epilogue contains 3 iterations of the loop. This is similar to unroll
+  the loop by a factor of 3.
+  Maybe we can put each iteration into a separate basic block?
+- sched.barrier seems to be a mark for instruction scheduling.
+  It does not mark a region for register allocation.
