@@ -412,6 +412,16 @@ class HIPBackend(BaseBackend):
         # Disable inlining of print related functions,
         # because inlining of these function could slow down compilation significantly
         amd.disable_print_inline(llvm_mod)
+
+        if "AMD_INSERT_LLVM_IR" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_LLVM_IR"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find llvm ir file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            file_content = ''.join(file_content)
+            return file_content
+
         return str(llvm_mod)
 
     @staticmethod
