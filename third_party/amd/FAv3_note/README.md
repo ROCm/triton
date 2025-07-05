@@ -66,6 +66,7 @@ setting | reg usage inside the loop | kernel reg spill
 `impl1_TritonInterleaveAndRematRebase0_scalarized_annotEpiloguePrologue` | 210 | 43
 `disable_vector_combine` | 210 | 48
 `disable_vector_combine_hack` | 226 | 68
+`simple_epilogue` | 211 | 32
 
 From the above table, we can see
 - The `TritonInterleaveAndRematRebase0` really helps a lot in reducing the register
@@ -167,7 +168,7 @@ However, `sub` and `exp` from E0 cluster 2 need QK from E0 to do the computation
 Therefore, **QK from E0 and E1 are live at the same time** so they cannot share
 the same set of registers.
 
-#### Restore the same structure in E0,E1,E2 as inside the loop
+#### Restore the same structure in E0,E1,E2 as inside the loop --> no luck
 
 The VectorCombine pass moves some op across `sched.barrier`.
 It moves the accUpdate op, i.e. `v_fmul` from cluster 0 to right before the mfma
@@ -192,7 +193,7 @@ does not help with register pressure of the kernel.
 `disable_vector_combine_hack` even does worse in terms of register allocation
 inside the loop.
 
-#### Add some basic blocks to guard the structure of E0,E1,E2
+#### Add some basic blocks to guard the structure of E0,E1,E2 --> need to try
 
 The experiments seem to tell us that
 - The backend is not doing well if the basic block has too many instructions.
@@ -203,6 +204,16 @@ The experiments seem to tell us that
   Maybe we can put each iteration into a separate basic block?
 - sched.barrier seems to be a mark for instruction scheduling.
   It does not mark a region for register allocation.
+
+#### What if we remove the epilogue as much as we can
+
+We modified the ttgir to remove as much stuff from the epilogue as possible.
+The result IR is saved in `/var/lib/jenkins/OAI-triton/third_party/amd/FAv3_note/simple_epilogue/`.
+
+The kernel still has 32 spills. And ara says there are 211 registers used inside the loop.
+This indicates either the memory cluster inside the loop or the prologue is using too many registers.
+
+So the epilogue is not the problem ...
 
 
 ### Investigation of `ds_read` for V tensor
