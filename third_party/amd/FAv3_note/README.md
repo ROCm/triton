@@ -228,4 +228,15 @@ So the epilogue is not the problem ...
   - This makes things worse. Now the kernel has 113 spills :( 
 
 
+## Roofline analysis of register usage
+
+- Compute clusters: 208
+- Memory cluster: 69
+  - `ds_read` addresses: 8 (K) + 32 (V) = 40
+  - `ds_write` K addresses: 1
+  - `ds_write` V addresses: 8 due to in-thread-tranpose
+  - `buffer_load` 16 (data) + 4 (addr) = 20
+
+In total: 277. So this design does not work.
+
 
