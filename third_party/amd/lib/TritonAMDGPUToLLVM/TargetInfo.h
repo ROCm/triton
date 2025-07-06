@@ -79,10 +79,6 @@ public:
 
   bool supportVectorizedAtomics() const override;
 
-  void localStoreOpAnnotation(triton::gpu::LocalStoreOp op,
-                              size_t localStoreOpCount,
-                              Type type) const override;
-
   bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
 
   void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,

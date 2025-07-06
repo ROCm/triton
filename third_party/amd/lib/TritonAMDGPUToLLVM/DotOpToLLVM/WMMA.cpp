@@ -359,9 +359,6 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
       wmmaLayout.getContext(), SmallVector<Type>(fc.size(), dstElemTy));
   Value res = packLLElements(loc, typeConverter, fc, rewriter, structTy);
 
-  const size_t mmaCount = numRepB * numRepM * numRepN * numRepK;
-  setNumGeneratedMMAs(op, mmaCount, mnkDim[0], mnkDim[1], mnkDim[2], elemTy);
-
   rewriter.replaceOp(op, res);
   return success();
 }

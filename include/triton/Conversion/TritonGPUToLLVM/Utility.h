@@ -556,11 +556,12 @@ SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
                                            Location loc, RewriterBase &rewriter,
                                            const TargetInfoBase &target);
 
-void storeDistributedToShared(
-    triton::gpu::MemDescType dstTy, RankedTensorType srcTy, Type elemLlvmTy,
-    ArrayRef<Value> srcVals, const SharedMemoryObject &smemObj, Location loc,
-    RewriterBase &rewriter, const TargetInfoBase &target,
-    std::pair<size_t, Type> *const llvmOpCount = nullptr);
+void storeDistributedToShared(triton::gpu::MemDescType dstTy,
+                              RankedTensorType srcTy, Type elemLlvmTy,
+                              ArrayRef<Value> srcVals,
+                              const SharedMemoryObject &smemObj, Location loc,
+                              RewriterBase &rewriter,
+                              const TargetInfoBase &target);
 
 SmallVector<Value> unpackLLElements(Location loc, Value llvmStruct,
                                     RewriterBase &rewriter);
