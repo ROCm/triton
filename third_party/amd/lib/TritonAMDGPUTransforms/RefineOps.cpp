@@ -271,8 +271,7 @@ struct RefinedOpAttrTracker {
     ++idUnrefinedOp;
   }
   triton::amdgpu::RefinedOpAttr getRefinedOpAttr() {
-    auto refinedOpAttr =
-        triton::amdgpu::RefinedOpAttr::get(ctx, idUnrefinedOp);
+    auto refinedOpAttr = triton::amdgpu::RefinedOpAttr::get(ctx, idUnrefinedOp);
     return refinedOpAttr;
   }
 };
@@ -492,7 +491,7 @@ struct DotOpMFMAConverter {
                                refinedDotValues[int32_t(m * numRepN + n)]},
                     dotAttrs);
                 dotOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
-                    refinedOpAttrTracker.getRefinedOpAttr());
+                               refinedOpAttrTracker.getRefinedOpAttr());
                 refinedDotValues[int32_t(m * numRepN + n)] = dotOp;
                 elementSerial++;
               }

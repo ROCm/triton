@@ -259,7 +259,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
 }
 
 llvm::raw_ostream &dumpDagDotFormat1(llvm::raw_ostream &out,
-                                    SchedDagNodeList &nodes) {
+                                     SchedDagNodeList &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
   for (auto node : nodes) {
@@ -280,7 +280,7 @@ llvm::raw_ostream &dumpDagDotFormat1(llvm::raw_ostream &out,
 
 llvm::raw_ostream &
 dumpDagDotFormat2(llvm::raw_ostream &out,
-                 llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
+                  llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
   for (auto node : nodes) {
@@ -338,9 +338,8 @@ bool opCategoryNop(SchedDagNode *node) {
 
 bool opCategoryBarrier(SchedDagNode *node) {
   Operation *op = node->getOp();
-  return llvm::isa<mlir::gpu::BarrierOp,
-                   ROCDL::SchedBarrier,
-                   ROCDL::SetPrioOp>(op);
+  return llvm::isa<mlir::gpu::BarrierOp, ROCDL::SchedBarrier, ROCDL::SetPrioOp>(
+      op);
 }
 
 /******************************************************************************
@@ -1462,7 +1461,8 @@ struct SchedManager {
           << ", style=filled, fillcolor=" << color << "]\n";
 
       // Count refined ops.
-      if (isa<DotOp>(op) && op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+      if (isa<DotOp>(op) &&
+          op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
         if (!firstRefined) {
           firstRefined = node;
         }
@@ -1482,9 +1482,10 @@ struct SchedManager {
 
       for (auto node : nodeList) {
         Operation *op = node->getOp();
-        if (isa<DotOp>(op) && op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+        if (isa<DotOp>(op) &&
+            op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
           auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-            triton::amdgpu::RefinedOpAttr::getMnemonic());
+              triton::amdgpu::RefinedOpAttr::getMnemonic());
           int32_t idUnrefinedOp = attr.getIdUnrefinedOp();
           if (idUnrefinedOp == prevUnrefinedId || prevUnrefinedId < 0) {
             // Same unrefined op.
@@ -1624,11 +1625,10 @@ struct TritonAMDGPURescheduleOps
     LDBG(hr);
     LDBG("Rescheduled Ops:");
     // Print op (and not node) list.
-    LLVM_DEBUG(
-               for (auto op : rescheduledOps) {
-                 op->print(llvm::dbgs());
-                 llvm::dbgs() << "\n";
-               });
+    LLVM_DEBUG(for (auto op : rescheduledOps) {
+      op->print(llvm::dbgs());
+      llvm::dbgs() << "\n";
+    });
     // Apply schedule to basic block.
     for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
       (*it)->moveBefore(mlirBlock, mlirBlock->begin());
