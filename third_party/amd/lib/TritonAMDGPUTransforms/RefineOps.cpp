@@ -262,24 +262,21 @@ private:
 };
 
 // Track the id of refined ops for scheduling.
-struct RefinedOpOrderTracker {
-  int32_t idOriginalOp;
-  int32_t idRefinedOp;
+struct RefinedOpAttrTracker {
+  int32_t idUnrefinedOp;
   MLIRContext *ctx;
-  RefinedOpOrderTracker() : idOriginalOp(0), idRefinedOp(0) {}
-  void nextOriginalOp(MLIRContext *context) {
+  RefinedOpAttrTracker() : idUnrefinedOp(0) {}
+  void nextUnrefinedOp(MLIRContext *context) {
     ctx = context;
-    ++idOriginalOp;
-    idRefinedOp = 0;
+    ++idUnrefinedOp;
   }
-  triton::amdgpu::RefinedOpOrderAttr getRefinedOpOrderAttr() {
-    auto refinedOpOrderAttr =
-        triton::amdgpu::RefinedOpOrderAttr::get(ctx, idOriginalOp, idRefinedOp);
-    ++idRefinedOp;
-    return refinedOpOrderAttr;
+  triton::amdgpu::RefinedOpAttr getRefinedOpAttr() {
+    auto refinedOpAttr =
+        triton::amdgpu::RefinedOpAttr::get(ctx, idUnrefinedOp);
+    return refinedOpAttr;
   }
 };
-static RefinedOpOrderTracker refinedOpOrder;
+static RefinedOpAttrTracker refinedOpAttrTracker;
 
 struct DotOpMFMAConverter {
   AMDMfmaEncodingAttr mfmaLayout;
@@ -426,26 +423,6 @@ struct DotOpMFMAConverter {
         auto extract = rewriter.create<triton::amdgpu::ExtractSliceOp>(
             loc, Type{extractSliceTypeA}, Value{a},
             DenseI64ArrayAttr::get(ctx, {shiftM, shiftK}));
-        // Add dot-tile info to local_load's slice;
-        // this specifies which dot-tile this load is needed for.
-        int32_t tileM = i / tileShapeM;
-        int32_t tileN = -1;
-        int32_t tileK = k / tileShapeK;
-        int32_t tileSerial = dotTileOrder.getOuterTileM()
-                                 ? tileM * dotTileOrder.getNumTilesN()
-                                 : tileM;
-        tileSerial +=
-            k * dotTileOrder.getNumTilesM() * dotTileOrder.getNumTilesN();
-        int32_t elementM = i % tileShapeM; // dots are n-major within tile
-        int32_t elementN = -1;
-        int32_t elementK = k % tileShapeK;
-        int32_t elementSerial =
-            elementM * tileShapeN; // dots are n-major within tile
-        auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
-        extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                         dotTileAttr);
         subtilesK.push_back(extract);
       }
       subtilesA.push_back(subtilesK);
@@ -465,25 +442,6 @@ struct DotOpMFMAConverter {
         auto extract = rewriter.create<triton::amdgpu::ExtractSliceOp>(
             loc, Type{extractSliceTypeB}, Value{b},
             DenseI64ArrayAttr::get(ctx, {shiftK, shiftN}));
-        // Add dot-tile info to local_load's slice;
-        // this specifies which dot-tile this load is needed for.
-        int32_t tileM = -1;
-        int32_t tileN = j / tileShapeN;
-        int32_t tileK = k / tileShapeK;
-        int32_t tileSerial = dotTileOrder.getOuterTileM()
-                                 ? tileN
-                                 : tileN * dotTileOrder.getNumTilesM();
-        tileSerial +=
-            k * dotTileOrder.getNumTilesM() * dotTileOrder.getNumTilesN();
-        int32_t elementM = -1;
-        int32_t elementN = j % tileShapeN; // dots are n-major within tile
-        int32_t elementK = k % tileShapeK;
-        int32_t elementSerial = elementN; // dots are n-major within tile
-        auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
-        extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                         dotTileAttr);
         subtilesK.push_back(extract);
       }
       subtilesB.push_back(subtilesK);
@@ -507,6 +465,7 @@ struct DotOpMFMAConverter {
     }
     auto dotAttrs = dotOp->getAttrs();
     int32_t tileSerial = 0;
+    refinedOpAttrTracker.nextUnrefinedOp(ctx);
     // Iterate over dot-tiles.
     for (int32_t tileIdxK = 0; tileIdxK < numRepK / tileShapeK; ++tileIdxK) {
       for (int tileOuterIdx = 0; tileOuterIdx < dotTileOrder.getNumTilesOuter();
@@ -532,18 +491,8 @@ struct DotOpMFMAConverter {
                     ValueRange{refinedTensorA, refinedTensorB,
                                refinedDotValues[int32_t(m * numRepN + n)]},
                     dotAttrs);
-                // Add dot-tile info to dot.
-                int32_t tileM = tileStartM / tileShapeM;
-                int32_t tileN = tileStartN / tileShapeN;
-                int32_t tileK = k;
-                int32_t elementM = m - tileStartM;
-                int32_t elementN = n - tileStartN;
-                int32_t elementK = 0;
-                auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-                    ctx, tileM, tileN, tileK, tileSerial, elementM, elementN,
-                    elementK, elementSerial);
-                dotOp->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                               dotTileAttr);
+                dotOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                    refinedOpAttrTracker.getRefinedOpAttr());
                 refinedDotValues[int32_t(m * numRepN + n)] = dotOp;
                 elementSerial++;
               }
@@ -689,7 +638,7 @@ struct LocalLoadOpPattern
 
     rewriter.setInsertionPointAfter(op);
     SmallVector<Value> subtiles;
-    refinedOpOrder.nextOriginalOp(ctx);
+    refinedOpAttrTracker.nextUnrefinedOp(ctx);
     for (int32_t i = 0; i < numReps2D[0]; ++i) {
       for (int32_t j = 0; j < numReps2D[1]; ++j) {
         int32_t offset0 = i * refinedShape[0];
@@ -701,8 +650,8 @@ struct LocalLoadOpPattern
 
         auto refinedLoad = rewriter.create<ttg::LocalLoadOp>(
             loc, refinedTensorType, refinedView);
-        refinedLoad->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-                             refinedOpOrder.getRefinedOpOrderAttr());
+        refinedLoad->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                             refinedOpAttrTracker.getRefinedOpAttr());
         subtiles.push_back(refinedLoad);
       }
     }
@@ -753,7 +702,7 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
     auto isVolatile = op.getIsVolatile();
 
     AMD::CoordinateMapper coordsMapper(refinedBlock.numPerDims);
-    refinedOpOrder.nextOriginalOp(ctx);
+    refinedOpAttrTracker.nextUnrefinedOp(ctx);
     for (size_t linearIdx = 0; linearIdx < refinedBlock.numSubTiles;
          ++linearIdx) {
       auto coords = coordsMapper.map(linearIdx);
@@ -768,8 +717,8 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
       auto loadOp = rewriter.create<triton::LoadOp>(loc, slice, mask, other,
                                                     boundaryCheck, padding,
                                                     cache, evict, isVolatile);
-      loadOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-                      refinedOpOrder.getRefinedOpOrderAttr());
+      loadOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                      refinedOpAttrTracker.getRefinedOpAttr());
       refinedTensors.push_back(loadOp);
     }
 
@@ -853,7 +802,7 @@ struct AMDGCNBufferLoadOp
         RankedTensorType::get(refinedShape, origElementType, origEncoding);
 
     SmallVector<Value> refinedOps;
-    refinedOpOrder.nextOriginalOp(ctx);
+    refinedOpAttrTracker.nextUnrefinedOp(ctx);
     for (size_t i = 0; i < slicedOffsets.size(); ++i) {
       Value slicedOffset = slicedOffsets[i];
       Value slicedMask = slicedMasks ? slicedMasks.value()[i] : nullptr;
@@ -863,8 +812,8 @@ struct AMDGCNBufferLoadOp
       auto refinedOp = rewriter.create<triton::amdgpu::BufferLoadOp>(
           loc, refinedTensorType, origBasePtr, slicedOffset, origStride,
           origCache, slicedMask, slicedOtherTensor);
-      refinedOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-                         refinedOpOrder.getRefinedOpOrderAttr());
+      refinedOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                         refinedOpAttrTracker.getRefinedOpAttr());
       refinedOps.push_back(refinedOp);
     }
 
@@ -921,7 +870,7 @@ struct LocalStoreOpPattern
 
     rewriter.setInsertionPointAfter(op);
     AMD::CoordinateMapper coordsMapper(refinedBlock.numPerDims);
-    refinedOpOrder.nextOriginalOp(ctx);
+    refinedOpAttrTracker.nextUnrefinedOp(ctx);
     for (size_t linearIdx = 0; linearIdx < refinedBlock.numSubTiles;
          ++linearIdx) {
       auto coords = coordsMapper.map(linearIdx);
@@ -938,8 +887,8 @@ struct LocalStoreOpPattern
 
       auto storeOp =
           rewriter.create<ttg::LocalStoreOp>(loc, slice, slicedSharedMemView);
-      storeOp->setAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic(),
-                       refinedOpOrder.getRefinedOpOrderAttr());
+      storeOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                       refinedOpAttrTracker.getRefinedOpAttr());
     }
 
     rewriter.eraseOp(op);

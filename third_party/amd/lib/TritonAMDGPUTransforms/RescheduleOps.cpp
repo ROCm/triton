@@ -258,7 +258,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
   return out;
 }
 
-llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out,
+llvm::raw_ostream &dumpDagDotFormat1(llvm::raw_ostream &out,
                                     SchedDagNodeList &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
@@ -279,7 +279,7 @@ llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out,
 }
 
 llvm::raw_ostream &
-dumpDagDotFormat(llvm::raw_ostream &out,
+dumpDagDotFormat2(llvm::raw_ostream &out,
                  llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
   out << "digraph \"dep-dag\" {\n";
   out << "rankdir=\"BT\"\n";
@@ -698,7 +698,7 @@ struct DataDependencyCalculator : DependencyCalculator {
               LDBG("Adding: " << schedDep);
               depList.push_back(schedDep);
             }
-          } 
+          }
         }
       }
     }
@@ -758,87 +758,30 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   RefinedOpDependencyCalculator() : DependencyCalculator("RefinedOrder") {}
 
   /*
-    Add dependencies between all dots; it is assumed that they were originally
-    created in the ideal order during refinement.
-    If it changes that they aren't created in ideal order, then we would need to
-    enhance this to place dependencies according to dot tiling.
+    Assume all dots are in ideal order, due to user placing unrefined dots
+    in ideal order, and refinement creating refined dots in ideal order.
+    Therefore the dot order before any rescheduling is a source of truth.
+    Deps were already created between refined dots, here we place deps
+    between the unrefined ops.
   */
   void calcDepsDot() {
     SchedDagNode *prevDot = nullptr;
-    int32_t prevTileSerial = -1;
-    int32_t prevElemSerial = -1;
+    int32_t prevId = -1;
     for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
       SchedDagNode *node = *it;
       if (DotOp op = dyn_cast<DotOp>(node->getOp())) {
-        if (op->hasAttr(triton::amdgpu::DotTileAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(
-              triton::amdgpu::DotTileAttr::getMnemonic());
-          // int32_t tileSerial = attr.getTileSerial();
-          // int32_t elemSerial = attr.getElementSerial();
-          // LDBG("Found DotOp w/ DotTileAttr " << tileSerial << ", " <<
-          // elemSerial);
-          //  When both tile and element serial ids decrease, it means we've
-          //  started a new dot.
-          if (prevDot /*&& (tileSerial >= prevTileSerial || elemSerial >= prevElemSerial)*/) {
+        if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+              triton::amdgpu::RefinedOpAttr::getMnemonic());
+          int32_t id = attr.getIdUnrefinedOp();
+          if (prevDot && id != prevId) {
             SchedDep dep;
             dep.parent = prevDot;
             dep.child = node;
             depList.push_back(dep);
           }
           prevDot = node;
-          // prevTileSerial = tileSerial;
-          // prevElemSerial = elemSerial;
-        } else {
-          LDBG("WARNING DotOp has no DotTileAttr:" << *node);
-        }
-      }
-    }
-  }
-
-  /*
-    Add dependencies between local loads which
-    (1) Belong to the same dot.
-    (2) Belong to the same operand of the dot.
-    It is assumed that the above two criterial mean the local loads would have
-    been refined from the same unrefined local load. It is also assumed that the
-    ideal relative order of refined local loads is monotonically increasing
-    addresses.
-  */
-  void calcDepsLocalLoad() {
-    SchedDagNode *prevNode = nullptr;
-    int32_t prevTileSerial = -1;
-    int32_t prevElemSerial = -1;
-    int32_t prevOpdIdx = -1;
-    for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
-      SchedDagNode *node = *it;
-      if (ttg::LocalLoadOp op = dyn_cast<ttg::LocalLoadOp>(node->getOp())) {
-        auto resultType = cast<RankedTensorType>(op.getType());
-        auto resultEncode =
-            cast<DotOperandEncodingAttr>(resultType.getEncoding());
-        auto opdIdx = resultEncode.getOpIdx();
-        LDBG("Found LocalLoadOp w/ opdIdx=" << opdIdx << "; " << *node);
-        if (op->hasAttr(triton::amdgpu::DotTileAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::DotTileAttr>(
-              triton::amdgpu::DotTileAttr::getMnemonic());
-          int32_t tileSerial = attr.getTileSerial();
-          int32_t elemSerial = attr.getElementSerial();
-          LDBG("Found LocalLoadOp w/ DotTileAttr " << tileSerial << ", "
-                                                   << elemSerial);
-
-          if (prevNode &&
-              (tileSerial >= prevTileSerial || elemSerial >= prevElemSerial) &&
-              opdIdx == prevOpdIdx) {
-            SchedDep dep;
-            dep.parent = prevNode;
-            dep.child = node;
-            depList.push_back(dep);
-          }
-          prevNode = node;
-          prevTileSerial = tileSerial;
-          prevElemSerial = elemSerial;
-          prevOpdIdx = opdIdx;
-        } else {
-          LDBG("WARNING LocalLoadOp has no DotTileAttr:" << *node);
+          prevId = id;
         }
       }
     }
@@ -855,29 +798,26 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
     for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
       SchedDagNode *node = *it;
       Operation *op = node->getOp();
-      if (op->hasAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic())) {
-        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(
-            triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
-        int32_t idOriginalOp = attr.getIdOriginalOp();
-        int32_t idRefinedOp = attr.getIdRefinedOp();
-        LDBG("Found RefinedOp: " << idOriginalOp << ", " << idRefinedOp);
-        if (prevNode && idOriginalOp == prevId) {
+      if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+            triton::amdgpu::RefinedOpAttr::getMnemonic());
+        int32_t id = attr.getIdUnrefinedOp();
+        LDBG("Found RefinedOp: " << id);
+        if (prevNode && id == prevId) {
           SchedDep dep;
           dep.parent = prevNode;
           dep.child = node;
           depList.push_back(dep);
         }
         prevNode = node;
-        prevId = idOriginalOp;
+        prevId = id;
       }
     }
   }
 
   void calcDeps() {
-    calcDepsDot();
-    calcDepsLocalLoad(); // TODO(dtanner) add me and verify Ravil's
-                         // canonicalizer passing forward attributes.
     calcDepsRefinedOp();
+    calcDepsDot();
   }
 };
 
@@ -1183,16 +1123,16 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   // get memory ops only from the graph; keep them in order.
   llvm::SmallVector<std::shared_ptr<SchedDagNode>> getMemNodes() const {
     llvm::SmallVector<std::shared_ptr<SchedDagNode>> memNodes;
+    SetVector<int32_t> unrefinedIds;
     for (SchedDagNode *node : *nodeList) {
       if (opCategoryMem(node)) {
         // Verify unrefined op not already in list.
         Operation *op = node->getOp();
-        if (op->hasAttr(triton::amdgpu::RefinedOpOrderAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpOrderAttr>(
-              triton::amdgpu::RefinedOpOrderAttr::getMnemonic());
-          int32_t idOriginalOp = attr.getIdOriginalOp();
-          int32_t idRefinedOp = attr.getIdRefinedOp();
-          if (idRefinedOp == 0) {
+        if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+              triton::amdgpu::RefinedOpAttr::getMnemonic());
+          int32_t id = attr.getIdUnrefinedOp();
+          if (!unrefinedIds.contains(id)) {
             LDBG("Found MemNode: " << *node);
             // create a copy of the new node, since we don't want to disturb the
             // old graph's deps.
@@ -1200,9 +1140,10 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
                 std::make_shared<SchedDagNode>(*node);
             nodeClone.get()->clearDeps();
             memNodes.push_back(nodeClone);
+            unrefinedIds.insert(id);
           }
         } else {
-          LDBG("Found memory op without RefinedOpOrderAttr: " << op);
+          LDBG("Found memory op without RefinedOpAttr: " << op);
         }
       }
     }
@@ -1239,7 +1180,6 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     llvm::SmallVector<std::shared_ptr<SchedDagNode>> memNodes = getMemNodes();
     LDBG("Simplified Graph of MemNodes");
     LDBG(memNodes);
-    LLVM_DEBUG(dumpDagDotFormat(llvm::dbgs(), memNodes));
 
     // If memory ops' data are used in strict order, then
   }
@@ -1486,33 +1426,91 @@ struct SchedManager {
     return opList;
   }
 
+  std::string getNodeColor(SchedDagNode *node) {
+    Operation *op = node->getOp();
+    if (llvm::isa<DotOp>(op)) {
+      return "deepskyblue";
+    } else if (llvm::isa<triton::gpu::LocalLoadOp>(op)) {
+      return "gold";
+    } else if (llvm::isa<triton::gpu::LocalStoreOp>(op)) {
+      return "orangered";
+    } else if (opCategoryGlobalLoad(node)) {
+      return "maroon";
+    } else if (opCategoryGlobalStore(node)) {
+      return "green";
+    } else if (opCategoryBarrier(node)) {
+      return "magenta";
+    } else if (opCategoryNop(node)) {
+      return "none";
+    } else {
+      return "gray80";
+    }
+  }
+
   llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out) {
     out << "digraph \"dep-dag\" {\n";
     out << "rankdir=\"BT\"\n";
+
+    // Dump nodes.
+    int32_t numRefined = 0;
+    SchedDagNode *firstRefined = nullptr;
     for (auto node : nodeList) {
-      std::string color = "none";
-      if (llvm::isa<DotOp>(node->getOp())) {
-        color = "deepskyblue";
-      } else if (llvm::isa<triton::gpu::LocalLoadOp>(node->getOp())) {
-        color = "gold";
-      } else if (llvm::isa<triton::gpu::LocalStoreOp>(node->getOp())) {
-        color = "orangered";
-      } else if (opCategoryGlobalLoad(node)) {
-        color = "maroon";
-      } else if (opCategoryGlobalStore(node)) {
-        color = "green";
-      } else if (opCategoryBarrier(node)) {
-        color = "magenta";
-      } else if (opCategoryNop(node)) {
-        color = "none";
-      } else {
-        color = "gray80";
-      }
+      Operation *op = node->getOp();
+      std::string color = getNodeColor(node);
       std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
       out << addr << "\t[label=\"[@" << node->id << " " << node->opStr << "]\""
           << ", style=filled, fillcolor=" << color << "]\n";
+
+      // Count refined ops.
+      if (isa<DotOp>(op) && op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+        if (!firstRefined) {
+          firstRefined = node;
+        }
+      }
     }
 
+    // Dump refined-ops subgraphs.
+    // TODO(dtanner) this doesn't work for refined ops being out of order.
+    // Since the idRefinedOp changes back and forth after interleaving.
+    if (firstRefined) {
+      int32_t serial = 0;
+      int32_t prevUnrefinedId = -1;
+      out << "\nsubgraph ref_" << serial << " {\n";
+      out << "  cluster=true;\n";
+      out << "  color = \"" << getNodeColor(firstRefined) << "\";\n";
+      out << "  label = \"refined[" << serial << "]\";\n  ";
+
+      for (auto node : nodeList) {
+        Operation *op = node->getOp();
+        if (isa<DotOp>(op) && op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+            triton::amdgpu::RefinedOpAttr::getMnemonic());
+          int32_t idUnrefinedOp = attr.getIdUnrefinedOp();
+          if (idUnrefinedOp == prevUnrefinedId || prevUnrefinedId < 0) {
+            // Same unrefined op.
+            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+            out << "\"" << addr << "\" ";
+          } else {
+            // New unrefined op.
+            // Close previous subgraph.
+            out << ";\n}\n\n";
+
+            // Begin next subgraph.
+            serial++;
+            out << "\nsubgraph ref_" << serial << " {\n";
+            out << "  cluster=true;\n";
+            out << "  color = \"" << getNodeColor(node) << "\";\n";
+            out << "  label = \"refined[" << serial << "]\";\n  ";
+            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+            out << "\"" << addr << "\" ";
+          }
+          prevUnrefinedId = idUnrefinedOp;
+        }
+      }
+      out << ";\n}\n\n";
+    }
+
+    // Dump dependencies.
     // https://graphviz.org/doc/info/colors.html
     // https://graphviz.org/doc/info/shapes.html
 
