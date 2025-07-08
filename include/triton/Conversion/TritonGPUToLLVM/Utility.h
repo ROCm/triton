@@ -557,13 +557,14 @@ SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
 // We might want to merge them at some point, but having to support
 // ldmatrix.trans makes the code in lowerLdStMatrix a bit specific
 // Lowers to st when valArrays is empty, and to ld when it is not,
-// and returns the output values.
+// and returns the output values. Optionally it takes the original ttg op which
+// might be used by the backend, e.g. for AMD to deduce alias groups
 SmallVector<Value>
 lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
                 ConversionPatternRewriter &rewriter,
-                const TargetInfoBase &targetInfo);
+                const TargetInfoBase &targetInfo, Operation *op = nullptr);
 
 // Lower local_load/local_store via ld.shared/st.shared
 SmallVector<Value> lowerLocalLdSt(Location loc, MLIRContext *ctx,
@@ -572,7 +573,8 @@ SmallVector<Value> lowerLocalLdSt(Location loc, MLIRContext *ctx,
                                   // Input for store, output for load
                                   Type llvmElemTy, Value smemBase,
                                   ConversionPatternRewriter &rewriter,
-                                  const TargetInfoBase &targetInfo);
+                                  const TargetInfoBase &targetInfo,
+                                  Operation *op = nullptr);
 
 SmallVector<Value> unpackLLElements(Location loc, Value llvmStruct,
                                     RewriterBase &rewriter);

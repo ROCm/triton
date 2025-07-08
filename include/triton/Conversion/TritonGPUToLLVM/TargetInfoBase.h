@@ -27,6 +27,14 @@ public:
   virtual Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                             std::optional<Value> ctaId, Type elemTy,
                             Value pred) const = 0;
+  // Overload from above which takes the original ttg op. The base behaviour
+  // will call the overload above dropping the op but a backend can overload
+  // this, e.g. AMD's backend uses this to apply alias groups to the llvm.load
+  virtual Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
+                            std::optional<Value> ctaId, Type elemTy, Value pred,
+                            Operation *op) const {
+    return loadDShared(rewriter, loc, ptr, ctaId, elemTy, pred);
+  }
 
   void storeShared(RewriterBase &rewriter, Location loc, Value ptr, Value val,
                    Value pred) const {

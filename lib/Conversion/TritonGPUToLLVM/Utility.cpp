@@ -624,7 +624,7 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
                 ConversionPatternRewriter &rewriter,
-                const TargetInfoBase &targetInfo) {
+                const TargetInfoBase &targetInfo, Operation *op) {
   auto vals = to_vector(valsArray);
   bool isStore = !vals.empty();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -689,7 +689,7 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
         Value valsVec =
             targetInfo.loadDShared(rewriter, loc, vecAddr, std::nullopt,
                                    vec_ty(llvmElemTy, elemsPerVec),
-                                   /*pred=*/b.true_val());
+                                   /*pred=*/b.true_val(), op);
         llvm::append_range(outVals, unpackLLVector(loc, valsVec, rewriter));
       }
     }
@@ -710,7 +710,8 @@ SmallVector<Value> lowerLocalLdSt(Location loc, MLIRContext *ctx,
                                   // Input for store, output for load
                                   Type llvmElemTy, Value smemBase,
                                   ConversionPatternRewriter &rewriter,
-                                  const TargetInfoBase &targetInfo) {
+                                  const TargetInfoBase &targetInfo,
+                                  Operation *op) {
   assert(cvt.getNumOutDims() == 1);
   assert(*cvt.getOutDimNames().begin() == str_attr("offset"));
   auto isStore = !valsArray.empty();
@@ -723,7 +724,7 @@ SmallVector<Value> lowerLocalLdSt(Location loc, MLIRContext *ctx,
       inVals = removeBroadcastSrc.apply(inVals);
     }
     auto outVals = lowerLdStShared(loc, ctx, prmtCvt, inVals, llvmElemTy,
-                                   smemBase, rewriter, targetInfo);
+                                   smemBase, rewriter, targetInfo, op);
     if (!isStore) {
       outVals = broadcastAs(outVals, cvt);
     }
@@ -731,7 +732,7 @@ SmallVector<Value> lowerLocalLdSt(Location loc, MLIRContext *ctx,
   }
 
   return lowerLdStShared(loc, ctx, cvt, valsArray, llvmElemTy, smemBase,
-                         rewriter, targetInfo);
+                         rewriter, targetInfo, op);
 }
 
 bool emitTransferBetweenRegistersAndShared(
