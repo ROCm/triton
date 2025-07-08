@@ -254,39 +254,29 @@ bool opCategoryBarrier(SchedDagNode *node) {
       op);
 }
 
-/******************************************************************************
-  Creates list of nodes using shared_ptr to keep a single copy.
-  Also creates a list of plain node pointers for algorithm.
-******************************************************************************/
-struct BasicBlockNodeMap {
-  BasicBlockNodeMap(Block *mlirBlock) {
-    for (auto it = mlirBlock->begin(); it != mlirBlock->end(); ++it) {
-      Operation *op = &(*it);
-      std::shared_ptr<SchedDagNode> node = std::make_shared<SchedDagNode>(op);
-      lookup.insert({op, node.get()});
-      nodes.push_back(std::move(node));
-    }
+  
+std::string getNodeColor(SchedDagNode *node) {
+  Operation *op = node->getOp();
+  if (llvm::isa<DotOp>(op)) {
+    return "deepskyblue";
+  } else if (llvm::isa<triton::gpu::LocalLoadOp>(op)) {
+    return "gold";
+  } else if (llvm::isa<triton::gpu::LocalStoreOp>(op)) {
+    return "orangered";
+  } else if (opCategoryGlobalLoad(node)) {
+    return "maroon";
+  } else if (opCategoryGlobalStore(node)) {
+    return "green";
+  } else if (opCategoryBarrier(node)) {
+    return "magenta";
+  } else if (opCategoryNop(node)) {
+    return "none";
+  } else {
+    return "gray80";
   }
+}
 
-  // Returns a copy of original node list.
-  SchedDagNodeList getNodeList() const {
-    SchedDagNodeList nodeList;
-    for (auto node : nodes) {
-      nodeList.push_back(node.get());
-    }
-    return nodeList;
-  }
-
-  // Lookup node by op.
-  SchedDagNode *operator[](Operation *op) const {
-    if (!lookup.contains(op))
-      return nullptr;
-    return lookup.find(op)->second;
-  }
-
-  llvm::SmallVector<std::shared_ptr<SchedDagNode>> nodes;
-  llvm::MapVector<Operation *, SchedDagNode *> lookup;
-};
+typedef llvm::MapVector<Operation *, SchedDagNode *> OpNodeMap;
 
 /******************************************************************************
   Dependency is from src/child to dst/parent.
@@ -309,6 +299,276 @@ typedef SmallVector<SchedDep> DepList;
 typedef DenseMap<StringRef, DepList> DepMap;
 
 /******************************************************************************
+  SchedDag consists of nodes containing edges to other nodes.
+******************************************************************************/
+struct SchedDag {
+
+  SchedDag(Block *block) {
+    // Create a new SchedDag.
+    for (auto it = block->begin(); it != block->end(); ++it) {
+      Operation *op = &(*it);
+      addOp(op);
+    }
+    printNodes();
+  }
+
+  // Shallow copy constructor.
+  SchedDag(const SchedDag& dag)
+   : nodesHeap(dag.nodesHeap), nodeList(dag.nodeList), deps(dag.deps), nodeMap(dag.nodeMap) {
+    LDBG("SchedDag::CopyConstructor(shallow)");
+  }
+
+  void addOp(Operation *op) {
+    std::shared_ptr<SchedDagNode> node = std::make_shared<SchedDagNode>(op);
+    nodeMap.insert({op, node.get()});
+    nodeList.push_back(node.get());
+    nodesHeap.push_back(std::move(node));
+  }
+
+  void addDeps(StringRef depName, const DepList &depList) {
+    deps[depName] = depList;
+  }
+
+  void applyDeps() {
+    for (auto &depType : deps) {
+      StringRef depTypeName = depType.getFirst();
+      DepList depList = depType.getSecond();
+      for (auto dep : depList) {
+        dep.child->addParent(dep.parent);
+        dep.parent->addChild(dep.child);
+      }
+    }
+  }
+
+  void applyDeps(StringRef depName) {
+    auto depList = deps[depName];
+    for (auto dep : depList) {
+      dep.child->addParent(dep.parent);
+      dep.parent->addChild(dep.child);
+    }
+  }
+
+  void clearDeps() {
+    for (auto *node : nodeList) {
+      node->clearDeps();
+    }
+  }
+
+  void resetDeps() {
+    clearDeps();
+    applyDeps();
+  }
+
+  /*
+    Problem with removing node is removing deps also.
+    Inserting deps needs to give them a type also.
+  
+  */
+  // Remove node from nodeList and remove deps from nodes.
+  // Leaves heapNodes and deps alone.
+  void removeNodeAndDeps(SchedDagNode *node) {
+    for (auto child : node->getChildren()) {
+      child->removeParent(node);
+    }
+    for (auto parent : node->getParents()) {
+      parent->removeChild(node);
+    }
+    readyNodes.remove(node);
+    for (auto it = nodeList.begin(); it != nodeList.end(); it++) {
+      SchedDagNode *n = *it;
+      if (n == node) {
+        LDBG("removed " << *node);
+        nodeList.erase(it, it+1);
+        return;
+      }
+    }
+    for (auto &depType : deps) {
+      StringRef depTypeName = depType.getFirst();
+      DepList depList = depType.getSecond();
+      for (auto dep : depList) {
+        
+      }
+    }
+    LDBG("removal couldn't find " << *node);
+  }
+
+  /*
+    Same as removeNodeRemoveDeps, except convey depenencies.
+    Before there are 3 parents and 3 children.
+    p0 p1 p2
+     \ | /
+      node
+     / | \
+    c0 c1 c2
+
+    After there are 9 dependencies.
+    p0 p1 p2
+     \ | /
+       *
+     / | \
+    c0 c1 c2
+  */
+  void removeNodeCascadeDeps(SchedDagNode *node) {
+    LDBG("removeNodeCascadeDeps() " << *node);
+    // Add new dependencies first.
+    for (auto parent : node->getParents()) {
+      for (auto child : node->getChildren()) {
+        parent->addChild(child);
+        child->addParent(parent);
+      }
+    }
+    // Remove node and old dependencies.
+    removeNodeAndDeps(node);
+  }
+
+  template <SchedDirection Direction> void initReadyNodes() {
+    readyNodes.clear();
+    for (auto *node : nodeList) {
+      if (node->isReady<Direction>()) {
+        readyNodes.insert(node);
+      }
+    }
+  }
+
+  bool finished() { return readyNodes.empty(); }
+
+  /*
+    After scheduling a node top-down, mark it's children as
+    dependency-fulfilled. After scheduling a node bottom-up, mark it's parents
+    as dependency-fulfilled.
+  */
+  template <SchedDirection Direction>
+  void removeScheduledNode(SchedDagNode *node) {
+    assert(node->isReady<Direction>());
+    readyNodes.remove(node);
+
+    if constexpr (Direction == SchedDirection::TopDown) {
+      for (auto child : node->getChildren()) {
+        child->removeParent(node);
+        if (child->isReady<Direction>()) {
+          readyNodes.insert(child);
+        }
+      }
+    } else {
+      for (auto parent : node->getParents()) {
+        parent->removeChild(node);
+        if (parent->isReady<Direction>()) {
+          readyNodes.insert(parent);
+        }
+      }
+    }
+  }
+
+  SetVector<SchedDagNode *> &getReadyNodes() { return readyNodes; }
+
+  void printNodes() {
+    for (auto it = nodeList.begin(); it != nodeList.end(); ++it) {
+      auto node = *it;
+      LDBG(*node);
+    }
+  }
+
+  llvm::raw_ostream &dumpDotFormat(llvm::raw_ostream &out) {
+    out << "digraph \"dep-dag\" {\n";
+    out << "rankdir=\"BT\"\n";
+
+    // Dump nodes.
+    int32_t numRefined = 0;
+    SchedDagNode *firstRefined = nullptr;
+    for (auto node : nodeList) {
+      Operation *op = node->getOp();
+      std::string color = getNodeColor(node);
+      std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+      out << addr << "\t[label=\"[@" << node->id << " " << node->opStr << "]\""
+          << ", style=filled, fillcolor=" << color << "]\n";
+
+      // Count refined ops.
+      if (isa<DotOp>(op) &&
+          op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+        if (!firstRefined) {
+          firstRefined = node;
+        }
+      }
+    }
+
+    // Dump refined-ops subgraphs; dots only.
+    if (firstRefined) {
+      int32_t serial = 0;
+      int32_t prevUnrefinedId = -1;
+      out << "\nsubgraph ref_" << serial << " {\n";
+      out << "  cluster=true;\n";
+      out << "  color = \"" << getNodeColor(firstRefined) << "\";\n";
+      out << "  label = \"refined[" << serial << "]\";\n  ";
+
+      for (auto node : nodeList) {
+        Operation *op = node->getOp();
+        if (isa<DotOp>(op) &&
+            op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+              triton::amdgpu::RefinedOpAttr::getMnemonic());
+          int32_t idUnrefinedOp = attr.getIdUnrefinedOp();
+          if (idUnrefinedOp == prevUnrefinedId || prevUnrefinedId < 0) {
+            // Same unrefined op.
+            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+            out << "\"" << addr << "\" ";
+          } else {
+            // New unrefined op.
+            // Close previous subgraph.
+            out << ";\n}\n\n";
+
+            // Begin next subgraph.
+            serial++;
+            out << "\nsubgraph ref_" << serial << " {\n";
+            out << "  cluster=true;\n";
+            out << "  color = \"" << getNodeColor(node) << "\";\n";
+            out << "  label = \"refined[" << serial << "]\";\n  ";
+            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
+            out << "\"" << addr << "\" ";
+          }
+          prevUnrefinedId = idUnrefinedOp;
+        }
+      }
+      out << ";\n}\n\n";
+    }
+
+    std::map<StringRef, std::pair<std::string, std::string>> format;
+    // Assume later deps are more important to visualize b/c complex.
+    format["Data"] = std::make_pair("gray70", "dotted");
+    format["RefinedOrder"] = std::make_pair("black", "dashed");
+    format["LocalLoadTypeOrder"] = std::make_pair("darkgreen", "solid");
+    format["LocalStoreTypeOrder"] = std::make_pair("darkgreen", "solid");
+    format["GlobalLoadCategoryOrder"] = std::make_pair("darkgreen", "solid");
+    format["MemOrder"] = std::make_pair("blue", "solid");
+    format["MemInterleave"] = std::make_pair("red", "solid");
+
+    for (auto &depType : deps) {
+      StringRef depTypeName = depType.getFirst();
+      DepList depList = depType.getSecond();
+      std::string color = format[depTypeName].first;
+      std::string style = format[depTypeName].second;
+      for (auto dep : depList) {
+        std::string parentAddr =
+            std::to_string(reinterpret_cast<intptr_t>(dep.parent));
+        std::string childAddr =
+            std::to_string(reinterpret_cast<intptr_t>(dep.child));
+        out << "\t" << childAddr << " -> " << parentAddr << " [color=" << color
+            << ", style=" << style << "]\n";
+      }
+    }
+    out << "}\n";
+    return out;
+  }
+
+  // SchedDagNodes as shared_ptrs for dealloc.
+  llvm::SmallVector<std::shared_ptr<SchedDagNode>> nodesHeap;
+  // SchedDagNodes as simple ptrs for everything else.
+  SchedDagNodeList nodeList;
+  DepMap deps;
+  OpNodeMap nodeMap;
+  SetVector<SchedDagNode *> readyNodes;
+};
+
+/******************************************************************************
   Each DependencyCalculator gets to see the current nodeList
   as well as all previously applied deps.
 ******************************************************************************/
@@ -317,21 +577,20 @@ struct DependencyCalculator {
 
   virtual void calcDeps() = 0;
 
-  DepList calcDepsForNodes(SchedDagNodeList &currentNodeList,
-                           BasicBlockNodeMap currentNodeMap) {
-    LDBG("DependencyCalculator::calcDepsForNodes() - " << depName);
+  void addDepsToDag(SchedDag *d) {
+    dag = d;
     depList.clear();
-    nodeList = &currentNodeList;
-    nodeMap = &currentNodeMap;
+    // Populates depList.
     calcDeps();
-    return depList;
+    dag->addDeps(depName, depList);
   }
   virtual ~DependencyCalculator() = default;
 
   StringRef depName;
-  SchedDagNodeList *nodeList;
+  SchedDag *dag;
   DepList depList;
-  BasicBlockNodeMap *nodeMap;
+  //SchedDagNodeList nodeList;
+  // OpNodeMap *nodeMap;
 };
 
 /******************************************************************************
@@ -345,16 +604,16 @@ struct DataDependencyCalculator : DependencyCalculator {
   // There is an implied data dependency between LDS ops and GPUBarrier.
   template <SchedDirection Direction> void calcDepsLdsGpuBar() {
 
-    auto fwIt = nodeList->begin();
-    auto bkIt = nodeList->rbegin();
+    auto fwIt = dag->nodeList.begin();
+    auto bkIt = dag->nodeList.rbegin();
     auto next = [&]() -> SchedDagNode * {
       if constexpr (Direction == SchedDirection::TopDown) {
-        if (fwIt == nodeList->end())
+        if (fwIt == dag->nodeList.end())
           return nullptr;
         return *(fwIt++);
       }
       if constexpr (Direction == SchedDirection::BottomUp) {
-        if (bkIt == nodeList->rend())
+        if (bkIt == dag->nodeList.rend())
           return nullptr;
         return *(bkIt++);
       }
@@ -391,12 +650,13 @@ struct DataDependencyCalculator : DependencyCalculator {
     }
   }
 
-  // GpuBar can't be recordered across themselves.
+  // GpuBar can't be reordered across themselves.
   // While this may be logically superfluous, it's fine to leave it for clarity.
   void calcDepsGpuBarGpuBar() {
+    dag->printNodes();
     SchedDagNode *prevBar = nullptr;
-    for (auto it = std::next(nodeList->begin()); it != nodeList->end(); ++it) {
-      auto node = *it;
+    for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
+      SchedDagNode *node = *it;
       auto bar = dyn_cast<mlir::gpu::BarrierOp>(node->getOp());
       if (bar) {
         if (prevBar) {
@@ -412,11 +672,11 @@ struct DataDependencyCalculator : DependencyCalculator {
 
   // Add data deps for operands.
   void calcDepsOperands() {
-    for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
+    for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = (*it);
       for (auto operandValue : node->getOp()->getOperands()) {
         auto operandDefOp = operandValue.getDefiningOp();
-        SchedDagNode *parentNode = (*nodeMap)[operandDefOp];
+        SchedDagNode *parentNode = dag->nodeMap[operandDefOp];
         if (parentNode) {
           SchedDep dep;
           dep.parent = parentNode;
@@ -429,8 +689,8 @@ struct DataDependencyCalculator : DependencyCalculator {
 
   // Nodes without results still must come before cf.br.
   void calcDepsCfBr() {
-    SchedDagNode *lastNode = (*(nodeList->rbegin()));
-    for (auto it = std::next(nodeList->rbegin()); it != nodeList->rend();
+    SchedDagNode *lastNode = (*(dag->nodeList.rbegin()));
+    for (auto it = std::next(dag->nodeList.rbegin()); it != dag->nodeList.rend();
          ++it) {
       SchedDagNode *node = (*it);
       if (node->getOp()->getNumResults() == 0) {
@@ -525,7 +785,7 @@ struct DataDependencyCalculator : DependencyCalculator {
   // Returns true if there are any sched.barriers
   // non-zero masks; more complicated to create barriers.
   bool hasSchedBarMasks() {
-    for (auto node : *nodeList) {
+    for (auto node : dag->nodeList) {
       Operation *op = node->getOp();
       if (isa<ROCDL::SchedBarrier>(node->getOp())) {
         IntegerAttr maskAttr = op->getAttrOfType<IntegerAttr>("mask");
@@ -560,7 +820,7 @@ struct DataDependencyCalculator : DependencyCalculator {
     visitedNodes[SchedBarOpType::LdsWrite] = SchedDagNodeList();
     visitedNodes[SchedBarOpType::Trans] = SchedDagNodeList();
     // Visit every node top-down.
-    for (auto node : *nodeList) {
+    for (auto node : dag->nodeList) {
       LDBG("Visiting " << *node);
       Operation *op = node->getOp();
       if (isa<ROCDL::SchedBarrier>(node->getOp())) {
@@ -624,7 +884,7 @@ struct DataDependencyCalculator : DependencyCalculator {
     SchedDagNode *prevBar = nullptr;
     SchedDagNodeList prevNodes;
 
-    for (auto node : *nodeList) {
+    for (auto node : dag->nodeList) {
       if (isa<ROCDL::SchedBarrier, ROCDL::SetPrioOp>(node->getOp())) {
         // prevNodes must be before this barrier.
         for (auto p : prevNodes) {
@@ -679,7 +939,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   void calcDepsDot() {
     SchedDagNode *prevDot = nullptr;
     int32_t prevId = -1;
-    for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
+    for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = *it;
       if (DotOp op = dyn_cast<DotOp>(node->getOp())) {
         if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
@@ -707,7 +967,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   void calcDepsRefinedOp() {
     SchedDagNode *prevNode = nullptr;
     int32_t prevId = -1;
-    for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
+    for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = *it;
       Operation *op = node->getOp();
       if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
@@ -776,7 +1036,7 @@ struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
   LocalLoadOrderDependencyCalculator()
       : DependencyCalculator("LocalLoadTypeOrder") {}
   void calcDeps() {
-    calcDepsOpType<triton::gpu::LocalLoadOp>(nodeList, depList);
+    calcDepsOpType<triton::gpu::LocalLoadOp>(&dag->nodeList, depList);
   }
 };
 
@@ -784,7 +1044,7 @@ struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
   LocalStoreOrderDependencyCalculator()
       : DependencyCalculator("LocalStoreTypeOrder") {}
   void calcDeps() {
-    calcDepsOpType<triton::gpu::LocalStoreOp>(nodeList, depList);
+    calcDepsOpType<triton::gpu::LocalStoreOp>(&dag->nodeList, depList);
   }
 };
 
@@ -792,94 +1052,10 @@ struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
   GlobalLoadOrderDependencyCalculator()
       : DependencyCalculator("GlobalLoadCategoryOrder") {}
   void calcDeps() {
-    calcDepsOpCategory(nodeList, depList, opCategoryGlobalLoad);
+    calcDepsOpCategory(&dag->nodeList, depList, opCategoryGlobalLoad);
   }
 };
 
-/******************************************************************************
-  SchedDag consists of nodes containing edges to other nodes.
-  DepMap stored outside of Dag.
-******************************************************************************/
-struct SchedDag {
-public:
-  SchedDag(SchedDagNodeList nodes) : nodes(nodes) {}
-
-  SmallVector<SchedDagNode *> getNodes() {
-    SmallVector<SchedDagNode *> copy(nodes.size(), nullptr);
-    for (auto [idx, node] : llvm::enumerate(nodes)) {
-      copy[idx] = node;
-    }
-    return copy;
-  }
-
-  void addDeps(const DepMap &deps) {
-    for (auto &depType : deps) {
-      StringRef depTypeName = depType.getFirst();
-      DepList depList = depType.getSecond();
-      for (auto dep : depList) {
-        dep.child->addParent(dep.parent);
-        dep.parent->addChild(dep.child);
-      }
-    }
-  }
-
-  void addDeps(const DepList &depList) {
-    for (auto dep : depList) {
-      dep.child->addParent(dep.parent);
-      dep.parent->addChild(dep.child);
-    }
-  }
-
-  void resetDeps() {
-    for (auto [idx, node] : llvm::enumerate(nodes)) {
-      node->clearDeps();
-    }
-  }
-
-  template <SchedDirection Direction> void initReadyNodes() {
-    readyNodes.clear();
-    for (auto node : nodes) {
-      if (node->isReady<Direction>()) {
-        readyNodes.insert(node);
-      }
-    }
-  }
-
-  bool finished() { return readyNodes.empty(); }
-
-  /*
-    After scheduling a node top-down, mark it's children as
-    dependency-fulfilled. After scheduling a node bottom-up, mark it's parents
-    as dependency-fulfilled.
-   */
-  template <SchedDirection Direction>
-  void removeScheduledNode(SchedDagNode *node) {
-    assert(node->isReady<Direction>());
-    readyNodes.remove(node);
-
-    if constexpr (Direction == SchedDirection::TopDown) {
-      for (auto child : node->getChildren()) {
-        child->removeParent(node);
-        if (child->isReady<Direction>()) {
-          readyNodes.insert(child);
-        }
-      }
-    } else {
-      for (auto parent : node->getParents()) {
-        parent->removeChild(node);
-        if (parent->isReady<Direction>()) {
-          readyNodes.insert(parent);
-        }
-      }
-    }
-  }
-
-  SetVector<SchedDagNode *> &getReadyNodes() { return readyNodes; }
-
-private:
-  SchedDagNodeList nodes;
-  SetVector<SchedDagNode *> readyNodes;
-};
 
 /******************************************************************************
 Create high-level dependencies between the different memory ops where there
@@ -1032,51 +1208,31 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   MemOrderDependencyCalculator() : DependencyCalculator("MemOrder") {}
 
   // get memory ops only from the graph; keep them in order.
-  llvm::SmallVector<std::shared_ptr<SchedDagNode>> getMemNodes() const {
-    llvm::SmallVector<std::shared_ptr<SchedDagNode>> memNodes;
-    SetVector<int32_t> unrefinedIds;
-    for (SchedDagNode *node : *nodeList) {
-      if (opCategoryMem(node)) {
-        // Verify unrefined op not already in list.
-        Operation *op = node->getOp();
-        if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-              triton::amdgpu::RefinedOpAttr::getMnemonic());
-          int32_t id = attr.getIdUnrefinedOp();
-          if (!unrefinedIds.contains(id)) {
-            LDBG("Found MemNode: " << *node);
-            // create a copy of the new node, since we don't want to disturb the
-            // old graph's deps.
-            std::shared_ptr<SchedDagNode> nodeClone =
-                std::make_shared<SchedDagNode>(*node);
-            nodeClone.get()->clearDeps();
-            memNodes.push_back(nodeClone);
-            unrefinedIds.insert(id);
-          }
-        } else {
-          LDBG("Found memory op without RefinedOpAttr: " << op);
-        }
-      }
-    }
+  void createMemDag(SchedDag *memDag) const {
 
-    // Add edges directly into simplified memory graph.
-    // TODO(dtanner) - this is prohibitively expensive!
-    for (auto it0 = memNodes.begin(); it0 != memNodes.end(); ++it0) {
-      SchedDagNode *memNode0 = it0->get();
-      Operation *memOp0 = memNode0->getOp();
-      SchedDagNode *origNode0 = (*nodeMap)[memOp0];
-      for (auto it1 = memNodes.begin(); it1 != memNodes.end(); ++it1) {
-        SchedDagNode *memNode1 = it1->get();
-        Operation *memOp1 = memNode1->getOp();
-        SchedDagNode *origNode1 = (*nodeMap)[memOp1];
-        if (origNode0->isAncestor(origNode1)) {
-          // node0 is ancestor of node1 therefore add dependencies.
-          memNode0->addChild(memNode1);
-          memNode1->addParent(memNode0);
+    // TODO(dtanner) - iterator gets messed up because removing items while iterating.
+    SchedDagNodeList listCopy = memDag->nodeList;
+    for (SchedDagNode *node : listCopy) {
+      if (!opCategoryMem(node)) {
+        memDag->removeNodeCascadeDeps(node);
+      }
+    }
+    // TODO(dtanner) Remove non-unique refined ops.
+    SetVector<int32_t> refinedIds;
+    listCopy = memDag->nodeList;
+    for (SchedDagNode *node : listCopy) {
+      Operation *op = node->getOp();
+      if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+            triton::amdgpu::RefinedOpAttr::getMnemonic());
+        int32_t id = attr.getIdUnrefinedOp();
+        if (refinedIds.contains(id)) {
+          memDag->removeNodeCascadeDeps(node);
+        } else {
+          refinedIds.insert(id);
         }
       }
     }
-    return memNodes;
   }
 
   /*
@@ -1087,9 +1243,11 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     Should buffer load come before/after local_loads.
   */
   void calcDeps() {
-    llvm::SmallVector<std::shared_ptr<SchedDagNode>> memNodes = getMemNodes();
+    SchedDag memDag = *dag;
+    createMemDag(&memDag);
     LDBG("Simplified Graph of MemNodes");
-    LDBG(memNodes);
+    memDag.printNodes();
+    LLVM_DEBUG(memDag.dumpDotFormat(llvm::dbgs()));
   }
 };
 
@@ -1223,23 +1381,12 @@ struct SchedHeuristicOriginalOrder
 ******************************************************************************/
 struct SchedManager {
   SchedManager(Block *block)
-      : nodeMap(block), nodeList(nodeMap.getNodeList()), dag(nodeList),
-        rescheduleId(0) {}
+      : dag(block), rescheduleId(0) {}
 
   // Calculate new deps based on op order and previously determined deps.
   // Insert new deps into dep map and apply them to dat.
   void addDeps(std::unique_ptr<DependencyCalculator> depCalc) {
-    deps[depCalc->depName] = depCalc->calcDepsForNodes(nodeList, nodeMap);
-    dag.addDeps(deps[depCalc->depName]);
-    depOrder.push_back(depCalc->depName);
-  }
-
-  void printNodes() {
-    LDBG("nodeList:");
-    for (auto it = nodeList.begin(); it != nodeList.end(); ++it) {
-      auto node = *it;
-      LDBG(*node);
-    }
+    depCalc->addDepsToDag(&dag);
   }
 
   template <SchedDirection Direction>
@@ -1251,10 +1398,10 @@ struct SchedManager {
          << ", Heuristic=" << heuristic->name());
 
     LDBG("NodeList before reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(printNodes());
+    LLVM_DEBUG(dag.printNodes());
 
     LDBG("SchedDag before reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(dumpDagDotFormat(llvm::dbgs()));
+    LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
 
     // Node readiness is based on direction.
     dag.initReadyNodes<Direction>();
@@ -1286,23 +1433,23 @@ struct SchedManager {
     }
 
     // After scheduling, re-apply deps to prepare for adding additional deps.
-    dag.addDeps(deps);
+    dag.resetDeps();
 
     // Update nodeList after rescheduling.
     if constexpr (Direction == SchedDirection::TopDown) {
-      nodeList = rescheduledNodes;
+      dag.nodeList = rescheduledNodes;
     } else {
-      nodeList.clear();
+      dag.nodeList.clear();
       for (auto it = rescheduledNodes.rbegin(); it != rescheduledNodes.rend();
            ++it) {
         auto &node = *it;
-        nodeList.push_back(node);
+        dag.nodeList.push_back(node);
       }
     }
 
     LDBG("");
     LDBG("NodeList after reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(printNodes());
+    LLVM_DEBUG(dag.printNodes());
     LDBG("SchedManager::reschedule(" << rescheduleId << ") - DONE");
     rescheduleId++;
   }
@@ -1321,134 +1468,18 @@ struct SchedManager {
 
   SmallVector<Operation *> getOpList() {
     SmallVector<Operation *> opList;
-    for (auto node : nodeList) {
+    for (auto node : dag.nodeList) {
       Operation *op = node->getOp();
       opList.push_back(op);
     }
     return opList;
   }
 
-  std::string getNodeColor(SchedDagNode *node) {
-    Operation *op = node->getOp();
-    if (llvm::isa<DotOp>(op)) {
-      return "deepskyblue";
-    } else if (llvm::isa<triton::gpu::LocalLoadOp>(op)) {
-      return "gold";
-    } else if (llvm::isa<triton::gpu::LocalStoreOp>(op)) {
-      return "orangered";
-    } else if (opCategoryGlobalLoad(node)) {
-      return "maroon";
-    } else if (opCategoryGlobalStore(node)) {
-      return "green";
-    } else if (opCategoryBarrier(node)) {
-      return "magenta";
-    } else if (opCategoryNop(node)) {
-      return "none";
-    } else {
-      return "gray80";
-    }
-  }
-
-  llvm::raw_ostream &dumpDagDotFormat(llvm::raw_ostream &out) {
-    out << "digraph \"dep-dag\" {\n";
-    out << "rankdir=\"BT\"\n";
-
-    // Dump nodes.
-    int32_t numRefined = 0;
-    SchedDagNode *firstRefined = nullptr;
-    for (auto node : nodeList) {
-      Operation *op = node->getOp();
-      std::string color = getNodeColor(node);
-      std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
-      out << addr << "\t[label=\"[@" << node->id << " " << node->opStr << "]\""
-          << ", style=filled, fillcolor=" << color << "]\n";
-
-      // Count refined ops.
-      if (isa<DotOp>(op) &&
-          op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-        if (!firstRefined) {
-          firstRefined = node;
-        }
-      }
-    }
-
-    // Dump refined-ops subgraphs; dots only.
-    if (firstRefined) {
-      int32_t serial = 0;
-      int32_t prevUnrefinedId = -1;
-      out << "\nsubgraph ref_" << serial << " {\n";
-      out << "  cluster=true;\n";
-      out << "  color = \"" << getNodeColor(firstRefined) << "\";\n";
-      out << "  label = \"refined[" << serial << "]\";\n  ";
-
-      for (auto node : nodeList) {
-        Operation *op = node->getOp();
-        if (isa<DotOp>(op) &&
-            op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-              triton::amdgpu::RefinedOpAttr::getMnemonic());
-          int32_t idUnrefinedOp = attr.getIdUnrefinedOp();
-          if (idUnrefinedOp == prevUnrefinedId || prevUnrefinedId < 0) {
-            // Same unrefined op.
-            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
-            out << "\"" << addr << "\" ";
-          } else {
-            // New unrefined op.
-            // Close previous subgraph.
-            out << ";\n}\n\n";
-
-            // Begin next subgraph.
-            serial++;
-            out << "\nsubgraph ref_" << serial << " {\n";
-            out << "  cluster=true;\n";
-            out << "  color = \"" << getNodeColor(node) << "\";\n";
-            out << "  label = \"refined[" << serial << "]\";\n  ";
-            std::string addr = std::to_string(reinterpret_cast<intptr_t>(node));
-            out << "\"" << addr << "\" ";
-          }
-          prevUnrefinedId = idUnrefinedOp;
-        }
-      }
-      out << ";\n}\n\n";
-    }
-
-    std::map<StringRef, std::pair<std::string, std::string>> format;
-    // Assume later deps are more important to visualize b/c complex.
-    format["Data"] = std::make_pair("gray70", "dotted");
-    format["RefinedOrder"] = std::make_pair("black", "dashed");
-    format["LocalLoadTypeOrder"] = std::make_pair("darkgreen", "solid");
-    format["LocalStoreTypeOrder"] = std::make_pair("darkgreen", "solid");
-    format["GlobalLoadCategoryOrder"] = std::make_pair("darkgreen", "solid");
-    format["MemOrder"] = std::make_pair("blue", "solid");
-    format["MemInterleave"] = std::make_pair("red", "solid");
-
-    for (StringRef depTypeName : depOrder) {
-      std::string color = format[depTypeName].first;
-      std::string style = format[depTypeName].second;
-      DepList depList = deps[depTypeName];
-      for (auto dep : depList) {
-        std::string parentAddr =
-            std::to_string(reinterpret_cast<intptr_t>(dep.parent));
-        std::string childAddr =
-            std::to_string(reinterpret_cast<intptr_t>(dep.child));
-        out << "\t" << childAddr << " -> " << parentAddr << " [color=" << color
-            << ", style=" << style << "]\n";
-      }
-    }
-    out << "}\n";
-    return out;
-  }
-
 private:
-  BasicBlockNodeMap nodeMap; // does not get changed; contains shared_ptrs.
-  SchedDagNodeList nodeList; // rewritten every rescheduling.
   SchedDag dag;
-  bool readyToAddDeps;
-  DepMap deps;
-  SmallVector<StringRef> depOrder;
-  DenseMap<SchedDagNode *, size_t> nodeIndices;
   int32_t rescheduleId;
-};
+}; // SchedManager
+
 
 /******************************************************************************
   TritonAMDGPURescheduleOps::applyReschedulingPasses()
@@ -1510,7 +1541,7 @@ struct TritonAMDGPURescheduleOps
     schedManager.addDeps(
         std::make_unique<GlobalLoadOrderDependencyCalculator>());
     // TODO(dtanner) MemOrder is currently prohibitively expensive.
-    // schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
+    schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
 
     // (F) Final rescheduling restores original order except for dependencies.
     SchedHeuristicOriginalOrder shOo;
@@ -1529,6 +1560,7 @@ struct TritonAMDGPURescheduleOps
     for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
       (*it)->moveBefore(mlirBlock, mlirBlock->begin());
     }
+    llvm::outs() << "TritonAMDGPURescheduleOps::applyReschedulingPasses() - DONE\n";
   }
 
   void runOnOperation() override {
