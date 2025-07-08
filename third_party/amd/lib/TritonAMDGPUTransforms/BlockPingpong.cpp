@@ -1130,7 +1130,7 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
   Operation *gLoadRhs = useAsyncCopy ? asyncCopyOps[1] : gLoadOps[1];
   builder.setInsertionPointAfter(gLoadRhs);
   updateOpInsertion(gLoadRhs);
- 
+ /*
   // Combine asyncWaitOps
   SmallVector<Value> tokens;
   for (auto asyncWaitOp : asyncWaitOps) {
@@ -1143,7 +1143,7 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
   asyncWaitOps[1].getResult().replaceAllUsesWith(newAsyncWaitOp.getResult());
   asyncWaitOps[0]->erase();
   asyncWaitOps[1]->erase();
-
+*/
   // try to interleave address calculation better by inserting sched.barrier
   // beween ds_reads. Helps reducing salu/valu stalls.
   moveOpAndPredecessorsUpSameBlock(lLoadOps[0]);
@@ -1154,25 +1154,68 @@ LogicalResult Pingponger::transformNS3(OpBuilder &builder, Location loc) {
   
   appendOp(asyncCopyOps[0]);
   appendOp(asyncCommitOps[0]);
-
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(newAsyncWaitOp);
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-
-  //appendOp(builder.create<ROCDL::IglpOpt>(loc, 3));
-  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
-  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 3, 0));
-  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
-  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 3, 0));
-  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
-
   appendOp(asyncCopyOps[1]);
   appendOp(asyncCommitOps[1]);  
-  appendOp(dotOps[0]);
 
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  //appendOp(newAsyncWaitOp);
   appendOp(builder.create<ROCDL::SBarrierOp>(loc));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+
+  //appendOp(builder.create<ROCDL::IglpOpt>(loc, 1));
+  //appendOp(lLoadOps[1]);  
+  //appendOp(builder.create<ROCDL::IglpOpt>(loc, 3));
+  /*
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+*/
+
+  /*
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 3, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 2, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 4, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 8, 1, 0));
+  appendOp(builder.create<ROCDL::SchedGroupBarrier>(loc, 0x20, 1, 0));
+ */
+
+  //appendOp(asyncCopyOps[0]);
+  //appendOp(asyncCommitOps[0]);
+  //appendOp(asyncCopyOps[1]);
+  //appendOp(asyncCommitOps[1]);  
+  appendOp(dotOps[0]);
+
+//  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+//  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+//  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
   return success();
 }
