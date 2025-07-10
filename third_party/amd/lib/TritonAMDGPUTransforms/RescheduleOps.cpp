@@ -94,6 +94,9 @@ struct SchedDagNode {
       : op(node.op), id(node.id), opStr(node.opStr), children(node.children),
         parents(node.parents) {}
 
+  // For DenseMapInfo
+  SchedDagNode(int32_t i) : op(nullptr), id(i), opStr("") {}
+
   void addChild(SchedDagNode *node) { children.insert(node); }
   void addParent(SchedDagNode *node) { parents.insert(node); }
   Operation *getOp() { return op; }
@@ -182,6 +185,63 @@ struct SchedDagNode {
   // This node depends on parents; this node must be scheduled after parents.
   llvm::SetVector<SchedDagNode *> parents;
 };
+
+  
+struct SchedDagNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode> {
+  static inline SchedDagNode getEmptyKey() {
+    return SchedDagNode(DenseMapInfo<int32_t>::getEmptyKey());
+  }
+  static inline SchedDagNode getTombstoneKey() {
+    return SchedDagNode(DenseMapInfo<int32_t>::getTombstoneKey());
+  }
+  static unsigned getHashValue(const SchedDagNode& node) {
+    return DenseMapInfo<int32_t>::getHashValue(node.id);
+  }
+  static bool isEqual(const SchedDagNode& lhs, const SchedDagNode& rhs) {
+    return DenseMapInfo<int32_t>::isEqual(lhs.id, rhs.id);
+  }
+};
+
+#if 0
+struct SchedDagPtrNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode *> {
+  SchedDagNode *emptyNode;
+  SchedDagNode *tombstoneNode;
+
+  static inline SchedDagNode getEmptyKey() {
+    return SchedDagNode(DenseMapInfo<int32_t>::getEmptyKey());
+  }
+  static inline SchedDagNode getTombstoneKey() {
+    return SchedDagNode(DenseMapInfo<int32_t>::getTombstoneKey());
+  }
+  static unsigned getHashValue(const SchedDagNode *node) {
+    return DenseMapInfo<int32_t>::getHashValue(node->id);
+  }
+  static bool isEqual(const SchedDagNode *lhs, const SchedDagNode *rhs) {
+    return DenseMapInfo<int32_t>::isEqual(lhs.id, rhs.id);
+
+    static bool isEqual(const SchedDagNode *lhs, const SchedDagNode *rhs) {
+      if (lhs == emptyNode) {
+        if (rhs == emptyNode)
+          return true;
+        return false;
+      }
+      // know lhs not empty
+      if (lhs == tombstoneNode) {
+        if (rhs == tombstoneNode)
+          return true;
+        return false;
+      }
+      // know lhs not empty nor tombstone
+      if (rhs == emptyNode || rhs == tombstoneNode) {
+        return false;
+      }
+      // know neither lhs nor rhs are empty nor tombstone
+      // now it is safe to dereference them.
+      return SchedDagNodeDenseMapInfo::isEqual(*lhs, *rhs);
+  }
+};
+#endif
+
 // [@nodeId opName p={parent nodes} c={child nodes}]
 llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNode &node) {
   out << "[@" << node.id << " " << node.opStr;
@@ -289,17 +349,97 @@ typedef llvm::MapVector<Operation *, SchedDagNode *> OpNodeMap;
 struct SchedDep {
   SchedDagNode *parent;
   SchedDagNode *child;
-};
 
-llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDep &dep) {
-  return out << *(dep.child) << " -> " << *(dep.parent);
+  SchedDep() = default;
+  SchedDep(SchedDagNode *p, SchedDagNode *c) : parent(p), child(c) {}
+
+  llvm::raw_ostream &dump(llvm::raw_ostream &out) const {
+    out << "p=" << parent->id << " <- c=" << child->id;
+    return out;
+  }
+
+  //bool operator<(const SchedDep& rhs) const {
+  //  return parent < rhs.parent || child < rhs.child;
+  //};
+  //bool operator==(const SchedDep& rhs) const {
+  //  return parent == rhs.parent && child == rhs.child;
+  //};
+  
+}; // SchedDep
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const SchedDep &dep) {
+  return dep.dump(out);
 }
 
-typedef SmallVector<SchedDep> DepList;
-typedef DenseMap<StringRef, DepList> DepMap;
+struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
+
+  // These represent additional nodes are illegal to dereference.
+  static const SchedDagNode *emptyNode;// = DenseMapInfo<SchedDagNode *>::getEmptyKey();
+  static const SchedDagNode *tombstoneNode;// = DenseMapInfo<SchedDagNode *>::getTombstoneKey();
+
+  //SchedDepDenseMapInfo() :
+  //    emptyNode(DenseMapInfo<SchedDagNode *>::getEmptyKey()),
+  //    tombstoneNode(DenseMapInfo<SchedDagNode *>::getTombstoneKey()) {}
+
+  static inline SchedDep getEmptyKey() {
+    //LDBG("DenseMapInfo<SchedDep>::getEmptyKey()");
+    return SchedDep(DenseMapInfo<SchedDagNode *>::getEmptyKey(), DenseMapInfo<SchedDagNode *>::getEmptyKey());
+  }
+  static inline SchedDep getTombstoneKey() {
+    //LDBG("DenseMapInfo<SchedDep>::getTombstoneKey()");
+    return SchedDep(DenseMapInfo<SchedDagNode *>::getTombstoneKey(), DenseMapInfo<SchedDagNode *>::getTombstoneKey());
+  }
+  // Hash parent and child ids.
+  // can I de-reference d.parent, it will it sometimes be empty or tombstone key?
+  static unsigned getHashValue(const SchedDep &d) {
+    //LDBG("DenseMapInfo<SchedDep>::getHashValue()");
+    //return SchedDagNodeDenseMapInfo::getHashValue(*d.parent) << 16
+    //    | SchedDagNodeDenseMapInfo::getHashValue(*d.child);
+    return llvm::detail::combineHashValue(
+        SchedDagNodeDenseMapInfo::getHashValue(*d.parent),
+        SchedDagNodeDenseMapInfo::getHashValue(*d.child));
+  }
+
+  static bool isEqual(const SchedDagNode *lhs, const SchedDagNode *rhs) {
+    if (lhs == emptyNode) {
+      if (rhs == emptyNode)
+        return true;
+      return false;
+    }
+    // know lhs not empty
+    if (lhs == tombstoneNode) {
+      if (rhs == tombstoneNode)
+        return true;
+      return false;
+    }
+    // know lhs not empty nor tombstone
+    if (rhs == emptyNode || rhs == tombstoneNode) {
+      return false;
+    }
+    // know neither lhs nor rhs are empty nor tombstone
+    // now it is safe to dereference them.
+    return SchedDagNodeDenseMapInfo::isEqual(*lhs, *rhs);
+  }
+  
+
+  // Equal if parent and child ids are equal.
+  static bool isEqual(const SchedDep &lhs, const SchedDep &rhs) {
+    //LDBG("DenseMapInfo<SchedDep>::isEqual()");
+    return isEqual(lhs.parent, rhs.parent)
+        && isEqual(lhs.child, rhs.child);
+  }
+};
+const SchedDagNode *SchedDepDenseMapInfo::emptyNode = DenseMapInfo<SchedDagNode *>::getEmptyKey();
+const SchedDagNode *SchedDepDenseMapInfo::tombstoneNode = DenseMapInfo<SchedDagNode *>::getTombstoneKey();
+
+typedef DenseSet<SchedDep, SchedDepDenseMapInfo> DepSet;
+typedef DenseMap<StringRef, DepSet> DepMap;
 
 /******************************************************************************
   SchedDag consists of nodes containing edges to other nodes.
+  Because the scheduling process will remove deps from nodes,
+  an copy of deps is stored externally to the dag.
+  
 ******************************************************************************/
 struct SchedDag {
 
@@ -309,7 +449,8 @@ struct SchedDag {
       Operation *op = &(*it);
       addOp(op);
     }
-    printNodes();
+    LDBG("SchedDag() nodeList");
+    LLVM_DEBUG(dumpNodes(llvm::dbgs()));
   }
 
   // Shallow copy constructor.
@@ -325,24 +466,25 @@ struct SchedDag {
     nodesHeap.push_back(std::move(node));
   }
 
-  void addDeps(StringRef depName, const DepList &depList) {
-    deps[depName] = depList;
+  void addDeps(StringRef depTypeName, const DepSet &depSet) {
+    deps[depTypeName] = depSet;
+    applyDeps(depTypeName);
   }
 
   void applyDeps() {
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      DepList depList = depType.getSecond();
-      for (auto dep : depList) {
+      DepSet& depSet = depType.getSecond();
+      for (auto dep : depSet) {
         dep.child->addParent(dep.parent);
         dep.parent->addChild(dep.child);
       }
     }
   }
 
-  void applyDeps(StringRef depName) {
-    auto depList = deps[depName];
-    for (auto dep : depList) {
+  void applyDeps(StringRef depTypeName) {
+    DepSet& depSet = deps[depTypeName];
+    for (auto dep : depSet) {
       dep.child->addParent(dep.parent);
       dep.parent->addChild(dep.child);
     }
@@ -359,19 +501,40 @@ struct SchedDag {
     applyDeps();
   }
 
+  // Removes dep from all depTypes
+  int32_t removeDep(const SchedDep& dep) {
+    LDBG("removeDep(" << dep << ")");
+    int32_t count = 0;
+    for (auto &depType : deps) {
+      StringRef depTypeName = depType.getFirst();
+      LDBG(depTypeName);
+      DepSet& depSet = depType.getSecond();
+
+      int32_t erased = depSet.erase(dep);
+      if (erased) {
+        LDBG("  erased");
+      }
+      count += erased;
+    }
+    return count;
+  }
+
   /*
     Problem with removing node is removing deps also.
     Inserting deps needs to give them a type also.
-  
   */
   // Remove node from nodeList and remove deps from nodes.
-  // Leaves heapNodes and deps alone.
+  // Leaves heapNodes alone.
   void removeNodeAndDeps(SchedDagNode *node) {
     for (auto child : node->getChildren()) {
       child->removeParent(node);
+      int32_t n = removeDep(SchedDep(node, child));
+      LDBG("removed " << n << " deps");
     }
     for (auto parent : node->getParents()) {
       parent->removeChild(node);
+      int32_t n = removeDep(SchedDep(parent, node));
+      LDBG("removed " << n << " deps");
     }
     readyNodes.remove(node);
     for (auto it = nodeList.begin(); it != nodeList.end(); it++) {
@@ -380,13 +543,6 @@ struct SchedDag {
         LDBG("removed " << *node);
         nodeList.erase(it, it+1);
         return;
-      }
-    }
-    for (auto &depType : deps) {
-      StringRef depTypeName = depType.getFirst();
-      DepList depList = depType.getSecond();
-      for (auto dep : depList) {
-        
       }
     }
     LDBG("removal couldn't find " << *node);
@@ -415,6 +571,9 @@ struct SchedDag {
       for (auto child : node->getChildren()) {
         parent->addChild(child);
         child->addParent(parent);
+        // Add this dep to other list.
+        SchedDep dep(parent, child);
+        deps["Other"].insert(dep);
       }
     }
     // Remove node and old dependencies.
@@ -461,10 +620,20 @@ struct SchedDag {
 
   SetVector<SchedDagNode *> &getReadyNodes() { return readyNodes; }
 
-  void printNodes() {
+  void dumpNodes(llvm::raw_ostream &out) {
     for (auto it = nodeList.begin(); it != nodeList.end(); ++it) {
       auto node = *it;
-      LDBG(*node);
+      out << *node << "\n";
+    }
+  }
+
+  void dumpDeps(llvm::raw_ostream &out) {
+    for (auto &depType : deps) {
+      StringRef depTypeName = depType.getFirst();
+      DepSet& depSet = depType.getSecond();
+      for (auto dep : depSet) {
+        out << depTypeName << ": " << dep << "\n";
+      }
     }
   }
 
@@ -473,6 +642,7 @@ struct SchedDag {
     out << "rankdir=\"BT\"\n";
 
     // Dump nodes.
+    out << "\n// Op nodes.\n";
     int32_t numRefined = 0;
     SchedDagNode *firstRefined = nullptr;
     for (auto node : nodeList) {
@@ -493,6 +663,7 @@ struct SchedDag {
 
     // Dump refined-ops subgraphs; dots only.
     if (firstRefined) {
+      out << "\n// Clusters for refined dots.\n";
       int32_t serial = 0;
       int32_t prevUnrefinedId = -1;
       out << "\nsubgraph ref_" << serial << " {\n";
@@ -543,10 +714,17 @@ struct SchedDag {
 
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      DepList depList = depType.getSecond();
-      std::string color = format[depTypeName].first;
-      std::string style = format[depTypeName].second;
-      for (auto dep : depList) {
+      DepSet& depSet = depType.getSecond();
+      std::string color = "black";
+      std::string style = "solid";
+      if (format.find(depTypeName) != format.end()) {
+        color = format[depTypeName].first;
+        style = format[depTypeName].second;
+      } else {
+        // LDBG("WARNING no color/style specified for depTypeName=" << depTypeName);
+      }
+      out << "\n// DepType: " << depTypeName << ".\n";
+      for (auto dep : depSet) {
         std::string parentAddr =
             std::to_string(reinterpret_cast<intptr_t>(dep.parent));
         std::string childAddr =
@@ -573,24 +751,23 @@ struct SchedDag {
   as well as all previously applied deps.
 ******************************************************************************/
 struct DependencyCalculator {
-  DependencyCalculator(StringRef name) : depName(name) {}
+  DependencyCalculator(StringRef name) : depTypeName(name) {}
 
   virtual void calcDeps() = 0;
 
   void addDepsToDag(SchedDag *d) {
+    LDBG("DependencyCalculator<" << depTypeName << ">::addDepsToDag()");
     dag = d;
-    depList.clear();
-    // Populates depList.
+    depSet.clear();
+    // Populates depSet.
     calcDeps();
-    dag->addDeps(depName, depList);
+    dag->addDeps(depTypeName, depSet);
   }
   virtual ~DependencyCalculator() = default;
 
-  StringRef depName;
+  StringRef depTypeName;
   SchedDag *dag;
-  DepList depList;
-  //SchedDagNodeList nodeList;
-  // OpNodeMap *nodeMap;
+  DepSet depSet;
 };
 
 /******************************************************************************
@@ -636,13 +813,13 @@ struct DataDependencyCalculator : DependencyCalculator {
             SchedDep dep;
             dep.parent = ldsOpNode;
             dep.child = barrierNode;
-            depList.push_back(dep);
+            depSet.insert(dep);
           }
           if constexpr (Direction == SchedDirection::BottomUp) {
             SchedDep dep;
             dep.parent = barrierNode;
             dep.child = ldsOpNode;
-            depList.push_back(dep);
+            depSet.insert(dep);
           }
         }
         ldsOpsNodes.clear();
@@ -653,7 +830,6 @@ struct DataDependencyCalculator : DependencyCalculator {
   // GpuBar can't be reordered across themselves.
   // While this may be logically superfluous, it's fine to leave it for clarity.
   void calcDepsGpuBarGpuBar() {
-    dag->printNodes();
     SchedDagNode *prevBar = nullptr;
     for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = *it;
@@ -663,7 +839,7 @@ struct DataDependencyCalculator : DependencyCalculator {
           SchedDep dep;
           dep.parent = prevBar;
           dep.child = node;
-          depList.push_back(dep);
+          depSet.insert(dep);
         }
         prevBar = node;
       }
@@ -681,7 +857,8 @@ struct DataDependencyCalculator : DependencyCalculator {
           SchedDep dep;
           dep.parent = parentNode;
           dep.child = node;
-          depList.push_back(dep);
+          LDBG("depSet.insert(dep)");
+          depSet.insert(dep);
         }
       }
     }
@@ -697,7 +874,7 @@ struct DataDependencyCalculator : DependencyCalculator {
         SchedDep dep;
         dep.parent = node;
         dep.child = lastNode;
-        depList.push_back(dep);
+        depSet.insert(dep);
       }
     }
   }
@@ -837,7 +1014,7 @@ struct DataDependencyCalculator : DependencyCalculator {
               SchedDep schedDep;
               schedDep.parent = v;
               schedDep.child = node;
-              depList.push_back(schedDep);
+              depSet.insert(schedDep);
             }
             // Make this barrier the only thing in this visited list.
             visitedNodes[sbType].clear();
@@ -869,7 +1046,7 @@ struct DataDependencyCalculator : DependencyCalculator {
               SchedDep schedDep;
               schedDep.parent = prevBar;
               schedDep.child = node;
-              depList.push_back(schedDep);
+              depSet.insert(schedDep);
             }
           }
         }
@@ -891,7 +1068,7 @@ struct DataDependencyCalculator : DependencyCalculator {
           SchedDep schedDep;
           schedDep.parent = p;
           schedDep.child = node;
-          depList.push_back(schedDep);
+          depSet.insert(schedDep);
         }
         // Barrier becomes only previous node.
         prevNodes.clear();
@@ -903,18 +1080,24 @@ struct DataDependencyCalculator : DependencyCalculator {
           SchedDep schedDep;
           schedDep.parent = prevBar;
           schedDep.child = node;
-          depList.push_back(schedDep);
+          depSet.insert(schedDep);
         }
       }
     }
   }
 
   void calcDeps() {
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsOperands();
+    LDBG("2");
     calcDepsLdsGpuBar<SchedDirection::BottomUp>();
+    LDBG("3");
     calcDepsLdsGpuBar<SchedDirection::TopDown>();
+    LDBG("4");
     calcDepsGpuBarGpuBar();
+    LDBG("5");
     calcDepsCfBr();
+    LDBG("6");
     calcDepsFullBars();
     if (hasSchedBarMasks()) {
       calcDepsSchedBarMasks();
@@ -950,7 +1133,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
             SchedDep dep;
             dep.parent = prevDot;
             dep.child = node;
-            depList.push_back(dep);
+            depSet.insert(dep);
           }
           prevDot = node;
           prevId = id;
@@ -978,7 +1161,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
           SchedDep dep;
           dep.parent = prevNode;
           dep.child = node;
-          depList.push_back(dep);
+          depSet.insert(dep);
         }
         prevNode = node;
         prevId = id;
@@ -987,6 +1170,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   }
 
   void calcDeps() {
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsRefinedOp();
     calcDepsDot();
   }
@@ -997,7 +1181,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   all ops of that type.
 */
 template <typename OpType>
-void calcDepsOpType(SchedDagNodeList *nodeList, DepList &depList) {
+void calcDepsOpType(SchedDagNodeList *nodeList, DepSet &depSet) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
@@ -1007,14 +1191,14 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepList &depList) {
         SchedDep dep;
         dep.parent = prevNode;
         dep.child = node;
-        depList.push_back(dep);
+        depSet.insert(dep);
       }
       prevNode = node;
     }
   }
 }
 
-void calcDepsOpCategory(SchedDagNodeList *nodeList, DepList &depList,
+void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
                         bool (*category)(SchedDagNode *)) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
@@ -1025,7 +1209,7 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepList &depList,
         SchedDep dep;
         dep.parent = prevNode;
         dep.child = node;
-        depList.push_back(dep);
+        depSet.insert(dep);
       }
       prevNode = node;
     }
@@ -1036,7 +1220,8 @@ struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
   LocalLoadOrderDependencyCalculator()
       : DependencyCalculator("LocalLoadTypeOrder") {}
   void calcDeps() {
-    calcDepsOpType<triton::gpu::LocalLoadOp>(&dag->nodeList, depList);
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
+    calcDepsOpType<triton::gpu::LocalLoadOp>(&dag->nodeList, depSet);
   }
 };
 
@@ -1044,7 +1229,8 @@ struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
   LocalStoreOrderDependencyCalculator()
       : DependencyCalculator("LocalStoreTypeOrder") {}
   void calcDeps() {
-    calcDepsOpType<triton::gpu::LocalStoreOp>(&dag->nodeList, depList);
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
+    calcDepsOpType<triton::gpu::LocalStoreOp>(&dag->nodeList, depSet);
   }
 };
 
@@ -1052,7 +1238,8 @@ struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
   GlobalLoadOrderDependencyCalculator()
       : DependencyCalculator("GlobalLoadCategoryOrder") {}
   void calcDeps() {
-    calcDepsOpCategory(&dag->nodeList, depList, opCategoryGlobalLoad);
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
+    calcDepsOpCategory(&dag->nodeList, depSet, opCategoryGlobalLoad);
   }
 };
 
@@ -1211,13 +1398,17 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   void createMemDag(SchedDag *memDag) const {
 
     // TODO(dtanner) - iterator gets messed up because removing items while iterating.
+    LDBG("Removing non-mem nodes.");
     SchedDagNodeList listCopy = memDag->nodeList;
     for (SchedDagNode *node : listCopy) {
       if (!opCategoryMem(node)) {
         memDag->removeNodeCascadeDeps(node);
       }
     }
+    LDBG("Removing non-unique refinement ids.");
+
     // TODO(dtanner) Remove non-unique refined ops.
+    // We are correctly removing the nodes, but some dependencies are staying in the graph.
     SetVector<int32_t> refinedIds;
     listCopy = memDag->nodeList;
     for (SchedDagNode *node : listCopy) {
@@ -1231,6 +1422,8 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
         } else {
           refinedIds.insert(id);
         }
+      } else {
+        LDBG("WARNING memory op has no RefineOpAttr: " << *op);
       }
     }
   }
@@ -1243,10 +1436,14 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     Should buffer load come before/after local_loads.
   */
   void calcDeps() {
+    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
+    LLVM_DEBUG(dag->dumpDeps(llvm::dbgs()));
+
     SchedDag memDag = *dag;
     createMemDag(&memDag);
+
     LDBG("Simplified Graph of MemNodes");
-    memDag.printNodes();
+    LLVM_DEBUG(memDag.dumpNodes(llvm::dbgs()));
     LLVM_DEBUG(memDag.dumpDotFormat(llvm::dbgs()));
   }
 };
@@ -1381,7 +1578,9 @@ struct SchedHeuristicOriginalOrder
 ******************************************************************************/
 struct SchedManager {
   SchedManager(Block *block)
-      : dag(block), rescheduleId(0) {}
+      : dag(block), rescheduleId(0) {
+    LDBG("SchedManager()");
+  }
 
   // Calculate new deps based on op order and previously determined deps.
   // Insert new deps into dep map and apply them to dat.
@@ -1398,7 +1597,7 @@ struct SchedManager {
          << ", Heuristic=" << heuristic->name());
 
     LDBG("NodeList before reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(dag.printNodes());
+    LLVM_DEBUG(dag.dumpNodes(llvm::dbgs()));
 
     LDBG("SchedDag before reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
@@ -1407,7 +1606,6 @@ struct SchedManager {
     dag.initReadyNodes<Direction>();
 
     // Schedule the dag; this process removes deps from nodes.
-    LDBG("");
     // Store nodes in newly scheduled order.
     SchedDagNodeList rescheduledNodes;
     const bool printDetails = false;
@@ -1433,12 +1631,15 @@ struct SchedManager {
     }
 
     // After scheduling, re-apply deps to prepare for adding additional deps.
+    LDBG("dag.resetDeps()");
     dag.resetDeps();
 
     // Update nodeList after rescheduling.
     if constexpr (Direction == SchedDirection::TopDown) {
+      LDBG("dag.nodeList = rescheduledNodes");
       dag.nodeList = rescheduledNodes;
     } else {
+      LDBG("dag.nodeList = reversed(rescheduledNodes)");
       dag.nodeList.clear();
       for (auto it = rescheduledNodes.rbegin(); it != rescheduledNodes.rend();
            ++it) {
@@ -1449,7 +1650,8 @@ struct SchedManager {
 
     LDBG("");
     LDBG("NodeList after reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(dag.printNodes());
+    LLVM_DEBUG(dag.dumpNodes(llvm::dbgs()));
+
     LDBG("SchedManager::reschedule(" << rescheduleId << ") - DONE");
     rescheduleId++;
   }
