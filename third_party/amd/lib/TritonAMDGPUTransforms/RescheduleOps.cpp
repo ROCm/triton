@@ -294,14 +294,7 @@ std::string getNodeColor(SchedDagNode *node) {
 
 using OpNodeMap = llvm::MapVector<Operation *, SchedDagNode *>;
 
-/******************************************************************************
-  Dependency is from src/child to dst/parent.
-  dst must preceed src during scheduling.
-  dst / parent
-    ^
-    |
-  src / child
-******************************************************************************/
+
 struct SchedDep {
   SchedDagNode *parent;
   SchedDagNode *child;
@@ -371,7 +364,6 @@ struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
     return SchedDagNodeDenseMapInfo::isEqual(*lhs, *rhs);
   }
   
-
   // Equal if parent and child ids are equal.
   static bool isEqual(const SchedDep &lhs, const SchedDep &rhs) {
     return isEqual(lhs.parent, rhs.parent)
@@ -385,10 +377,12 @@ using DepSet = DenseSet<SchedDep, SchedDepDenseMapInfo>;
 using DepMap = DenseMap<StringRef, DepSet>;
 
 /******************************************************************************
-  SchedDag consists of nodes containing edges to other nodes.
+  SchedDag consists of nodes and deps.
   Because the scheduling process will remove deps from nodes,
-  there are 2 coppies of dependencies,
-  one is on the nodes themselves, the other in is DepMap.
+  there are 2 copies of dependencies;
+  one is on the nodes themselves (parents, children),
+  the other in is DepMap.
+  After scheduling, the dependencies are restored to the nodes.
 ******************************************************************************/
 struct SchedDag {
 
@@ -603,7 +597,7 @@ struct SchedDag {
     }
 
     // Dump refined-ops subgraphs; dots only.
-    if (firstRefined) {
+    if (firstRefined && false) {
       out << "\n// Clusters for refined dots.\n";
       int32_t serial = 0;
       int32_t prevUnrefinedId = -1;
