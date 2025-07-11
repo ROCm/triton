@@ -13,6 +13,9 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
+
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -103,10 +106,23 @@ struct RefinedBlock {
   RankedTensorType tensorType;
 };
 
+// Track the id of pre-refined ops for scheduling.
+struct RefinedOpAttrTracker {
+  int32_t idUnrefinedOp;
+  MLIRContext *ctx;
+  RefinedOpAttrTracker(MLIRContext *context) : idUnrefinedOp(0), ctx(context) {}
+  void nextOp() { ++idUnrefinedOp; }
+  triton::amdgpu::RefinedOpAttr getRefinedOpAttr() {
+    auto refinedOpAttr = triton::amdgpu::RefinedOpAttr::get(ctx, idUnrefinedOp);
+    return refinedOpAttr;
+  }
+};
+
 template <typename OpTy>
 struct RefineRewritePattern : public OpRewritePattern<OpTy> {
-  RefineRewritePattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : OpRewritePattern<OpTy>(context, benefit) {}
+  RefineRewritePattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                       PatternBenefit benefit = 1)
+      : OpRewritePattern<OpTy>(context, benefit), refinedOpAttrTracker(r) {}
 
   virtual LogicalResult apply(OpTy op, PatternRewriter &rewriter) const = 0;
 
@@ -116,6 +132,9 @@ struct RefineRewritePattern : public OpRewritePattern<OpTy> {
       return failure();
     return apply(op, rewriter);
   }
+
+protected:
+  RefinedOpAttrTracker &refinedOpAttrTracker;
 
 private:
   bool isRefinable(Operation *op) const {
@@ -139,11 +158,13 @@ struct DotOpMFMAConverter {
   PatternRewriter &rewriter;
   Location loc;
   MLIRContext *ctx{};
+  RefinedOpAttrTracker &refinedOpAttrTracker;
 
   explicit DotOpMFMAConverter(AMDMfmaEncodingAttr mfmaLayout,
-                              PatternRewriter &rewriter, Location loc)
+                              PatternRewriter &rewriter, Location loc,
+                              RefinedOpAttrTracker &r)
       : mfmaLayout(mfmaLayout), rewriter(rewriter), loc(loc),
-        ctx(mfmaLayout.getContext()) {}
+        ctx(mfmaLayout.getContext()), refinedOpAttrTracker(r) {}
 
   LogicalResult convert(DotOp dotOp, DotOpAdaptor adaptor) const {
     InputPrecisionAttr precisionAttr = dotOp.getInputPrecisionAttr();
@@ -277,26 +298,6 @@ struct DotOpMFMAConverter {
         auto extract = rewriter.create<triton::amdgpu::ExtractSliceOp>(
             loc, Type{extractSliceTypeA}, Value{a},
             DenseI64ArrayAttr::get(ctx, {shiftM, shiftK}));
-        // Add dot-tile info to local_load's slice;
-        // this specifies which dot-tile this load is needed for.
-        int32_t tileM = i / tileShapeM;
-        int32_t tileN = -1;
-        int32_t tileK = k / tileShapeK;
-        int32_t tileSerial = dotTileOrder.getOuterTileM()
-                                 ? tileM * dotTileOrder.getNumTilesN()
-                                 : tileM;
-        tileSerial +=
-            k * dotTileOrder.getNumTilesM() * dotTileOrder.getNumTilesN();
-        int32_t elementM = i % tileShapeM; // dots are n-major within tile
-        int32_t elementN = -1;
-        int32_t elementK = k % tileShapeK;
-        int32_t elementSerial =
-            elementM * tileShapeN; // dots are n-major within tile
-        auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
-        extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                         dotTileAttr);
         subtilesK.push_back(extract);
       }
       subtilesA.push_back(subtilesK);
@@ -316,25 +317,6 @@ struct DotOpMFMAConverter {
         auto extract = rewriter.create<triton::amdgpu::ExtractSliceOp>(
             loc, Type{extractSliceTypeB}, Value{b},
             DenseI64ArrayAttr::get(ctx, {shiftK, shiftN}));
-        // Add dot-tile info to local_load's slice;
-        // this specifies which dot-tile this load is needed for.
-        int32_t tileM = -1;
-        int32_t tileN = j / tileShapeN;
-        int32_t tileK = k / tileShapeK;
-        int32_t tileSerial = dotTileOrder.getOuterTileM()
-                                 ? tileN
-                                 : tileN * dotTileOrder.getNumTilesM();
-        tileSerial +=
-            k * dotTileOrder.getNumTilesM() * dotTileOrder.getNumTilesN();
-        int32_t elementM = -1;
-        int32_t elementN = j % tileShapeN; // dots are n-major within tile
-        int32_t elementK = k % tileShapeK;
-        int32_t elementSerial = elementN; // dots are n-major within tile
-        auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-            ctx, tileM, tileN, tileK, tileSerial, elementM, elementN, elementK,
-            elementSerial);
-        extract->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                         dotTileAttr);
         subtilesK.push_back(extract);
       }
       subtilesB.push_back(subtilesK);
@@ -358,6 +340,7 @@ struct DotOpMFMAConverter {
     }
     auto dotAttrs = dotOp->getAttrs();
     int32_t tileSerial = 0;
+    refinedOpAttrTracker.nextOp();
     // Iterate over dot-tiles.
     for (int32_t tileIdxK = 0; tileIdxK < numRepK / tileShapeK; ++tileIdxK) {
       for (int tileOuterIdx = 0; tileOuterIdx < dotTileOrder.getNumTilesOuter();
@@ -383,18 +366,8 @@ struct DotOpMFMAConverter {
                     ValueRange{refinedTensorA, refinedTensorB,
                                refinedDotValues[int32_t(m * numRepN + n)]},
                     dotAttrs);
-                // Add dot-tile info to dot.
-                int32_t tileM = tileStartM / tileShapeM;
-                int32_t tileN = tileStartN / tileShapeN;
-                int32_t tileK = k;
-                int32_t elementM = m - tileStartM;
-                int32_t elementN = n - tileStartN;
-                int32_t elementK = 0;
-                auto dotTileAttr = triton::amdgpu::DotTileAttr::get(
-                    ctx, tileM, tileN, tileK, tileSerial, elementM, elementN,
-                    elementK, elementSerial);
-                dotOp->setAttr(triton::amdgpu::DotTileAttr::getMnemonic(),
-                               dotTileAttr);
+                dotOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                               refinedOpAttrTracker.getRefinedOpAttr());
                 refinedDotValues[int32_t(m * numRepN + n)] = dotOp;
                 elementSerial++;
               }
@@ -417,7 +390,8 @@ struct DotOpMFMAConverter {
   }
 };
 
-LogicalResult rewriteMFMA(PatternRewriter &rewriter, triton::DotOp op) {
+LogicalResult rewriteMFMA(PatternRewriter &rewriter, triton::DotOp op,
+                          RefinedOpAttrTracker &refinedOpAttrTracker) {
   if (!(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()))) {
     LDBG("Both $a and %b should be DotOperand layout");
@@ -441,17 +415,18 @@ LogicalResult rewriteMFMA(PatternRewriter &rewriter, triton::DotOp op) {
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
       cast<RankedTensorType>(op.getResult().getType()).getEncoding());
 
-  DotOpMFMAConverter converter(mfmaLayout, rewriter, loc);
+  DotOpMFMAConverter converter(mfmaLayout, rewriter, loc, refinedOpAttrTracker);
   return converter.convert(op, DotOpAdaptor(op));
 }
 
 struct DotOpPattern : public RefineRewritePattern<triton::DotOp> {
-  DotOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  DotOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+               PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   LogicalResult apply(triton::DotOp op,
                       PatternRewriter &rewriter) const override {
-    auto result = rewriteMFMA(rewriter, op);
+    auto result = rewriteMFMA(rewriter, op, refinedOpAttrTracker);
     if (failed(result)) {
       LDBG("failed to refine tt.Dot: " << *op);
     }
@@ -461,8 +436,9 @@ struct DotOpPattern : public RefineRewritePattern<triton::DotOp> {
 
 struct LocalLoadOpPattern
     : public RefineRewritePattern<triton::gpu::LocalLoadOp> {
-  LocalLoadOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  LocalLoadOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                     PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   LogicalResult apply(triton::gpu::LocalLoadOp op,
                       PatternRewriter &rewriter) const override {
@@ -530,6 +506,7 @@ struct LocalLoadOpPattern
 
     rewriter.setInsertionPointAfter(op);
     SmallVector<Value> subtiles;
+    refinedOpAttrTracker.nextOp();
     for (int32_t i = 0; i < numReps2D[0]; ++i) {
       for (int32_t j = 0; j < numReps2D[1]; ++j) {
         int32_t offset0 = i * refinedShape[0];
@@ -541,6 +518,8 @@ struct LocalLoadOpPattern
 
         auto refinedLoad = rewriter.create<ttg::LocalLoadOp>(
             loc, refinedTensorType, refinedView);
+        refinedLoad->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                             refinedOpAttrTracker.getRefinedOpAttr());
         subtiles.push_back(refinedLoad);
       }
     }
@@ -555,8 +534,9 @@ struct LocalLoadOpPattern
 };
 
 struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
-  LoadOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  LoadOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   LogicalResult apply(triton::LoadOp op,
                       PatternRewriter &rewriter) const override {
@@ -591,6 +571,7 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
     auto isVolatile = op.getIsVolatile();
 
     AMD::CoordinateMapper coordsMapper(refinedBlock.numPerDims);
+    refinedOpAttrTracker.nextOp();
     for (size_t linearIdx = 0; linearIdx < refinedBlock.numSubTiles;
          ++linearIdx) {
       auto coords = coordsMapper.map(linearIdx);
@@ -602,10 +583,12 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
       auto slice = rewriter.create<triton::amdgpu::ExtractSliceOp>(
           loc, Type{refinedBlock.tensorType}, Value{origSrc}, offset);
 
-      auto refinedTensor = rewriter.create<triton::LoadOp>(
-          loc, slice, mask, other, boundaryCheck, padding, cache, evict,
-          isVolatile);
-      refinedTensors.push_back(refinedTensor);
+      auto loadOp = rewriter.create<triton::LoadOp>(loc, slice, mask, other,
+                                                    boundaryCheck, padding,
+                                                    cache, evict, isVolatile);
+      loadOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                      refinedOpAttrTracker.getRefinedOpAttr());
+      refinedTensors.push_back(loadOp);
     }
 
     auto joinedResult = rewriter.create<triton::amdgpu::ConcatOp>(
@@ -618,8 +601,9 @@ struct LoadOpPattern : public RefineRewritePattern<triton::LoadOp> {
 
 struct AMDGCNBufferLoadOp
     : public RefineRewritePattern<triton::amdgpu::BufferLoadOp> {
-  AMDGCNBufferLoadOp(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  AMDGCNBufferLoadOp(MLIRContext *context, RefinedOpAttrTracker &r,
+                     PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   LogicalResult apply(triton::amdgpu::BufferLoadOp op,
                       PatternRewriter &rewriter) const override {
@@ -688,6 +672,7 @@ struct AMDGCNBufferLoadOp
         RankedTensorType::get(refinedShape, origElementType, origEncoding);
 
     SmallVector<Value> refinedOps;
+    refinedOpAttrTracker.nextOp();
     for (size_t i = 0; i < slicedOffsets.size(); ++i) {
       Value slicedOffset = slicedOffsets[i];
       Value slicedMask = slicedMasks ? slicedMasks.value()[i] : nullptr;
@@ -697,6 +682,8 @@ struct AMDGCNBufferLoadOp
       auto refinedOp = rewriter.create<triton::amdgpu::BufferLoadOp>(
           loc, refinedTensorType, origBasePtr, slicedOffset, origStride,
           origCache, slicedMask, slicedOtherTensor);
+      refinedOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                         refinedOpAttrTracker.getRefinedOpAttr());
       refinedOps.push_back(refinedOp);
     }
 
@@ -711,8 +698,9 @@ struct AMDGCNBufferLoadOp
 
 struct LocalStoreOpPattern
     : public RefineRewritePattern<triton::gpu::LocalStoreOp> {
-  LocalStoreOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  LocalStoreOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                      PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   LogicalResult apply(triton::gpu::LocalStoreOp op,
                       PatternRewriter &rewriter) const override {
@@ -753,6 +741,7 @@ struct LocalStoreOpPattern
 
     rewriter.setInsertionPointAfter(op);
     AMD::CoordinateMapper coordsMapper(refinedBlock.numPerDims);
+    refinedOpAttrTracker.nextOp();
     for (size_t linearIdx = 0; linearIdx < refinedBlock.numSubTiles;
          ++linearIdx) {
       auto coords = coordsMapper.map(linearIdx);
@@ -767,7 +756,10 @@ struct LocalStoreOpPattern
       auto slice = rewriter.create<triton::amdgpu::ExtractSliceOp>(
           loc, Type{refinedBlock.tensorType}, Value{origSrc}, offset);
 
-      rewriter.create<ttg::LocalStoreOp>(loc, slice, slicedSharedMemView);
+      auto storeOp =
+          rewriter.create<ttg::LocalStoreOp>(loc, slice, slicedSharedMemView);
+      storeOp->setAttr(triton::amdgpu::RefinedOpAttr::getMnemonic(),
+                       refinedOpAttrTracker.getRefinedOpAttr());
     }
 
     rewriter.eraseOp(op);
@@ -777,8 +769,9 @@ struct LocalStoreOpPattern
 
 struct LocalAllocOpPattern
     : public RefineRewritePattern<triton::gpu::LocalAllocOp> {
-  LocalAllocOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  LocalAllocOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                      PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   // Refines non-mutable memory `LocalAllocOp` ops. The non-mutable variant
   // is used as a not-pipelined version of the op. To be able to refine the op,
@@ -862,8 +855,9 @@ struct LocalAllocOpPattern
 };
 
 struct ReduceOpPattern : public RefineRewritePattern<triton::ReduceOp> {
-  ReduceOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  ReduceOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                  PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   // Reduce ops have different intput and output shapes and produce
   // sliced layouts.
@@ -925,8 +919,9 @@ struct ReduceOpPattern : public RefineRewritePattern<triton::ReduceOp> {
 
 template <typename OpTy>
 struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
-  ElementWiseOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern<OpTy>(context, benefit) {}
+  ElementWiseOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                       PatternBenefit benefit = 1)
+      : RefineRewritePattern<OpTy>(context, r, benefit) {}
 
   // Refine ops with distributed layouts.
   // Assumes same layout for operands.
@@ -1054,8 +1049,9 @@ struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
 };
 
 struct ExpandDimsOpPattern : public RefineRewritePattern<triton::ExpandDimsOp> {
-  ExpandDimsOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  ExpandDimsOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                      PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   // Refine ExpandDims ops.
   // Since expanding dims increases tensor rank,
@@ -1170,8 +1166,9 @@ struct ExpandDimsOpPattern : public RefineRewritePattern<triton::ExpandDimsOp> {
 };
 
 struct BroadcastOpPattern : public RefineRewritePattern<BroadcastOp> {
-  BroadcastOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern(context, benefit) {}
+  BroadcastOpPattern(MLIRContext *context, RefinedOpAttrTracker &r,
+                     PatternBenefit benefit = 1)
+      : RefineRewritePattern(context, r, benefit) {}
 
   // Refine Broadcast ops.
   // Since inputs are roughtly 1D and outputs are roughly 2D,
@@ -1290,6 +1287,7 @@ struct TritonAMDGPURefineOps
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
+    RefinedOpAttrTracker refinedOpAttrTracker(context);
     triton::FuncOp func = getOperation();
     mlir::triton::AMD::TargetInfo targetInfo(this->arch.getValue());
     if (targetInfo.getISAFamily() == mlir::triton::AMD::ISAFamily::Unknown) {
@@ -1298,22 +1296,29 @@ struct TritonAMDGPURefineOps
     }
 
     RewritePatternSet primaryPatterns(context);
-    primaryPatterns.add<LocalAllocOpPattern>(context, /*benefit=*/1);
+    primaryPatterns.add<LocalAllocOpPattern>(context, refinedOpAttrTracker,
+                                             /*benefit=*/1);
     walkAndApplyPatterns(func, std::move(primaryPatterns));
 
     RewritePatternSet patterns(context);
-    patterns.add<LocalLoadOpPattern>(context, /*benefit=*/1);
-    patterns.add<DotOpPattern>(context, /*benefit=*/1);
-    patterns.add<LoadOpPattern>(context, /*benefit=*/1);
-    patterns.add<AMDGCNBufferLoadOp>(context, /*benefit=*/1);
-    patterns.add<LocalStoreOpPattern>(context, /*benefit=*/1);
-    patterns.add<ReduceOpPattern>(context, /*benefit=*/1);
-    patterns.add<ExpandDimsOpPattern>(context, /*benefit=*/1);
-    patterns.add<BroadcastOpPattern>(context, /*benefit=*/1);
+    patterns.add<LocalLoadOpPattern>(context, refinedOpAttrTracker,
+                                     /*benefit=*/1);
+    patterns.add<DotOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
+    patterns.add<LoadOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
+    patterns.add<AMDGCNBufferLoadOp>(context, refinedOpAttrTracker,
+                                     /*benefit=*/1);
+    patterns.add<LocalStoreOpPattern>(context, refinedOpAttrTracker,
+                                      /*benefit=*/1);
+    patterns.add<ReduceOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
+    patterns.add<ExpandDimsOpPattern>(context, refinedOpAttrTracker,
+                                      /*benefit=*/1);
+    patterns.add<BroadcastOpPattern>(context, refinedOpAttrTracker,
+                                     /*benefit=*/1);
 
     // Elementwise patterns
 #define REFINE_ELEMENTWISE_OP(OP_TYPE)                                         \
-  patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, /*benefit=*/1);
+  patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, refinedOpAttrTracker,   \
+                                              /*benefit=*/1);
 
     REFINE_ELEMENTWISE_OP(math::RsqrtOp)
     REFINE_ELEMENTWISE_OP(math::Exp2Op)
