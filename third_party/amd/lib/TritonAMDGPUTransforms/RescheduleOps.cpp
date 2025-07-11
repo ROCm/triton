@@ -61,15 +61,13 @@ Operation *createSchedBarrier(OpBuilder &rewriter, Location loc,
 enum class SchedDirection { TopDown, BottomUp };
 
 /******************************************************************************
- Dependency points in the opposite direction of data flow.
+  Note: Dependencies point from child to parent; parents must preceed children
+  in op order. Therefore dependencies point upward in dag.
 
- The child node depends on parent node because data flows from parent to child;
- dependency "arrow" points from child to parent.
-
- dst / parent / dependee
-  ^
-  |
- src / child / dependent
+  parent / dependee / dst / scheduled before
+    ^
+    |
+  child / dependent / src / scheduled after
 ******************************************************************************/
 
 /******************************************************************************
@@ -215,7 +213,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNode &node) {
   return out;
 }
 
-typedef SmallVector<SchedDagNode *> SchedDagNodeList;
+using SchedDagNodeList = SmallVector<SchedDagNode *>;
 // Format NodeList.
 llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
   for (auto node : nodes) {
@@ -294,7 +292,7 @@ std::string getNodeColor(SchedDagNode *node) {
   }
 }
 
-typedef llvm::MapVector<Operation *, SchedDagNode *> OpNodeMap;
+using OpNodeMap = llvm::MapVector<Operation *, SchedDagNode *>;
 
 /******************************************************************************
   Dependency is from src/child to dst/parent.
@@ -315,13 +313,6 @@ struct SchedDep {
     out << "p=" << parent->id << " <- c=" << child->id;
     return out;
   }
-
-  //bool operator<(const SchedDep& rhs) const {
-  //  return parent < rhs.parent || child < rhs.child;
-  //};
-  //bool operator==(const SchedDep& rhs) const {
-  //  return parent == rhs.parent && child == rhs.child;
-  //};
   
 }; // SchedDep
 
@@ -329,6 +320,15 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const SchedDep &dep) {
   return dep.dump(out);
 }
 
+/*
+  Need to compare SchedDeps based on contents of the SchedDagNode
+  and not just based he pointers to the nodes.
+  However, the empty and tombstone deps need to have
+  dummy pointers which can't be dereferenced.
+  Therefore the comparison operations need to first check
+  if the pointers are empty/tombstone before dereferencing.
+  TODO(dtanner) - isEqual() might be simplifiable.
+*/
 struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
 
   // These represent additional nodes are illegal to dereference.
@@ -381,14 +381,14 @@ struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
 const SchedDagNode *SchedDepDenseMapInfo::emptyNode = DenseMapInfo<SchedDagNode *>::getEmptyKey();
 const SchedDagNode *SchedDepDenseMapInfo::tombstoneNode = DenseMapInfo<SchedDagNode *>::getTombstoneKey();
 
-typedef DenseSet<SchedDep, SchedDepDenseMapInfo> DepSet;
-typedef DenseMap<StringRef, DepSet> DepMap;
+using DepSet = DenseSet<SchedDep, SchedDepDenseMapInfo>;
+using DepMap = DenseMap<StringRef, DepSet>;
 
 /******************************************************************************
   SchedDag consists of nodes containing edges to other nodes.
   Because the scheduling process will remove deps from nodes,
-  an copy of deps is stored externally to the dag.
-  
+  there are 2 coppies of dependencies,
+  one is on the nodes themselves, the other in is DepMap.
 ******************************************************************************/
 struct SchedDag {
 
@@ -468,33 +468,25 @@ struct SchedDag {
     return count;
   }
 
-  /*
-    Problem with removing node is removing deps also.
-    Inserting deps needs to give them a type also.
-  */
   // Remove node from nodeList and remove deps from nodes.
   // Leaves heapNodes alone.
   void removeNodeAndDeps(SchedDagNode *node) {
     for (auto child : node->getChildren()) {
       child->removeParent(node);
       int32_t n = removeDep(SchedDep(node, child));
-      LDBG("removed " << n << " deps");
     }
     for (auto parent : node->getParents()) {
       parent->removeChild(node);
       int32_t n = removeDep(SchedDep(parent, node));
-      LDBG("removed " << n << " deps");
     }
     readyNodes.remove(node);
     for (auto it = nodeList.begin(); it != nodeList.end(); it++) {
       SchedDagNode *n = *it;
       if (n == node) {
-        LDBG("removed " << *node);
         nodeList.erase(it, it+1);
         return;
       }
     }
-    LDBG("removal couldn't find " << *node);
   }
 
   /*
@@ -669,8 +661,6 @@ struct SchedDag {
       if (format.find(depTypeName) != format.end()) {
         color = format[depTypeName].first;
         style = format[depTypeName].second;
-      } else {
-        // LDBG("WARNING no color/style specified for depTypeName=" << depTypeName);
       }
       out << "\n// DepType: " << depTypeName << ".\n";
       for (auto dep : depSet) {
@@ -1074,9 +1064,8 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
     for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = *it;
       if (DotOp op = dyn_cast<DotOp>(node->getOp())) {
-        if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-          auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-              triton::amdgpu::RefinedOpAttr::getMnemonic());
+        if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+            triton::amdgpu::RefinedOpAttr::getMnemonic())) {
           int32_t id = attr.getIdUnrefinedOp();
           if (prevDot && id != prevId) {
             SchedDep dep;
@@ -1102,9 +1091,8 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
     for (auto it = dag->nodeList.begin(); it != dag->nodeList.end(); ++it) {
       SchedDagNode *node = *it;
       Operation *op = node->getOp();
-      if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-            triton::amdgpu::RefinedOpAttr::getMnemonic());
+      if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+          triton::amdgpu::RefinedOpAttr::getMnemonic())) {
         int32_t id = attr.getIdUnrefinedOp();
         if (prevNode && id == prevId) {
           SchedDep dep;
@@ -1148,7 +1136,7 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepSet &depSet) {
 }
 
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
-                        bool (*category)(SchedDagNode *)) {
+                        std::function<bool (SchedDagNode *)> category) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
@@ -1355,15 +1343,13 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     }
     LDBG("Removing non-unique refinement ids.");
 
-    // TODO(dtanner) Remove non-unique refined ops.
     // We are correctly removing the nodes, but some dependencies are staying in the graph.
     SetVector<int32_t> refinedIds;
     listCopy = memDag->nodeList;
     for (SchedDagNode *node : listCopy) {
       Operation *op = node->getOp();
-      if (op->hasAttr(triton::amdgpu::RefinedOpAttr::getMnemonic())) {
-        auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-            triton::amdgpu::RefinedOpAttr::getMnemonic());
+      if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+          triton::amdgpu::RefinedOpAttr::getMnemonic())) {
         int32_t id = attr.getIdUnrefinedOp();
         if (refinedIds.contains(id)) {
           memDag->removeNodeCascadeDeps(node);
@@ -1377,11 +1363,8 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   }
 
   /*
-    Need to traverse graph to determine which memory ops can be co-scheduled
-    with which other memory ops.
-
-    aiter gemm has 2 decisions to be made
-    Should buffer load come before/after local_loads.
+    Determine which memory ops can be co-scheduled
+    with which other memory ops, or need a strict order.
   */
   void calcDeps() {
     LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
@@ -1453,6 +1436,7 @@ SchedDagNode *getOriginalOrder(SchedDagNode *a, SchedDagNode *b) {
 template <SchedDirection Direction> struct SchedHeuristic {
   virtual SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) = 0;
   virtual StringRef name() = 0;
+  virtual ~SchedHeuristic() = default;
 };
 
 /******************************************************************************
@@ -1538,7 +1522,6 @@ struct SchedManager {
 
   template <SchedDirection Direction>
   void reschedule(SchedHeuristic<Direction> *heuristic) {
-    LDBG("");
     LDBG("SchedManager::reschedule("
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
@@ -1596,7 +1579,6 @@ struct SchedManager {
       }
     }
 
-    LDBG("");
     LDBG("NodeList after reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(dag.dumpNodes(llvm::dbgs()));
 
@@ -1670,9 +1652,7 @@ struct TritonAMDGPURescheduleOps
   }
 
   void applyReschedulingPasses(Block *mlirBlock) {
-    LDBG("");
-    LDBG("");
-    llvm::outs() << "TritonAMDGPURescheduleOps::applyReschedulingPasses()\n";
+    LDBG("TritonAMDGPURescheduleOps::applyReschedulingPasses()");
 
     SchedManager schedManager(mlirBlock);
 
@@ -1690,7 +1670,6 @@ struct TritonAMDGPURescheduleOps
         std::make_unique<LocalStoreOrderDependencyCalculator>());
     schedManager.addDeps(
         std::make_unique<GlobalLoadOrderDependencyCalculator>());
-    // TODO(dtanner) MemOrder is currently prohibitively expensive.
     schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
 
     // (F) Final rescheduling restores original order except for dependencies.
@@ -1699,7 +1678,6 @@ struct TritonAMDGPURescheduleOps
 
     SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
 
-    LDBG("");
     LDBG("Rescheduled Ops:");
     // Print op (and not node) list.
     LLVM_DEBUG(for (auto op : rescheduledOps) {
@@ -1710,7 +1688,7 @@ struct TritonAMDGPURescheduleOps
     for (auto it = rescheduledOps.rbegin(); it != rescheduledOps.rend(); ++it) {
       (*it)->moveBefore(mlirBlock, mlirBlock->begin());
     }
-    llvm::outs() << "TritonAMDGPURescheduleOps::applyReschedulingPasses() - DONE\n";
+    LDBG("TritonAMDGPURescheduleOps::applyReschedulingPasses() - DONE");
   }
 
   void runOnOperation() override {
