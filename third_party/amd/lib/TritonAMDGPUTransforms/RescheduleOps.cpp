@@ -1520,10 +1520,12 @@ struct SchedManager {
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
          << ", Heuristic=" << heuristic->name());
-
+    // Reset deps right before rescheduling b/c analysis passes
+    // may have altered them.
+    LDBG("dag.resetDeps() before rescheduling");
+    dag.resetDeps();
     LDBG("NodeList before reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(dag.dumpNodes(llvm::dbgs()));
-
     LDBG("SchedDag before reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
 
@@ -1556,7 +1558,7 @@ struct SchedManager {
     }
 
     // After scheduling, re-apply deps to prepare for adding additional deps.
-    LDBG("dag.resetDeps()");
+    LDBG("dag.resetDeps() after rescheduling");
     dag.resetDeps();
 
     // Update nodeList after rescheduling.
@@ -1609,23 +1611,9 @@ private:
 
 /******************************************************************************
   TritonAMDGPURescheduleOps::applyReschedulingPasses()
-  is the top-level scheduling pass for a single block,
-  whose purpose is to improve performance and regalloc of backend compilers.
-  Before this pass, mfmas and local_loads (belonging to dots)
-  were already annotated with their dot-tile info.
-  The order of re-scheduling is:
-    - Place order dependencies on dots according to dot-tiling.
-    - Place order dependencies on local_loads according to dot-tiling.
-    - Determine min-register vs max-latency-hiding preference.
-    - Determine memory op order and co-scheduling.
-    - Place order dependencies between memory ops.
-    - Determine memory ops' early/late preference.
-    - Determine memory ops' preferred issue rate.
-    - Determine memory ops' supported issue rate.
-    - Place performance and anti-dependencies between memory ops and dots.
-    - Run scheduler with new dependencies in place.
-  Note that reschedule() can be run after any new dependencies are created to
-  visualize dag.
+  Top-level scheduling pass for a single block,
+  whose purpose is to improve ttgir op order, and thereby improve llir op order
+  to help improve scheduling and regalloc of backend compilers.
 ******************************************************************************/
 struct TritonAMDGPURescheduleOps
     : public TritonAMDGPURescheduleOpsBase<TritonAMDGPURescheduleOps> {
@@ -1649,7 +1637,6 @@ struct TritonAMDGPURescheduleOps
     LDBG("TritonAMDGPURescheduleOps::applyReschedulingPasses()");
 
     SchedManager schedManager(mlirBlock);
-
     // (0) Add basic deps.
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
     schedManager.addDeps(std::make_unique<RefinedOpDependencyCalculator>());
