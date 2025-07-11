@@ -320,11 +320,11 @@ std::string getNodeColor(SchedDagNode *node) {
   if (llvm::isa<DotOp>(op)) {
     return "deepskyblue";
   } else if (llvm::isa<triton::gpu::LocalLoadOp>(op)) {
-    return "gold";
+    return "yellow";
   } else if (llvm::isa<triton::gpu::LocalStoreOp>(op)) {
-    return "orangered";
+    return "orange";
   } else if (opCategoryGlobalLoad(node)) {
-    return "maroon";
+    return "red";
   } else if (opCategoryGlobalStore(node)) {
     return "green";
   } else if (opCategoryBarrier(node)) {
@@ -729,7 +729,7 @@ struct SchedDag {
             std::to_string(reinterpret_cast<intptr_t>(dep.parent));
         std::string childAddr =
             std::to_string(reinterpret_cast<intptr_t>(dep.child));
-        out << "\t" << childAddr << " -> " << parentAddr << " [color=" << color
+        out << childAddr << " -> " << parentAddr << " [color=" << color
             << ", style=" << style << "]\n";
       }
     }
@@ -1397,11 +1397,10 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   // get memory ops only from the graph; keep them in order.
   void createMemDag(SchedDag *memDag) const {
 
-    // TODO(dtanner) - iterator gets messed up because removing items while iterating.
     LDBG("Removing non-mem nodes.");
     SchedDagNodeList listCopy = memDag->nodeList;
     for (SchedDagNode *node : listCopy) {
-      if (!opCategoryMem(node)) {
+      if (!opCategoryMem(node) && !isa<triton::DotOp>(node->op)) {
         memDag->removeNodeCascadeDeps(node);
       }
     }
