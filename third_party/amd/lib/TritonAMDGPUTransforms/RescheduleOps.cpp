@@ -15,8 +15,8 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule"
@@ -182,7 +182,6 @@ struct SchedDagNode {
   llvm::SetVector<SchedDagNode *> parents;
 };
 
-  
 struct SchedDagNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode> {
   static inline SchedDagNode getEmptyKey() {
     return SchedDagNode(DenseMapInfo<int32_t>::getEmptyKey());
@@ -190,10 +189,10 @@ struct SchedDagNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode> {
   static inline SchedDagNode getTombstoneKey() {
     return SchedDagNode(DenseMapInfo<int32_t>::getTombstoneKey());
   }
-  static unsigned getHashValue(const SchedDagNode& node) {
+  static unsigned getHashValue(const SchedDagNode &node) {
     return DenseMapInfo<int32_t>::getHashValue(node.id);
   }
-  static bool isEqual(const SchedDagNode& lhs, const SchedDagNode& rhs) {
+  static bool isEqual(const SchedDagNode &lhs, const SchedDagNode &rhs) {
     return DenseMapInfo<int32_t>::isEqual(lhs.id, rhs.id);
   }
 };
@@ -270,7 +269,6 @@ bool opCategoryBarrier(SchedDagNode *node) {
       op);
 }
 
-  
 std::string getNodeColor(SchedDagNode *node) {
   Operation *op = node->getOp();
   if (llvm::isa<DotOp>(op)) {
@@ -294,7 +292,6 @@ std::string getNodeColor(SchedDagNode *node) {
 
 using OpNodeMap = llvm::MapVector<Operation *, SchedDagNode *>;
 
-
 struct SchedDep {
   SchedDagNode *parent;
   SchedDagNode *child;
@@ -306,7 +303,7 @@ struct SchedDep {
     out << "p=" << parent->id << " <- c=" << child->id;
     return out;
   }
-  
+
 }; // SchedDep
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const SchedDep &dep) {
@@ -328,15 +325,17 @@ struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
   static const SchedDagNode *emptyNode;
   static const SchedDagNode *tombstoneNode;
 
-
   static inline SchedDep getEmptyKey() {
-    return SchedDep(DenseMapInfo<SchedDagNode *>::getEmptyKey(), DenseMapInfo<SchedDagNode *>::getEmptyKey());
+    return SchedDep(DenseMapInfo<SchedDagNode *>::getEmptyKey(),
+                    DenseMapInfo<SchedDagNode *>::getEmptyKey());
   }
   static inline SchedDep getTombstoneKey() {
-    return SchedDep(DenseMapInfo<SchedDagNode *>::getTombstoneKey(), DenseMapInfo<SchedDagNode *>::getTombstoneKey());
+    return SchedDep(DenseMapInfo<SchedDagNode *>::getTombstoneKey(),
+                    DenseMapInfo<SchedDagNode *>::getTombstoneKey());
   }
   // Hash parent and child ids.
-  // can I de-reference d.parent, it will it sometimes be empty or tombstone key?
+  // can I de-reference d.parent, it will it sometimes be empty or tombstone
+  // key?
   static unsigned getHashValue(const SchedDep &d) {
     return llvm::detail::combineHashValue(
         SchedDagNodeDenseMapInfo::getHashValue(*d.parent),
@@ -363,15 +362,16 @@ struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
     // now it is safe to dereference them.
     return SchedDagNodeDenseMapInfo::isEqual(*lhs, *rhs);
   }
-  
+
   // Equal if parent and child ids are equal.
   static bool isEqual(const SchedDep &lhs, const SchedDep &rhs) {
-    return isEqual(lhs.parent, rhs.parent)
-        && isEqual(lhs.child, rhs.child);
+    return isEqual(lhs.parent, rhs.parent) && isEqual(lhs.child, rhs.child);
   }
 };
-const SchedDagNode *SchedDepDenseMapInfo::emptyNode = DenseMapInfo<SchedDagNode *>::getEmptyKey();
-const SchedDagNode *SchedDepDenseMapInfo::tombstoneNode = DenseMapInfo<SchedDagNode *>::getTombstoneKey();
+const SchedDagNode *SchedDepDenseMapInfo::emptyNode =
+    DenseMapInfo<SchedDagNode *>::getEmptyKey();
+const SchedDagNode *SchedDepDenseMapInfo::tombstoneNode =
+    DenseMapInfo<SchedDagNode *>::getTombstoneKey();
 
 using DepSet = DenseSet<SchedDep, SchedDepDenseMapInfo>;
 using DepMap = DenseMap<StringRef, DepSet>;
@@ -397,8 +397,9 @@ struct SchedDag {
   }
 
   // Shallow copy constructor.
-  SchedDag(const SchedDag& dag)
-   : nodesHeap(dag.nodesHeap), nodeList(dag.nodeList), deps(dag.deps), nodeMap(dag.nodeMap) {
+  SchedDag(const SchedDag &dag)
+      : nodesHeap(dag.nodesHeap), nodeList(dag.nodeList), deps(dag.deps),
+        nodeMap(dag.nodeMap) {
     LDBG("SchedDag::CopyConstructor(shallow)");
   }
 
@@ -417,7 +418,7 @@ struct SchedDag {
   void applyDeps() {
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      DepSet& depSet = depType.getSecond();
+      DepSet &depSet = depType.getSecond();
       for (auto dep : depSet) {
         dep.child->addParent(dep.parent);
         dep.parent->addChild(dep.child);
@@ -426,7 +427,7 @@ struct SchedDag {
   }
 
   void applyDeps(StringRef depTypeName) {
-    DepSet& depSet = deps[depTypeName];
+    DepSet &depSet = deps[depTypeName];
     for (auto dep : depSet) {
       dep.child->addParent(dep.parent);
       dep.parent->addChild(dep.child);
@@ -445,13 +446,13 @@ struct SchedDag {
   }
 
   // Removes dep from all depTypes
-  int32_t removeDep(const SchedDep& dep) {
+  int32_t removeDep(const SchedDep &dep) {
     LDBG("removeDep(" << dep << ")");
     int32_t count = 0;
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
       LDBG(depTypeName);
-      DepSet& depSet = depType.getSecond();
+      DepSet &depSet = depType.getSecond();
 
       int32_t erased = depSet.erase(dep);
       if (erased) {
@@ -477,7 +478,7 @@ struct SchedDag {
     for (auto it = nodeList.begin(); it != nodeList.end(); it++) {
       SchedDagNode *n = *it;
       if (n == node) {
-        nodeList.erase(it, it+1);
+        nodeList.erase(it, it + 1);
         return;
       }
     }
@@ -565,7 +566,7 @@ struct SchedDag {
   void dumpDeps(llvm::raw_ostream &out) {
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      DepSet& depSet = depType.getSecond();
+      DepSet &depSet = depType.getSecond();
       for (auto dep : depSet) {
         out << depTypeName << ": " << dep << "\n";
       }
@@ -649,7 +650,7 @@ struct SchedDag {
 
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      DepSet& depSet = depType.getSecond();
+      DepSet &depSet = depType.getSecond();
       std::string color = "black";
       std::string style = "solid";
       if (format.find(depTypeName) != format.end()) {
@@ -800,8 +801,8 @@ struct DataDependencyCalculator : DependencyCalculator {
   // Nodes without results still must come before cf.br.
   void calcDepsCfBr() {
     SchedDagNode *lastNode = (*(dag->nodeList.rbegin()));
-    for (auto it = std::next(dag->nodeList.rbegin()); it != dag->nodeList.rend();
-         ++it) {
+    for (auto it = std::next(dag->nodeList.rbegin());
+         it != dag->nodeList.rend(); ++it) {
       SchedDagNode *node = (*it);
       if (node->getOp()->getNumResults() == 0) {
         SchedDep dep;
@@ -1059,7 +1060,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
       SchedDagNode *node = *it;
       if (DotOp op = dyn_cast<DotOp>(node->getOp())) {
         if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-            triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+                triton::amdgpu::RefinedOpAttr::getMnemonic())) {
           int32_t id = attr.getIdUnrefinedOp();
           if (prevDot && id != prevId) {
             SchedDep dep;
@@ -1086,7 +1087,7 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
       SchedDagNode *node = *it;
       Operation *op = node->getOp();
       if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-          triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+              triton::amdgpu::RefinedOpAttr::getMnemonic())) {
         int32_t id = attr.getIdUnrefinedOp();
         if (prevNode && id == prevId) {
           SchedDep dep;
@@ -1130,7 +1131,7 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepSet &depSet) {
 }
 
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
-                        std::function<bool (SchedDagNode *)> category) {
+                        std::function<bool(SchedDagNode *)> category) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
@@ -1173,7 +1174,6 @@ struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
     calcDepsOpCategory(&dag->nodeList, depSet, opCategoryGlobalLoad);
   }
 };
-
 
 /******************************************************************************
 Create high-level dependencies between the different memory ops where there
@@ -1337,13 +1337,14 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     }
     LDBG("Removing non-unique refinement ids.");
 
-    // We are correctly removing the nodes, but some dependencies are staying in the graph.
+    // We are correctly removing the nodes, but some dependencies are staying in
+    // the graph.
     SetVector<int32_t> refinedIds;
     listCopy = memDag->nodeList;
     for (SchedDagNode *node : listCopy) {
       Operation *op = node->getOp();
       if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
-          triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+              triton::amdgpu::RefinedOpAttr::getMnemonic())) {
         int32_t id = attr.getIdUnrefinedOp();
         if (refinedIds.contains(id)) {
           memDag->removeNodeCascadeDeps(node);
@@ -1503,8 +1504,7 @@ struct SchedHeuristicOriginalOrder
   - Runs scheduler.
 ******************************************************************************/
 struct SchedManager {
-  SchedManager(Block *block)
-      : dag(block), rescheduleId(0) {
+  SchedManager(Block *block) : dag(block), rescheduleId(0) {
     LDBG("SchedManager()");
   }
 
@@ -1608,7 +1608,6 @@ private:
   int32_t rescheduleId;
 }; // SchedManager
 
-
 /******************************************************************************
   TritonAMDGPURescheduleOps::applyReschedulingPasses()
   Top-level scheduling pass for a single block,
@@ -1657,9 +1656,8 @@ struct TritonAMDGPURescheduleOps
     SchedHeuristicOriginalOrder shOo;
     schedManager.reschedule<SchedDirection::TopDown>(&shOo);
 
-    SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
-
     LDBG("Rescheduled Ops:");
+    SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
     // Print op (and not node) list.
     LLVM_DEBUG(for (auto op : rescheduledOps) {
       op->print(llvm::dbgs());
