@@ -38,16 +38,14 @@ namespace ttg = mlir::triton::gpu;
   (3) Inject sched.barriers into op order to provide scheduling guard rails
       to backend scheduler to constrain pre-RA and post-RA scheduling.
 
-  Scheduling consists of multiple passes which:
+  Scheduling consists of multiple passes controlled by SchedManager:
   (1) Analyse the current op sequence.
-  (2) Create an additional set of dependencies in DepMap.
-    (a) Deps are stored externally to the Dag, then later added.
-  (3) Populate SchedDag with all prior and new dependencies.
-  (4) During readyList-based scheduling, as ops are scheduled,
-      their nodes are removed from the SchedDag,
-      parent/child dependencies are removed from the nodes
-      creating new nodes ready to be scheduled.
-  (5) Resulting in a new op sequence.
+  (2) Create an additional sets of dependencies in SchedDag.
+  (3) Reschedule based on ready-list,
+      (a) Select best node based on heuristic.
+      (b) Remove node and dependencies from nodes in SchedDag.
+      (c) Update ready-list.
+  (4) Results in a new op sequence. Also, restore deps in SchedDag.
 ******************************************************************************/
 namespace {
 
@@ -94,7 +92,7 @@ struct SchedDagNode {
       : op(node.op), id(node.id), opStr(node.opStr), children(node.children),
         parents(node.parents) {}
 
-  // For DenseMapInfo
+  // For DenseMapInfo to create empty/tombstone entries.
   SchedDagNode(int32_t i) : op(nullptr), id(i), opStr("") {}
 
   void addChild(SchedDagNode *node) { children.insert(node); }
@@ -202,47 +200,7 @@ struct SchedDagNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode> {
   }
 };
 
-#if 0
-struct SchedDagPtrNodeDenseMapInfo : public llvm::DenseMapInfo<SchedDagNode *> {
-  SchedDagNode *emptyNode;
-  SchedDagNode *tombstoneNode;
-
-  static inline SchedDagNode getEmptyKey() {
-    return SchedDagNode(DenseMapInfo<int32_t>::getEmptyKey());
-  }
-  static inline SchedDagNode getTombstoneKey() {
-    return SchedDagNode(DenseMapInfo<int32_t>::getTombstoneKey());
-  }
-  static unsigned getHashValue(const SchedDagNode *node) {
-    return DenseMapInfo<int32_t>::getHashValue(node->id);
-  }
-  static bool isEqual(const SchedDagNode *lhs, const SchedDagNode *rhs) {
-    return DenseMapInfo<int32_t>::isEqual(lhs.id, rhs.id);
-
-    static bool isEqual(const SchedDagNode *lhs, const SchedDagNode *rhs) {
-      if (lhs == emptyNode) {
-        if (rhs == emptyNode)
-          return true;
-        return false;
-      }
-      // know lhs not empty
-      if (lhs == tombstoneNode) {
-        if (rhs == tombstoneNode)
-          return true;
-        return false;
-      }
-      // know lhs not empty nor tombstone
-      if (rhs == emptyNode || rhs == tombstoneNode) {
-        return false;
-      }
-      // know neither lhs nor rhs are empty nor tombstone
-      // now it is safe to dereference them.
-      return SchedDagNodeDenseMapInfo::isEqual(*lhs, *rhs);
-  }
-};
-#endif
-
-// [@nodeId opName p={parent nodes} c={child nodes}]
+// Format: [@nodeId opName p={parent nodes} c={child nodes}]
 llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNode &node) {
   out << "[@" << node.id << " " << node.opStr;
   out << " p={";
@@ -374,27 +332,19 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const SchedDep &dep) {
 struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
 
   // These represent additional nodes are illegal to dereference.
-  static const SchedDagNode *emptyNode;// = DenseMapInfo<SchedDagNode *>::getEmptyKey();
-  static const SchedDagNode *tombstoneNode;// = DenseMapInfo<SchedDagNode *>::getTombstoneKey();
+  static const SchedDagNode *emptyNode;
+  static const SchedDagNode *tombstoneNode;
 
-  //SchedDepDenseMapInfo() :
-  //    emptyNode(DenseMapInfo<SchedDagNode *>::getEmptyKey()),
-  //    tombstoneNode(DenseMapInfo<SchedDagNode *>::getTombstoneKey()) {}
 
   static inline SchedDep getEmptyKey() {
-    //LDBG("DenseMapInfo<SchedDep>::getEmptyKey()");
     return SchedDep(DenseMapInfo<SchedDagNode *>::getEmptyKey(), DenseMapInfo<SchedDagNode *>::getEmptyKey());
   }
   static inline SchedDep getTombstoneKey() {
-    //LDBG("DenseMapInfo<SchedDep>::getTombstoneKey()");
     return SchedDep(DenseMapInfo<SchedDagNode *>::getTombstoneKey(), DenseMapInfo<SchedDagNode *>::getTombstoneKey());
   }
   // Hash parent and child ids.
   // can I de-reference d.parent, it will it sometimes be empty or tombstone key?
   static unsigned getHashValue(const SchedDep &d) {
-    //LDBG("DenseMapInfo<SchedDep>::getHashValue()");
-    //return SchedDagNodeDenseMapInfo::getHashValue(*d.parent) << 16
-    //    | SchedDagNodeDenseMapInfo::getHashValue(*d.child);
     return llvm::detail::combineHashValue(
         SchedDagNodeDenseMapInfo::getHashValue(*d.parent),
         SchedDagNodeDenseMapInfo::getHashValue(*d.child));
@@ -424,7 +374,6 @@ struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
 
   // Equal if parent and child ids are equal.
   static bool isEqual(const SchedDep &lhs, const SchedDep &rhs) {
-    //LDBG("DenseMapInfo<SchedDep>::isEqual()");
     return isEqual(lhs.parent, rhs.parent)
         && isEqual(lhs.child, rhs.child);
   }
