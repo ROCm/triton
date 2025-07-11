@@ -804,7 +804,14 @@ struct AsyncCopyGlobalToLocalOpConversion
         // laneId + laneOffset will always stay inside the warp [0,
         // threadsPerWarp) because we only swizzle inside a warp
         Value swizzledLaneId = b.add(getLaneId(rewriter, loc), laneOffset);
-        srcPtr = targetInfo.shuffleIdx(rewriter, loc, srcPtr, swizzledLaneId);
+
+        if (::triton::tools::getBoolEnv(
+                "TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE")) {
+          srcPtr = b.gep(srcPtr.getType(), vecTy, srcPtr, laneOffset);
+        } else {
+          srcPtr = targetInfo.shuffleIdx(rewriter, loc, srcPtr, swizzledLaneId);
+        }
+
         if (!maskElements.empty()) {
           pred =
               shuffleMask(rewriter, b, loc, targetInfo, swizzledLaneId, pred);
