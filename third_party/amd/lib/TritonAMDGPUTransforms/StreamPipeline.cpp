@@ -1391,7 +1391,7 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
       // TODO: fix for four stage pipeliner
-      // tt::combineRedundantWaitOps(waitOps);
+      tt::combineRedundantWaitOps(waitOps);
     }
   }
 };
