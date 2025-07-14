@@ -16,7 +16,7 @@ in which we can see
 We need 37 vgprs just for addresses of ds instructions for V tensor.
 This is due to the design of rotatingShared layout.
 
-## First attempt of paddedShared layout: 512:+8
+## First attempt of paddedShared layout: <512:+8>
 
 triton compiler: 7e6a3da26490
 
@@ -36,7 +36,7 @@ vgpr usages for addresses. This is already a huge reduction compared to 37 vgprs
 and we still need to figure out a better distribution to avoid bank conflicts.
 Therefore, we won't try to further reduce vgprs based on this version.
 
-## Seccond attempt of paddedShared layout: 64:+2, 2048:+4, 4096:+16
+## 3-layer paddedShared layout: <64:+2,2048:+4,4096:+16>
 
 triton compiler: bb19837d979ba8
 
@@ -65,5 +65,44 @@ of the instruction. `offset` has 8 bits and it's max value is 255, which means
 an offset of 2040 bytes.
 However, in this kernel, we need offsets as large as 4096 and 8192 bytes.
 Therefore, 4 vgprs for the addresses is already the best we can do.
+
+tflops: 242
+
+## 3-layer paddedShared layout: <64:+2,2048:+4,4096:+16> with row rotating (RR0)
+
+
+triton compiler: 325c1eaf3f0
+
+The current paddedShared layout does not provide information about
+the underlying linear layout for LDS.
+The default layout is an identity linear layout, which leads to bank conflicts
+even with padding.
+This commit applies row rotating in the following order:
+```bash
+0, 16, 32, 48, 64, 80, 96, 112,
+1, 17, 33, 49, 65, 81, 97, 113,
+...
+15, 31, 47, 63, 79, 95, 111, 127,
+128, ...
+```
+
+LWV and LRV instructions are saved in `padding_64-2_2048-4_4096_16_RR0/ds_inst_V.s`,
+in which we can see
+- 8 x `ds_write_b32` that need 1 vgpr to hold address (v164)
+  - The backend does not generate `ds_write2_b64`.
+    The distance between offsets (1056) should be representable as `offset0/1`.
+- 16 x `ds_read2_b64` that need 1 vgpr to hold address (v165)
+  - With RR0, the elements read by each thread is closer to each other
+    so that relatively smaller offsets can be used.
+
+
+tflops: 334
+
+However, thread trace shows that `ds_read2_b64` still take very long to issue.
+I did not check the counters for bank conflicts, but this is very likely
+to be bank conflicts.
+
+Not sure why performance improves.
+
 
 
