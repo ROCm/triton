@@ -1920,4 +1920,69 @@ LinearLayout getTmemLoadLayoutSplitLongM(int M, int N, RankedTensorType oldType,
   return combineCtaCgaWithShape(regLanes, ctaLayout, oldType.getShape());
 }
 
+LinearLayout getRegToSharedLayoutRowRotating(LinearLayout regLayout,
+                                             MemDescType memDescTy) {
+  auto *ctx = memDescTy.getContext();
+
+  auto outNames = to_vector(regLayout.getOutDimNames());
+  auto order = to_vector(triton::gpu::getOrder(memDescTy));
+  auto shape = memDescTy.getShape();
+  regLayout = regLayout.transposeOuts(outNames);
+
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(memDescTy.getEncoding());
+  LinearLayout srcToSharedLayout = LinearLayout::empty();
+  if (paddedLayout) {
+    StringAttr kOffset = StringAttr::get(ctx, "offset");
+    StringAttr kRegister = StringAttr::get(ctx, "register");
+    StringAttr kLane = StringAttr::get(ctx, "lane");
+    StringAttr kWarp = StringAttr::get(ctx, "warp");
+    StringAttr kBlock = StringAttr::get(ctx, "block");
+
+    auto standardOutDims = standardOutDimNames(ctx, memDescTy.getRank());
+
+    // We hardcode sharedOrder == hbmOrder
+    unsigned contigSize = shape[order[0]];
+    unsigned nonContigSize = shape[order[1]];
+    assert(((contigSize == 64) && (nonContigSize == 128)) &&
+           "Only support 64x128 shape");
+
+    std::vector<std::vector<int>> offsetBases;
+
+    if (contigSize == 64) {
+      if (nonContigSize == 128) {
+        offsetBases = {
+            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
+            {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+        };
+      } else {
+        assert(false);
+      }
+    }
+
+    auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+      for (auto &p : vec)
+        std::swap(p[0], p[1]);
+    };
+
+    auto regOutDims = llvm::to_vector(regLayout.getOutDimNames());
+    if (triton::gpu::getOrder(memDescTy)[0] != 1) {
+      transposeBases(offsetBases);
+      std::swap(regOutDims[0], regOutDims[1]);
+    }
+
+    LinearLayout rowSwizzled(
+        {
+            {kOffset, offsetBases},
+        },
+        {regOutDims[0], regOutDims[1]});
+
+    srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
+  } else {
+    assert(false);
+  }
+
+  return srcToSharedLayout;
+}
+
 } // namespace mlir::triton::gpu

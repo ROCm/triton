@@ -302,5 +302,9 @@ LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape,
 // the two can be done using transferWithinWarp, without involving LDS
 std::optional<LinearLayout> chooseMfmaLikeStoreLayout(RankedTensorType valType);
 
+// Get the shared layout with a row rotating linear layout under the hood
+LinearLayout getRegToSharedLayoutRowRotating(LinearLayout reglayout,
+                                             MemDescType dstTy);
+
 } // namespace mlir::triton::gpu
 #endif // TRITON_DIALECT_TRITONGPU_IR_LINEARLAYOUTCONVERSIONS_H
