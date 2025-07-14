@@ -560,9 +560,9 @@ SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
 // and returns the output values.
 SmallVector<Value>
 lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
+                triton::gpu::PaddedSharedEncodingAttr layout,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
-                std::function<Value(Value)> smemAddrAddon,
                 ConversionPatternRewriter &rewriter,
                 const TargetInfoBase &targetInfo, Operation *op = nullptr);
 
@@ -571,10 +571,10 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
 // not, and returns the output values.
 SmallVector<Value> lowerLdSt(
     Location loc, MLIRContext *ctx, LinearLayout cvt,
+    triton::gpu::PaddedSharedEncodingAttr layout,
     ArrayRef<Value> valsArray, // Input for store, output for load
-    Type llvmElemTy, Value smemBase, std::function<Value(Value)> smemAddrAddon,
-    ConversionPatternRewriter &rewriter, const TargetInfoBase &targetInfo,
-    std::optional<int> maybeMaxVecElems,
+    Type llvmElemTy, Value smemBase, ConversionPatternRewriter &rewriter,
+    const TargetInfoBase &targetInfo, std::optional<int> maybeMaxVecElems,
     std::function<SmallVector<Value>(ConversionPatternRewriter &, Location,
                                      ArrayRef<Value>, Value, int, VectorType)>
         lowerInst);

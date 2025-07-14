@@ -431,6 +431,53 @@ Value emitPadding(Location loc, RewriterBase &rewriter,
   return padOffset;
 }
 
+Value emitPaddingi8(Location loc, RewriterBase &rewriter,
+                    triton::gpu::PaddedSharedEncodingAttr layout,
+                    unsigned bitwidth, Value smemOffset) {
+  TritonLLVMOpBuilder b(loc, rewriter);
+
+  Value padOffset = b.i32_val(0);
+  unsigned elemInBytes = bitwidth / 8;
+  for (auto [interval, padding] :
+       llvm::zip_equal(layout.getIntervals(), layout.getPaddings())) {
+    unsigned intervali8 = elemInBytes * interval;
+    unsigned paddingi8 = elemInBytes * padding;
+    Value iVal = b.i32_val(llvm::Log2_32(intervali8));
+    Value pVal = b.i32_val(llvm::Log2_32(paddingi8));
+    padOffset = b.add(padOffset, b.shl(b.ashr(smemOffset, iVal), pVal));
+  }
+  return padOffset;
+}
+
+Value updatePaddedOffset(Location loc, RewriterBase &rewriter,
+                         triton::gpu::PaddedSharedEncodingAttr layout,
+                         unsigned bitwidth, Value smemOffset) {
+  TritonLLVMOpBuilder b(loc, rewriter);
+  Value padding = emitPaddingi8(loc, rewriter, layout, bitwidth, smemOffset);
+  return b.add(smemOffset, padding);
+}
+
+unsigned emitPaddingi8(triton::gpu::PaddedSharedEncodingAttr layout,
+                       unsigned bitwidth, unsigned smemOffset) {
+  unsigned padOffset = 0;
+  unsigned elemInBytes = bitwidth / 8;
+  for (auto [interval, padding] :
+       llvm::zip_equal(layout.getIntervals(), layout.getPaddings())) {
+    unsigned intervali8 = elemInBytes * interval;
+    unsigned paddingi8 = elemInBytes * padding;
+    if (smemOffset < intervali8)
+      break;
+    padOffset += smemOffset / intervali8 * paddingi8;
+  }
+  return padOffset;
+}
+
+unsigned updatePaddedOffset(triton::gpu::PaddedSharedEncodingAttr layout,
+                            unsigned bitwidth, unsigned smemOffset) {
+  unsigned padding = emitPaddingi8(layout, bitwidth, smemOffset);
+  return smemOffset + padding;
+}
+
 namespace {
 
 SmallVector<Value> getSmemVecAddrVec(
@@ -651,9 +698,9 @@ largestVectorisation(MLIRContext *ctx, const LinearLayout &cvt, int bitwidth,
 
 SmallVector<Value>
 lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
+                triton::gpu::PaddedSharedEncodingAttr layout,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
-                std::function<Value(Value)> smemAddrAddon,
                 ConversionPatternRewriter &rewriter,
                 const TargetInfoBase &targetInfo, Operation *op) {
 
@@ -678,16 +725,16 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
       return unpackLLVector(loc, valsVec, rewriter);
     }
   };
-  return lowerLdSt(loc, ctx, cvt, valsArray, llvmElemTy, smemBase,
-                   smemAddrAddon, rewriter, targetInfo, {}, emitCpAsync);
+  return lowerLdSt(loc, ctx, cvt, layout, valsArray, llvmElemTy, smemBase,
+                   rewriter, targetInfo, {}, emitCpAsync);
 }
 
 SmallVector<Value> lowerLdSt(
     Location loc, MLIRContext *ctx, LinearLayout cvt,
+    triton::gpu::PaddedSharedEncodingAttr paddedLayout,
     ArrayRef<Value> valsArray, // Input for store, output for load
-    Type llvmElemTy, Value smemBase, std::function<Value(Value)> smemAddrAddon,
-    ConversionPatternRewriter &rewriter, const TargetInfoBase &targetInfo,
-    std::optional<int> maybeMaxVecElems,
+    Type llvmElemTy, Value smemBase, ConversionPatternRewriter &rewriter,
+    const TargetInfoBase &targetInfo, std::optional<int> maybeMaxVecElems,
     std::function<SmallVector<Value>(ConversionPatternRewriter &, Location,
                                      ArrayRef<Value>, Value, int, VectorType)>
         lowerInst) {
@@ -739,15 +786,24 @@ SmallVector<Value> lowerLdSt(
     auto regIdx = reps.apply({{kReg, i}, {kLane, 0}, {kWarp, 0}})[0].second;
     auto regIdxI8 = regIdx * (bitwidth / 8);
     Value offset = b.xor_(regBaseI8, b.i32_val(regIdxI8));
+
+    if (paddedLayout) {
+      offset =
+          updatePaddedOffset(loc, rewriter, paddedLayout, bitwidth, offset);
+    }
+
     for (int j = 0; j < nAdditive; j += elemsPerVec) {
       // all these constants will go as immediate values to LDS/STS
       auto regIdxAdd =
           reps.apply({{kReg, j}, {kLane, 0}, {kWarp, 0}})[0].second;
       auto regIdxAddI8 = regIdxAdd * (bitwidth / 8);
+      if (paddedLayout) {
+        regIdxAddI8 = updatePaddedOffset(paddedLayout, bitwidth, regIdxAddI8);
+      }
       Value innerOffset = b.add(offset, b.i32_val(regIdxAddI8));
-      auto vecAddr =
-          b.gep(smemPtrTy, i8_ty, smemBase, smemAddrAddon(innerOffset),
-                LLVM::GEPNoWrapFlags::inbounds);
+      Value vecAddr;
+      vecAddr = b.gep(smemPtrTy, i8_ty, smemBase, innerOffset,
+                      LLVM::GEPNoWrapFlags::inbounds);
       llvm::append_range(outVals,
                          lowerInst(rewriter, loc, vals, vecAddr, i + j, vecTy));
     }
@@ -772,16 +828,8 @@ lowerLocalLdSt(Location loc, MLIRContext *ctx, LinearLayout cvt,
                const TargetInfoBase &targetInfo, Operation *op) {
   assert(cvt.getNumOutDims() == 1);
   assert(*cvt.getOutDimNames().begin() == str_attr("offset"));
-  auto smemAddrAddon = [&](Value smemOffset) {
-    TritonLLVMOpBuilder b(loc, rewriter);
-    if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-            memDescTy.getEncoding())) {
-      // Apply the offset needed for padding.
-      Value padOffset = emitPadding(loc, rewriter, paddedLayout, smemOffset);
-      smemOffset = b.add(smemOffset, padOffset);
-    }
-    return smemOffset;
-  };
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(memDescTy.getEncoding());
   auto isStore = !valsArray.empty();
   // Remove broadcasting in the registers
   auto removeBroadcastSrc = actionRemoveBroadcastedRegs(cvt);
@@ -792,16 +840,16 @@ lowerLocalLdSt(Location loc, MLIRContext *ctx, LinearLayout cvt,
       inVals = removeBroadcastSrc.apply(inVals);
     }
     auto outVals =
-        lowerLdStShared(loc, ctx, prmtCvt, inVals, llvmElemTy, smemBase,
-                        smemAddrAddon, rewriter, targetInfo, op);
+        lowerLdStShared(loc, ctx, prmtCvt, paddedLayout, inVals, llvmElemTy,
+                        smemBase, rewriter, targetInfo, op);
     if (!isStore) {
       outVals = broadcastAs(outVals, cvt);
     }
     return outVals;
   }
 
-  return lowerLdStShared(loc, ctx, cvt, valsArray, llvmElemTy, smemBase,
-                         smemAddrAddon, rewriter, targetInfo, op);
+  return lowerLdStShared(loc, ctx, cvt, paddedLayout, valsArray, llvmElemTy,
+                         smemBase, rewriter, targetInfo, op);
 }
 
 bool emitTransferBetweenRegistersAndShared(
