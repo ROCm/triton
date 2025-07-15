@@ -835,57 +835,13 @@ enum FS_STAGES {
   STAGE_LLOAD2 = 3,
 };
 
-void fourStageCreateAndScheduleAsyncCopy(
-    tt::LoadOp loadOp, Value alloc, Value extractIdx, scf::ForOp forOp,
+void fourStageScheduleAsyncCopy(
+    const AsyncCopyChainOps &asyncOps, tt::LoadOp loadOp,
     tt::CoarseSchedule &schedule,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
-  OpBuilder builder(loadOp);
-  Location loc = loadOp.getLoc();
-
-  ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
-
-  // Extract local subview from shared allocation
-  Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
-  SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
-  loadOffsets[0] = extractIdx;
-  auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(forOp.getContext());
-  auto subviewTy = ttg::MemDescType::get(
-      allocTy.getShape().drop_front(), allocTy.getElementType(),
-      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
-  auto viewLoad =
-      builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
-
-  // If the load is used by an existing local allocation we replace it with the
-  // new subview
-  SmallVector<ttg::LocalAllocOp> allocsToErase;
-  for (Operation *user : loadOp->getUsers()) {
-    if (auto userAlloc = dyn_cast<ttg::LocalAllocOp>(user)) {
-      tt::replaceUsesAndPropagateType(builder, userAlloc, viewLoad);
-      allocsToErase.push_back(userAlloc);
-    }
-  }
-  for (auto allocToErase : allocsToErase)
-    allocToErase.erase();
-
-  auto copyOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-      loadOp.getLoc(), loadOp.getPtr(), viewLoad, loadOp.getMask(),
-      loadOp.getOther(), loadOp.getCache(), loadOp.getEvict(),
-      loadOp.getIsVolatile());
-
-  // Insert synchronization primitives to create barriers during lowering
-  auto commitOp =
-      builder.create<ttg::AsyncCommitGroupOp>(loc, copyOp->getResult(0));
-
-  ttg::AsyncWaitOp waitOp =
-      builder.create<ttg::AsyncWaitOp>(loc, commitOp->getResult(0), 0);
-
-  // Create local load which consumes the async token from the AsyncWait
-  auto sharedLoad =
-      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad, waitOp);
-
   auto [loadStage, loadCluster] = schedule[loadOp];
-  schedule.erase(loadOp);
+  auto [copyOp, commitOp, waitOp, localLoadOp] = asyncOps;
   // Schedule new ops
   schedule.insert(copyOp, loadStage, loadCluster);
   // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
@@ -895,23 +851,67 @@ void fourStageCreateAndScheduleAsyncCopy(
   if (loadStage == FS_STAGES::STAGE_LOAD1) {
     schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::ASYNCWAIT1]);
-    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD1,
+    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::LLOAD1]);
   } else {
     schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::ASYNCWAIT2]);
-    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD2,
+    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::LLOAD2]);
   }
 
-  loadOp->replaceAllUsesWith(ValueRange{sharedLoad});
+  loadOp->replaceAllUsesWith(ValueRange{localLoadOp});
   if (auto cvt =
-          dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
-    auto [localLoadStage, localLoadCluster] = schedule[sharedLoad];
+          dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
+    auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
     schedule.insert(cvt, localLoadStage, localLoadCluster);
   }
+}
 
+void fourStageCreateAndScheduleAsyncCopy(
+    tt::LoadOp loadOp, Value alloc, Value extractIdx, scf::ForOp forOp,
+    tt::CoarseSchedule &schedule,
+    const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
+        &clusters) {
+  auto asyncOps = createAsyncCopy(loadOp, alloc, extractIdx, forOp);
+  loadOp->replaceAllUsesWith(ValueRange{asyncOps.localLoadOp});
+
+  fourStageScheduleAsyncCopy(asyncOps, loadOp, schedule, clusters);
+
+  schedule.erase(loadOp);
   loadOp.erase();
+}
+
+void fourStageScheduleStreamCopy(
+    const StreamCopyChainOps &streamOps, tt::LoadOp loadOp,
+    tt::CoarseSchedule &schedule,
+    const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
+        &clusters) {
+  auto [loadStage, loadCluster] = schedule[loadOp];
+  auto [copyOp, subviewOp, localStoreOp, localLoadOp] = streamOps;
+  schedule.insert(copyOp, loadStage, loadCluster);
+
+  if (loadStage == FS_STAGES::STAGE_LOAD1) {
+    schedule.insert(subviewOp, FS_STAGES::STAGE_LWRITE1,
+                    clusters[FS_CLUSTERS::LWRITE1]);
+    schedule.insert(localStoreOp, FS_STAGES::STAGE_LWRITE1,
+                    clusters[FS_CLUSTERS::LWRITE1]);
+    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD1,
+                    clusters[FS_CLUSTERS::LLOAD1]);
+  } else {
+    schedule.insert(subviewOp, FS_STAGES::STAGE_LWRITE2,
+                    clusters[FS_CLUSTERS::LWRITE2]);
+    schedule.insert(localStoreOp, FS_STAGES::STAGE_LWRITE2,
+                    clusters[FS_CLUSTERS::LWRITE2]);
+    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD2,
+                    clusters[FS_CLUSTERS::LLOAD2]);
+  }
+
+  if (auto cvt =
+          dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
+    auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
+    schedule.insert(cvt, localLoadStage, localLoadCluster);
+  }
 }
 
 void fourStageCreateAndScheduleStreamCopy(
@@ -919,72 +919,13 @@ void fourStageCreateAndScheduleStreamCopy(
     tt::CoarseSchedule &schedule,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
-  OpBuilder builder(forOp);
-  Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
-  // Replace the load with insert/extract slice.
-  builder.setInsertionPoint(loadOp);
-  Location loc = loadOp.getLoc();
 
-  ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
-  SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
-  Operation *copy = builder.clone(*loadOp);
+  auto streamCopy = createStreamCopy(loadOp, alloc, extractIdx, forOp);
+  loadOp->replaceAllUsesWith(ValueRange{streamCopy.localLoadOp});
 
-  auto [loadStage, loadCluster] = schedule[loadOp];
+  fourStageScheduleStreamCopy(streamCopy, loadOp, schedule, clusters);
+
   schedule.erase(loadOp);
-  schedule.insert(copy, loadStage, loadCluster);
-
-  // Extract part.
-  SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
-  loadOffsets[0] = extractIdx;
-  auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(forOp.getContext());
-  auto subviewTy = ttg::MemDescType::get(
-      allocTy.getShape().drop_front(), allocTy.getElementType(),
-      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
-  auto viewLoad =
-      builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
-  // Clean up old local caches.
-  SmallVector<ttg::LocalAllocOp> allocsToErase;
-  for (Operation *user : loadOp->getUsers()) {
-    if (auto userAlloc = dyn_cast<ttg::LocalAllocOp>(user)) {
-      tt::replaceUsesAndPropagateType(builder, userAlloc, viewLoad.getResult());
-      allocsToErase.push_back(userAlloc);
-    }
-  }
-  for (auto allocToErase : allocsToErase)
-    allocToErase.erase();
-
-  // Prefetch load ahead of the dot stage if is used by the dot.
-  auto storeOp =
-      builder.create<ttg::LocalStoreOp>(loc, copy->getResult(0), viewLoad);
-
-  // Create local load
-  auto sharedLoad =
-      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad);
-  Value result = sharedLoad.getResult();
-  // if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
-  //   schedule.insert(sharedLoad, stages[SCHED_LOCAL_LOAD],
-  //                   clusters[SCHED_LOCAL_LOAD]);
-
-  if (loadStage == FS_STAGES::STAGE_LOAD1) {
-    schedule.insert(storeOp, FS_STAGES::STAGE_LWRITE1,
-                    clusters[FS_CLUSTERS::LWRITE1]);
-    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD1,
-                    clusters[FS_CLUSTERS::LLOAD1]);
-  } else {
-    schedule.insert(storeOp, FS_STAGES::STAGE_LWRITE2,
-                    clusters[FS_CLUSTERS::LWRITE2]);
-    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD2,
-                    clusters[FS_CLUSTERS::LLOAD2]);
-  }
-
-  loadOp->replaceAllUsesWith(ValueRange{result});
-
-  if (auto cvt =
-          dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
-    auto [localLoadStage, localLoadCluster] = schedule[sharedLoad];
-    schedule.insert(cvt, localLoadStage, localLoadCluster);
-  }
-
   loadOp.erase();
 }
 
