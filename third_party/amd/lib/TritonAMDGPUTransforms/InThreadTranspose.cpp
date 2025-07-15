@@ -131,8 +131,12 @@ Attribute createNewSharedEncoding(RankedTensorType operandType) {
   //    ctx, {{64, 2}, {2048, 4}, {4096, 16}}, order, ctaLayout);
 
   // RR1
+  // auto newSharedEnc =
+  //    ttg::PaddedSharedEncodingAttr::get(ctx, {{128, 2}}, order, ctaLayout);
+
+  // Simple padding with RR
   auto newSharedEnc =
-      ttg::PaddedSharedEncodingAttr::get(ctx, {{128, 2}}, order, ctaLayout);
+      ttg::PaddedSharedEncodingAttr::get(ctx, {{64, 4}}, order, ctaLayout);
 
   return newSharedEnc;
 }
