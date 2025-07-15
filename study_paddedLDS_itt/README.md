@@ -106,3 +106,19 @@ Not sure why performance improves.
 
 
 
+## RR1 + pad<128:+2>
+
+triton compiler: bee8cd64da3f03bdad8
+
+Another design of the padding and RR pattern. Row rotating order is as follows
+```bash
+0, 4, 8, 12, 16, 20, ... 60,
+1, 5, 9, 13, 17, 21, ... 61,
+2, 6, 10, 14, 18, 22, ..., 62,
+3, 7, ..................., 63,
+64, ...
+```
+
+This version has a lot of bank conflicts. And the perf goes back to 200 tflops.
+
+
