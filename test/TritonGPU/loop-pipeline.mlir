@@ -475,8 +475,8 @@ tt.func @matmul_loop_single_pipeline(%lb : index, %ub : index, %step : index,
 //       AMD:       scf.yield %[[SELECT_33]]
 //       AMD:     }
 //       AMD:     %[[SELECT_37:.*]] = arith.select %[[CMPI_29]], %[[IF_36]], %[[SELECT_33]]
-//       AMD:     ttg.local_dealloc %[[LOCAL_ALLOC_0]]
-//       AMD:     ttg.local_dealloc %[[LOCAL_ALLOC_1]]
+//       AMD-dag:     ttg.local_dealloc %[[LOCAL_ALLOC_0]]
+//       AMD-dag:     ttg.local_dealloc %[[LOCAL_ALLOC_1]]
 
 // AMD_PREFETCH-LABEL: tt.func @indirect_bmm_scalar
 //       AMD_PREFETCH:   ttg.local_alloc
