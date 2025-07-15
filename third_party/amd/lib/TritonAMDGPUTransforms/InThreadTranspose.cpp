@@ -135,8 +135,10 @@ Attribute createNewSharedEncoding(RankedTensorType operandType) {
   //    ttg::PaddedSharedEncodingAttr::get(ctx, {{128, 2}}, order, ctaLayout);
 
   // Simple padding
-  auto newSharedEnc =
-      ttg::PaddedSharedEncodingAttr::get(ctx, {{64, 4}}, order, ctaLayout);
+  // 1st layer 64:+4 to avoid bank conflicts for ds_read
+  // 2nd layer 1024:+4 to avoid bank conflicts for ds_write
+  auto newSharedEnc = ttg::PaddedSharedEncodingAttr::get(
+      ctx, {{64, 4}, {1024, 4}}, order, ctaLayout);
 
   return newSharedEnc;
 }
