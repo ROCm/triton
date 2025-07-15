@@ -833,7 +833,7 @@ void fourStageScheduleAsyncCopy(
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
   auto [loadStage, loadCluster] = schedule[loadOp];
-  auto [copyOp, commitOp, waitOp, localLoadOp] = asyncOps;
+  auto [copyOp, commitOp, waitOp, maybeLocalLoadOp] = asyncOps;
   // Schedule new ops
   schedule.insert(copyOp, loadStage, loadCluster);
   // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
@@ -843,20 +843,22 @@ void fourStageScheduleAsyncCopy(
   if (loadStage == FS_STAGES::STAGE_LOAD1) {
     schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::ASYNCWAIT1]);
-    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD1,
+    schedule.insert(*maybeLocalLoadOp, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::LLOAD1]);
   } else {
     schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::ASYNCWAIT2]);
-    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD2,
+    schedule.insert(*maybeLocalLoadOp, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::LLOAD2]);
   }
 
-  loadOp->replaceAllUsesWith(ValueRange{localLoadOp});
-  if (auto cvt =
-          dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
-    auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
-    schedule.insert(cvt, localLoadStage, localLoadCluster);
+  if (maybeLocalLoadOp.has_value()) {
+    auto localLoadOp = *maybeLocalLoadOp;
+    if (auto cvt =
+            dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
+      auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
+      schedule.insert(cvt, localLoadStage, localLoadCluster);
+    }
   }
 }
 
@@ -866,7 +868,6 @@ void fourStageCreateAndScheduleAsyncCopy(
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
   auto asyncOps = createAsyncCopy(loadOp, alloc, extractIdx, forOp);
-  loadOp->replaceAllUsesWith(ValueRange{asyncOps.localLoadOp});
 
   fourStageScheduleAsyncCopy(asyncOps, loadOp, schedule, clusters);
 
@@ -880,7 +881,7 @@ void fourStageScheduleStreamCopy(
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
   auto [loadStage, loadCluster] = schedule[loadOp];
-  auto [copyOp, subviewOp, localStoreOp, localLoadOp] = streamOps;
+  auto [copyOp, subviewOp, localStoreOp, maybeLocalLoadOp] = streamOps;
   schedule.insert(copyOp, loadStage, loadCluster);
 
   if (loadStage == FS_STAGES::STAGE_LOAD1) {
@@ -888,21 +889,25 @@ void fourStageScheduleStreamCopy(
                     clusters[FS_CLUSTERS::LWRITE1]);
     schedule.insert(localStoreOp, FS_STAGES::STAGE_LWRITE1,
                     clusters[FS_CLUSTERS::LWRITE1]);
-    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD1,
+
+    schedule.insert(*maybeLocalLoadOp, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::LLOAD1]);
   } else {
     schedule.insert(subviewOp, FS_STAGES::STAGE_LWRITE2,
                     clusters[FS_CLUSTERS::LWRITE2]);
     schedule.insert(localStoreOp, FS_STAGES::STAGE_LWRITE2,
                     clusters[FS_CLUSTERS::LWRITE2]);
-    schedule.insert(localLoadOp, FS_STAGES::STAGE_LLOAD2,
+    schedule.insert(*maybeLocalLoadOp, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::LLOAD2]);
   }
 
-  if (auto cvt =
-          dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
-    auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
-    schedule.insert(cvt, localLoadStage, localLoadCluster);
+  if (maybeLocalLoadOp.has_value()) {
+    auto localLoadOp = *maybeLocalLoadOp;
+    if (auto cvt =
+            dyn_cast<ttg::ConvertLayoutOp>(*localLoadOp->getUsers().begin())) {
+      auto [localLoadStage, localLoadCluster] = schedule[localLoadOp];
+      schedule.insert(cvt, localLoadStage, localLoadCluster);
+    }
   }
 }
 
@@ -913,8 +918,6 @@ void fourStageCreateAndScheduleStreamCopy(
         &clusters) {
 
   auto streamCopy = createStreamCopy(loadOp, alloc, extractIdx, forOp);
-  loadOp->replaceAllUsesWith(ValueRange{streamCopy.localLoadOp});
-
   fourStageScheduleStreamCopy(streamCopy, loadOp, schedule, clusters);
 
   schedule.erase(loadOp);
