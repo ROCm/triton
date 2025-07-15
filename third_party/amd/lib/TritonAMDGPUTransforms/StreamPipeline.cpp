@@ -1297,9 +1297,6 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
 
   OpBuilder builder(forOp);
   builder.setInsertionPointAfter(forOp);
-  // Explicitly deallocate created allocations.
-  for (auto [_load, alloc] : sharedMemAllocs)
-    builder.create<ttg::LocalDeallocOp>(forOp.getLoc(), alloc);
 
   return success();
 }
