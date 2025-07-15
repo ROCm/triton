@@ -1279,8 +1279,8 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   triton::gpu::scheduleDistanceOneDependencies(forOp, schedule);
   dumpSchedule("Coarse schedule with dist 1:");
 
-  tt::CoarseSchedule::Cluster computeCluster = clusters[SCHED_COMPUTE];
-  triton::gpu::scheduleRemainingToLastStage(forOp, schedule, computeCluster);
+  tt::CoarseSchedule::Cluster lastCluster = clusters.back();
+  triton::gpu::scheduleRemainingToLastStage(forOp, schedule, lastCluster);
   dumpSchedule("Final coarse schedule:");
 
   // Create the final schedule for the kernel loop. This will dictate the
