@@ -1949,11 +1949,26 @@ LinearLayout getRegToSharedLayoutRowRotating(LinearLayout regLayout,
 
     std::vector<std::vector<int>> offsetBases;
 
+    /*
+    // RR0
     if (contigSize == 64) {
       if (nonContigSize == 128) {
         offsetBases = {
             {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
             {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+        };
+      } else {
+        assert(false);
+      }
+    }
+    */
+
+    // RR1
+    if (contigSize == 64) {
+      if (nonContigSize == 128) {
+        offsetBases = {
+            {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0}, {0, 4},
+            {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 64},
         };
       } else {
         assert(false);
