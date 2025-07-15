@@ -1,5 +1,8 @@
 #!/bin/bash
 
+#CONTAINER_NAME=dtanner-triton_dev-1
+CONTAINER_NAME=dtanner-triton_dev_6.4b-1 
+
 # Check which containers are running.
 # docker ps
 
@@ -8,14 +11,10 @@
 # docker-compose up -d
 
 # Start container, e.g. after reboot
-# docker start dtanner_triton_dev_1
+# docker start ${CONTAINER_NAME}
 
 # Enter running container.
-#docker exec -it dtanner-triton_dev-1 /bin/bash
-
-# run with extra volume mounted
-docker exec -it dtanner-triton_dev-1 /bin/bash
-#docker exec --user root -it dtanner-triton_dev-1 /bin/bash
+docker exec -it ${CONTAINER_NAME} /bin/bash
 
 # Enter running container as root.
-#docker exec --user root -it dtanner-triton_dev-1 /bin/bash
+#docker exec --user root -it ${CONTAINER_NAME} /bin/bash

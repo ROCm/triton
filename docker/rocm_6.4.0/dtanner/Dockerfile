@@ -3,9 +3,13 @@ ARG MUID=1000
 ARG MGID=1000
 ARG USERNAME=developer
 
+# See and get latest images.
 # https://hub.docker.com/r/rocm/pytorch/tags
+# docker pull rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.6.0
+
 # FROM rocm/pytorch:rocm6.0.2_ubuntu22.04_py3.10_pytorch_2.1.2
-FROM rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0
+#FROM rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0
+FROM rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.6.0
 #FROM rocm/pytorch:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,11 +47,11 @@ make install && \
 cd /opt && rm -rf /opt/ccls
 
 # Install Neovim if you want to
-RUN apt-get install -yqq ninja-build gettext cmake unzip curl build-essential && \
-wget --progress=bar:force:noscroll https://github.com/neovim/neovim/archive/refs/tags/v0.9.5.tar.gz && \
-tar -xvf ./v0.9.5.tar.gz && cd neovim-0.9.5 \
-make CMAKE_BUILD_TYPE=RelWithDebInfo && make install && \
-cd .. && rm v0.9.5.tar.gz && rm -rf neovim-0.9.5
+#RUN apt-get install -yqq ninja-build gettext cmake unzip curl build-essential && \
+#wget --progress=bar:force:noscroll https://github.com/neovim/neovim/archive/refs/tags/v0.9.5.tar.gz && \
+#tar -xvf ./v0.9.5.tar.gz && cd neovim-0.9.5 \
+#make CMAKE_BUILD_TYPE=RelWithDebInfo && make install && \
+#cd .. && rm v0.9.5.tar.gz && rm -rf neovim-0.9.5
 
 # Arcanist is needed for upstream, rocm-debug-agent is useful when debugging
 RUN apt-get -y install arcanist rocm-debug-agent && updatedb
@@ -60,7 +64,7 @@ RUN addgroup --gid ${MGID} ${USERNAME}
 RUN useradd -d /home/${USERNAME} -g ${MGID} --no-create-home -u ${MUID} --shell /usr/bin/bash ${USERNAME}
 RUN adduser ${USERNAME} sudo
 RUN adduser ${USERNAME} video
-RUN adduser ${USERNAME} render
+#RUN adduser ${USERNAME} render
 # The /var is only needed on lockhart
 RUN mkdir /home/${USERNAME} /var/${USERNAME}
 RUN chown ${USERNAME}:${USERNAME} /home/${USERNAME} /var/${USERNAME}

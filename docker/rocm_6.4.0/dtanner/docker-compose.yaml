@@ -1,6 +1,5 @@
-version: "3.4"
 services:
-  triton_dev:
+  triton_dev_6.4b:
     build:
       context: .
       dockerfile: Dockerfile
