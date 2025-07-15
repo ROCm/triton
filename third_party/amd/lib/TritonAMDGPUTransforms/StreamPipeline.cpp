@@ -760,6 +760,29 @@ LogicalResult streamPipelineLoop(scf::ForOp forOp, int numStages,
 }
 
 namespace fourStage {
+// Four Stage pipeliner to create a schedule if we have 2 chained dots with ops
+// in between. The goal of this pipeliner is to interleave the alu ops with the
+// two dots in the loop. To achieve this it places the dots on consecutive
+// stages and double buffers the loads feeding the dots. The coarse schedule
+// looks like:
+//   Stage0: (distance==1) loads for dot1
+//   Stage1: (distance==1) loads for dot2, local loads for dot1
+//   Stage2: dot1, interleaved ops part1
+//   Stage3: local loads for dot2, dot2, interleaved ops part2
+//
+// Local writes for dot1 are scheduled placed in stage1 and for dot2 into stage2
+// if we are not using async copies
+//
+// To optimize the interleaving of mfma and alu ops on AMD hardware (co-issue)
+// we cluster all ops into 2 memory and 2 computation clusters and schedule them
+// in the following order:
+//   ComputeCluster1: dot1, interleaved ops part2
+//   MemoryCluster1: LocalWrite2, LocalRead1, Loads2
+//   ComputeCluster2: dot2, interleaved ops part1
+//   MemoryCluster2: LocalWrite1, LocalRead2, Loads1
+// In the implementation we split the clusters further to ensure consistent op
+// scheduling, e.g. AsyncWait at the top of the memory cluster
+
 enum FS_CLUSTERS {
   // Cluster0
   DOT1,
@@ -794,35 +817,6 @@ enum FS_STAGES {
   STAGE_LWRITE2 = 2,
   STAGE_LLOAD2 = 3,
 };
-// Init Schedule Config based on settings and loop characteristics.
-// Create clusters in order of ops in loop. This can interleave ops
-// from different stages in the same cluster to achieve better backend
-// scheduling.
-//   WARNING: Changing the order of schedule.clusters.newAtBack() calls
-//            can cause invalid schedules to be produced.
-LogicalResult fourStageInitSchedule(
-    int maxDist, int numStages, int &numBuffers, bool useAsyncCopy,
-    std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> &clusters,
-    tt::CoarseSchedule &schedule) {
-
-  // Calculate the number of buffers needed for each load.
-  // TODO: Use the precise number of buffers needed by the particular load.
-  numBuffers = 2;
-
-  LDBG("deduced max shared memory buffer number = " << numBuffers);
-
-  // We place async wait as the first cluster because we want to have it being
-  // the first in the main loop after pipelining.
-  int asyncWaitCluster = 0;
-
-  // Make assignments
-  std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> clusterVec;
-  std::generate(clusterVec.begin(), clusterVec.end(),
-                [&]() { return schedule.clusters.newAtBack(); });
-  clusters = clusterVec;
-
-  return success();
-}
 
 void fourStageCreateAndScheduleAsyncCopy(
     tt::LoadOp loadOp, Value alloc, Value extractIdx, scf::ForOp forOp,
@@ -978,27 +972,30 @@ void fourStageCreateAndScheduleStreamCopy(
 }
 
 LogicalResult fourStageScheduleDots(
-    scf::ForOp forOp, const llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
-    int maxDist, int numStages,
+    std::array<tt::DotOp, 2> dotOps,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> &clusters,
     tt::CoarseSchedule &schedule) {
-  auto dotOps = llvm::to_vector(forOp.getBody()->getOps<tt::DotOp>());
-  assert(dotOps.size() == 2);
-
   schedule.insert(dotOps[0], STAGE_DOT1, clusters[FS_CLUSTERS::DOT1]);
   schedule.insert(dotOps[1], STAGE_DOT2, clusters[FS_CLUSTERS::DOT2]);
 
-  // TODO make more robust
+  return success();
+}
+
+LogicalResult fourStageScheduleLoads(
+    std::array<tt::DotOp, 2> dotOps,
+    const llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
+    const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> &clusters,
+    tt::CoarseSchedule &schedule) {
   for (auto [load, info] : loadToInfo) {
-    if (dotOps[0] == info.use) {
+    if (info.use == dotOps[0]) {
       schedule.insert(load, STAGE_LOAD1, clusters[FS_CLUSTERS::LOAD1]);
-    } else if (dotOps[1] == info.use) {
+    } else if (info.use == dotOps[1]) {
       schedule.insert(load, STAGE_LOAD2, clusters[FS_CLUSTERS::LOAD2]);
     }
   }
-
   return success();
 }
+
 // Convert load ops into shared memory allocation loads and apply
 // multi-buffering based on the required number of buffers.
 SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
@@ -1073,11 +1070,10 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
 }
 
 LogicalResult fourStageScheduleOpsBetweenDots(
-    scf::ForOp forOp, tt::CoarseSchedule &schedule,
+    scf::ForOp forOp, std::array<tt::DotOp, 2> dotOps,
+    tt::CoarseSchedule &schedule,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
-  auto dotOps = llvm::to_vector(forOp.getBody()->getOps<tt::DotOp>());
-
   SetVector<Operation *> dot0Slice;
   getForwardSlice(Value(dotOps[0]), &dot0Slice);
 
@@ -1086,55 +1082,61 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     return failure();
   }
 
-  // For each operand of the second dot we go back and search for a good point
-  // to split it across the two stages. Good points are when we expand/broadcast
-  // so we have to loop carry less stuff. We do not care too much about equal
-  // work in both clusters especially since the second alu cluster gets work
-  // required for things after the dot2
+  // For each operand of the second dot we go back the def-chain if it's part of
+  // the forward slice of the first dot. We want to find a good point to split
+  // the def-chain into 2 separate schedule stages and cluster. The idea is to
+  // find a expand_dim or broadcast op and split at the next alu/math op. This
+  // should reduce the values we are loop carrying and helps with register
+  // pressure.
+  // There is one heuristic which ignored trucnf ops since we get bad codegen if
+  // we move it to the second half
   for (auto operand : dotOps[1]->getOperands()) {
-    if (!dot0Slice.contains(operand.getDefiningOp()))
+    auto operandDefOp = operand.getDefiningOp();
+
+    // Skip if the op is not part of the forward slice
+    if (!operandDefOp || !dot0Slice.contains(operand.getDefiningOp()))
       continue;
 
-    // Sched the operand as alu2
-    auto operandDefOp = operand.getDefiningOp();
-    if (operandDefOp && dot0Slice.contains(operandDefOp) &&
-        schedule.count(operand.getDefiningOp()) == 0) {
-      schedule.insert(operandDefOp, FS_STAGES::STAGE_ALU2,
-                      clusters[FS_CLUSTERS::ALU2]);
-    }
+    // Schedule the ops directly feeding the second dot as ALU2
+    schedule.insertIfAbsent(operandDefOp, FS_STAGES::STAGE_ALU2,
+                            clusters[FS_CLUSTERS::ALU2]);
 
     LDBG("Check dot operand: " << operand);
-    // Go along until we find a real alu op
-    // Store the next value to follow and a bool to signal if we have passed a
-    // broadcast/expand_dim so we want to split on the next alu op
-    llvm::SmallVector<std::pair<Value, bool>> queue;
+    // DFS-like traversal of the def-chain. For each search item we store a bool
+    // to signal if we already passed an broadcast/expand_dim op to signal that
+    // we split on the next alu op.
+    struct SearchItem {
+      Value v;
+      bool splitOnAlu{false};
+    };
+    llvm::SmallVector<SearchItem> queue;
     queue.push_back({operand, false});
 
     while (!queue.empty()) {
       auto [v, splitOnAlu] = queue.pop_back_val();
+
+      // Abort path if we hit a blockarg or left the forward slice of dot0
       auto defOp = v.getDefiningOp();
       if (!defOp)
         continue;
-
       if (!dot0Slice.contains(defOp)) {
         LDBG("Found unrelated op to previous dot: " << v);
         continue;
       }
 
-      // If we find an arith op we assume it's a ALU op so we cut
-      bool isAluOp = false;
-      isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
-                                   arith::ArithDialect::getDialectNamespace() &&
-                               !isa<arith::TruncFOp>(defOp);
+      bool isAluOp = defOp->getDialect()->getNamespace() ==
+                         arith::ArithDialect::getDialectNamespace() &&
+                     !isa<arith::TruncFOp>(defOp);
       isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
                                math::MathDialect::getDialectNamespace();
 
-      // If the op has already a schedule we abort this path
+      // If the op has already a schedule we do not split here
       if (schedule.count(defOp) != 0) {
         LDBG("Found op with previous schedule: " << v);
         splitOnAlu = false;
       }
 
+      // If the op is an alu op and we passed an expand/broadcast we split here
       if (splitOnAlu && isAluOp) {
         LDBG("Found alu op schedule to first alu cluster: " << *defOp);
         schedule.insert(defOp, FS_STAGES::STAGE_ALU1,
@@ -1142,6 +1144,7 @@ LogicalResult fourStageScheduleOpsBetweenDots(
         continue;
       }
       LDBG("Skip non alu op: " << *defOp);
+      // Follow def chain
       for (Value op2 : defOp->getOperands()) {
         queue.push_back({op2, splitOnAlu || !isAluOp});
       }
@@ -1155,9 +1158,8 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     if (!defOp || !dot0Slice.contains(defOp))
       continue;
 
-    if (schedule.count(defOp) != 0)
-      continue;
-    schedule.insert(defOp, FS_STAGES::STAGE_ALU2, clusters[FS_CLUSTERS::ALU2]);
+    schedule.insertIfAbsent(defOp, FS_STAGES::STAGE_ALU2,
+                            clusters[FS_CLUSTERS::ALU2]);
   }
 
   return success();
@@ -1169,8 +1171,6 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
                                         tt::PipeliningOption &options) {
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
-  int numBuffers = 1;
-  std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> clusters;
   tt::CoarseSchedule schedule(numStages);
 
   auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
@@ -1183,12 +1183,6 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
       triton::gpu::loadOpsToIndirectionLevel(
           forOp, /*pipelineWithoutDot=*/false, axisInfoAnalysis, numStages,
           filterSmallVectors);
-
-  if (llvm::any_of(loadOpToIndLevel,
-                   [](auto it) { return it.second.first != 0; })) {
-    LDBG("Does not support indirect loads yet\n");
-    return failure();
-  }
 
   LLVM_DEBUG({
     LDBG("Found " << loadOpToIndLevel.size() << " loads to pipeline:");
@@ -1204,6 +1198,12 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
     return failure();
   }
 
+  if (llvm::any_of(loadOpToIndLevel,
+                   [](auto it) { return it.second.first != 0; })) {
+    LDBG("Does not support indirect loads yet\n");
+    return failure();
+  }
+
   llvm::MapVector<Operation *, LoadInfo> loadToInfo;
   int maxDist = -1;
   for (const auto &[load, info] : loadOpToIndLevel) {
@@ -1214,63 +1214,55 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
     maxDist = std::max(maxDist, distance);
   }
 
-  if (failed(fourStageInitSchedule(maxDist, numStages, numBuffers, useAsyncCopy,
-                                   clusters, schedule)))
-    return failure();
+  std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> clusters;
+  std::generate(clusters.begin(), clusters.end(),
+                [&]() { return schedule.clusters.newAtBack(); });
 
-  if (failed(fourStageScheduleDots(forOp, loadToInfo, maxDist, numStages,
-                                   clusters, schedule)))
-    return failure();
-
-  LLVM_DEBUG({
-    llvm::dbgs() << "\n";
-    LDBG("Coarse schedule load and dots only:");
-    schedule.dump();
-  });
-
-  // Convert the loads into shared memory allocations and loads from them.
-  if (failed(fourStageScheduleOpsBetweenDots(forOp, schedule, clusters))) {
+  auto dotOpsVec = llvm::to_vector(forOp.getBody()->getOps<tt::DotOp>());
+  if (dotOpsVec.size() != 2) {
+    LDBG("Does only work with 2 dots");
     return failure();
   }
+  std::array<tt::DotOp, 2> dotOps = {dotOpsVec[0], dotOpsVec[1]};
 
-  LLVM_DEBUG({
-    LDBG("Coarse schedule after schedule ops between dots:");
-    schedule.dump();
-  });
+  auto dumpSchedule = [&](llvm::StringRef msg) {
+    LLVM_DEBUG({
+      llvm::dbgs() << "\n";
+      LDBG(msg);
+      schedule.dump();
+    });
+  };
+
+  if (failed(fourStageScheduleDots(dotOps, clusters, schedule)))
+    return failure();
+  if (failed(fourStageScheduleLoads(dotOps, loadToInfo, clusters, schedule)))
+    return failure();
+  dumpSchedule("Coarse schedule load and dots only:");
 
   // Convert the loads into shared memory allocations and loads from them.
+  if (failed(
+          fourStageScheduleOpsBetweenDots(forOp, dotOps, schedule, clusters))) {
+    return failure();
+  }
+  dumpSchedule("Coarse schedule after schedule ops between dots:");
+
+  // Convert the loads into shared memory allocations and loads from them.
+  int numBuffers = 2;
   SmallVector<std::pair<Operation *, Value>> sharedMemAllocs =
       fourStageCreateAndScheduleStreamOps(loadToInfo, forOp, numBuffers,
                                           useAsyncCopy, schedule, clusters,
                                           axisInfoAnalysis);
-
-  LLVM_DEBUG({
-    llvm::dbgs() << "\n";
-    LDBG("Coarse schedule stream ops:");
-    schedule.dump();
-  });
+  dumpSchedule("Coarse schedule stream ops:");
 
   scheduleDependencies(forOp, schedule);
-  LLVM_DEBUG({
-    llvm::dbgs() << "\n";
-    LDBG("Coarse schedule with dependencies:");
-    schedule.dump();
-  });
+  dumpSchedule("Coarse schedule with dependencies:");
 
   triton::gpu::scheduleDistanceOneDependencies(forOp, schedule);
-  LLVM_DEBUG({
-    llvm::dbgs() << "\n";
-    LDBG("Coarse schedule with dist 1:");
-    schedule.dump();
-  });
+  dumpSchedule("Coarse schedule with dist 1:");
 
   tt::CoarseSchedule::Cluster computeCluster = clusters[SCHED_COMPUTE];
   triton::gpu::scheduleRemainingToLastStage(forOp, schedule, computeCluster);
-  LLVM_DEBUG({
-    llvm::dbgs() << "\n";
-    LDBG("Final coarse schedule:");
-    schedule.dump();
-  });
+  dumpSchedule("Final coarse schedule:");
 
   // Create the final schedule for the kernel loop. This will dictate the
   // stages and order of operations to the pipeline expander.
@@ -1390,7 +1382,6 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
     if (useAsyncCopy) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
-      // TODO: fix for four stage pipeliner
       tt::combineRedundantWaitOps(waitOps);
     }
   }
