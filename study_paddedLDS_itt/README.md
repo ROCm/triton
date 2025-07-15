@@ -16,6 +16,8 @@ in which we can see
 We need 37 vgprs just for addresses of ds instructions for V tensor.
 This is due to the design of rotatingShared layout.
 
+pmc counters: 0,0
+
 ## First attempt of paddedShared layout: <512:+8>
 
 triton compiler: 7e6a3da26490
@@ -68,6 +70,8 @@ Therefore, 4 vgprs for the addresses is already the best we can do.
 
 tflops: 242
 
+pmc counters: 0,0
+
 ## 3-layer paddedShared layout: <64:+2,2048:+4,4096:+16> with row rotating (RR0)
 
 
@@ -104,6 +108,7 @@ to be bank conflicts.
 
 Not sure why performance improves.
 
+pmc counters: 100663296,0.113366
 
 
 ## RR1 + pad<128:+2>
@@ -120,5 +125,25 @@ Another design of the padding and RR pattern. Row rotating order is as follows
 ```
 
 This version has a lot of bank conflicts. And the perf goes back to 200 tflops.
+
+pmc counters: 301989888,0.213392
+
+
+## pad<64:+4> without RR
+
+triton compiler: f6b3bd22aa532447daf07720ed4757e067461bdd
+
+This version removes the RR and uses a very simple padding pattern <64:+4>.
+This avoids bank conflicts for `ds_read2_b64`, but has a few conflicts for `ds_write2_b32`.
+
+thread trace shows that `ds_read2_b64` do not have any conflicts.
+And `ds_write2_b32` do take longer to issue.
+
+However, pmc counters (`SQ_LDS_BANK_CONFLICT` and `LDSBankConflict`) show
+larger numbers for bank conflicts.
+
+pmc counters: 704643072,1.339672
+
+tflops: 460
 
 
