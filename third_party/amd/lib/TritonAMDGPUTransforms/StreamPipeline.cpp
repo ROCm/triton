@@ -1020,7 +1020,6 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
     const int &numBuffers, bool useAsyncCopy, tt::CoarseSchedule &schedule,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT> &clusters,
     tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
-  IRRewriter builder(forOp.getContext());
   Attribute sharedMemorySpace =
       ttg::SharedMemorySpaceAttr::get(forOp.getContext());
   SmallVector<std::pair<Operation *, Value>> loadToAllocs;
@@ -1028,23 +1027,14 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
     if (!info.sharedEncoding)
       continue;
 
-    // Create an allocation that can hold distance nu/betweember of loadOp
-    // shapes.
-    builder.setInsertionPoint(forOp);
     auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
-    SmallVector<int64_t> bufferShape(ty.getShape());
-    bufferShape.insert(bufferShape.begin(), numBuffers);
-    Type memdescType =
-        ttg::MemDescType::get(bufferShape, ty.getElementType(),
-                              info.sharedEncoding, sharedMemorySpace,
-                              /*mutableMemory=*/true);
-    Value alloc =
-        builder.create<ttg::LocalAllocOp>(loadOp->getLoc(), memdescType);
+    Value alloc = triton::createAlloc(forOp, ty, loadOp->getLoc(),
+                                      info.sharedEncoding, numBuffers);
     assert(alloc && "Failed to create alloc for the async load.");
     loadToAllocs.emplace_back(loadOp, alloc);
   }
 
-  builder.setInsertionPoint(forOp);
+  IRRewriter builder(forOp);
   Location loc = forOp.getLoc();
   Value minusOne = builder.create<arith::ConstantIntOp>(loc, -1, 32);
   Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
@@ -1342,8 +1332,7 @@ LogicalResult attPipelineLoop(scf::ForOp forOp, int numStages,
     return failure();
   LDBG("Loop before sending to expander:\n" << *forOp);
 
-  IRRewriter rewriter(forOp->getContext());
-  rewriter.setInsertionPoint(forOp);
+  IRRewriter rewriter(forOp);
   if (failed(tt::pipelineForLoop(rewriter, forOp, options))) {
     assert(false);
   }
