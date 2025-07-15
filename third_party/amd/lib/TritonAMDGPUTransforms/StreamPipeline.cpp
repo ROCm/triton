@@ -586,7 +586,6 @@ SmallVector<std::pair<Operation *, Value>> createAndScheduleStreamOps(
     const int stages[SCHED_SIZE],
     const std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> &clusters,
     tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
-  IRRewriter builder(forOp.getContext());
   Attribute sharedMemorySpace =
       ttg::SharedMemorySpaceAttr::get(forOp.getContext());
   SmallVector<std::pair<Operation *, Value>> loadToAllocs;
@@ -602,7 +601,7 @@ SmallVector<std::pair<Operation *, Value>> createAndScheduleStreamOps(
     loadToAllocs.emplace_back(loadOp, alloc);
   }
 
-  builder.setInsertionPoint(forOp);
+  IRRewriter builder(forOp);
   Location loc = forOp.getLoc();
   Value minusOne = builder.create<arith::ConstantIntOp>(loc, -1, 32);
   Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
@@ -773,8 +772,7 @@ LogicalResult streamPipelineLoop(scf::ForOp forOp, int numStages,
     return failure();
   LDBG("Loop before sending to expander:\n" << *forOp);
 
-  IRRewriter rewriter(forOp->getContext());
-  rewriter.setInsertionPoint(forOp);
+  IRRewriter rewriter(forOp);
   return tt::pipelineForLoop(rewriter, forOp, options);
 }
 
