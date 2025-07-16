@@ -17,6 +17,9 @@ We need 37 vgprs just for addresses of ds instructions for V tensor.
 This is due to the design of rotatingShared layout.
 
 pmc counters: 0,0
+UNALIGNED: 0
+
+tflops: 475
 
 ## First attempt of paddedShared layout: <512:+8>
 
@@ -71,6 +74,7 @@ Therefore, 4 vgprs for the addresses is already the best we can do.
 tflops: 242
 
 pmc counters: 0,0
+UNALIGNED_STALL: 12079595520
 
 ## 3-layer paddedShared layout: <64:+2,2048:+4,4096:+16> with row rotating (RR0)
 
@@ -109,6 +113,7 @@ to be bank conflicts.
 Not sure why performance improves.
 
 pmc counters: 100663296,0.113366
+UNALIGNED: 6039797760
 
 
 ## RR1 + pad<128:+2>
@@ -131,7 +136,7 @@ pmc counters: 301989888,0.213392
 
 ## pad<64:+4> without RR
 
-triton compiler: f6b3bd22aa532447daf07720ed4757e067461bdd
+triton compiler: f6b3bd22aa
 
 This version removes the RR and uses a very simple padding pattern <64:+4>.
 This avoids bank conflicts for `ds_read2_b64`, but has a few conflicts for `ds_write2_b32`.
@@ -143,7 +148,78 @@ However, pmc counters (`SQ_LDS_BANK_CONFLICT` and `LDSBankConflict`) show
 larger numbers for bank conflicts.
 
 pmc counters: 704643072,1.339672
+UNALIGNED_STALL: 0
 
 tflops: 460
 
 
+## pad<64:+4, 1024:+4> without RR
+
+triton compiler: 38d89639dc
+
+Based on the previous commit, the 2nd layer of padding, 1024:+4, helps to avoid
+bank conflicts for `ds_write2_b32`.
+
+
+bank conflicts: 0,0
+UNALIGNED: 0
+
+tflops: 488
+
+
+## Summary
+
+| LDS layout                             | `SQ_LDS_BANK_CONFLICT` | `LDSBankConflict` | `SQ_LDS_UNALIGNED_STALL` | vgprs | TFLOPS |
+|----------------------------------------|------------------------|-------------------|--------------------------|-------|--------|
+| Baseline: RotatingShared               | 0                      | 0                 | 0                        | 215   | 475    |
+| Padding<64:+2,2048:+4,4096:+16> w/o RR | 0                      | 0                 | 12079595520              | 176   | 242    |
+| Padding<64:+2,2048:+4,4096:+16> w/ RR0 | 100663296              | 0.1133            | 6039797760               | 176   | 334    |
+| Padding<64:+4> w/o RR                  | 704643072              | 1.3396            | 0                        | 176   | 460    |
+| Padding<64:+4,1024:+4> w/o RR          | 0                      | 0                 | 0                        | 176   | 488    |
+
+
+### rocprofv2
+
+To collect these counters with rocprofv2, put the following into pmc.txt
+```
+pmc: SQ_LDS_BANK_CONFLICT, LDSBankConflict, SQ_LDS_UNALIGNED_STALL
+```
+and run rocprofv2 as
+```bash
+rocprofv2 -i pmc.txt -d pmc_result python fa/flash-attention.py
+```
+
+The meaning of these counters can be found in `rocprofv2 --list-counters`:
+- `SQ_LDS_UNALIGNED_STALL` : Number of cycles LDS is stalled processing flat unaligned load/store ops. (emulated)
+- `SQ_LDS_BANK_CONFLICT` : Number of cycles LDS is stalled by bank conflicts. (emulated)
+- `LDSBankConflict` : The percentage of GPUTime LDS is stalled by bank conflicts. Value range: 0% (optimal) to 100% (bad).
+
+To collect thread trace, put the following into att.txt
+```
+att: TARGET_CU=0
+SE_MASK=0x1
+SIMD_SELECT=0xF
+ISA_CAPTURE_MODE=2
+DISPATCH=30
+```
+and run rocprofv2 as
+```bash
+rocprofv2 -i att.txt --plugin att auto --mode file -d ./att_output python fa/flash-attention.py
+```
+
+### Observations and insights
+
+- Padding can reduce the number of vgprs when in-thread-transpose is used
+  - For multi layer padding pattern, we need to apply padded offset carefully,
+    as done in bb19837d979
+- When LDS accesses are not aligned, the perf drops a lot. The observation from thread trace
+  is that ds_ instructions takes very long to issue.
+  This can be monitored by `SQ_LDS_UNALIGNED_STALL`.
+- For padding <64:+2,2048:+4,4096:+16>, the effect of RR0 is
+  - Introduced bank conflicts. <-- This is counter-intuitive !!!
+  - Reduced unaligned LDS accesses. And since alignment is more important than
+    bank conflicts, RR0 improved perf a little.
+- For padding <64:+4,1024:+4> without RR, this is perfect in terms of
+  bank conflicts and aligned accesses.
+  However, this padding pattern uses a lot extra LDS.
+  This should be fine in current Triton for most cases.
