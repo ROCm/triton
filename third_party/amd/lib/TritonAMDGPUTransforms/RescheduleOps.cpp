@@ -525,17 +525,11 @@ struct SchedDag {
 
   // Removes dep from all depTypes
   int32_t removeDep(const SchedDep &dep) {
-    LDBG("removeDep(" << dep << ")");
     int32_t count = 0;
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
-      LDBG(depTypeName);
       DepSet &depSet = depType.getSecond();
-
       int32_t erased = depSet.erase(dep);
-      if (erased) {
-        LDBG("  erased");
-      }
       count += erased;
     }
     return count;
@@ -1335,6 +1329,39 @@ struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
 };
 
 /******************************************************************************
+  Create order dependencies between ops which were refined from same original
+  op.
+******************************************************************************/
+struct DotLdsOrderDependencyCalculator : DependencyCalculator {
+  DotLdsOrderDependencyCalculator() : DependencyCalculator("DotLdsOrder") {}
+
+  void calcDeps() {
+    SchedDagNode *prevDot = nullptr;
+    SchedDagNode *prevLds = nullptr;
+
+    for (auto node : dag->nodeList) {
+      if (isa<triton::gpu::LocalLoadOp, triton::gpu::LocalStoreOp>(node->getOp())) {
+        if (prevDot) {
+          SchedDep dep;
+          dep.parent = prevDot;
+          dep.child = node;
+          depSet.insert(dep);
+        }
+        prevLds = node;
+      } else if (isa<triton::DotOp>(node->getOp())) {
+        if (prevLds) {
+          SchedDep dep;
+          dep.parent = prevLds;
+          dep.child = node;
+          depSet.insert(dep);
+        }
+        prevDot = node;
+      }
+    }
+  }
+};
+
+/******************************************************************************
 Create high-level dependencies between the different memory ops where there
 aren't data deps. A basic block has a collection of refined memory ops, GL, LS,
 LL.
@@ -1815,9 +1842,7 @@ struct SchedHeuristicLdsOps
   SchedDagNode *findPreferredMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine,
                                         bool prefer = true) {
     if (preferMachineState(a, b, machine, prefer)) {
-      LDBG("MM preferMachineState() -> a");
       return a;
-      LDBG("MM preferMachineState() -> b");
     } else if (preferMachineState(b, a, machine, prefer)) {
       return b;
     }
@@ -1826,70 +1851,37 @@ struct SchedHeuristicLdsOps
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     LDBG("MM comparing " << *a << " and " << *b);
-    // Prefer based on machine stage; will select if one cooled down and other isn't.
+    // Prefer based on machine state; will select if one cooled down and other isn't.
     if (auto selected = findPreferredMachineState(a, b, &machine)) {
       LDBG("Selected based on MachineState");
       return selected;
     }
-#if 0
-    for (uint32_t i = 0; i < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++i) {
-      SchedDagNodePriorityType priorityType = static_cast<SchedDagNodePriorityType>(i);
-      if (auto selected = findPreferredPriority(a, b, priorityType,
-           Direction==SchedDirection::TopDown)) {
-        LDBG("Selected based on Priority " << i);
-        return selected;
-      }
-    }
-#endif
-#if 1
-    // Schedule others that could be in the way of local loads.
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryNop)) {
+
+    // Schedule others that could be in the way of local loads
+    // in the order of data flowing to dots.
+    if (auto selected = findPreferredOpCategory(a, b, opCategoryNop,
+        Direction==SchedDirection::TopDown)) {
       return selected;
     }
-    // Memory ops asap.
-    if (auto selected = findPreferredOpType<triton::gpu::LocalLoadOp>(a, b)) {
+    if (auto selected = findPreferredOpType<triton::gpu::LocalLoadOp>(a, b,
+      Direction==SchedDirection::TopDown)) {
       LDBG("Selected based on LocalLoadOp");
       return selected;
     }
-    if (auto selected = findPreferredOpType<triton::gpu::LocalStoreOp>(a, b)) {
+    if (auto selected = findPreferredOpType<triton::gpu::LocalStoreOp>(a, b,
+      Direction==SchedDirection::TopDown)) {
       LDBG("Selected based on LocalStoreOp");
       return selected;
     }
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryBarrier)) {
+    if (auto selected = findPreferredOpCategory(a, b, opCategoryBarrier,
+      Direction==SchedDirection::TopDown)) {
       return selected;
     }
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalLoad)) {
+    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalLoad,
+      Direction==SchedDirection::TopDown)) {
       LDBG("Selected based on GlobalLoad");
       return selected;
     }
-#endif
-
-    // this only works top-down
-    //SchedHeuristicPriority shp;
-    //return shp(a, b);
-#if 0
-
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryBarrier)) {
-      return selected;
-    }
-    if (auto selected = findPreferredOpType<triton::gpu::LocalStoreOp>(a, b)) {
-      return selected;
-    }
-
-    // Also delay other memory ops.
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalStore)) {
-      return selected;
-    }
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalLoad)) {
-      return selected;
-    }
-
-    // Schedule non-dots, so that all non-dot dependencies are fulfilled
-    // to better guarantee that local loads will be adjacent to dots.
-    if (auto selected = findPreferredOpType<triton::DotOp>(a, b, false)) {
-      return selected;
-    }
-#endif
 
     // Final comparison based on orig order.
     return getOriginalOrder<Direction>(a, b);
@@ -1928,6 +1920,30 @@ struct SchedHeuristicLdsOps
 
   std::shared_ptr<MachineModel> model;
   MachineState machine;
+};
+
+/******************************************************************************
+  After establishing where LocalStoreOp must go,
+  now we can lift global loads early.
+  TODO(dtanner) need to add antideps from buffer_loads and local_stores for FA
+******************************************************************************/
+template <SchedDirection Direction>
+struct SchedHeuristicGlobalLoadsEarly
+    : public SchedHeuristic<Direction> {
+
+  SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
+
+    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalLoad,
+      Direction==SchedDirection::TopDown)) {
+      LDBG("Selected based on GlobalLoad");
+      return selected;
+    }
+
+    // Final comparison based on orig order.
+    return getOriginalOrder<Direction>(a, b);
+  }
+
+  StringRef name() { return "GlobalLoadsEarly"; }
 };
 
 /******************************************************************************
@@ -2099,13 +2115,16 @@ struct TritonAMDGPURescheduleOps
 
     /*
       Scheduling Pass 0
+      - Dependencies: Data, DotOrder, LocalStoreOrder, Barriers
+      - Priorities: DotCriticalPath, LocalStoreCriticalPath
+      - Heuristic: Priority
     */
     // Add Data deps based on def-use chains.
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
-    LLVM_DEBUG(
-      LDBG("Dag w/ only data dependencies");
-      schedManager.dag.dumpDotFormat(llvm::dbgs());
-    );
+    //LLVM_DEBUG(
+    //  LDBG("Dag w/ only data dependencies");
+    //  schedManager.dag.dumpDotFormat(llvm::dbgs());
+    //);
     // Assume dots are in ideal order and propagate their critical path.
     schedManager.addDeps(
       std::make_unique<DotOrderDependencyCalculator>());
@@ -2119,34 +2138,43 @@ struct TritonAMDGPURescheduleOps
     SchedHeuristicPriority<SchedDirection::TopDown> shp;
     schedManager.reschedule<SchedDirection::TopDown>(&shp);
 
-    // schedManager.addDeps(std::make_unique<RefinedOpDependencyCalculator>());
-
-
-
     /*
       Scheduling Pass 1
+      - Dependencies: LocalLoadOrder, GlobalLoadOrder
+      - Priorities: 0
+      - Heuristic: LdsOps(MachineModel)
     */
 
-    // Preserve memory op order determined by critical paths.
+    // Preserve memory op order determined by critical paths above.
     schedManager.addDeps(
         std::make_unique<LocalLoadOrderDependencyCalculator>());
     schedManager.addDeps(
         std::make_unique<GlobalLoadOrderDependencyCalculator>());
-    // machine model for lds data and issue rate.
+    // Now that we've ordered lds ops, spread them out with machine model.
     SchedHeuristicLdsOps<SchedDirection::BottomUp> shl;
     schedManager.reschedule<SchedDirection::BottomUp>(&shl);
 
     /*
       Scheduling Pass 2
+      - Dependencies: DotLdsOrder; PriorityOrder
+      - Priorities: 0
+      - Heuristic: EarlyGlobalLoads
     */
-    // LocalLoadBeforeDot
-    // LocalStoresBeforeBarrier
+    schedManager.addDeps(
+      std::make_unique<DotLdsOrderDependencyCalculator>());
+    // TODO(dtanner) - flash-attention needs the below deps pass implemented.
+    //schedManager.addDeps(std::make_unique<LocalStoreGlobalLoadAntiDepsDependencyCalculator>());
 
-    // schedManager.addDeps(
-    //    std::make_unique<PriorityOrderDependencyCalculator>());
-    //schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
+    // keep this; it did seem to be working?
+    schedManager.addDeps(
+        std::make_unique<PriorityOrderDependencyCalculator>());
+    schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
+    SchedHeuristicGlobalLoadsEarly<SchedDirection::BottomUp> shg;
+    schedManager.reschedule<SchedDirection::BottomUp>(&shg);
 
-    // (F) Final rescheduling restores original order except for dependencies.
+    /*
+     (F) Final rescheduling restores original order except for dependencies.
+    */
     //SchedHeuristicOriginalOrder sho;
     //schedManager.reschedule<SchedDirection::TopDown>(&sho);
 
