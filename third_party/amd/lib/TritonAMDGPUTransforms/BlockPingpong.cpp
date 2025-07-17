@@ -75,6 +75,7 @@ private:
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformTwoPPClusters(OpBuilder &builder, Location loc);
+  LogicalResult transformFAv3(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -627,6 +628,46 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
   return success();
 }
 
+// Fixme : document the scheduling.
+// Assuming pipeliner already ordered the ops.
+LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
+  builder.setInsertionPointToStart(forOp.getBody());
+  updateOpInsertion(dotOps[0]);
+  prependOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority), false);
+
+  // dot cluster 0 operations here.
+
+  // appendOp(builder.create<ROCDL::IglpOpt>(loc, 10));
+  updateOpInsertion(lLoadOps[0]);
+  prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
+  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
+
+  // mem cluster 0 operations here.
+
+  updateOpInsertion(dotOps[1]);
+  // below ops are inserted backward
+  // prependOp(builder.create<ROCDL::IglpOpt>(loc, 10), true);
+  prependOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority), true);
+  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
+
+  // dot cluster 1 operations here.
+
+  updateOpInsertion(lLoadOps[1]);
+  prependOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority), false);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
+
+  // mem cluster 1 operations here.
+
+  updateOpInsertion(lastInsertedOp->getBlock()->getTerminator());
+  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
+
+  // Fixme: validate the case here?
+  return success();
+}
+
 // This function wraps forOp with cond_barrier. First, hold half of the warps
 // (warpHigh) in a block before the loop so the barriers in the loop synchronize
 // warps at the different point per the warp groups. After the loop, hold
@@ -659,10 +700,10 @@ void Pingponger::addAsymmetricSyncToLoop(OpBuilder &builder, Location loc) {
 }
 
 void Pingponger::getDotPingponged() {
-  if (numStages != 2) {
+  if (numStages != 2 && numStages != 4) {
     std::stringstream message;
-    message << "All ping pong scheduling requires 2 stages. Found " << numStages
-            << " stages";
+    message << "All ping pong scheduling requires 2 or 4 stages. Found "
+            << numStages << " stages";
     LDBG(message.str());
     return;
   }
@@ -675,20 +716,24 @@ void Pingponger::getDotPingponged() {
     if (auto gLoad = dyn_cast<tt::LoadOp>(op))
       gLoadOps.push_back(gLoad);
     else if (auto lLoad = dyn_cast<ttg::LocalLoadOp>(op)) {
-      // This scheduling doesn't help hiding intra-warp latency. So, we only
-      // collect local_load ops that are software pipelined, which means their
-      // source is from loop carried values
-      auto src = lLoad.getSrc();
-      if (auto arg = mlir::dyn_cast<BlockArgument>(src))
-        if (auto tiedLoopInit = forOp.getTiedLoopInit(arg))
-          if (tiedLoopInit->get())
-            lLoadOps.push_back(lLoad);
+      lLoadOps.push_back(lLoad);
     } else if (auto lStore = dyn_cast<ttg::LocalStoreOp>(op))
       lStoreOps.push_back(lStore);
     else if (auto pingpongDot = dyn_cast<tt::DotOp>(op))
       if (pingpongDot.getType().getRank() == 2)
         dotOps.push_back(pingpongDot);
   });
+
+  // Fixme : use proper condition to identify FAv3
+  if (numStages == 4 && dotOps.size() == 2) {
+    if (transformFAv3(builder, loc).failed()) {
+      LDBG("Encountered failure when trying to execute the FAv3 ping pong "
+           "cluster transformation");
+      return;
+    }
+    addAsymmetricSyncToLoop(builder, loc);
+    return;
+  }
 
   // Currently, pingpong scheduling is known as helpful under limited condition.
   // Individual conditions are checked while collecting each operation such as

@@ -165,6 +165,7 @@ initSchedule(int maxDist, int stages[SCHED_SIZE], int numStages,
   // TODO: Use the precise number of buffers needed by the particular load.
   numBuffers =
       std::max(1, stages[SCHED_LOCAL_LOAD] - stages[SCHED_LOCAL_STORE]);
+  numBuffers = 1;
   // If we use AsyncCopy we need one more buffer since we are not using a
   // register buffer
   if (useAsyncCopy) {
@@ -766,16 +767,16 @@ enum FS_CLUSTERS {
   ALU2,
   // Cluster1
   ASYNCWAIT2,
-  LWRITE1,
   LLOAD2,
+  LWRITE1,
   LOAD1,
   // Cluster2
   DOT2,
   ALU1,
   // Cluster3
   ASYNCWAIT1,
-  LWRITE2,
   LLOAD1,
+  LWRITE2,
   LOAD2,
 
   COUNT
@@ -807,7 +808,7 @@ LogicalResult fourStageInitSchedule(
 
   // Calculate the number of buffers needed for each load.
   // TODO: Use the precise number of buffers needed by the particular load.
-  numBuffers = 2;
+  numBuffers = 1;
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
@@ -1092,57 +1093,37 @@ LogicalResult fourStageScheduleOpsBetweenDots(
   // work in both clusters especially since the second alu cluster gets work
   // required for things after the dot2
   for (auto operand : dotOps[1]->getOperands()) {
-    if (!dot0Slice.contains(operand.getDefiningOp()))
+    auto operandDefOp = operand.getDefiningOp();
+    if (!operandDefOp || !dot0Slice.contains(operand.getDefiningOp()))
       continue;
 
-    // Sched the operand as alu2
-    auto operandDefOp = operand.getDefiningOp();
-    if (operandDefOp && dot0Slice.contains(operandDefOp) &&
-        schedule.count(operand.getDefiningOp()) == 0) {
-      schedule.insert(operandDefOp, FS_STAGES::STAGE_ALU2,
-                      clusters[FS_CLUSTERS::ALU2]);
-    }
+    // DFS-like traversal of the def-chain to find op with more than 1 user
+    llvm::SmallVector<Value> queue;
+    queue.push_back(operand);
 
     LDBG("Check dot operand: " << operand);
-    // Go along until we find a real alu op
-    // Store the next value to follow and a bool to signal if we have passed a
-    // broadcast/expand_dim so we want to split on the next alu op
-    llvm::SmallVector<std::pair<Value, bool>> queue;
-    queue.push_back({operand, false});
     while (!queue.empty()) {
-      auto [v, splitOnAlu] = queue.pop_back_val();
+      auto v = queue.pop_back_val();
       auto defOp = v.getDefiningOp();
-      if (!defOp)
-        continue;
-
-      if (!dot0Slice.contains(defOp)) {
-        LDBG("Found unrelated op to previous dot: " << v);
+      // Abort path if we hit a blockarg or left the forward slice of dot0
+      if (!defOp || !dot0Slice.contains(defOp)) {
         continue;
       }
 
-      // If the op has already a schedule we abort this path
-      if (schedule.count(defOp) != 0) {
-        LDBG("Found op with previous schedule: " << v);
+      auto numUsers = llvm::range_size(defOp->getUsers());
+      if (numUsers > 1) {
+        // Schedule this op to interleave with dot2. All its unscheduled
+        // dependencies will be scheduled the same by scheduleDependencies
+        schedule.insert(defOp, FS_STAGES::STAGE_DOT1, clusters[ALU1]);
+        // Schedule the dot2 operand to interleave with dot1. Its unscheduled
+        // dependencies will be scheduled the same by scheduleDependencies
+        schedule.insertIfAbsent(operandDefOp, FS_STAGES::STAGE_DOT2,
+                                clusters[ALU2]);
         continue;
       }
-
-      // If we find an arith op we assume it's a ALU op so we cut
-      bool isAluOp = false;
-      isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
-                                   arith::ArithDialect::getDialectNamespace() &&
-                               !isa<arith::TruncFOp>(defOp);
-      isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
-                               math::MathDialect::getDialectNamespace();
-
-      if (splitOnAlu && isAluOp) {
-        LDBG("Found alu op schedule to first alu cluster: " << *defOp);
-        schedule.insert(defOp, FS_STAGES::STAGE_ALU1,
-                        clusters[FS_CLUSTERS::ALU1]);
-        continue;
-      }
-      LDBG("Skip non alu op: " << *defOp);
-      for (Value op2 : defOp->getOperands()) {
-        queue.push_back({op2, splitOnAlu || !isAluOp});
+      // Follow def chain
+      for (Value prevOperand : defOp->getOperands()) {
+        queue.push_back(prevOperand);
       }
     }
   }
@@ -1154,9 +1135,7 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     if (!defOp || !dot0Slice.contains(defOp))
       continue;
 
-    if (schedule.count(defOp) != 0)
-      continue;
-    schedule.insert(defOp, FS_STAGES::STAGE_ALU2, clusters[FS_CLUSTERS::ALU2]);
+    schedule.insertIfAbsent(defOp, FS_STAGES::STAGE_DOT2, clusters[ALU2]);
   }
 
   return success();
