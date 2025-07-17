@@ -10,8 +10,8 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+//#undef LLVM_DEBUG
+//#define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-scheduler-machine-model"
@@ -23,38 +23,46 @@ namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
 /*******************************************************************************
- * Simple machine model which enabled the scheduler passes to create an
- * operation schedule optimized for both performance and resource allocation.
- *
- * Operation properties are expressed in terms of single hardware instruction,
- * e.g. v_add_fp32 taking 4 cycles, whereas Triton ops may be refined to various
- * degrees, such that single ttgir op maps to one or many hardware instruction.
- *
- * For complex ops (ones which don't directly map to single hardware ops),
- * Triton may attempt to break down the op into it's constituent ops,
- * get the properties for all of them combined, then return the properties
- * for the combined complex op.
- * Therefore OpProperties can be added together.
- *
- * Change these to an attribute, and add attribute to each operation
- * Create walkers for each optype like arith::Mulf to handle op types.
- *
+  Relatively simple machine model which enabled the scheduler passes to create a
+  "not bad" op schedule optimized for both performance and resource allocation.
+  To achieve this, the scheduler needs to know things like how many independent DotOps
+  should there be between a LocalLoadOp and it's dependent DotOp.
+  It is assumed that DotOps are the most important,
+  that memory ops whcih feed them are in a close second,
+  and all other ops are tertiary in importance.
+  Therefore it essentially only model ops as being dot, load/stores, nop, and other.
+
+  To achieve this there is
+  (1) MachineModel which stores basic properties of the most important ops,
+  such as how many cycles does it take to execute, and which can co-execute.
+  (2) MachineState tracker which stores, during scheduling, the hypothetical
+  state of the machine to know which ops are best scheduled next.
+  For example, when a dot is scheduled BottomUp, store at what time can the
+  dependent LocalLoadOp be scheduled.
+
+
+  However, to give even an approximate interleaving of memory op with 
+  Information needed to schedule ops:
+  - How far
+
+
+  
+
+
  ******************************************************************************/
 
 namespace {
 
-  // Keep track of which operations map to same / different hardware resources.
-  // using MachineModelResourcePipeMask = uint32_t;
-  // Note: this can be changed to a mask of pipes for complex instructions.
+  // Ops which use different resource pipes can be co-executed.
+  //
   enum MachineModelResourcePipe : uint32_t {
     None = 0,
     Mfma = 1,
     Lds = 2,
     Global = 3,
-    Valu = 4,
-    Other = 5,
+    Other = 4,
   };
-  constexpr uint32_t numResourcePipes = 6;
+  constexpr uint32_t numResourcePipes = 5;
 
   StringRef toString(MachineModelResourcePipe pipe) {
     switch(pipe) {
@@ -62,125 +70,145 @@ namespace {
       case Mfma: return "M";
       case Lds: return "L";
       case Global: return "G";
-      case Valu: return "V";
       case Other: return "O";
     }
   };
 
-  // Properties of a simple operation (maps to one resource pipe),
-  // which can be queried for op,
-  // and guides the Scheduler to create a more performant operation order.
+  /*
+    MachineModel Op Properties
+    Basic properties of the hardware instruction which the ttg ops
+    best map to.
+    For example, mfma_16x16x16 on MI300X
+    - Takes 8 cycles to issue.
+    - Also keeps the mfma pipe busy for an additional 8 cycles
+    Therefore 4 back-to-back mfmas will take 4*16=64 cycles since
+    they're each taking up 16 cycles of the mfma pipe.
+    And 1 mfma, 1 lds op, 1 mfma, 1 other op only takes 4*16=32 cycles
+    since the mfmas took 16 cycles but the other ops mapped to different
+    hardware pipes and could be co-executed for free.
+
+    This complexity of modeling co-execution of ops is necessary
+    for determining, e.g., at the top of a loop, how many LoadOps
+    can be grouped with how many DotOps, since the LoadOps need
+    to increment their addresses and then can co-execute with
+    the DotOps.
+  */
   struct MachineModelOpProperties {
 
     MachineModelOpProperties(MachineModelResourcePipe pipe,
-        int32_t seqBusy, int32_t pipeBusy, StringRef n) :
-        resourcePipe(pipe), seqBusyCycles(seqBusy), pipeBusyCycles(pipeBusy), name(n) {}
+        int32_t seqBusy, StringRef n, int32_t pipeBusyAfterSeq = 0) :
+        resourcePipe(pipe), cyclesSeqBusy(seqBusy), cyclesPipeBusyAfterSeq(pipeBusyAfterSeq), name(n) {}
 
     // To which resource pipe does this op map.
     MachineModelResourcePipe resourcePipe;
     
     // Op blocks all other ops from issuing.
-    // Call this sequencer Busy
-    int32_t seqBusyCycles;
+    int32_t cyclesSeqBusy;
 
-    // How long to wait before issuing another op to same
-    // resource pipe.
-    // Call this pipeBusy
-    int32_t pipeBusyCycles;
+    /*
+      How long to wait before issuing another op to same
+      resource pipe even after sequencer issues.
+      E.g. mfma "takes" 16 cycles, but this is broken into 4 cycles that the
+      sequencer is busy issuing the mfma, and 12 more cycles that the
+      mfma pipe is still busy but other pipes can be used.
+    */
+    int32_t cyclesPipeBusyAfterSeq;
 
     // To be used for debugging, e.g. saying that op was
     // assumed to map to 16 v_pk_add_fp32 instructions.
     StringRef name;
   };
 
-  // This needs to be converted into walkers.
-
-  // Abstract base class for querying op properties.
-  // Each new generation of hardware inherits from the previous,
-  // and only needs to override ops with new properties.
+  /*
+    Abstract base class for querying op properties based on GPU generation.
+    Each new generation of hardware inherits from the previous,
+    therefore each new geneation only needs to override ops with new properties.
+    Most ops we don't yet care about, so most ops will fall back to whatever
+    the most common instruction is, e.g., 4 cycles of valu.
+  */
   struct MachineModel {
-    // Returns the properties for the op.
+
     virtual MachineModelOpProperties getOpProperties(Operation *op) = 0;
-    int32_t getDataLatency(MachineModelResourcePipe pipe) {
+
+    /*
+      Models how many cycles does it take between issuing a memory
+      op and when the data is ready.
+      This is currently modeled based on pipe and not on op since
+      it is assumed, e.g., that ds_read_b32 has same latency
+      as ds_read_b64.
+      It is also assumed that read and writes to a pipe are the same.
+    */
+    virtual int32_t getDataLatency(MachineModelResourcePipe pipe) {
       switch(pipe) {
         case Lds: return 64;
-        case Global: return 4096; // TODO(dtanner) -1?
+        case Global: return 1000000;
         default: return 0;
       }
     };
+
     virtual ~MachineModel() = default;
   };
 
   // MI250
   struct MachineModelGFX90A : MachineModel {
     MachineModelOpProperties getOpProperties(Operation *op) {
-      // TODO(dtanner) subviews are nops
       if (llvm::isa<triton::gpu::MemDescSubviewOp,
                     triton::gpu::MemDescTransOp,
                     tt::amdgpu::ExtractSliceOp,
                     ROCDL::SchedBarrier,
                     tt::amdgpu::ConcatOp>(op)) {
         return MachineModelOpProperties(
-          MachineModelResourcePipe::Other, 0, 0, "nop");
+          MachineModelResourcePipe::None, 0, "nop");
       }
-      // Fallback is simple valu
+      // Fallback is 4 cycles.
       return MachineModelOpProperties(
-          MachineModelResourcePipe::Valu, 4, 4, "valu");
+          MachineModelResourcePipe::Other, 4, "valu");
     }
   };
 
   // MI300
+  // TODO(dtanner) these all need to reflect how many asm instructions
+  // are in the op and how large the tensors are (_b64 vs _b128)
   struct MachineModelGFX942 : MachineModelGFX90A {
 
     MachineModelOpProperties getOpProperties(Operation *op) {
+      // When specifying that memory ops should be spaced "2 mfmas apart"
+      // Since the second is co-scheduled with a mfma, don't include the pipe busy time for the 2nd.
+      int32_t mfmaCycles1 = 1*16-12;
+      int32_t mfmaCycles2 = 2*16-12;
+      int32_t mfmaCycles3 = 3*16-12;
+      int32_t mfmaCycles4 = 4*16-12;
+
       // Mfma
       if (isa<triton::DotOp>(op)) {
         return MachineModelOpProperties(
-            MachineModelResourcePipe::Mfma, 4, 16, "mfma_16x16x16");
+            MachineModelResourcePipe::Mfma, 4, "mfma_16x16x16", 12);
 
       // LDS Ops
       } else if (isa<triton::gpu::LocalLoadOp>(op)) {
         return MachineModelOpProperties(
-            MachineModelResourcePipe::Lds, 4, 4+16, "ds_read_b128");
+            MachineModelResourcePipe::Lds, 4, "ds_read_b128", mfmaCycles1);
       } else if (isa<triton::gpu::LocalStoreOp>(op)) {
         return MachineModelOpProperties(
-            MachineModelResourcePipe::Lds, 40, 40+32, "ds_write_b128");
+            MachineModelResourcePipe::Lds, 40, "ds_write_b128", mfmaCycles2);
       } else if (isa<mlir::gpu::BarrierOp>(op)) {
         return MachineModelOpProperties(
-            MachineModelResourcePipe::Lds, 8, 8+0, "s_barrier");
+            MachineModelResourcePipe::Lds, 8, "s_barrier");
 
       // Global Memory Ops
       } else if (isa<triton::LoadOp, triton::amdgpu::BufferLoadOp>(op)) {
         return MachineModelOpProperties(
-            MachineModelResourcePipe::Global, 8, 64, "global_load");
+            MachineModelResourcePipe::Global, 4, "buffer_load", mfmaCycles2);
       }
 
+      // Fallback to MI250.
       return MachineModelGFX90A::getOpProperties(op);
     }
   };
 
   /*
-    MachineModel State
-    track how many cycles since last op of type was issued.
-    this is already too sophisticated
-      scheduling a barrier will put a cooldown on the ldsread pipe and lds write pipe for 64 cycles
-
-    TODO(dtanner) we're a little backwards here.
-    The pipeBusyCycles are for after the instruction.
-    So, when we're scheduling bottom up, we need to track when the last op was to each pipe
-    and then query if we can fit in the queried op.
-    E.g. s_barrier followed by ds_write should be totally fine.
-    Instead of resourcePipeCoolDown going from N -> ) to say ready (wich would be fine forwards)
-    We'll track time stamp which last used.
-
-    TODO(dtanner) I conflated pipeBusyCycles with dataLatency for lds ops.
-    When only dealing with ops, that gives def/use ability, but doesn't let us say that
-    loads and stores have a data dependency on barriers and end of kernel.
-    Need a way to say that when a barrier gets scheduled, all parent nodes
-
-    TODO(dtanner) Deliberately control whether dots need to come after s_barrier for up and down.
+    
   */
-
   struct MachineState {
     MachineState(MachineModel *model, bool topDown) : currentCycle(0), machineModel(model), topDown(topDown) {
       for (int32_t i = 0; i < numResourcePipes; ++i) {
@@ -198,7 +226,7 @@ namespace {
       opDataReadyCycle.clear();
     }
 
-    // Elapsed time will be cycles until pipe is ready + seqBusyCycles
+    // Elapsed time will be cycles until pipe is ready + cyclesSeqBusy
     void scheduleOp(Operation *op) {
       // record time before stepping forward
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
@@ -213,7 +241,7 @@ namespace {
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       MachineModelResourcePipe pipe = properties.resourcePipe;
       // If resource pipe wasn't ready, need to first wait for it to empty before issuing next op.
-      int32_t elapsedCycles = getCyclesUntilOpReady(op) + properties.seqBusyCycles;
+      int32_t elapsedCycles = getCyclesUntilOpReady(op) + properties.cyclesSeqBusy;
       LDBG("scheduleOpCalcElapsedCycles=" << elapsedCycles);
       return elapsedCycles;
     }
@@ -232,21 +260,21 @@ namespace {
     int32_t getCyclesUntilPipeReadyForOp(MachineModelOpProperties properties) {
       int32_t readyCycle;
       if (topDown) {
-        // TODO(dtanner) top down needs to keep parent pipeBusyCycles
-        readyCycle = (cyclePipeReady[properties.resourcePipe] - getCurrentCycle()); //  + properties.pipeBusyCycles;
+        // TODO(dtanner) top down needs to keep parent cyclesPipeBusyAfterSeq
+        readyCycle = (cyclePipeReady[properties.resourcePipe] - getCurrentCycle()); //  + properties.cyclesPipeBusyAfterSeq;
         LDBG("getCyclesUntilPipeReady=" << readyCycle);
       } else {
         // BottomUp
         // How long ago was pipe last used compared to when it is now.
         readyCycle = (cyclePipeReady[properties.resourcePipe] - getCurrentCycle())
             // Only care about pipe cycles > seq cycles.
-            + (properties.pipeBusyCycles - properties.seqBusyCycles);
+            + properties.cyclesPipeBusyAfterSeq;
         LDBG("getCyclesUntilPipeReady=" << readyCycle);
       }
       LDBG("getCyclesUntilPipeReady(): pr=" << cyclePipeReady[properties.resourcePipe]
           << ", cc=" << getCurrentCycle()
-          << ", pb=" << properties.pipeBusyCycles
-          << ", sq=" << properties.seqBusyCycles
+          << ", pb=" << properties.cyclesPipeBusyAfterSeq
+          << ", sq=" << properties.cyclesSeqBusy
           << ", ready=" << readyCycle);
       readyCycle = std::max(0, readyCycle);
       return readyCycle;
@@ -267,7 +295,7 @@ namespace {
       LDBG("scheduleOpUpdatePipesReady");
       MachineModelResourcePipe pipe = properties.resourcePipe;
       if (topDown) {
-        cyclePipeReady[pipe] = getCurrentCycle() + (properties.pipeBusyCycles - properties.seqBusyCycles);
+        cyclePipeReady[pipe] = getCurrentCycle() + properties.cyclesPipeBusyAfterSeq;
       } else {
         cyclePipeReady[pipe] = getCurrentCycle();
       }
@@ -307,8 +335,6 @@ namespace {
     // other is child if BottomUp
     void updateOpDataReady(Operation *target, Operation *other) {
       assert(target && other);
-      target->print(llvm::dbgs());
-      other->print(llvm::dbgs());
       int32_t readyCycle = getCurrentCycle();
       if (topDown) {
         readyCycle += calcCyclesUntilDataReady(other);

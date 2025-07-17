@@ -16,8 +16,8 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+//#undef LLVM_DEBUG
+//#define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule"
@@ -77,7 +77,7 @@ enum class SchedDirection { TopDown, BottomUp };
   and a SchedulingHeuristic might use.
 
   For example, we want to get to a dot asap, so we want to analyze which are on critical path.
-  Also, we want to set the relative order of local loads.
+  Also, we want to set the relative order of LocalLoadOps.
 
 */
 
@@ -404,7 +404,6 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const SchedDep &dep) {
   dummy pointers which can't be dereferenced.
   Therefore the comparison operations need to first check
   if the pointers are empty/tombstone before dereferencing.
-  TODO(dtanner) - isEqual() might be simplifiable.
 */
 struct SchedDepDenseMapInfo : llvm::DenseMapInfo<SchedDep> {
 
@@ -1199,6 +1198,11 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   }
 };
 
+/*
+  Likely don't want this as it incorrectly ordered GL1 LS1 GL0 LS0
+  And enforced the order with dependencies.
+  Keeping around in case want to adapt the logic to something different later.
+*/
 struct PriorityOrderDependencyCalculator : DependencyCalculator {
   PriorityOrderDependencyCalculator()
       : DependencyCalculator("PriorityOrder") {}
@@ -1375,7 +1379,7 @@ LL.
 
 for num_stages=2 without local_prefetch
 the GL and LS have data dependencies, and both can be co-scheduled with the
-local_loads. So we need to specify that the GL should overlap the LL. The LS
+LocalLoadOps. So we need to specify that the GL should overlap the LL. The LS
 can't overlap LL because of anti-dep enforced by gpu.bar.
 
 Example:
@@ -1399,17 +1403,17 @@ LSA01 LSB01
 https://github.com/ROCm/triton-internal/issues/736
 Determine Memory Op Order & Co-Scheduling
 We need to determine the relative ordering between or overlap of different
-memory op types; e.g. if global_loads and local_loads can both be scheduled,
+memory op types; e.g. if LoadOps and LocalLoadOps can both be scheduled,
 which should have higher priority. The ordering of memory ops have implications
 for performance and register use. This applies to loops where data can be
 prefetched, and also to regions with multiple dots. First, data dependencies
 determine order. Second, critical-path analysis determines order, meaning the
 memory ops which need to be scheduled to get to the mfmas sooner have highest
-priority. Note that for local_loads, some may be on the critical path to get us
-to the first 1-2 dot-tiles, but after other dot-tiles' local_loads can be
+priority. Note that for LocalLoadOps, some may be on the critical path to get us
+to the first 1-2 dot-tiles, but after other dot-tiles' LocalLoadOps can be
 delayed Third, based on scheduling mode: Min-Vgpr mode: preferred order is
-local_store, global_load, local_load. Max-Latency mode: preferred order is
-global_load, local_load, local_store.
+LocalStoreOp, LoadOp, LocalLoadOp. Max-Latency mode: preferred order is
+LoadOp, LocalLoadOp, LocalStoreOp.
 ========================================================================
 This applies to loops where data can be prefetched.
 This should also apply to regions with multiple dots.
@@ -1453,26 +1457,26 @@ https://github.com/ROCm/triton-internal/issues/738
 Memory Opr Order Deps
 
 With this ordering of ops, we can create order dependencies between op types so
-we only schedule the ones at a time that we want. E.g. for local prefetch,
-scheduler shouldn’t even see local_loads until very late in the loop.
+we only schedule the ones at a time that we want. E.g. for LDS prefetch,
+scheduler shouldn’t even see LocalLoadOps until very late in the loop.
 
 Insert order dependencies to serialize certain memory ops.
 
 This may need information to be communicated from the stream-pipeliner (or other
 places) to the scheduler. Some examples of what this task means: (1) A gemm with
-num_stages=2 wants local_loads close to the top of the kernel and global_loads
-to come after the first few local_loads but interleaved among later local_loads.
-Whereas enabling local_prefetch puts all the local_loads at the bottom of the
-loop after the global_loads and local_stores. The scheduler needs to know "delay
-the local_loads as much as possible" after most mfmas which have freed registers
+num_stages=2 wants LocalLoadOps close to the top of the kernel and LoadOps
+to come after the first few LocalLoadOps but interleaved among later LocalLoadOps.
+Whereas enabling local_prefetch puts all the LocalLoadOps at the bottom of the
+loop after the LoadOps and LocalStoreOps. The scheduler needs to know "delay
+the LocalLoadOps as much as possible" after most mfmas which have freed registers
 which the local_local loads can then use. The backend gets this wrong because it
-schedules the local_loads early and uses too many vgprs.
+schedules the LocalLoadOps early and uses too many vgprs.
 
 (2) For FA num_stages=2 maxDepth=1, the memory structure looks like
-global_load
-local_store <-- these must come before
-global_load <-- these to save vgprs
-local_store
+LoadOp
+LocalStoreOp <-- these must come before
+LoadOp <-- these to save vgprs
+LocalStoreOp
 
 This second issue takes
 
@@ -1501,19 +1505,19 @@ LSB1
 Later will AddDeps between the mem ops and
 
 
-global_load before/after local_loads
-global_loads before/after local_stores
-local_load[A] before/after local_load[B]
-global_load[K] before/after global_load[K]
+LoadOp before/after LocalLoadOps
+LoadOps before/after LocalStoreOps
+LocalLoadOp[A] before/after LocalLoadOp[B]
+LoadOp[K] before/after LoadOp[K]
 
 
 Determines which memory ops should overlap other memory ops (vs being
 co-scheduled) when data dependencies allow them to be.
 
-if we have all dots in order, and we do a scheduling with delaying all local
-loads then we can just grab the order of local_loads from that. Can we just keep
-the relative order of local stores as being final? Then have the relative order
-of global loads to match (with loop wrap around).
+if we have all dots in order, and we do a scheduling with delaying all LocalLoadOps
+then we can just grab the order of LocalLoadOps from that. Can we just keep
+the relative order of LocalStoreOps as being final? Then have the relative order
+of LoadOps to match (with loop wrap around).
 ******************************************************************************/
 struct MemOrderDependencyCalculator : DependencyCalculator {
   MemOrderDependencyCalculator() : DependencyCalculator("MemOrder") {}
@@ -1679,7 +1683,7 @@ struct PriorityCalculator {
 
 /******************************************************************************
   Add DotCriticalPath weights to nodes to correctly schedule
-  local load order.
+  LocalLoadOp order.
 
 la0 = 9
 la1 = 6
@@ -1700,7 +1704,7 @@ dot22 = 1
 
 Only use Data dependencies as parent/children since we want to
 prioritiese the flow of data.
-We don't want barriers to give all ops the same priorities.
+Initially we don't want barriers to give all ops the same priorities.
 ******************************************************************************/
 struct DotCriticalPathPriorityCalculator
     : public PriorityCalculator {
@@ -1738,14 +1742,14 @@ struct DotCriticalPathPriorityCalculator
 };
 
 /******************************************************************************
-  Ideally we want the DotCriticalPath to also be able to label the local stores.
-  However local memory semantics make this hard, do we have aliasing information
-  so I can query which local_stores are needed for a local_read.
-  Since gpu.barriers enforce that all local_loads must complete,
-  we can assume that local_stores are already correctly ordered relative to local_loads.
+  Ideally we want the DotCriticalPath to also be able to label the LocalStoreOps.
+  However LDS semantics make this hard, do we have aliasing information
+  so I can query which LocalStoreOps are needed for a LocalLoadOp.
+  Since gpu.barriers enforce that all LocalLoadOps must complete,
+  we can assume that LocalStoreOps are already correctly ordered relative to LocalLoadOps.
   Now we want to continue the critical path to specify what is the optimal order
-  of local stores, and by consequence the optimal order of global loads.
-  Therefore we just want to ensure that global_loads have the same order.
+  of LocalStoreOps, and by consequence the optimal order of LoadOps.
+  Therefore we just want to ensure that LoadOps have the same order.
   TODO(dtanner) expand this to direct-to-lds.
 ******************************************************************************/
 struct LocalStoreCriticalPathPriorityCalculator
@@ -1784,26 +1788,31 @@ struct LocalStoreCriticalPathPriorityCalculator
 
 /*
   Abstract Base class for a scheduling heuristic recipe.
-  E.g. TopDown, schedule global_loads early and local_stores late.
+  E.g. TopDown, schedule LoadOps early and LocalStoreOps late.
 */
 template <SchedDirection Direction> struct SchedHeuristic {
+  SchedHeuristic(StringRef n) : name(n) {}
+  StringRef getName() const { return name; }
   virtual SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) = 0;
-  virtual StringRef name() = 0;
-  virtual void reset() {};
-  virtual void notifySelected(SchedDagNode *) {};
+  virtual void begin() {};
   virtual void dump(llvm::raw_ostream &out) {};
+  virtual void selectedOp(SchedDagNode *) {};
+  virtual void end() {};
   virtual ~SchedHeuristic() = default;
+  StringRef name;
 };
 
 /******************************************************************************
-  Delay LocalLoads as much as possible so they're adjacent to the dot which
-  needs them. This will then allow for placing deps between local loads.
+  Delay LocalLoadOps as much as possible so they're adjacent to the dot which
+  needs them. This will then allow for placing deps between LocalLoadOps.
   Also delay other memory ops so that order deps can be placed between them too.
   SchedDirection = BottomUp
 ******************************************************************************/
 template <SchedDirection Direction>
 struct SchedHeuristicPriority
     : public SchedHeuristic<Direction> {
+  
+  SchedHeuristicPriority() : SchedHeuristic<Direction>("Priority") {}
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     uint32_t start = 0;
@@ -1827,8 +1836,6 @@ struct SchedHeuristicPriority
     // Final comparison based on orig order.
     return getOriginalOrder<Direction>(a, b);
   }
-
-  StringRef name() { return "Priority"; }
 };
 
 bool preferMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine, bool prefer = true) {
@@ -1847,120 +1854,21 @@ SchedDagNode *findPreferredMachineState(SchedDagNode *a, SchedDagNode *b, Machin
 }
 
 /******************************************************************************
-  Employ MachineModel to capture data latencies and issue rate latencies.
-  SchedDirection = BottomUp
-  Memory ops are already ordered.
-  Goals:
-   - Local loads correct, therefore asap according to machine model.
-   - Local stores correct, therefore asap according to machine model.
-   - Global loads as late as possible to not hinder the above.
-  Change UpdateState to NotifyScheduled before node is removed.
-  We will examine it's parents and if they are memroy ops,
-  we'll store when they're allowed to be issued according to data latencies
-  Only need to store single value for global load, local load, local store
-******************************************************************************/
-template <SchedDirection Direction> 
-struct SchedHeuristicLdsOps
-    : public SchedHeuristic<Direction> {
-
-  SchedHeuristicLdsOps() : model(std::make_shared<MachineModelGFX942>()),
-      machine(model.get(), Direction==SchedDirection::TopDown) {
-    machine.reset();
-  }
-
-  SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
-    LDBG("MM comparing " << *a << " and " << *b);
-    // Prefer based on machine state; will select if one cooled down and other isn't.
-    if (auto selected = findPreferredMachineState(a, b, &machine, true)) {
-      LDBG("Selected based on MachineState");
-      return selected;
-    }
-
-    SchedHeuristicPriority<Direction> shp;
-    return shp(a, b);
-    // Schedule others that could be in the way of local loads
-    // in the order of data flowing to dots.
-    // TODO(dtanner) - these are never used for simple gemms; does fa need them?
-    // Does PriorityOrderDeps negate their use?
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryNop,
-        Direction==SchedDirection::TopDown)) {
-      return selected;
-    }
-    if (auto selected = findPreferredOpType<triton::gpu::LocalLoadOp>(a, b,
-      Direction==SchedDirection::TopDown)) {
-      LDBG("Selected based on LocalLoadOp");
-      return selected;
-    }
-    if (auto selected = findPreferredOpType<triton::gpu::LocalStoreOp>(a, b,
-      Direction==SchedDirection::TopDown)) {
-      LDBG("Selected based on LocalStoreOp");
-      return selected;
-    }
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryBarrier,
-      Direction==SchedDirection::TopDown)) {
-      return selected;
-    }
-    if (auto selected = findPreferredOpCategory(a, b, opCategoryGlobalLoad,
-      Direction==SchedDirection::TopDown)) {
-      LDBG("Selected based on GlobalLoad");
-      return selected;
-    }
-
-    // Final comparison based on orig order.
-    return getOriginalOrder<Direction>(a, b);
-  }
-
-  StringRef name() { return "LdsOps"; }
-
-  void reset() {
-    machine.reset();
-  };
-
-  // node still has dependencies.
-  void notifySelected(SchedDagNode *node) {
-
-    // MachineModelOpProperties properties = machine.machineModel->getOpProperties(node->getOp());
-    machine.scheduleOp(node->getOp());
-    LDBG("notifySelected() t=" << machine.getCurrentCycle() << *node << " (completed)");
-    // For anything else (non def/use) that waits, set data dependencies.
-    if constexpr (Direction==SchedDirection::TopDown) {
-      assert(false);
-    } else {
-      if (llvm::isa<mlir::gpu::BarrierOp, mlir::cf::BranchOp>(node->getOp())) {
-        for (auto parent : node->getParents()) {
-          if (opCategoryMem(parent)) {
-            LDBG("machine.updateOpDataReady() for " << *parent << ", " << *node);
-            machine.updateOpDataReady(parent->getOp(), node->getOp());
-          }
-        }
-      }
-    }
-  }
-
-  void dump(llvm::raw_ostream &out) {
-    out << "MachineState: " << machine;
-  };
-
-  std::shared_ptr<MachineModel> model;
-  MachineState machine;
-};
-
-/******************************************************************************
-  GlobalLoadsEarly  
-  After establishing where LocalStoreOp must go,
-  now we can lift global loads early.
-  This worked fine for BottomUp just hoisting them to the top.
-  Instead we want to work TopDown and follow the machine model
-  to schedule the global loads (and their parents) as soon as we can.
+  Employ MachineModel to capture data latencies and issue rate cycles.
+  Priority is backup comparison.
 ******************************************************************************/
 template <SchedDirection Direction>
 struct SchedHeuristicMachineModel
     : public SchedHeuristic<Direction> {
 
-    SchedHeuristicMachineModel() : model(std::make_shared<MachineModelGFX942>()),
-      machine(model.get(), Direction==SchedDirection::TopDown) {
+    SchedHeuristicMachineModel() : SchedHeuristic<Direction>("MachineModel"),
+        model(std::make_shared<MachineModelGFX942>()),
+        machine(model.get(), Direction==SchedDirection::TopDown) {}
+
+  void begin() {
     machine.reset();
-  }
+    scheduleCycles.clear();
+  };
   
   /*
     First priority is to get to dot.
@@ -1980,19 +1888,13 @@ struct SchedHeuristicMachineModel
     return getOriginalOrder<Direction>(a, b);
   }
 
-  StringRef name() { return "MachineModel"; }
-
-  void reset() {
-    machine.reset();
-  };
-
   // node still has dependencies.
-  void notifySelected(SchedDagNode *node) {
+  void selectedOp(SchedDagNode *node) {
 
     // MachineModelOpProperties properties = machine.machineModel->getOpProperties(node->getOp());
     machine.scheduleOp(node->getOp());
-    LDBG("notifySelected() t=" << machine.getCurrentCycle() << *node << " (completed)");
-
+    LDBG("selectedOp() t=" << machine.getCurrentCycle() << *node << " (completed)");
+    scheduleCycles.push_back(std::make_pair(node, machine.getCurrentCycle()));
     // For anything else (non def/use) that waits, set data dependencies.
     if constexpr (Direction==SchedDirection::TopDown) {
       if (opCategoryMem(node)) {
@@ -2019,8 +1921,16 @@ struct SchedHeuristicMachineModel
     out << "MachineState: " << machine;
   };
 
+  void end() {
+    LDBG("Machine Schedule Cycles");
+    for (auto entry : scheduleCycles) {
+      LDBG("t=" << entry.second << " " << *entry.first);
+    }
+  }
+
   std::shared_ptr<MachineModel> model;
   MachineState machine;
+  SmallVector<std::pair<SchedDagNode *, int32_t>> scheduleCycles;
 };
 
 /******************************************************************************
@@ -2067,7 +1977,7 @@ struct SchedManager {
     LDBG("SchedManager::reschedule("
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
-         << ", Heuristic=" << heuristic->name());
+         << ", Heuristic=" << heuristic->getName());
     // Reset deps right before rescheduling b/c analysis passes
     // may have altered them.
     LDBG("dag.resetDeps() before rescheduling");
@@ -2079,7 +1989,7 @@ struct SchedManager {
 
     // Node readiness is based on direction.
     dag.initReadyNodes<Direction>();
-    heuristic->reset();
+    heuristic->begin();
 
     // Schedule the dag; this process removes deps from nodes.
     // Store nodes in newly scheduled order.
@@ -2103,13 +2013,14 @@ struct SchedManager {
       if (printDetails) {
         LDBG("Selected: " << *selectedNode);
       }
-      heuristic->notifySelected(selectedNode);
+      heuristic->selectedOp(selectedNode);
 
       // Place selected node in list, remove it from dag which updates
       // readyList.
       rescheduledNodes.push_back(selectedNode);
       dag.removeScheduledNode<Direction>(selectedNode);
     }
+    heuristic->end();
 
     // After scheduling, re-apply deps to prepare for adding additional deps.
     LDBG("dag.resetDeps() after rescheduling");
@@ -2190,78 +2101,128 @@ struct TritonAMDGPURescheduleOps
 
     SchedManager schedManager(mlirBlock);
 
+    bool dumpGraphs = false;
     /*
       Scheduling Pass 0
       - Dependencies: Data, DotOrder, LocalStoreOrder, Barriers
       - Priorities: DotCriticalPath, LocalStoreCriticalPath
       - Heuristic: Priority
+
+      Dependencies accomplish:
+      - Enforced dot relative order.
+      - Enforced LocalStoreOp relative order.
+      Scheduling in order of priority (critical path) accomplishes:
+      - Note that LoadOp are close to LocalStoreOp on purpose.
+      - Determines relative order of LocalLoadOps.
+      - Determines order of tertiary ops to get to the DotOps asap.
+      - Determines the order of LoadOps to match LocalStoreOps.
     */
     // Add Data deps based on def-use chains.
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
-    //LLVM_DEBUG(
-    //  LDBG("Dag w/ only data dependencies");
-    //  schedManager.dag.dumpDotFormat(llvm::dbgs());
-    //);
+    if (dumpGraphs) {
+      LLVM_DEBUG(
+        LDBG("Dag: data");
+        schedManager.dag.dumpDotFormat(llvm::dbgs());
+      );
+    }
     // Assume dots are in ideal order and propagate their critical path.
     schedManager.addDeps(
       std::make_unique<DotOrderDependencyCalculator>());
+    // Add initial priorities while only data deps exist, before adding other deps.
     schedManager.addPriorities(std::make_unique<DotCriticalPathPriorityCalculator>());
-    // Assume local_stores are in ideal order and propagate their critical path.
+    // Assume LocalStoreOps are in ideal order and propagate their critical path.
     schedManager.addDeps(
       std::make_unique<LocalStoreOrderDependencyCalculator>());
     schedManager.addPriorities(std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
     // Add dependencies for barriers (gpu.barrier, sched.barrier, setprio...).
     schedManager.addDeps(std::make_unique<BarrierDependencyCalculator>());
-    // After creating dependencies for barriers, repeat propagate priorities for barriers.
+    // After creating dependencies for barriers, repeat priority analysis.
+    // This won't override any previous priorities, but for tertiary ops it
+    // determines which are needed to unblock barriers which block other priorities.
     schedManager.addPriorities(std::make_unique<DotCriticalPathPriorityCalculator>());
     schedManager.addPriorities(std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
-
+    if (dumpGraphs) {
+      LLVM_DEBUG(
+        LDBG("Dag: data, dot:dot, ls:ls, bar:*");
+        schedManager.dag.dumpDotFormat(llvm::dbgs());
+      );
+    }
     SchedHeuristicPriority<SchedDirection::TopDown> shp;
     schedManager.reschedule<SchedDirection::TopDown>(&shp);
 
     /*
       Scheduling Pass 1
       - Dependencies: LocalLoadOrder, GlobalLoadOrder
-      - Priorities: 0
-      - Heuristic: LdsOps(MachineModel)
+      - Priorities: none
+      - Heuristic: MachineModel<BottomUp>
+
+      Dependencies accomplish:
+      - Enforce LocalLoadOp relative order.
+      - Enforce LoadOp relative order.
+      Scheduled in order of MachineModel<BottomUp> accomplishes:
+      - Determines LocalStoreOps before barriers and end of loop.
+      - Spreads LocalStoreOps out.
+      - Determines LocalLoadOps prefetched before DotOps.
+      - Spreads LocalLoadOps out.
+      - Lifts LoadOps as high as possible, which is likely top of block.
     */
     // Preserve memory op order determined by critical paths above.
     schedManager.addDeps(
         std::make_unique<LocalLoadOrderDependencyCalculator>());
     schedManager.addDeps(
         std::make_unique<GlobalLoadOrderDependencyCalculator>());
-    // I think we don't want this. It orders some GL after LS.
-    // Also, having priority come after machine model should do the same.
-    //schedManager.addDeps(
-    //  std::make_unique<PriorityOrderDependencyCalculator>());
+    if (dumpGraphs) {
+      LLVM_DEBUG(
+        LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl");
+        schedManager.dag.dumpDotFormat(llvm::dbgs());
+      );
+    }
     // Now that we've ordered lds ops, spread them out with machine model.
     // This comes first becase we want LL and LS as late as possible.
+    // This pass pushes the GL up as high as possible (data latency = 1e6)
     SchedHeuristicMachineModel<SchedDirection::BottomUp> sh1;
     schedManager.reschedule<SchedDirection::BottomUp>(&sh1);
+
+    // Now we lock the LS in place (so the GL data latency doesn't push them even later)
+    // And we schedule the GL as soon as machine model find space for them
+    // hidden behind mfmas usually.
 
     /*
       Scheduling Pass 2
       - Dependencies: DotLdsOrder; PriorityOrder
       - Priorities: 0
       - Heuristic: EarlyGlobalLoads
+
+      Dependencies accomplish:
+      - Enforce LocalLoadOp relative to DotOps.
+      - Enforce LocalStoreOp relative to DotOps.
+      Scheduled in order of MachineModel<TopDown> accomplishes:
+      - Delays LoadOps until issuing them is hidden by DotOps.
+      - Spreads out LoadOps.
     */
     schedManager.addDeps(
       std::make_unique<DotLdsOrderDependencyCalculator>());
-    // TODO(dtanner) - flash-attention needs the below deps pass implemented.
-    //schedManager.addDeps(std::make_unique<LocalStoreGlobalLoadAntiDepsDependencyCalculator>());
-
-    // keep this; it did seem to be working?
-    //schedManager.addDeps(
-    //    std::make_unique<PriorityOrderDependencyCalculator>());
-    //schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
-    // This come next because now we've cememted all lds ops locations
-    // among dots, now we can schedule GL as early as MM will allow.
+    if (dumpGraphs) {
+      LLVM_DEBUG(
+        LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl, ll:dot, ls:dot");
+        schedManager.dag.dumpDotFormat(llvm::dbgs());
+      );
+    }
     SchedHeuristicMachineModel<SchedDirection::TopDown> sh2;
     schedManager.reschedule<SchedDirection::TopDown>(&sh2);
 
     /*
-      After Rescheduling, apply op order to block.
+      TODO(dtanner) - flash-attention (or anything with multiple GL/LS)
+      will need to have some anti-deps to keep some GL after LS so they
+      can use the same registers. This should probably be added after DotLdsOrder
+      dependencies and before the machine model top-down, so that it just delays
+      the LoadOps even further until after the anti-dep.
+      schedManager.addDeps(std::make_unique<LocalStoreGlobalLoadAntiDepsDependencyCalculator>());
+      This is already the beginning of working on this.
+      schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
+
     */
+
     LDBG("Rescheduled Ops:");
     SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
     // Print op (and not node) list.
@@ -2293,7 +2254,13 @@ struct TritonAMDGPURescheduleOps
           LLVM_DEBUG((*it).print(llvm::dbgs());
           llvm::dbgs() << "\n";);
         }
+        // TODO(dtanner) remove me.
+        auto start = std::chrono::high_resolution_clock::now();
         applyReschedulingPasses(block);
+        auto stop = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+        llvm::outs() << "applyReschedulingPasses takes: " << duration.count() << " us\n";
+        
         LDBG("OpList after applyReschedulingPasses()");
         for (auto it = block->begin(); it != block->end(); ++it) {
           LLVM_DEBUG((*it).print(llvm::dbgs());
