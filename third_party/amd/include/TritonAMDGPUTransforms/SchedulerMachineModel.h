@@ -10,8 +10,8 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
-//#undef LLVM_DEBUG
-//#define LLVM_DEBUG(X) X
+#undef LLVM_DEBUG
+#define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-scheduler-machine-model"
@@ -207,12 +207,58 @@ namespace {
   };
 
   /*
-    
+    MachineState tracks what has and will happen on the GPU as a result of the scheduling process.
+
+    The primary functions called by the scheduler are
+    - scheduleOp(op) which updates the machine state based on the op being scheduled.
+    - getCyclesUntilOpReady(op) which return how soon the machine will be ready
+        to schedule the op (without wasting cycles).
+    - updateOpDataReady(op, op) which allows the scheduler to tell the machine that there
+        is a non def/use dependency (e.g. bar) which requires one op to wait for the other.
+
+    The machine state consists of pipeReadyCycle[pipe] and opDataReadyCycle[op] which track when
+    these resources will be ready.
+    pipeReadyCycle[pipe] tracks how long ago the last op was scheduled to the pipe and therefore when
+      will the pipe be ready for the next op. E.g. after scheduling an mfma, the mfma pipe will busy
+      for several cycles but other pipes (lds or valu) are free to execute.
+    opDataReadyCycle[op] stores when data will be ready for memory ops, e.g. after a LocalLoadOp
+      it's children won't have their data until X cycles later.
+
+    Because actual machine execution is always TopDown, but scheduling can be either direction,
+    the above state has slightly different meanings based on direction.
+
+    (1) TopDown Pipe Example:
+    pipeReadyCycle[pipe] tracks at which cycle the pipe will be ready,
+      which is the cycle it was last used + prev op's pipeBusyAfterSeq.
+    E.g. currentCycle=16 scheduleOp(mfma)
+      - currentCycle advances to 20 b/c mfma seqBusy=4.
+      - pipeReadyCycle[mfma] set to 32 b/c mfma's pipeBusyAfterSeq=16.
+    Later, getCyclesUntilPipeReadyForOp() will know that the pipe is ready at t=32.
+
+    (2) BottomUp Pipe Example:
+    pipeReadyCycle[pipe] tracks which cycle the pipe was last used;
+      we can't add the pipeBusyAfterSeq for the op which comes above it
+      since we haven't determined it yet for BottomUp.
+    E.g. currentCycle=16 scheduleOp(mfma)
+      - currentCycle advances to 20 b/c mfma seqBusy=4.
+      - pipeReadyCycle[mfma] set to 20 b/c only stores last used.
+    Later, getCyclesUntilPipeReadyForOp() will know that the pipe was last used at t=20,
+      then it will determine if the next op scheduled will be done with the pipe by t=20
+      based on it's pipeBusyAfterSeq.
+
+    (3) TopDown Data Example:
+      opDataReadyCycle tracks at which future cycle the data for an op will be ready.
+      E.g. currentCycle=16 scheduleOp(load) will record op->children need to wait until
+        t=16+updateOpDataReady(load).
+
+    (4) BottomUp Data Example:
+      Same as TopDown, except that insteady of recording when children will be ready,
+      it records when parents (the load ops) will be ready to be issued.
   */
   struct MachineState {
     MachineState(MachineModel *model, bool topDown) : currentCycle(0), machineModel(model), topDown(topDown) {
       for (int32_t i = 0; i < numResourcePipes; ++i) {
-        cyclePipeReady.push_back(0);
+        pipeReadyCycle.push_back(0);
       }
       reset();
     }
@@ -221,105 +267,99 @@ namespace {
     void reset() {
       currentCycle = 0;
       for (int32_t i = 0; i < numResourcePipes; ++i) {
-        cyclePipeReady[i] = 0;
+        pipeReadyCycle[i] = 0;
       }
       opDataReadyCycle.clear();
     }
 
-    // Elapsed time will be cycles until pipe is ready + cyclesSeqBusy
+    /*
+      When op is scheduled,
+      - Calculate how many cycles elapsed, update currentCycle.
+      - Update when the used pipe will be ready.
+      - Update when the op's parents/children will be ready
+        based on data latencies.
+    */
     void scheduleOp(Operation *op) {
       // record time before stepping forward
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       int32_t elapsedCycles = scheduleOpCalcElapsedCycles(op);
-      scheduleOpUpdateCurrentCycle(elapsedCycles);
+      currentCycle += elapsedCycles;
       scheduleOpUpdatePipesReady(properties);
       scheduleOpUpdateDepsReady(op);
     }
 
-    // Issue op and step time forward.
+    // Calculates how many cycles forward time is advanced as a result of scheduling op.
+    // Elapsed time will be cycles until data and pipe are ready + cyclesSeqBusy.
     int32_t scheduleOpCalcElapsedCycles(Operation *op) {
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       MachineModelResourcePipe pipe = properties.resourcePipe;
-      // If resource pipe wasn't ready, need to first wait for it to empty before issuing next op.
+      // If resource pipe or data weren't ready, need to first wait for them before issuing op.
       int32_t elapsedCycles = getCyclesUntilOpReady(op) + properties.cyclesSeqBusy;
-      LDBG("scheduleOpCalcElapsedCycles=" << elapsedCycles);
       return elapsedCycles;
     }
 
-    // Queries opDataReadyCycle
+    // Returns cycles until op will be ready to issue;
+    // called from scheduler and used for elapsed cycles.
+    // Queries both pipeReadyCycle and opDataReadyCycle.
     int32_t getCyclesUntilOpReady(Operation *op) {
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       int32_t cycles = std::max(getCyclesUntilDataReady(op), getCyclesUntilPipeReadyForOp(properties));
-      LDBG("getCyclesUntilOpReady=" << cycles);
+      //LDBG("getCyclesUntilOpReady=" << cycles);
       return cycles;
     }
 
-    // Op's pipe is ready at
-    // pipeLastUsed + pipeBusyCyclesForOp - currentCycle
-    // 32 + 8 - 36 = 
+    // Calculates when pipe will be ready; examples provided above.
+    // Queries pipeReadyCycle.
     int32_t getCyclesUntilPipeReadyForOp(MachineModelOpProperties properties) {
       int32_t readyCycle;
       if (topDown) {
-        // TODO(dtanner) top down needs to keep parent cyclesPipeBusyAfterSeq
-        readyCycle = (cyclePipeReady[properties.resourcePipe] - getCurrentCycle()); //  + properties.cyclesPipeBusyAfterSeq;
-        LDBG("getCyclesUntilPipeReady=" << readyCycle);
+        readyCycle = (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle());
       } else {
-        // BottomUp
-        // How long ago was pipe last used compared to when it is now.
-        readyCycle = (cyclePipeReady[properties.resourcePipe] - getCurrentCycle())
-            // Only care about pipe cycles > seq cycles.
+        readyCycle = (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle())
             + properties.cyclesPipeBusyAfterSeq;
-        LDBG("getCyclesUntilPipeReady=" << readyCycle);
       }
-      LDBG("getCyclesUntilPipeReady(): pr=" << cyclePipeReady[properties.resourcePipe]
-          << ", cc=" << getCurrentCycle()
-          << ", pb=" << properties.cyclesPipeBusyAfterSeq
-          << ", sq=" << properties.cyclesSeqBusy
-          << ", ready=" << readyCycle);
+      //LDBG("getCyclesUntilPipeReady(): pr=" << pipeReadyCycle[properties.resourcePipe]
+      //    << ", cc=" << getCurrentCycle()
+      //    << ", pb=" << properties.cyclesPipeBusyAfterSeq
+      //    << ", sq=" << properties.cyclesSeqBusy
+      //    << ", ready=" << readyCycle);
       readyCycle = std::max(0, readyCycle);
       return readyCycle;
     }
 
+    // Calculates when data will be ready; examples provided above.
+    // Queries opDataReadyCycle.
     int32_t getCyclesUntilDataReady(Operation *op) {
       auto find = opDataReadyCycle.find(op);
       int32_t cycle = 0;
       if (find != opDataReadyCycle.end()) {
         cycle = std::max(0, find->getSecond() - getCurrentCycle());
       }
-      LDBG("getCyclesUntilDataReady=" << cycle);
+      //LDBG("getCyclesUntilDataReady=" << cycle);
       return cycle;
     }
 
-    // Update when pipes will be ready.
+    // Update when pipes will be ready, based on op getting scheduled.
+    // Writes to pipeReadyCycle.
     void scheduleOpUpdatePipesReady(MachineModelOpProperties properties) {
-      LDBG("scheduleOpUpdatePipesReady");
       MachineModelResourcePipe pipe = properties.resourcePipe;
       if (topDown) {
-        cyclePipeReady[pipe] = getCurrentCycle() + properties.cyclesPipeBusyAfterSeq;
+        pipeReadyCycle[pipe] = getCurrentCycle() + properties.cyclesPipeBusyAfterSeq;
       } else {
-        cyclePipeReady[pipe] = getCurrentCycle();
+        pipeReadyCycle[pipe] = getCurrentCycle();
       }
     }
 
-    void scheduleOpUpdateCurrentCycle(int32_t elapsedCycles) {
-      currentCycle += elapsedCycles;
-    }
-
-    // Updates ready for parents/children.
-    // This sets the opDataReadyCycle.
+    // Update when parents/children (based on direction) data will be ready.
+    // Writes to opDataReadyCycle.
     void scheduleOpUpdateDepsReady(Operation *op) {
-      LDBG("scheduleOpUpdateDepsReady()");
       if (topDown) {
-        // TopDown - scheduled op, therefore children will all be ready
-        // when op is done.
         for (auto result : op->getResults()) {
           for (auto child : result.getUsers()) {
             updateOpDataReady(child, op);
           }
         }
       } else {
-        // BottomUp - scheduled op, therefore determine when parents
-        // will be ready, they're who define the operands.
         for (auto operand : op->getOperands()) {
           auto parent = operand.getDefiningOp();
           if (parent) {
@@ -329,10 +369,14 @@ namespace {
       }
     }
 
-    // Updates ready for op (called externally)
-    // This sets the opDataReadyCycle.
-    // other is parent if topDown
-    // other is child if BottomUp
+    /*
+      Updates when target will be ready based on it's
+      dependency with other and the data latency.
+      Call from above and from scheduler.
+      TopDown: target=child, other=parent.
+      BottomUp: target=parent, other=child.
+      Writes to opDataReadyCycle.
+    */
     void updateOpDataReady(Operation *target, Operation *other) {
       assert(target && other);
       int32_t readyCycle = getCurrentCycle();
@@ -348,40 +392,30 @@ namespace {
       return currentCycle;
     }
 
-    // This depends on seeing only 1 op at a time for each pipe.
-    // Therefore all lds reads/writes need to be serialized.
+    // Calculates data latency cycles based on op's pipe.
     int32_t calcCyclesUntilDataReady(Operation *op) {
-      LDBG("calcCyclesUntilDataReady()");
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       MachineModelResourcePipe pipe = properties.resourcePipe;
-      LDBG("calcCyclesUntilDataReady() pipe=" << pipe);
       int32_t cyclesUntilDataReady = machineModel->getDataLatency(pipe);
-      LDBG("cyclesUntilDataReady=" << cyclesUntilDataReady);
       return cyclesUntilDataReady;
     }
 
-    // Specify when op will be ready based on data latency and pipe.
-    // If already exists, updates to max cycles.
+    // Writes to opDataReadyCycle; keeps maximum since op will have to wait for all deps.
     void setDataReadyCycle(Operation *op, int32_t c) {
-      LDBG("setDataReadyCycle()");
       auto find = opDataReadyCycle.find(op);
       if (find != opDataReadyCycle.end()) {
-        int32_t updated = std::max(c, find->getSecond());
-        LDBG("setDataReadyCycle() t=" << c << " (updated), op=" << op->getName());
-        opDataReadyCycle[op] = updated;
+        opDataReadyCycle[op] = std::max(c, find->getSecond());
       } else {
-        LDBG("setDataReadyCycle() t=" << c << ", op=" << op->getName());
         opDataReadyCycle[op] = c;
       }
     }
 
     int32_t currentCycle;
     MachineModel *machineModel;
-    /* Tracks pipe readiness differently for TopDown vs BottomUp.
-      BottomUp: tracks the cycle during which pipe was last used.
-      TopDown: tracks the cycle last used + prev op's pipe busy cycles.
-    */
-    SmallVector<int32_t, numResourcePipes> cyclePipeReady;
+    // Tracks pipe readiness differently for TopDown vs BottomUp.
+    // BottomUp: tracks the cycle during which pipe was last used.
+    // TopDown: tracks the cycle last used + prev op's cyclesPipeBusyAfterSeq.
+    SmallVector<int32_t, numResourcePipes> pipeReadyCycle;
     DenseMap<Operation *, int32_t> opDataReadyCycle;
     bool topDown;
   };
@@ -391,7 +425,7 @@ namespace {
     out << "[t=" << machine.getCurrentCycle();
     for (int32_t i = 1; i < numResourcePipes; ++i) {
       out << ", " << toString(static_cast<MachineModelResourcePipe>(i));
-      out << "=" << machine.cyclePipeReady[i];
+      out << "=" << machine.pipeReadyCycle[i];
     }
     out << "]";
     if (false) {
