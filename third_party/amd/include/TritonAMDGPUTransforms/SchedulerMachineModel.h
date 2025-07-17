@@ -177,6 +177,8 @@ namespace {
     When only dealing with ops, that gives def/use ability, but doesn't let us say that
     loads and stores have a data dependency on barriers and end of kernel.
     Need a way to say that when a barrier gets scheduled, all parent nodes
+
+    TODO(dtanner) Deliberately control whether dots need to come after s_barrier for up and down.
   */
 
   struct MachineState {
@@ -198,14 +200,12 @@ namespace {
 
     // Elapsed time will be cycles until pipe is ready + seqBusyCycles
     void scheduleOp(Operation *op) {
-      LDBG("scheduleOp()");
       // record time before stepping forward
       MachineModelOpProperties properties = machineModel->getOpProperties(op);
       int32_t elapsedCycles = scheduleOpCalcElapsedCycles(op);
       scheduleOpUpdateCurrentCycle(elapsedCycles);
       scheduleOpUpdatePipesReady(properties);
       scheduleOpUpdateDepsReady(op);
-      LDBG("scheduleOp() - DONE");
     }
 
     // Issue op and step time forward.
@@ -267,7 +267,7 @@ namespace {
       LDBG("scheduleOpUpdatePipesReady");
       MachineModelResourcePipe pipe = properties.resourcePipe;
       if (topDown) {
-        cyclePipeReady[pipe] = getCurrentCycle() + properties.pipeBusyCycles;
+        cyclePipeReady[pipe] = getCurrentCycle() + (properties.pipeBusyCycles - properties.seqBusyCycles);
       } else {
         cyclePipeReady[pipe] = getCurrentCycle();
       }
@@ -368,7 +368,7 @@ namespace {
       out << "=" << machine.cyclePipeReady[i];
     }
     out << "]";
-    if (true) {
+    if (false) {
       for (auto entry : machine.opDataReadyCycle) {
         out << "\t t=" << entry.getSecond() << " ready << " << entry.getFirst()->getName() << "\n";
       }
