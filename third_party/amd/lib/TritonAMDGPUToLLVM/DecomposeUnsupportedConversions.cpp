@@ -33,7 +33,7 @@ struct DecomposeUnsupportedAMDConversions
     int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
     int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
 
-    auto shortcutFn = [](RankedTensorType srcTy, RankedTensorType dstTy) {
+    /*auto shortcutFn = [](RankedTensorType srcTy, RankedTensorType dstTy) {
       auto srcWmma =
           dyn_cast<triton::gpu::AMDWmmaEncodingAttr>(srcTy.getEncoding());
       auto dstDotOp =
@@ -41,7 +41,7 @@ struct DecomposeUnsupportedAMDConversions
       return !cvtNeedsSharedMemory(srcTy, dstTy) && !(srcWmma && dstDotOp);
     };
 
-    triton::gpu::decomposeTensorCoreToDotLayoutConversion(mod, shortcutFn);
+    triton::gpu::decomposeTensorCoreToDotLayoutConversion(mod, shortcutFn);*/
 
     // Try to reduce LDS usage of cvt(mfma->blocked) op by changing the shape of
     // WarpsPerCta attribute in mfma layout. The implicit LDS usage of
