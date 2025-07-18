@@ -28,6 +28,7 @@ from utils.utils import (
     get_filename_compile_driver,
     get_filename_myKernels,
     get_filename_profile_driver,
+    get_num_sms,
     name_to_tl_types,
     patch_triton_compiler,
     run_bash_command,
@@ -47,7 +48,7 @@ def is_hip_available():
         return True
 
 
-def get_full_tuning_space():
+def get_full_tuning_space(num_cus):
     configs = []
 
     block_mn_range = [16, 32, 64, 128, 256]
@@ -61,7 +62,7 @@ def get_full_tuning_space():
     waves_per_eu_range = [0]
     matrix_instr_nonkdim_range = [16, 32]
     kpack_range = [1, 2]
-    num_sms_range = [304]
+    num_sms_range = [num_cus]
 
     space = itertools.product(block_mn_range, block_mn_range, block_k_range, num_warps_range, group_m_range,
                               num_sms_range, num_stage_range, waves_per_eu_range, matrix_instr_nonkdim_range,
@@ -76,12 +77,6 @@ def get_full_tuning_space():
         })
 
     return configs
-
-
-def get_default_config():
-    full_configs = get_full_tuning_space()
-    return full_configs[0]
-
 
 def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
     pruned_configs = []
@@ -554,6 +549,7 @@ def main():
     kernel_name = kernel_name.strip()
     module = importlib.import_module(module_name)
     kernel_func = getattr(module, kernel_name)
+    num_cus = get_num_sms()
 
     if not args.o:
         if args.benchmark:
@@ -636,7 +632,7 @@ def main():
                              bias_vector, True)
         return
 
-    configs_full = get_full_tuning_space()
+    configs_full = get_full_tuning_space(num_cus)
 
     start_time = datetime.now()
     # Append to the output file so that we can save all results into one file
@@ -731,7 +727,7 @@ def main():
             status -= minTime
 
         if not run_bench:
-            f_results.write("- " + str(sizeDict) + " ")
+            f_results.write("- " + str(sizeDict) + "  \n")
 
         # remove generated files if asked to
         if not keepTmp:
