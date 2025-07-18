@@ -6,18 +6,18 @@
 #include "mlir/Pass/Pass.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "third_party/amd/include/TritonAMDGPUTransforms/MfmaGroup.h"
+#include "third_party/amd/include/TritonAMDGPUTransforms/SchedulerMachineModel.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
-#include "third_party/amd/include/TritonAMDGPUTransforms/SchedulerMachineModel.h"
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule"
@@ -78,8 +78,8 @@ enum class SchedDirection { TopDown, BottomUp };
   This is an optional parameter which a PriorityCalculator sets
   and a SchedulingHeuristic might use.
 
-  For example, we want to get to a dot asap, so we want to analyze which are on critical path.
-  Also, we want to set the relative order of LocalLoadOps.
+  For example, we want to get to a dot asap, so we want to analyze which are on
+  critical path. Also, we want to set the relative order of LocalLoadOps.
 */
 enum class SchedDagNodePriorityType : uint32_t {
   DotCriticalPath = 0,
@@ -87,18 +87,21 @@ enum class SchedDagNodePriorityType : uint32_t {
   Size // Keep as last to know size().
 };
 using SchedDagNodePriorityDataType = float;
-using SchedDagNodePriority = SmallVector<SchedDagNodePriorityDataType, static_cast<uint32_t>(SchedDagNodePriorityType::Size)>;
-constexpr SchedDagNodePriorityDataType schedDagNodePriorityUnset = std::numeric_limits<SchedDagNodePriorityDataType>::lowest();
+using SchedDagNodePriority =
+    SmallVector<SchedDagNodePriorityDataType,
+                static_cast<uint32_t>(SchedDagNodePriorityType::Size)>;
+constexpr SchedDagNodePriorityDataType schedDagNodePriorityUnset =
+    std::numeric_limits<SchedDagNodePriorityDataType>::lowest();
 StringRef toString(SchedDagNodePriorityType type) {
   switch (type) {
-    case SchedDagNodePriorityType::DotCriticalPath:
-      return "DotCriticalPath";
-    case SchedDagNodePriorityType::LocalStoreCriticalPath:
-      return "LocalStoreCriticalPath";
-    case SchedDagNodePriorityType::Size:
-      return "Size";
-    default:
-      return "ERROR";
+  case SchedDagNodePriorityType::DotCriticalPath:
+    return "DotCriticalPath";
+  case SchedDagNodePriorityType::LocalStoreCriticalPath:
+    return "LocalStoreCriticalPath";
+  case SchedDagNodePriorityType::Size:
+    return "Size";
+  default:
+    return "ERROR";
   }
 }
 
@@ -111,9 +114,9 @@ StringRef toString(SchedDagNodePriorityType type) {
   Nodes without children are ready to be scheduled if Direction=BottomUp.
 ******************************************************************************/
 struct SchedDagNode {
-  SchedDagNode(Operation *op) : op(op),
-      priority(static_cast<uint32_t>(SchedDagNodePriorityType::Size),
-      schedDagNodePriorityUnset) {
+  SchedDagNode(Operation *op)
+      : op(op), priority(static_cast<uint32_t>(SchedDagNodePriorityType::Size),
+                         schedDagNodePriorityUnset) {
     static int32_t serialId = 0;
     id = serialId++;
     opStr = op->getName().getStringRef();
@@ -172,38 +175,43 @@ struct SchedDagNode {
   }
 
   // Manipulate the node's priorities.
-  void setPriority(SchedDagNodePriorityType type, SchedDagNodePriorityDataType value) {
+  void setPriority(SchedDagNodePriorityType type,
+                   SchedDagNodePriorityDataType value) {
     priority[static_cast<uint32_t>(type)] = value;
   }
-  SchedDagNodePriorityDataType getPriority(SchedDagNodePriorityType type) const {
+  SchedDagNodePriorityDataType
+  getPriority(SchedDagNodePriorityType type) const {
     return priority[static_cast<uint32_t>(type)];
   }
   bool hasPriority(SchedDagNodePriorityType type) const {
     return getPriority(type) != schedDagNodePriorityUnset;
   }
   void resetPriorities() {
-    for (uint32_t i = 0; i < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++i) {
-      setPriority(static_cast<SchedDagNodePriorityType>(i), schedDagNodePriorityUnset);
+    for (uint32_t i = 0;
+         i < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++i) {
+      setPriority(static_cast<SchedDagNodePriorityType>(i),
+                  schedDagNodePriorityUnset);
     }
   }
   void propagateHigherPriorityToParents(SchedDagNodePriorityType type) {
     assert(hasPriority(type));
     for (SchedDagNode *parent : parents) {
       // First time setting priorities of this type.
-      if (!parent->hasPriority(type) || getPriority(type) > parent->getPriority(type)) {
+      if (!parent->hasPriority(type) ||
+          getPriority(type) > parent->getPriority(type)) {
         parent->setPriority(type, getPriority(type));
         parent->propagateHigherPriorityToParents(type);
       } else if (getPriority(type) == parent->getPriority(type)) {
         // Second+ time setting priorities of this type.
         parent->propagateHigherPriorityToParents(type);
       }
-
     }
   }
   void propagateLowerPriorityToChildren(SchedDagNodePriorityType type) {
     assert(hasPriority(type));
     for (SchedDagNode *child : children) {
-      if (!child->hasPriority(type) || getPriority(type) < child->getPriority(type)) {
+      if (!child->hasPriority(type) ||
+          getPriority(type) < child->getPriority(type)) {
         child->setPriority(type, getPriority(type));
         child->propagateLowerPriorityToChildren(type);
       } else if (getPriority(type) == child->getPriority(type)) {
@@ -222,7 +230,7 @@ struct SchedDagNode {
 
   // This node depends on parents; this node must be scheduled after parents.
   llvm::SetVector<SchedDagNode *> parents;
-  // Priorities are enumerated and optionally set by 
+  // Priorities are enumerated and optionally set by
   // and used by SchedulingHeuristics.
   SchedDagNodePriority priority;
 };
@@ -254,7 +262,8 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNode &node) {
     out << "@" << c->id << " ";
   }
   out << "} pr={";
-  for (uint32_t i = 0; i < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++i) {
+  for (uint32_t i = 0;
+       i < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++i) {
     SchedDagNodePriorityType type = static_cast<SchedDagNodePriorityType>(i);
     if (node.hasPriority(type)) {
       out << node.getPriority(type) << " ";
@@ -792,7 +801,6 @@ struct DataDependencyCalculator : DependencyCalculator {
 struct BarrierDependencyCalculator : DependencyCalculator {
   BarrierDependencyCalculator() : DependencyCalculator("Barrier") {}
 
-  
   // There is an implied data dependency between LDS ops and GPUBarrier.
   template <SchedDirection Direction> void calcDepsLdsGpuBar() {
 
@@ -860,7 +868,6 @@ struct BarrierDependencyCalculator : DependencyCalculator {
       }
     }
   }
-
 
   // Nodes without results still must come before cf.br.
   void calcDepsCfBr() {
@@ -1170,18 +1177,20 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   Keeping around in case want to adapt the logic to something different later.
 */
 struct PriorityOrderDependencyCalculator : DependencyCalculator {
-  PriorityOrderDependencyCalculator()
-      : DependencyCalculator("PriorityOrder") {}
+  PriorityOrderDependencyCalculator() : DependencyCalculator("PriorityOrder") {}
   void calcDeps() {
-    
-    for (uint32_t priorityIdx = 0; priorityIdx < static_cast<uint32_t>(SchedDagNodePriorityType::Size); ++priorityIdx) {
-      
-      SchedDagNodePriorityType priorityType = static_cast<SchedDagNodePriorityType>(priorityIdx);
+
+    for (uint32_t priorityIdx = 0;
+         priorityIdx < static_cast<uint32_t>(SchedDagNodePriorityType::Size);
+         ++priorityIdx) {
+
+      SchedDagNodePriorityType priorityType =
+          static_cast<SchedDagNodePriorityType>(priorityIdx);
       SchedDagNodePriorityDataType prevPriority = schedDagNodePriorityUnset;
       SchedDagNodeList prevNodes;
       SchedDagNodePriorityDataType currPriority = schedDagNodePriorityUnset;
       SchedDagNodeList currNodes;
-  
+
       for (auto node : dag->nodeList) {
         if (node->hasPriority(priorityType)) {
           auto nodePriority = node->getPriority(priorityType);
@@ -1197,7 +1206,8 @@ struct PriorityOrderDependencyCalculator : DependencyCalculator {
               depSet.insert(dep);
             }
             currNodes.push_back(node);
-          } else { // maintain order even when we dropped priority b/c other deps.
+          } else { // maintain order even when we dropped priority b/c other
+                   // deps.
             // We're on a new priority; add all deps between prev and curr.
             for (auto p : prevNodes) {
               for (auto c : currNodes) {
@@ -1225,7 +1235,7 @@ struct PriorityOrderDependencyCalculator : DependencyCalculator {
           depSet.insert(dep);
         }
       }
-    }  
+    }
   }
 };
 
@@ -1270,11 +1280,8 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
 }
 
 struct DotOrderDependencyCalculator : DependencyCalculator {
-  DotOrderDependencyCalculator()
-      : DependencyCalculator("DotTypeOrder") {}
-  void calcDeps() {
-    calcDepsOpType<triton::DotOp>(&dag->nodeList, depSet);
-  }
+  DotOrderDependencyCalculator() : DependencyCalculator("DotTypeOrder") {}
+  void calcDeps() { calcDepsOpType<triton::DotOp>(&dag->nodeList, depSet); }
 };
 
 struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
@@ -1313,7 +1320,8 @@ struct DotLdsOrderDependencyCalculator : DependencyCalculator {
     SchedDagNode *prevLds = nullptr;
 
     for (auto node : dag->nodeList) {
-      if (isa<triton::gpu::LocalLoadOp, triton::gpu::LocalStoreOp>(node->getOp())) {
+      if (isa<triton::gpu::LocalLoadOp, triton::gpu::LocalStoreOp>(
+              node->getOp())) {
         if (prevDot) {
           SchedDep dep;
           dep.parent = prevDot;
@@ -1412,11 +1420,11 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
 
 // Prefer based on node priority.
 bool preferPriority(SchedDagNode *a, SchedDagNode *b,
-                    SchedDagNodePriorityType priorityType,
-                    bool prefer = true) {
+                    SchedDagNodePriorityType priorityType, bool prefer = true) {
   if (a->hasPriority(priorityType)) {
     if (b->hasPriority(priorityType)) {
-      return (a->getPriority(priorityType) > b->getPriority(priorityType)) == prefer;
+      return (a->getPriority(priorityType) > b->getPriority(priorityType)) ==
+             prefer;
     }
     return prefer;
   }
@@ -1470,12 +1478,14 @@ SchedDagNode *findPreferredOpCategory(SchedDagNode *a, SchedDagNode *b,
 }
 
 // Prefer based on machine state.
-bool preferMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine, bool prefer = true) {
-  return (machine->getCyclesUntilOpReady(a->getOp())
-      < machine->getCyclesUntilOpReady(b->getOp())) == prefer;
+bool preferMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine,
+                        bool prefer = true) {
+  return (machine->getCyclesUntilOpReady(a->getOp()) <
+          machine->getCyclesUntilOpReady(b->getOp())) == prefer;
 }
-SchedDagNode *findPreferredMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine,
-                                      bool prefer = true) {
+SchedDagNode *findPreferredMachineState(SchedDagNode *a, SchedDagNode *b,
+                                        MachineState *machine,
+                                        bool prefer = true) {
   if (preferMachineState(a, b, machine, prefer)) {
     return a;
   } else if (preferMachineState(b, a, machine, prefer)) {
@@ -1500,7 +1510,8 @@ struct PriorityCalculator {
   virtual void calcPriorities() = 0;
 
   void addPrioritiesToDag(SchedDag *d) {
-    LDBG("PriorityCalculator<" << toString(priorityType) << ">::addPrioritiesToDag()");
+    LDBG("PriorityCalculator<" << toString(priorityType)
+                               << ">::addPrioritiesToDag()");
     dag = d;
     calcPriorities();
   }
@@ -1515,8 +1526,8 @@ struct PriorityCalculator {
   Priority = 1->N starting at the bottom of the block.
   Then priorities are propagated (unmodified) to parents and children.
   Therefore when scheduling TopDown, we know from all ops in the ready list
-  which are needed to get to DotOP(priority=9) asap, and we schedule those first.
-  Therefore we can schedule the critical path to the first DotOp.
+  which are needed to get to DotOP(priority=9) asap, and we schedule those
+  first. Therefore we can schedule the critical path to the first DotOp.
 
   We only want to populate the dag with def/use Data dependencies
   to highlight the flow of data.
@@ -1543,18 +1554,19 @@ struct PriorityCalculator {
   DotOp 21 = 2
   DotOp 22 = 1
 ******************************************************************************/
-struct DotCriticalPathPriorityCalculator
-    : public PriorityCalculator {
+struct DotCriticalPathPriorityCalculator : public PriorityCalculator {
 
-  DotCriticalPathPriorityCalculator() : PriorityCalculator(SchedDagNodePriorityType::DotCriticalPath) {}
-  
+  DotCriticalPathPriorityCalculator()
+      : PriorityCalculator(SchedDagNodePriorityType::DotCriticalPath) {}
+
   void calcPriorities() {
     SchedDagNodePriorityDataType dotPriority = 1;
     // Prioritize DotOps.
     for (auto it = dag->nodeList.rbegin(); it != dag->nodeList.rend(); ++it) {
       SchedDagNode *node = *it;
       if (isa<triton::DotOp>(node->getOp())) {
-        node->setPriority(SchedDagNodePriorityType::DotCriticalPath, dotPriority);
+        node->setPriority(SchedDagNodePriorityType::DotCriticalPath,
+                          dotPriority);
         dotPriority += 1;
       }
     }
@@ -1562,7 +1574,8 @@ struct DotCriticalPathPriorityCalculator
     // Propagate high priorities up for critical path.
     for (auto *node : dag->nodeList) {
       if (isa<triton::DotOp>(node->getOp())) {
-        node->propagateHigherPriorityToParents(SchedDagNodePriorityType::DotCriticalPath);
+        node->propagateHigherPriorityToParents(
+            SchedDagNodePriorityType::DotCriticalPath);
       }
     }
 
@@ -1570,39 +1583,41 @@ struct DotCriticalPathPriorityCalculator
     for (auto it = dag->nodeList.rbegin(); it != dag->nodeList.rend(); ++it) {
       SchedDagNode *node = *it;
       if (isa<triton::DotOp>(node->getOp())) {
-        node->propagateLowerPriorityToChildren(SchedDagNodePriorityType::DotCriticalPath);
+        node->propagateLowerPriorityToChildren(
+            SchedDagNodePriorityType::DotCriticalPath);
       }
     }
   }
 };
 
 /******************************************************************************
-  Ideally we want the DotCriticalPath to also be able to label the LocalStoreOps.
-  However LDS semantics make this hard; do we have aliasing information
-  so I can query which LocalStoreOps are needed for a LocalLoadOp.
+  Ideally we want the DotCriticalPath to also be able to label the
+  LocalStoreOps. However LDS semantics make this hard; do we have aliasing
+  information so I can query which LocalStoreOps are needed for a LocalLoadOp.
 
   Since gpu.barriers enforce that all LocalLoadOps must complete,
-  we can assume that LocalStoreOps are already correctly ordered relative to LocalLoadOps.
-  Here we just want to continue the critical path to specify what is the optimal order
-  of LocalStoreOps, and by consequence the optimal order of LoadOps.
-  Therefore we just want to ensure that LoadOps have the same order.
+  we can assume that LocalStoreOps are already correctly ordered relative to
+  LocalLoadOps. Here we just want to continue the critical path to specify what is
+  the optimal order of LocalStoreOps, and by consequence the optimal order of
+  LoadOps. Therefore we just want to ensure that LoadOps have the same order.
 
   TODO(dtanner) Expand this to direct-to-lds.
   TODO(dtanner) Update this for removing gpu.barriers.
     For this we will take a LocalLoadOp, determine the dependent LocalStoreOps
     and continue that propagation.
 ******************************************************************************/
-struct LocalStoreCriticalPathPriorityCalculator
-    : public PriorityCalculator {
+struct LocalStoreCriticalPathPriorityCalculator : public PriorityCalculator {
 
-  LocalStoreCriticalPathPriorityCalculator() : PriorityCalculator(SchedDagNodePriorityType::LocalStoreCriticalPath) {}
-  
+  LocalStoreCriticalPathPriorityCalculator()
+      : PriorityCalculator(SchedDagNodePriorityType::LocalStoreCriticalPath) {}
+
   void calcPriorities() {
     SchedDagNodePriorityDataType priority = 1;
     for (auto it = dag->nodeList.rbegin(); it != dag->nodeList.rend(); ++it) {
       SchedDagNode *node = *it;
       if (isa<triton::gpu::LocalStoreOp>(node->getOp())) {
-        node->setPriority(SchedDagNodePriorityType::LocalStoreCriticalPath, priority);
+        node->setPriority(SchedDagNodePriorityType::LocalStoreCriticalPath,
+                          priority);
         priority += 1;
       }
     }
@@ -1610,7 +1625,8 @@ struct LocalStoreCriticalPathPriorityCalculator
     // Propagate high priorities up for critical path.
     for (auto *node : dag->nodeList) {
       if (isa<triton::gpu::LocalStoreOp>(node->getOp())) {
-        node->propagateHigherPriorityToParents(SchedDagNodePriorityType::LocalStoreCriticalPath);
+        node->propagateHigherPriorityToParents(
+            SchedDagNodePriorityType::LocalStoreCriticalPath);
       }
     }
 
@@ -1618,7 +1634,8 @@ struct LocalStoreCriticalPathPriorityCalculator
     for (auto it = dag->nodeList.rbegin(); it != dag->nodeList.rend(); ++it) {
       SchedDagNode *node = *it;
       if (isa<triton::gpu::LocalStoreOp>(node->getOp())) {
-        node->propagateLowerPriorityToChildren(SchedDagNodePriorityType::LocalStoreCriticalPath);
+        node->propagateLowerPriorityToChildren(
+            SchedDagNodePriorityType::LocalStoreCriticalPath);
       }
     }
   }
@@ -1648,35 +1665,33 @@ template <SchedDirection Direction> struct SchedHeuristic {
 };
 
 /******************************************************************************
-  Schedule ops based on priority, which are DotOp and LocalStoreOp critical paths.
-  Priorities themselves have an priority order,
-  Dot is p[0] and LocalStore is p[1].
-  Therefore, when scheduling TopDown, we first compare based on p[0],
-  and only if they're the same do we examine p[1].
-  This also means that when we schedule BottomUp, not only are we looking for
-  the lowest priority ops first, but we also want to find the lowest p[1]
-  before we look for the lowest p[0].
+  Schedule ops based on priority, which are DotOp and LocalStoreOp critical
+  paths. Priorities themselves have an priority order, Dot is p[0] and LocalStore
+  is p[1]. Therefore, when scheduling TopDown, we first compare based on p[0], and
+  only if they're the same do we examine p[1]. This also means that when we
+  schedule BottomUp, not only are we looking for the lowest priority ops first,
+  but we also want to find the lowest p[1] before we look for the lowest p[0].
 ******************************************************************************/
 template <SchedDirection Direction>
-struct SchedHeuristicPriority
-    : public SchedHeuristic<Direction> {
-  
+struct SchedHeuristicPriority : public SchedHeuristic<Direction> {
+
   SchedHeuristicPriority() : SchedHeuristic<Direction>("Priority") {}
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     uint32_t start = 0;
     uint32_t stop = static_cast<uint32_t>(SchedDagNodePriorityType::Size);
     uint32_t incr = 1;
-    if (Direction==SchedDirection::BottomUp) {
+    if (Direction == SchedDirection::BottomUp) {
       // Reverse priorities for reversed direction.
-      start = static_cast<uint32_t>(SchedDagNodePriorityType::Size)-1;
+      start = static_cast<uint32_t>(SchedDagNodePriorityType::Size) - 1;
       stop = -1;
       incr = -1;
     }
-    for (uint32_t i = start; i < stop; i+=incr) {
-      SchedDagNodePriorityType priorityType = static_cast<SchedDagNodePriorityType>(i);
-      if (auto selected = findPreferredPriority(a, b, priorityType,
-          Direction==SchedDirection::TopDown)) {
+    for (uint32_t i = start; i < stop; i += incr) {
+      SchedDagNodePriorityType priorityType =
+          static_cast<SchedDagNodePriorityType>(i);
+      if (auto selected = findPreferredPriority(
+              a, b, priorityType, Direction == SchedDirection::TopDown)) {
         return selected;
       }
     }
@@ -1692,26 +1707,28 @@ struct SchedHeuristicPriority
   (rather than prefer=Direction==TopDown) because we always want a good
   machine state regardless of direction.
 
-  Priority is fallback comparison so that we also stick to the DotOp critical path.
+  Priority is fallback comparison so that we also stick to the DotOp critical
+  path.
 ******************************************************************************/
 template <SchedDirection Direction>
-struct SchedHeuristicMachineModel
-    : public SchedHeuristic<Direction> {
+struct SchedHeuristicMachineModel : public SchedHeuristic<Direction> {
 
-    SchedHeuristicMachineModel() : SchedHeuristic<Direction>("MachineModel"),
+  SchedHeuristicMachineModel()
+      : SchedHeuristic<Direction>("MachineModel"),
         model(std::make_shared<MachineModelGFX942>()),
-        machine(model.get(), Direction==SchedDirection::TopDown) {}
+        machine(model.get(), Direction == SchedDirection::TopDown) {}
 
   void begin() {
     machine.reset();
     scheduleCycles.clear();
   };
-  
+
   /*
     First priority is to get to dot.
   */
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
-    // Prefer based on machine state; will select if one cooled down and other isn't.
+    // Prefer based on machine state; will select if one cooled down and other
+    // isn't.
     if (auto selected = findPreferredMachineState(a, b, &machine, true)) {
       return selected;
     }
@@ -1721,14 +1738,16 @@ struct SchedHeuristicMachineModel
   }
 
   void selectedOp(SchedDagNode *node) {
-    // MachineModelOpProperties properties = machine.machineModel->getOpProperties(node->getOp());
+    // MachineModelOpProperties properties =
+    // machine.machineModel->getOpProperties(node->getOp());
     machine.scheduleOp(node->getOp());
     scheduleCycles.push_back(std::make_pair(node, machine.getCurrentCycle()));
     // For anything else (non def/use) that waits, set data dependencies.
-    if constexpr (Direction==SchedDirection::TopDown) {
+    if constexpr (Direction == SchedDirection::TopDown) {
       if (opCategoryMem(node)) {
         for (auto child : node->getChildren()) {
-          if (llvm::isa<mlir::gpu::BarrierOp, mlir::cf::BranchOp>(child->getOp())) {
+          if (llvm::isa<mlir::gpu::BarrierOp, mlir::cf::BranchOp>(
+                  child->getOp())) {
             machine.updateOpDataReady(child->getOp(), node->getOp());
           }
         }
@@ -1744,9 +1763,7 @@ struct SchedHeuristicMachineModel
     }
   }
 
-  void dump(llvm::raw_ostream &out) {
-    out << "MachineState: " << machine;
-  };
+  void dump(llvm::raw_ostream &out) { out << "MachineState: " << machine; };
 
   void end() {
     LDBG("Machine Schedule Cycles");
@@ -1767,7 +1784,8 @@ struct SchedHeuristicMachineModel
 struct SchedHeuristicOriginalOrder
     : public SchedHeuristic<SchedDirection::TopDown> {
 
-  SchedHeuristicOriginalOrder() : SchedHeuristic<SchedDirection::TopDown>("OriginalOrder") {}
+  SchedHeuristicOriginalOrder()
+      : SchedHeuristic<SchedDirection::TopDown>("OriginalOrder") {}
 
   SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) {
     if (auto selected = findPreferredOpCategory(a, b, opCategoryNop)) {
@@ -1804,7 +1822,8 @@ struct SchedManager {
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
          << ", Heuristic=" << heuristic->getName());
-    // Reset deps right before rescheduling b/c analysis passes may have altered them.
+    // Reset deps right before rescheduling b/c analysis passes may have altered
+    // them.
     dag.resetDeps();
     LDBG("SchedDag before reschedule(" << rescheduleId << ")");
     LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
@@ -1848,7 +1867,8 @@ struct SchedManager {
 
   // Single pass of rescheduling the dag.
   template <SchedDirection Direction>
-  void scheduleNextOp(SchedHeuristic<Direction> *heuristic, SchedDagNodeList &rescheduledNodes) {
+  void scheduleNextOp(SchedHeuristic<Direction> *heuristic,
+                      SchedDagNodeList &rescheduledNodes) {
     const bool printDetails = rescheduleId > 0;
     // Print ReadyNodes and HeuristicState
     const auto &readyNodes = dag.getReadyNodes();
@@ -1947,32 +1967,34 @@ struct TritonAMDGPURescheduleOps
     // Add Data deps based on def-use chains.
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
     if (dumpGraphs) {
-      LLVM_DEBUG(
-        LDBG("Dag: data");
-        schedManager.dag.dumpDotFormat(llvm::dbgs());
-      );
+      LLVM_DEBUG(LDBG("Dag: data");
+                 schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
     // Assume dots are in ideal order and propagate their critical path.
+    schedManager.addDeps(std::make_unique<DotOrderDependencyCalculator>());
+    // Add initial priorities while only data deps exist, before adding other
+    // deps.
+    schedManager.addPriorities(
+        std::make_unique<DotCriticalPathPriorityCalculator>());
+    // Assume LocalStoreOps are in ideal order and propagate their critical
+    // path.
     schedManager.addDeps(
-      std::make_unique<DotOrderDependencyCalculator>());
-    // Add initial priorities while only data deps exist, before adding other deps.
-    schedManager.addPriorities(std::make_unique<DotCriticalPathPriorityCalculator>());
-    // Assume LocalStoreOps are in ideal order and propagate their critical path.
-    schedManager.addDeps(
-      std::make_unique<LocalStoreOrderDependencyCalculator>());
-    schedManager.addPriorities(std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
+        std::make_unique<LocalStoreOrderDependencyCalculator>());
+    schedManager.addPriorities(
+        std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
     // Add dependencies for barriers (gpu.barrier, sched.barrier, setprio...).
     schedManager.addDeps(std::make_unique<BarrierDependencyCalculator>());
     // After creating dependencies for barriers, repeat priority analysis.
     // This won't override any previous priorities, but for tertiary ops it
-    // determines which are needed to unblock barriers which block other priorities.
-    schedManager.addPriorities(std::make_unique<DotCriticalPathPriorityCalculator>());
-    schedManager.addPriorities(std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
+    // determines which are needed to unblock barriers which block other
+    // priorities.
+    schedManager.addPriorities(
+        std::make_unique<DotCriticalPathPriorityCalculator>());
+    schedManager.addPriorities(
+        std::make_unique<LocalStoreCriticalPathPriorityCalculator>());
     if (dumpGraphs) {
-      LLVM_DEBUG(
-        LDBG("Dag: data, dot:dot, ls:ls, bar:*");
-        schedManager.dag.dumpDotFormat(llvm::dbgs());
-      );
+      LLVM_DEBUG(LDBG("Dag: data, dot:dot, ls:ls, bar:*");
+                 schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
     SchedHeuristicPriority<SchedDirection::TopDown> shp;
     schedManager.reschedule<SchedDirection::TopDown>(&shp);
@@ -1999,10 +2021,8 @@ struct TritonAMDGPURescheduleOps
     schedManager.addDeps(
         std::make_unique<GlobalLoadOrderDependencyCalculator>());
     if (dumpGraphs) {
-      LLVM_DEBUG(
-        LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl");
-        schedManager.dag.dumpDotFormat(llvm::dbgs());
-      );
+      LLVM_DEBUG(LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl");
+                 schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
     // Now that we've ordered lds ops, spread them out with machine model.
     // This comes first because we want LL and LS as late as possible.
@@ -2023,13 +2043,12 @@ struct TritonAMDGPURescheduleOps
       - Delays LoadOps until issuing them is hidden by DotOps.
       - Spreads out LoadOps.
     */
-    schedManager.addDeps(
-      std::make_unique<DotLdsOrderDependencyCalculator>());
+    schedManager.addDeps(std::make_unique<DotLdsOrderDependencyCalculator>());
     if (dumpGraphs) {
       LLVM_DEBUG(
-        LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl, ll:dot, ls:dot");
-        schedManager.dag.dumpDotFormat(llvm::dbgs());
-      );
+          LDBG(
+              "Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl, ll:dot, ls:dot");
+          schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
     SchedHeuristicMachineModel<SchedDirection::TopDown> sh2;
     schedManager.reschedule<SchedDirection::TopDown>(&sh2);
@@ -2037,13 +2056,12 @@ struct TritonAMDGPURescheduleOps
     /*
       TODO(dtanner) - flash-attention (or anything with multiple GL/LS)
       will need to have some anti-deps to keep some GL after LS so they
-      can use the same registers. This should probably be added after DotLdsOrder
-      dependencies and before the machine model top-down, so that it just delays
-      the LoadOps even further until after the anti-dep.
+      can use the same registers. This should probably be added after
+      DotLdsOrder dependencies and before the machine model top-down, so that it
+      just delays the LoadOps even further until after the anti-dep.
       schedManager.addDeps(std::make_unique<LocalStoreGlobalLoadAntiDepsDependencyCalculator>());
       This is already the beginning of working on this.
       schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
-
     */
 
     LDBG("Rescheduled Ops:");
@@ -2075,14 +2093,12 @@ struct TritonAMDGPURescheduleOps
       if (succeeded(verify(block))) {
         LDBG("OpList before applyReschedulingPasses()");
         for (auto it = block->begin(); it != block->end(); ++it) {
-          LLVM_DEBUG((*it).print(llvm::dbgs());
-          llvm::dbgs() << "\n";);
+          LLVM_DEBUG((*it).print(llvm::dbgs()); llvm::dbgs() << "\n";);
         }
         applyReschedulingPasses(block);
         LDBG("OpList after applyReschedulingPasses()");
         for (auto it = block->begin(); it != block->end(); ++it) {
-          LLVM_DEBUG((*it).print(llvm::dbgs());
-          llvm::dbgs() << "\n";);
+          LLVM_DEBUG((*it).print(llvm::dbgs()); llvm::dbgs() << "\n";);
         }
       }
     }

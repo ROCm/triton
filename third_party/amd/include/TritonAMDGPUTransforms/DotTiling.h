@@ -10,6 +10,9 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
+#undef LLVM_DEBUG
+#define LLVM_DEBUG(X) X
+
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -105,11 +108,11 @@ SmallVector<unsigned, 3> getMfmasPerRep(const ArrayRef<int64_t> &ctaTile,
       static_cast<unsigned>(repTile[2] / mfmaShape[2])};
   LDBG("mfmasPerRep: " << mfmasPerRep[0] << "x" << mfmasPerRep[1] << "x"
                        << mfmasPerRep[2]);
-  if (mfmasPerRep[0] < 1 || mfmasPerRep[1] < 1 || mfmasPerRep[2] < 1) {
-    llvm::errs() << "DotTiling::getMfmasPerRep() - Invalid combination of "
-                    "ctaTile, warpsPerCta and mfmaShape.\n";
-    return SmallVector<unsigned, 3>({1, 1, 1});
-  }
+  // It is valid for a cta or warp tile to be so small that it doesn't
+  // fully utilize an mfma op. Therefore we round up numReps.
+  mfmasPerRep[0] = std::max(1U, mfmasPerRep[0]);
+  mfmasPerRep[1] = std::max(1U, mfmasPerRep[1]);
+  mfmasPerRep[2] = std::max(1U, mfmasPerRep[2]);
   return mfmasPerRep;
 }
 
