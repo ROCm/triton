@@ -78,6 +78,7 @@ def get_full_tuning_space(num_cus):
 
     return configs
 
+
 def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):
     pruned_configs = []
 
