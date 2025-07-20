@@ -348,3 +348,104 @@ fused-attention-fwd-d128-layoutbshd-causal1:
 The kernel has 34 spills.
 
 The dumped IR and ISA is saved in `python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal1_e12cbd8339b`
+
+## Bottleneck
+
+Let's focus on the kernel with causal=0 and remat llvm branch, i.e.
+`python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal0_remat`
+
+mfma efficiency inside the loop: 62%, which means the exposed cycles is about 66% of mfma cycles.
+Now we want to have a breakdown of this 66% number.
+
+### 1st cluster: compute DOT1 + VEC2
+
+Without any interference from other waves, the 1st compute cluster takes 632 cycles.
+in which mfma takes 512 cycles.
+The exposed cycles (632-512 = 120) is about 11.7% of the mfma cycles.
+
+There are 3 sources of the exposed cycles
+1. There are 13 `v_mul` instructions not covered by mfma, which takes 52 cycles,
+   i.e. 5% of mfma cycles.
+2. There are 7 valu/salu instructions before the first mfma,
+   which take up 28 cycles, i.e. 2.7% of mfma cycles.
+3. There 7 valu/salu instructions from softmax that cannot be covered by mfma.
+   And `s_nop` and `v_permlane32_swap` each takes 8 cycles.
+   So there are 36 cycles exposed, i.e. 3.5% of mfma cycles.
+   
+Todo:
+1. The exposed `v_mul` can be combined as `v_pk_mul`, 
+   which can save 28 cycles, i.e. 2.7% of mfma cycles.
+2. Investigate why `s_nop` and `v_permlane32_swap` each takes 8 cycles.
+3. Investigate why there are `v_mov` and `s_mov` instructions before the first mfma
+   and see if we can remove them.
+
+### 2nd cluster: memory LRV + ACK
+
+Memory cluster itself does not count into mfma efficiency.
+However, there are valu/salu instructions in the memory cluster, which can
+delay the execution of valu/salu instructions in the compute cluster.
+
+1. There are 17 salu + 1 valu instructions at the beginning of the memory
+   cluster, which is overlapped with the leading valu/salu instructions
+   in the 1st cluster. 
+   This makes the valu/salu instructions take 112, rather than 28 cycles,
+   in the compute cluster, which leads to another 8.2% mfma cycles to be
+   exposed.
+2. There are 13 valu instructions for LRV. These will delay the valu instructions
+   in the compute cluster, which leads to another 5.1% mfma cycles to be exposed.
+
+Todo:
+1. We need to try paddedShared layout + AsyncCopy to see if fewer instructions
+   are needed to calculate the addresses.
+   
+### 3rd cluster: compute DOT2 + VEC1
+
+
+1. There are 12 `v_exp` instructions that cannot be covered by mfma, which
+   leads to 9.3% mfma cycles exposed.
+2. 1 `v_setprio` before the 1st mfma
+3. Some valu instructions are taking longer than expected.
+   From the averaged cycles, there are 118 extra cycles, which is 11.5%
+   exposed mfma cycles.
+   Some of these cycles can be explained by the other memory cluster on
+   the same SIMD. But some long cyles cannot.
+   
+
+Todo
+1. There are 5 `s_waitcnt` instructions waiting for LDS.
+   We can use one `s_waitcnt lgkmcnt(0)` at the beginning of the compute cluster
+   to wait for all LDS instructions to finish.
+   This can save 1.5% exposed mfma cycles.
+2. Investigate why `s_nop` and `v_permlane32_swap` each takes 8 cycles.
+3. Investigate why some valu instructions take too long to execute/issue.
+
+### 4th cluster: memory LRK + ACV
+
+
+1. There are 12 salu instructions for AsyncCopy instructions.
+2. There are 8 `v_add3_u32` instructions to update the addresses of LRK.
+   This is about 5% exposed mfma cycles.
+
+Todo
+1. PaddedShared layout should resolve both the above two problems
+
+
+## Ablation Experiment
+
+### Remove valu from memory cluster
+
+The modified assembly code is saved as 
+`study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal0_remat/attn_fwd.s.rm-valu`
+
+```bash
+cd <triton dir> && git pull
+AMD_INSERT_AMDGCN=[path to attn_fwd.s.rm-valu]   python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+```
+Output
+```bash
+fused-attention-fwd-d128-layoutbshd-causal0:
+   BATCH    HQ    HK  N_CTX_Q  N_CTX_K       triton      torch
+0    1.0  64.0  64.0  16384.0  16384.0  1127.255706  29.873194
+```
+This version has 1127 tflops with mfma efficiency = 65%.
+So this version must has a much higher freq. Need to confirm with agt.
