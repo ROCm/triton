@@ -232,6 +232,119 @@ It has only 7 spills, but some of them are inside the loop, which kills the perf
 
 
 
+# Performance report 7/20/2025
+
+## Reproduce perf numbers with pre-installed llvm and triton
+1. docker pull rocmshared/triton-attn-bench:iglp10
+2. start a container (this example names the container as `test_triton_fav3`)
+   ```bash
+   sudo docker run -it --network=host --device=/dev/kfd --device=/dev/dri --group-add video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v $HOME:/data --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 --name test_triton_fav3 rocmshared/triton-attn-bench:iglp10
+   ```
+3. check status
+  - `cd /var/lib/jenkins/triton && git log -1`
+    ```bash
+    commit 553023c924bf402b247071fdabf72e0ca71e2840 (HEAD -> shared/triton-gfx950-launch
+    , origin/shared/triton-gfx950-launch)
+    Author: root <root@asrock-126-009c.aus.dcgpu>
+    Date:   Sat Jul 5 00:02:25 2025 +0000
+    
+        Add iglp(10)
+    ```
+  - `cd /var/lib/jenkins/llvm-project && git log -1`
+     ```bash
+     commit 0a49c1fa2cc72927ab31c852f05822bd8df4d95b (HEAD -> TritonInterleaveAndRematRebase0, 
+     origin/TritonInterleaveAndRematRebase0)
+     Author: Jeffrey Byrnes <Jeffrey.Byrnes@amd.com>
+     Date:   Thu May 22 13:34:53 2025 -0700
+     
+         Auto select good flags
+     
+         Change-Id: I5aa9f71c403215205fb98d79d866453659a42661
+     ```
+4. batch benchmark
+   ```bash
+   cd /var/lib/jenkins/triton && ./bench.sh
+   ```
+5. Run a single config with causal = 0
+   ```bash
+   rm -rf ~/.triton/cache/
+   TRITON_HIP_USE_ASYNC_COPY=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE=1 TRITON_HIP_ASYNC_FAST_SWIZZLE=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+   ```
+   Output
+   ```bash
+   fused-attention-fwd-d128-layoutbshd-causal0:
+      BATCH    HQ    HK  N_CTX_Q  N_CTX_K      triton      torch
+   0    1.0  64.0  64.0  16384.0  16384.0  924.917845  70.473362
+   ```
+   Triton perf is 924 tflops
+   
+   The dumped IR and ISA is saved in `python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal0_remat`
+6. Run single config with causal = 1
+   ```bash
+   rm -rf ~/.triton/cache/
+   TRITON_HIP_USE_ASYNC_COPY=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE=1 TRITON_HIP_ASYNC_FAST_SWIZZLE=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 1 -layout "bshd"
+   ```
+   Output
+   ```bash
+   fused-attention-fwd-d128-layoutbshd-causal1:
+      BATCH    HQ    HK  N_CTX_Q  N_CTX_K      triton      torch
+   0    1.0  64.0  64.0  16384.0  16384.0  650.500986  67.068967
+   ```
+   Triton perf is 650 tflops
+   
+   The dumped IR and ISA is saved in `python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal1_remat`
+
+## Build triton with custom LLVM
+
+Instruction can be found [here](https://github.com/triton-lang/triton/blob/main/README.md#building-with-a-custom-llvm).
+The alternative method is tested.
+
+## Examine IR and ISA
+
+IR and ISA dump can be found in the cache: `~/.triton/cache/`.
+To quickly locate the dump dir, use `find ~/.triton/cache/* -name attn_fwd.llir`
 
 
 
+## FAv3 perf without Remat
+
+The above perf numbers are from triton with a customized LLVM at https://github.com/jrbyrnes/llvm-project/commits/TritonInterleaveAndRematRebase0/
+
+Here is the command to run triton without the above patch
+```bash
+cd /var/lib/jenkins/llvm-project/build
+git checkout e12cbd8339b8956
+ninja
+
+cd /var/lib/jenkins/triton
+git checkout e347b1418e0
+export LLVM_BUILD_DIR=/var/lib/jenkins/llvm-project/build/
+LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib LLVM_SYSPATH=$LLVM_BUILD_DIR pip install -e .
+
+rm -rf ~/.triton/cache/
+TRITON_HIP_USE_ASYNC_COPY=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE=1 TRITON_HIP_ASYNC_FAST_SWIZZLE=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+```
+Output
+```bash
+fused-attention-fwd-d128-layoutbshd-causal0:
+   BATCH    HQ    HK  N_CTX_Q  N_CTX_K      triton      torch
+0    1.0  64.0  64.0  16384.0  16384.0  890.469697  70.490166
+```
+And the kernel has 2 spills.
+
+The dumped IR and ISA is saved in `python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal0_e12cbd8339b`
+
+Causal = 1
+```bash
+rm -rf ~/.triton/cache/
+   TRITON_HIP_USE_ASYNC_COPY=1 TRITON_HIP_USE_BLOCK_PINGPONG=1 TRITON_HIP_ASYNC_COPY_BYPASS_PERMUTE=1 TRITON_HIP_ASYNC_FAST_SWIZZLE=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 1 -layout "bshd"
+```
+Output
+```bash
+fused-attention-fwd-d128-layoutbshd-causal1:
+   BATCH    HQ    HK  N_CTX_Q  N_CTX_K      triton      torch
+0    1.0  64.0  64.0  16384.0  16384.0  483.577941  70.490166
+```
+The kernel has 34 spills.
+
+The dumped IR and ISA is saved in `python/perf-kernels/study_4-stage/MI350/perf_report_7-20-2025/b1-d128-h64-s16384-causal1_e12cbd8339b`
