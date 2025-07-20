@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import subprocess
 import functools
 from pathlib import Path
@@ -392,6 +393,16 @@ class HIPBackend(BaseBackend):
         # Disable inlining of print related functions,
         # because inlining of these function could slow down compilation significantly
         amd.disable_print_inline(llvm_mod)
+
+        if "AMD_INSERT_LLVM_IR" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_LLVM_IR"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find llvm ir file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            file_content = ''.join(file_content)
+            return file_content
+
         return str(llvm_mod)
 
     @staticmethod
@@ -411,6 +422,15 @@ class HIPBackend(BaseBackend):
         if options.schedule_hint == 'attention':
             flags.append('sink-insts-to-avoid-spills')
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
+
+        if "AMD_INSERT_AMDGCN" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            amdgcn = ''.join(file_content)
+
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
