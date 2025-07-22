@@ -763,7 +763,7 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
                          waitAtTail);
     }
 
-    if (useAsyncCopy && !waitAtTail) {
+    if (useAsyncCopy) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
       tt::combineRedundantWaitOps(waitOps);
