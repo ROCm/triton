@@ -115,14 +115,13 @@ struct StreamCopyChainOps {
   tt::LoadOp loadOp;
   ttg::MemDescSubviewOp subviewOp;
   ttg::LocalStoreOp localStoreOp;
-  ttg::LocalLoadOp maybeLocalLoadOp;
 };
 
 struct AsyncCopyChainOps {
+  ttg::MemDescSubviewOp subviewOp;
   ttg::AsyncCopyGlobalToLocalOp copyOp;
   ttg::AsyncCommitGroupOp commitOp;
   ttg::AsyncWaitOp waitOp;
-  ttg::LocalLoadOp maybeLocalLoadOp;
 };
 
 using StreamOpVariant = std::variant<StreamCopyChainOps, AsyncCopyChainOps>;
@@ -148,17 +147,22 @@ AsyncCopyChainOps createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   auto maybeSharedLoad = tt::replaceUsesWithLocalLoad(
       builder, loadOp->getResult(0), viewLoad, waitOp);
 
-  return {copyOp, commitOp, waitOp, maybeSharedLoad};
+  return {viewLoad, copyOp, commitOp, waitOp};
 }
 
-void scheduleLocalLoad(ttg::LocalLoadOp localLoadOp,
-                       tt::CoarseSchedule &schedule, int stage,
-                       const tt::CoarseSchedule::Cluster &cluster) {
-  schedule.insert(localLoadOp, stage, cluster);
-  // If its only user is a ConvertLayout, we place it into the same stage so
-  // it can be folded by a later pass
-  if (localLoadOp->hasOneUse()) {
-    auto cvt = *localLoadOp->getUsers().begin();
+// Schedules all LocalLoadLike ops using the subview. If the op has a single
+// ttg.convert_layout as its user we also schedule it so we can fold it later
+void scheduleSubViewUsers(ttg::MemDescSubviewOp subviewOp,
+                          tt::CoarseSchedule &schedule, int stage,
+                          const tt::CoarseSchedule::Cluster &cluster) {
+  for (auto user : subviewOp->getUsers()) {
+    if (!user->hasTrait<OpTrait::LocalLoadTrait>())
+      continue;
+
+    schedule.insert(user, stage, cluster);
+    if (!user->hasOneUse())
+      continue;
+    auto cvt = *user->getUsers().begin();
     if (isa<ttg::ConvertLayoutOp>(cvt)) {
       schedule.insert(cvt, stage, cluster);
     }
@@ -176,10 +180,9 @@ StreamCopyChainOps createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   tt::LoadOp newLoadOp = cast<tt::LoadOp>(builder.clone(*loadOp));
   auto storeOp = builder.create<ttg::LocalStoreOp>(loc, newLoadOp, viewLoad);
-  auto maybeLocalLoad =
-      tt::replaceUsesWithLocalLoad(builder, loadOp->getResult(0), viewLoad);
+  tt::replaceUsesWithLocalLoad(builder, loadOp->getResult(0), viewLoad);
 
-  return {newLoadOp, viewLoad, storeOp, maybeLocalLoad};
+  return {newLoadOp, viewLoad, storeOp};
 }
 
 // Returns the given |inputValue|'s dot user result encoding and updates |opIdx|
@@ -535,7 +538,7 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
 void scheduleAsyncCopy(const AsyncCopyChainOps &asyncOps, tt::LoadOp loadOp,
                        tt::CoarseSchedule &schedule, const Stages &stages,
                        const Clusters &clusters) {
-  auto [copyOp, commitOp, waitOp, maybeLocalLoadOp] = asyncOps;
+  auto [subviewOp, copyOp, commitOp, waitOp] = asyncOps;
   auto [loadStage, loadCluster] = schedule[loadOp];
   schedule.insert(copyOp, loadStage, loadCluster);
   // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
@@ -551,16 +554,16 @@ void scheduleAsyncCopy(const AsyncCopyChainOps &asyncOps, tt::LoadOp loadOp,
     schedule.insert(waitOp, stages[SCHED_ASYNC_WAIT],
                     clusters[SCHED_ASYNC_WAIT]);
 
-  if (maybeLocalLoadOp && stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE]) {
-    scheduleLocalLoad(maybeLocalLoadOp, schedule, stages[SCHED_LOCAL_LOAD],
-                      clusters[SCHED_LOCAL_LOAD]);
+  if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE]) {
+    scheduleSubViewUsers(subviewOp, schedule, stages[SCHED_LOCAL_LOAD],
+                         clusters[SCHED_LOCAL_LOAD]);
   }
 }
 
 void scheduleStreamCopy(const StreamCopyChainOps &streamOps,
                         tt::LoadOp oldLoadOp, tt::CoarseSchedule &schedule,
                         const Stages &stages, const Clusters &clusters) {
-  auto [newLoadOp, subviewOp, localStoreOp, maybeLocalLoadOp] = streamOps;
+  auto [newLoadOp, subviewOp, localStoreOp] = streamOps;
   auto [loadStage, loadCluster] = schedule[oldLoadOp];
 
   schedule.insert(newLoadOp, loadStage, loadCluster);
@@ -568,9 +571,9 @@ void scheduleStreamCopy(const StreamCopyChainOps &streamOps,
                   clusters[SCHED_LOCAL_STORE]);
   schedule.insert(localStoreOp, stages[SCHED_LOCAL_STORE],
                   clusters[SCHED_LOCAL_STORE]);
-  if (maybeLocalLoadOp && stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE]) {
-    scheduleLocalLoad(maybeLocalLoadOp, schedule, stages[SCHED_LOCAL_LOAD],
-                      clusters[SCHED_LOCAL_LOAD]);
+  if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE]) {
+    scheduleSubViewUsers(subviewOp, schedule, stages[SCHED_LOCAL_LOAD],
+                         clusters[SCHED_LOCAL_LOAD]);
   }
 }
 
