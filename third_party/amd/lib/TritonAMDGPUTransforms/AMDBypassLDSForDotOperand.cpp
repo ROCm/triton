@@ -81,6 +81,10 @@
 //    MoE-like kernels). Bypassing for operand 0 is not yet implemented.
 //===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "tritonamdgpu-bypass-lds"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+
 using namespace mlir;
 namespace ttg = triton::gpu;
 
@@ -148,20 +152,26 @@ struct TritonAMDGPUBypassLDSForDotOperandPass
     auto srcType = dyn_cast<RankedTensorType>(convertOp.getOperand().getType());
     auto dstType = dyn_cast<RankedTensorType>(convertOp.getType());
 
-    if (!srcType || !dstType)
+    LDBG("ConvertOp-under-test: " << convertOp);
+    if (!srcType || !dstType) {
+      LDBG("Either srcType or dstType is not RankedTensorType");
       return false;
+    }
 
     auto srcBlocked = dyn_cast<ttg::BlockedEncodingAttr>(srcType.getEncoding());
     auto dstDotOp =
         dyn_cast<ttg::DotOperandEncodingAttr>(dstType.getEncoding());
-    if (!srcBlocked || !dstDotOp)
+    if (!srcBlocked || !dstDotOp) {
+      LDBG("Either srcType is not blocked or dstType is not DotOpEncoding");
       return false;
+    }
 
     // srcBlocked.getOrder[0] == 0 is the requirement for opIdx 1 tensor to be K
     // contig (required condition 1) from the above doc).
     auto mfmaLayout = dyn_cast<ttg::AMDMfmaEncodingAttr>(dstDotOp.getParent());
+    LDBG("bypass: dstDotOp.getKWidth() = " << dstDotOp.getKWidth());
     return mfmaLayout &&
-           (dstDotOp.getKWidth() == 8 || dstDotOp.getKWidth() == 16) &&
+           (dstDotOp.getKWidth() == 8 || dstDotOp.getKWidth() == 16 || dstDotOp.getKWidth() == 4 || dstDotOp.getKWidth() == 64) &&
            mfmaLayout.getWarpsPerCTA()[0] == 1 && dstDotOp.getOpIdx() == 1 &&
            srcBlocked.getOrder()[0] == 0;
   }
