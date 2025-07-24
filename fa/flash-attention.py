@@ -30,6 +30,34 @@ import triton
 import triton.language as tl
 from utils.benchmark_utils import get_available_models, get_model_configs
 
+@triton.jit
+def remap_xcd(pid, GRID_MN, NUM_XCDS: tl.constexpr = 8):
+    ## pid remapping on xcds
+    # Number of pids per XCD in the new arrangement
+    pids_per_xcd = (GRID_MN + NUM_XCDS - 1) // NUM_XCDS
+    # When GRID_MN cannot divide NUM_XCDS, some xcds will have
+    # pids_per_xcd pids, the other will have pids_per_xcd - 1 pids.
+    # We calculate the number of xcds that have pids_per_xcd pids as
+    # tall_xcds
+    tall_xcds = GRID_MN % NUM_XCDS
+    tall_xcds = NUM_XCDS if tall_xcds == 0 else tall_xcds
+    # Compute current XCD and local pid within the XCD
+    xcd = pid % NUM_XCDS
+    local_pid = pid // NUM_XCDS
+    # Calculate new pid based on the new grouping
+    # Note that we need to consider the following two cases:
+    # 1. the current pid is on a tall xcd
+    # 2. the current pid is on a short xcd
+    if xcd < tall_xcds:
+        pid = xcd * pids_per_xcd + local_pid
+    else:
+        pid = (
+            tall_xcds * pids_per_xcd
+            + (xcd - tall_xcds) * (pids_per_xcd - 1)
+            + local_pid
+        )
+
+    return pid
 
 class MetaData():
     cu_seqlens_q = None
@@ -487,8 +515,9 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh
             off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head  # at which head are we inside the sample
             start_m = tile_id % num_tiles_per_sample % num_tiles_per_head  # at which tile are we inside the head
         else:
-            start_m = tl.program_id(0)
-            off_h_q = tl.program_id(1)
+            off_h_q = tl.program_id(0)
+            off_h_q = remap_xcd(off_h_q, HQ)
+            start_m = tl.program_id(1)
             off_z = tl.program_id(2)
 
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -1139,7 +1168,7 @@ class _attention(torch.autograd.Function):
             grid = lambda META: (min(NUM_CU * META['GRID_CU_MULTIP'],
                                      triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']) * nheads_q * batch), )
         else:
-            grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
+            grid = lambda META: (nheads_q, triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), batch)
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
