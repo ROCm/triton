@@ -105,7 +105,7 @@ bool doesSwizzleInsideWarp(RewriterBase &rewriter,
                            const LinearLayout &srcToSharedLayout,
                            unsigned threadsPerWarp);
 
-// Return true if op is used by DotScaledOp or UpcastMXFPOp ops.
+// Return true if op is used by DotScaledOp.
 bool isUsedByDotScaledOp(Operation *op);
 
 // Check if the result of this tl.dot is used as opA of another tl.dot
