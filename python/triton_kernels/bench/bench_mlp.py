@@ -36,8 +36,8 @@ def quantize(w, dtype, dev, **opt):
     else:
         assert dtype == "mx4", f"{dtype=}"
         w, w_scale = downcast_to_mxfp(w.to(torch.bfloat16), torch.uint8, axis=1)
-        w = convert_layout(wrap_torch_tensor(w, dtype=FP4), opt["value_layout"])
-        w_scale = convert_layout(wrap_torch_tensor(w_scale), opt["scale_layout"])
+        #w = convert_layout(wrap_torch_tensor(w, dtype=FP4), opt["value_layout"])
+        #w_scale = convert_layout(wrap_torch_tensor(w_scale), opt["scale_layout"])
         return w, InFlexData(), w_scale
 
 
@@ -82,7 +82,7 @@ class PerfData:
         return max(min_t_flop, min_t_bw) / self.time
 
 
-def bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP, EP, name):
+def bench_mlp(batch, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP, EP, name):
     assert n_expts_tot % EP == 0
     assert dim2 % TP == 0
     dev = "cuda"
@@ -91,11 +91,12 @@ def bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP,
     # weights
     wg = torch.randn((dim1, n_expts_tot), device=dev)
     w1 = torch.randn((n_expts_tot // EP, dim1, dim2 // TP), device=dev)
-    w2 = torch.randn((n_expts_tot // EP, dim2 // TP // 2, dim1), device=dev)
+    w2 = torch.randn((n_expts_tot // EP, dim2 // TP // 2, dim3), device=dev)
+    #w2 = torch.randn((n_expts_tot // EP, dim2 // TP, dim3), device=dev)
     # biases
     bg = torch.randn((n_expts_tot, ), device=dev)
     b1 = torch.randn((n_expts_tot // EP, dim2 // TP), device=dev)
-    b2 = torch.randn((n_expts_tot // EP, dim1), device=dev)
+    b2 = torch.randn((n_expts_tot // EP, dim3), device=dev)
 
     # -- numerics --
     optg = dict()
@@ -115,7 +116,7 @@ def bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP,
     w1, w1_flex, w1_scale = quantize(w1, w_dtype, dev, **opt1)
     w2, w2_flex, w2_scale = quantize(w2, w_dtype, dev, **opt2)
     pcg = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=wg_flex), weight_scale=wg_scale)
-    act = FusedActivation(FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")), (1.0, 1.0), 2)
+    act = FusedActivation(FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")), (1.0, None), 2)
     pc1 = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=w1_flex), weight_scale=w1_scale)
     pc2 = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=w2_flex), weight_scale=w2_scale)
 
@@ -145,7 +146,10 @@ def bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP,
     # -- analyze --
     gf, _, _, info = viewer.read(fpath)
     # Now the dataframe only contains leave nodes (i.e., kernels) that perform matmuls
-    matmuls = gf.filter("MATCH ('*', c) WHERE c.'name' =~ '.*matmul.*' AND c IS LEAF").dataframe
+    #matmuls = gf.filter("MATCH ('*', c) WHERE c.'name' =~ '.*matmul.*' AND c IS LEAF").dataframe
+    matmuls = gf.filter("MATCH ('*', c) WHERE c.'name' =~ '.*matmul.*swiglu*' AND c IS LEAF").dataframe
+    #matmuls = gf.filter(f"MATCH ('*', c) WHERE c.'name' =~ '.*matmul.*N = {dim3}*' AND c IS LEAF").dataframe
+    #matmuls = gf.filter(f"MATCH ('*', c) WHERE c.'name' =~ '.*matmul.*N = {dim2}*' AND c IS LEAF").dataframe
     bytes = matmuls["bytes"].sum()
     flops = sum(matmuls[[c for c in ["flops8", "flops16"] if c in matmuls.columns]].sum())
     time = matmuls["time (ns)"].sum()
@@ -156,7 +160,7 @@ def bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP,
                     device_info=device_info)
 
 
-def roofline_mlp(batch_ranges, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP=1, EP=1, name="",
+def roofline_mlp(batch_ranges, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP=1, EP=1, name="",
                  verbose=True):
     from itertools import chain
     from bisect import bisect_left
@@ -167,11 +171,12 @@ def roofline_mlp(batch_ranges, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_
     print(f"Benchmarking {bench_case}...")
     print("===============================================================")
     for batch in batches:
-        perfs += [bench_mlp(batch, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP, EP, name)]
+        perfs += [bench_mlp(batch, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dtype, w_dtype, TP, EP, name)]
         if verbose:
-            print(f"Batch: {batch}; Util: {perfs[-1].util}; TFLOPS: {perfs[-1].tflops}; TBPS: {perfs[-1].tbps}")
+            print(f"Batch: {batch}; Kernel Latency (us): {perfs[-1].time * 1e-3 * 1e-2}; Util: {perfs[-1].util}; TFLOPS: {perfs[-1].tflops}; TBPS: {perfs[-1].tbps}")
     print("===============================================================")
     # machine limits
+    '''
     max_tbps = perfs[0].max_tbps
     max_tflops = perfs[0].max_tflops
     fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
@@ -201,15 +206,22 @@ def roofline_mlp(batch_ranges, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_
     fig.tight_layout()
     fpath = Path(f"logs/{name}/{x_dtype}-{w_dtype}-TP{TP}-EP{EP}/roofline.png")
     plt.savefig(fpath)
-
+    '''
 
 if __name__ == "__main__":
     has_native_mx4 = torch.cuda.get_device_capability(0)[0] >= 10 or get_cdna_version() == 4
-    batch_ranges_dense = [(1024, 32768, 1024)]
-    batch_ranges_moe = [(128, 512, 32), (512, 32000, 128)]
-    dense_dtypes = ["fp8", "fp8"]
-    quantized_dtypes = ["fp8", "mx4"] if has_native_mx4 else ["bf16", "mx4"]
-    roofline_mlp(batch_ranges_dense, 8192, 8192, 1, 1, *dense_dtypes, TP=1, EP=1, name="dense")
-    roofline_mlp(batch_ranges_dense, 8192, 8192, 1, 1, *quantized_dtypes, TP=1, EP=1, name="dense")
-    roofline_mlp(batch_ranges_moe, 5120, 8192, 128, 4, *dense_dtypes, TP=1, EP=1, name="llama4-maverick")
-    roofline_mlp(batch_ranges_moe, 5120, 8192, 128, 4, *quantized_dtypes, TP=1, EP=1, name="llama4-maverick")
+    #batch_ranges_dense = [(1024, 32768, 1024)]
+    #batch_ranges_moe = [(4096, 4200, 128)] #130, 32)]
+    #batch_ranges_moe = [(32, 130, 32), (1024, 4100, 1024)]
+    batch_ranges_moe = [(8, 18, 8), (32, 130, 32), (1024, 4100, 1024), (8192, 8200, 32)]
+    #batch_ranges_moe = [(32, 40, 32)]
+    #dense_dtypes = ["fp8", "fp8"]
+    #quantized_dtypes = ["bf16", "mx4"] #if has_native_mx4 else ["bf16", "mx4"]
+    quantized_dtypes = ["bf16", "mx4"]
+    #roofline_mlp(batch_ranges_dense, 8192, 8192, 1, 1, *dense_dtypes, TP=1, EP=1, name="dense")
+    #roofline_mlp(batch_ranges_dense, 5760, 2880, 1, 1, *quantized_dtypes, TP=1, EP=1, name="dense")
+    #roofline_mlp(batch_ranges_moe, 5120, 8192, 128, 4, *dense_dtypes, TP=1, EP=1, name="llama4-maverick")
+    #roofline_mlp(batch_ranges_moe, 2880, 5888, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
+    roofline_mlp(batch_ranges_moe, 3072, 5888, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
+    #roofline_mlp(batch_ranges_moe, 2880, 768, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
+    #roofline_mlp(batch_ranges_moe, 3072, 768, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")

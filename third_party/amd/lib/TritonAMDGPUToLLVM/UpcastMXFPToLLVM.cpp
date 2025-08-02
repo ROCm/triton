@@ -215,23 +215,61 @@ Value mxfpScaleFp16(RewriterBase &rewriter, Location loc, Value v, Value scale,
 // In gfx9 architectures, we don't have bf16 VALU ops. So instead this function
 // handles v * scale multiplication using fp32 VALU ops. LLVM backend can do it
 // for us, just with unnecessary overheads.
-Value mxfpScaleBf16ViaF32(RewriterBase &rewriter, Location loc, Value v,
+SmallVector<Value> mxfpScaleBf16ViaF32(RewriterBase &rewriter, amdgpu::UpcastMXFPOp upcastOp, Location loc, Value packedVec,
                           Value scale, bool fastMath) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  Value c16 = b.i32_val(16);
-  Value vF32 =
-      b.bitcast(b.shl(b.zext(i32_ty, b.bitcast(v, i16_ty)), c16), f32_ty);
+  SmallVector<Value> results;
+  results.reserve(8);
+
+  auto packedBf16Ty = vec_ty(bf16_ty, 2);
+  Type i32Ty = rewriter.getI32Type();
+  Type f32Ty = rewriter.getF32Type();
+  auto permU32FnTy = LLVM::LLVMFunctionType::get(packedBf16Ty, {i32Ty, f32Ty, i32Ty});
+  LLVM::LLVMFuncOp funcOp = appendOrGetExternFuncOp(
+      rewriter, upcastOp, "llvm.amdgcn.cvt.scalef32.pk.bf16.fp4", permU32FnTy);
+
+  //Value c16 = b.i32_val(16);
+  //Value vF32 =
+  //    b.bitcast(b.shl(b.zext(i32_ty, b.bitcast(v, i16_ty)), c16), f32_ty);
+  Value vI32 = b.bitcast(packedVec, i32_ty);
   Value scaleF32 =
       b.bitcast(b.shl(b.zext(i32_ty, scale), b.i32_val(23)), f32_ty);
-  Value mulF32 = b.fmul(vF32, scaleF32);
-  Value mulI16 = b.trunc(i16_ty, b.lshr(b.bitcast(mulF32, i32_ty), c16));
-  Value mulBf16 = b.bitcast(mulI16, bf16_ty);
-  if (fastMath)
-    return mulBf16;
+  
+  Value packed0 = LLVM::createLLVMCallOp(rewriter, loc, funcOp,
+                             {vI32, scaleF32, b.i32_val(0)})
+                      .getResult();
+  results.push_back(b.extract_element(packed0, b.i32_val(0)));
+  results.push_back(b.extract_element(packed0, b.i32_val(1)));
+
+  Value packed1 = LLVM::createLLVMCallOp(rewriter, loc, funcOp,
+                             {vI32, scaleF32, b.i32_val(1)})
+                      .getResult();
+  results.push_back(b.extract_element(packed1, b.i32_val(0)));
+  results.push_back(b.extract_element(packed1, b.i32_val(1)));
+
+  Value packed2 = LLVM::createLLVMCallOp(rewriter, loc, funcOp,
+                             {vI32, scaleF32, b.i32_val(2)})
+                      .getResult();
+  results.push_back(b.extract_element(packed2, b.i32_val(0)));
+  results.push_back(b.extract_element(packed2, b.i32_val(1)));
+
+  Value packed3 = LLVM::createLLVMCallOp(rewriter, loc, funcOp,
+                             {vI32, scaleF32, b.i32_val(3)})
+                      .getResult();
+  results.push_back(b.extract_element(packed3, b.i32_val(0)));
+  results.push_back(b.extract_element(packed3, b.i32_val(1)));
+
+  //results.push_back(b.extract_element(packedBf16, b.i32_val(0)));
+  //results.push_back(b.extract_element(packedBf16, b.i32_val(1)));
+  //Value mulF32 = b.fmul(vF32, scaleF32);
+  //Value mulI16 = b.trunc(i16_ty, b.lshr(b.bitcast(mulF32, i32_ty), c16));
+  //Value mulBf16 = b.bitcast(mulI16, bf16_ty);
+  //if (fastMath)
+  return results; // mulBf16;
   // Account for NaN in the scale as per the mxfp specification.
-  Value scaleIsNan = b.icmp_eq(scale, b.i8_val(0xff));
-  Value nanBf16 = b.bitcast(b.i16_val(0x7fff), bf16_ty);
-  return b.select(scaleIsNan, nanBf16, mulBf16);
+  //Value scaleIsNan = b.icmp_eq(scale, b.i8_val(0xff));
+  //Value nanBf16 = b.bitcast(b.i16_val(0x7fff), bf16_ty);
+  //return b.select(scaleIsNan, nanBf16, mulBf16);
 };
 
 class UpcastMXFPOpPattern
@@ -260,6 +298,8 @@ public:
     auto scaleVals = unpackLLElements(loc, adaptor.getScale(), rewriter);
     LDBG("x: " << xVals.size() << " x " << xVals.front().getType());
     LDBG("scale: " << scaleVals.size() << " x " << scaleVals.front().getType());
+    SmallVector<Value> yVals;
+    yVals.reserve(2 * xVals.size());
 
     // When we lower scaled dot op, we made sure to distribute K only on one
     // warp. MXFP spec mandates 1 scale value for every 32 onsecutive values
@@ -283,9 +323,9 @@ public:
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
 
     bool useFp16 = op.getType().getElementType().isF16();
-    if (isPacked) {
-      xVals = upcastMxfp4(rewriter, op, useFp16, xVals);
-    }
+    //if (isPacked) {
+    //  xVals = upcastMxfp4(rewriter, op, useFp16, xVals);
+    //}
 
     // Given that MFMA layout for the A tensor arranges thread in a column-major
     // manner, for the current tid, it's at row (tid % mDim). When we set up
@@ -313,11 +353,12 @@ public:
 
         for (int j = 0; j < 32; ++j) {
           int index = 32 * i + j;
-          xVals[index] =
-              useFp16 ? mxfpScaleFp16(rewriter, loc, xVals[index], si[j / 16],
-                                      op.getFastMath())
-                      : mxfpScaleBf16ViaF32(rewriter, loc, xVals[index],
+          auto result = mxfpScaleBf16ViaF32(rewriter, op, loc, xVals[index],
                                             si[j / 16], op.getFastMath());
+              //useFp16 ? mxfpScaleFp16(rewriter, loc, xVals[index], si[j / 16],
+              //                        op.getFastMath())
+              //        : mxfpScaleBf16ViaF32(rewriter, op, loc, xVals[index],
+              //                              si[j / 16], op.getFastMath());
         }
       }
     } else {
@@ -337,15 +378,32 @@ public:
             targetInfo.shuffleIdx(rewriter, loc, scaleVal, scaleThreads[3]),
         };
 
-        for (int j = 0; j < 32; ++j) {
-          int index = 32 * i + j;
-          xVals[index] = useFp16
-                             ? mxfpScaleFp16(rewriter, loc, xVals[index],
-                                             si[j / 8], op.getFastMath())
-                             : mxfpScaleBf16ViaF32(rewriter, loc, xVals[index],
-                                                   si[j / 8], op.getFastMath());
+        for (int j = 0; j < 16; j = j + 4) {
+          int index = 16 * i + j;
+          Value v0 = xVals[index];
+          Value v1 = xVals[index + 1];
+          Value v2 = xVals[index + 2];
+          Value v3 = xVals[index + 3];
+          Value packedVec = b.undef(vec_ty(i8_ty, 4));
+          packedVec = b.insert_element(packedVec, v0, b.i32_val(0));
+          packedVec = b.insert_element(packedVec, v1, b.i32_val(1));
+          packedVec = b.insert_element(packedVec, v2, b.i32_val(2));
+          packedVec = b.insert_element(packedVec, v3, b.i32_val(3));
+          auto results = mxfpScaleBf16ViaF32(rewriter, op, loc, packedVec,
+                                                   si[j / 4], op.getFastMath());
+          for (int k = 0; k < 8; k++) {
+            yVals.push_back(results[k]);
+          }
+          //results.push_back(b.extract_element(packedBf16, b.i32_val(1)));
+
+          //xVals[index] = useFp16
+          //                   ? mxfpScaleFp16(rewriter, loc, xVals[index],
+          //                                   si[j / 8], op.getFastMath())
+          //                   : mxfpScaleBf16ViaF32(rewriter, loc, xVals[index],
+          //                                         si[j / 8], op.getFastMath());
         }
       }
+      xVals = yVals;
     }
 
     Value result =

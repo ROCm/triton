@@ -423,6 +423,10 @@ class HIPBackend(BaseBackend):
         if options.schedule_hint == 'attention':
             flags.append('sink-insts-to-avoid-spills')
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
+        if "matmul" in metadata["name"]:
+            amdgcn = amdgcn.replace("op_sel:[0,1,0]", "op_sel:[1,0,0,0]")
+            amdgcn = amdgcn.replace("op_sel:[1,0,0]", "op_sel:[0,1,0,0]")
+            amdgcn = amdgcn.replace("op_sel:[1,1,0]", "op_sel:[1,1,0,0]")
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
