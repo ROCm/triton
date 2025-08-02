@@ -121,6 +121,8 @@ def make_default_opt_flags_amd(
         block_m = 64
         block_n = 512
         block_k = 256
+        num_warps = 8
+        split_k = 1
 
     ret = OptFlags(
         block_m=block_m,
