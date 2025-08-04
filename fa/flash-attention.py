@@ -2051,7 +2051,6 @@ def run_benchmark(custom, args):
         if causal:
             input_metadata.need_causal()
 
-        print(q.shape)
         if "triton" in provider:
             o = torch.empty_like(q)
             if int8:
