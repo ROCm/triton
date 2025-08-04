@@ -1363,8 +1363,8 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
 
     # Random sequence lengths. Using N_CTX as kind of max of sum of individual seqs
     if not equal_seqlens:
-        max_seqlens_q = N_CTX_Q // Z
-        max_seqlens_k = N_CTX_K // Z
+        max_seqlens_q = N_CTX_Q
+        max_seqlens_k = N_CTX_K
         if N_CTX_Q == N_CTX_K:
             seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
             seqlens_k = seqlens_q
@@ -1372,8 +1372,8 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
             seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
             seqlens_k = torch.randint(1, max_seqlens_k + 1, (Z, ), dtype=torch.int32)
     else:
-        seqlens_q = torch.full((Z, ), N_CTX_Q // Z)
-        seqlens_k = torch.full((Z, ), N_CTX_K // Z)
+        seqlens_q = torch.full((Z, ), N_CTX_Q)
+        seqlens_k = torch.full((Z, ), N_CTX_K)
 
     # Calculate cumulative sequence lengths
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_q.cumsum(dim=0, dtype=torch.int32)])
@@ -2051,6 +2051,7 @@ def run_benchmark(custom, args):
         if causal:
             input_metadata.need_causal()
 
+        print(q.shape)
         if "triton" in provider:
             o = torch.empty_like(q)
             if int8:
