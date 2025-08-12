@@ -74,18 +74,14 @@ def fast_expf(arg0, _builder=None):
 
 
 @core.extern
-<<<<<<< HEAD
-def fast_dividef(arg0, arg1, _builder=None):
-=======
-def fast_tanhf(arg0, _semantic=None):
+def fast_tanhf(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
         (core.dtype("fp32"), ): ("__triton_hip_fast_tanhf", core.dtype("fp32")),
-    }, is_pure=True, _semantic=_semantic)
+    }, is_pure=True, _builder=_builder)
 
 
 @core.extern
-def fast_dividef(arg0, arg1, _semantic=None):
->>>>>>> 353540798c ([AMD] Add fast_tanhf to libdevice (#7780))
+def fast_dividef(arg0, arg1, _builder=None):
     return core.extern_elementwise("", "", [arg0, arg1], {
         (core.dtype("fp32"), core.dtype("fp32")): ("__triton_hip_fast_fdividef", core.dtype("fp32")),
     }, is_pure=True, _builder=_builder)
