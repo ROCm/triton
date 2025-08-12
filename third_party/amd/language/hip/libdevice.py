@@ -74,10 +74,10 @@ def fast_expf(arg0, _builder=None):
 
 
 @core.extern
-def fast_tanhf(arg0, _semantic=None):
+def fast_tanhf(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
         (core.dtype("fp32"), ): ("__triton_hip_fast_tanhf", core.dtype("fp32")),
-    }, is_pure=True, _semantic=_semantic)
+    }, is_pure=True, _builder=_builder)
 
 
 @core.extern
