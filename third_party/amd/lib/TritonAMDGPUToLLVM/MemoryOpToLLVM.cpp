@@ -275,6 +275,11 @@ private:
     SmallVector<Value> outVals;
     SmallVector<Value> elemsI32;
     mlir::Type retTy = dstTy;
+
+    bool isSplitDsread = false;
+    if (auto splitUnitAttr = op->getAttr("split_dsread"))
+      isSplitDsread = true;
+
     bool valid = emitTransferBetweenRegistersAndShared(
         ldsTransLayout, srcTy, llvmElemTy,
         /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
@@ -288,6 +293,11 @@ private:
               outVals.push_back(
                   b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
             }
+	    // For the special cases where spliting ds_read results better
+	    // perf by interleace instructions for address calculations
+	    // with the reads, e.g. pingpong.
+            if (isSplitDsread)
+	      rewriter.create<ROCDL::SchedBarrier>(loc, 0);
           } else {
             // pack elements in i32 vectors
             auto numElems = vecTy.getNumElements();

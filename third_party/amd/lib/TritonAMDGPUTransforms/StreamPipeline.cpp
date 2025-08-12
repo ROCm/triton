@@ -1128,7 +1128,7 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
     // This removes additional barrier but pingpong will add the barrier again.
     // So we should just not do it to get a better vmcnt in front of each
     // AsyncCopy.
-    if (useAsyncCopy) {
+    if (useAsyncCopy && !useF16BlockPingpong) {
       llvm::SmallSetVector<ttg::AsyncWaitOp, 8> waitOps;
       moduleOp.walk([&](ttg::AsyncWaitOp waitOp) { waitOps.insert(waitOp); });
       tt::combineRedundantWaitOps(waitOps);
