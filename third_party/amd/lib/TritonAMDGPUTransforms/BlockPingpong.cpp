@@ -1049,19 +1049,23 @@ void Pingponger::getDotPingponged() {
   gLoadOps.erase(gLoadIt, gLoadOps.end());
   lLoadOps.erase(lLoadIt, lLoadOps.end());
   lStoreOps.erase(lStoreIt, lStoreOps.end());
-  // All PingPong Scheduler assumes there are 2 movable global loads and 2
-  // movable local loads.
-  if ((gLoadOps.size() == 3 && lLoadOps.size() == 3)) {
-    // mixed type gemm case using scale.
-    if (elemWidth == 16 && numWarps == 4){
+
+  // Mixed type gemm with scale case.
+  bool isGemmWithScale = dotOps.size() == 1 && gLoadOps.size() > 2 && lLoadOps.size() > 2;
+  if (isGemmWithScale && numWarps == 4 && numStages == 2) {
+    // NxK = 128x256
+    if (dotShape[1] == 128 && aShape[1] == 256 && elemWidth == 16) {
       if(setReadPrioOverWrite(builder, dotOps[0]->getLoc()).failed()) {
         LDBG("Failed during inserting setprio to local_load/store");
-        return;
       }
       return;
     }
+    return;
   }
-  else if (gLoadOps.size() != 2 || lLoadOps.size() != 2) {
+
+  // All PingPong Scheduler assumes there are 2 movable global loads and 2
+  // movable local loads.
+  if (gLoadOps.size() != 2 || lLoadOps.size() != 2) {
     std::stringstream message;
     message << "Unable to match ping pong slicing pattern. Details: "
             << gLoadOps.size() << " global loads in dot computation, "
