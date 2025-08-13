@@ -960,10 +960,8 @@ void Pingponger::getDotPingponged() {
   auto dotType = dotOps[0].getType();
   auto dotShape = dotType.getShape();
   auto aType = dotOps[0].getA().getType();
-  auto bType = dotOps[0].getB().getType();
   auto aShape = aType.getShape();
   auto elemWidth = aType.getElementTypeBitWidth();
-  auto elemWidthB = bType.getElementTypeBitWidth();
   int64_t tileSize = dotShape[0] * dotShape[1] * aShape[1] * elemWidth;
 
   const int64_t minTile = 262144;      // e.g. 32x128x64x16bit
