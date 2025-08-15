@@ -20,70 +20,9 @@ namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
 namespace {
-/*
- TODO - this needs to be MUCH more official.
-*/
 
-// Return warp shape of dot op, e.g. 16x16x128 if kPack>1
-SmallVector<uint32_t> getWarpShapeForDotOp(DotOp dotOp) {
-  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
-      cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
-  auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
-  MLIRContext *ctx = dotOp->getContext();
-  Value a = dotOp.getA();
-  Value d = dotOp.getD();
-  auto aTensorTy = cast<RankedTensorType>(a.getType());
-  auto encodeA = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
-  auto dTensorTy = cast<RankedTensorType>(d.getType());
-  auto elemTyA = aTensorTy.getElementType();
-  auto mDim = mfmaLayout.getMDim();
-  auto nDim = mfmaLayout.getNDim();
-  auto shapeA = aTensorTy.getShape();
-  auto shapeD = dTensorTy.getShape();
-  SmallVector<uint32_t> ctaTile = {static_cast<uint32_t>(shapeD[0]),
-                                   static_cast<uint32_t>(shapeD[1]),
-                                   static_cast<uint32_t>(shapeA[1])};
-  SmallVector<uint32_t> warpTile = {ctaTile[0] / warpsPerCTA[0],
-                                    ctaTile[1] / warpsPerCTA[1], ctaTile[2]};
-  return warpTile;
-}
-
-// Get Shape of assembly instructions, e.g. mfma/wmma 16x16x32.
-SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
-  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
-      cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
-  MLIRContext *ctx = dotOp->getContext();
-  Value a = dotOp.getA();
-  Value b = dotOp.getB();
-  auto aTensorTy = cast<RankedTensorType>(a.getType());
-  auto bTensorTy = cast<RankedTensorType>(b.getType());
-  auto elemTyA = aTensorTy.getElementType();
-  auto elemTyB = bTensorTy.getElementType();
-  auto mDim = mfmaLayout.getMDim();
-  auto nDim = mfmaLayout.getNDim();
-  const auto kDimOperandSize = aTensorTy.getShape().back();
-  auto mfmaVersion = mfmaLayout.getVersion();
-  bool allowXF32 =
-      dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
-
-  FailureOr<MfmaIntrinsic> maybeMfmaInsn =
-      MfmaIntrinsic::selectFor(dotOp->getLoc(), mfmaVersion, mDim, nDim,
-                               kDimOperandSize, elemTyA, elemTyB,
-                               /*withScale=*/false, allowXF32);
-  if (failed(maybeMfmaInsn))
-    llvm::report_fatal_error("No match found in MFMA database\n");
-  return {maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, maybeMfmaInsn->kDim};
-}
-
-// Get number of assembly instructions [per wave] for dot op.
-SmallVector<uint32_t> getAsmNumRepsForDotOp(DotOp dotOp) {
-  auto dotShape = getWarpShapeForDotOp(dotOp);
-  auto mfmaShape = getAsmShapeForDotOp(dotOp);
-  return {dotShape[0] / mfmaShape[0], dotShape[1] / mfmaShape[1],
-          dotShape[2] / mfmaShape[2]};
-}
-
-unsigned getCyclesPerMfma(DotOp dotOp) {
+// Get MfmaIntrinsic from DotOp
+FailureOr<MfmaIntrinsic> maybeGetMfma(DotOp dotOp) {
   // Get mfma op type.
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
       cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
@@ -102,17 +41,59 @@ unsigned getCyclesPerMfma(DotOp dotOp) {
   bool allowXF32 =
       dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
 
-  FailureOr<MfmaIntrinsic> maybeMfmaInsn =
-      MfmaIntrinsic::selectFor(dotOp->getLoc(), mfmaVersion, mDim, nDim,
-                               kDimOperandSize, elemTyA, elemTyB,
-                               /*withScale=*/false, allowXF32);
+  return MfmaIntrinsic::selectFor(dotOp->getLoc(), mfmaVersion, mDim, nDim,
+                                  kDimOperandSize, elemTyA, elemTyB,
+                                  /*withScale=*/false, allowXF32);
+}
 
+// Get Shape of assembly instruction, e.g. mfma/wmma 16x16x32.
+SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
+  FailureOr<MfmaIntrinsic> maybeMfmaInsn = maybeGetMfma(dotOp);
   if (failed(maybeMfmaInsn))
     llvm::report_fatal_error("No match found in MFMA database\n");
+  // TODO(dtanner) add wmma.
+  return {maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, maybeMfmaInsn->kDim};
+}
+
+// Return wave shape of dot op, e.g. 16x16x128 if kPack>1.
+SmallVector<uint32_t> getWarpShapeForDotOp(DotOp dotOp) {
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
+      cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
+  auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  auto aTensorTy = cast<RankedTensorType>(dotOp.getA().getType());
+  auto dTensorTy = cast<RankedTensorType>(dotOp.getD().getType());
+  auto shapeA = aTensorTy.getShape();
+  auto shapeD = dTensorTy.getShape();
+  SmallVector<uint32_t> ctaTile = {static_cast<uint32_t>(shapeD[0]),
+                                   static_cast<uint32_t>(shapeD[1]),
+                                   static_cast<uint32_t>(shapeA[1])};
+  SmallVector<uint32_t> warpTile = {ctaTile[0] / warpsPerCTA[0],
+                                    ctaTile[1] / warpsPerCTA[1], ctaTile[2]};
+  return warpTile;
+}
+
+// Get number of assembly instructions [per wave] for dot op.
+SmallVector<uint32_t> getAsmNumRepsForDotOp(DotOp dotOp) {
+  auto warpShape = getWarpShapeForDotOp(dotOp);
+  auto asmShape = getAsmShapeForDotOp(dotOp);
+  return {warpShape[0] / asmShape[0], warpShape[1] / asmShape[1],
+          warpShape[2] / asmShape[2]};
+}
+
+// Get cycles per mfma asm instruction, e.g. 32 cycles for rocdl.mfma.f32.32x32x8f16.
+// TODO(dtanner) add support for machine version; this is for mi300X.
+uint32_t getCyclesPerMfma(DotOp dotOp) {
+  FailureOr<MfmaIntrinsic> maybeMfmaInsn = maybeGetMfma(dotOp);
+  if (failed(maybeMfmaInsn))
+    llvm::report_fatal_error("No match found in MFMA database\n");
+  // TODO(dtanner) add wmma support.
   // Estimate rate of mfma op type.
   unsigned maxBitWidth =
       std::max(maybeMfmaInsn->aElementType.getIntOrFloatBitWidth(),
                maybeMfmaInsn->bElementType.getIntOrFloatBitWidth());
+  // Total ops is 32x32x8 = 8192.
+  int64_t totalOps =
+      maybeMfmaInsn->mDim * maybeMfmaInsn->nDim * maybeMfmaInsn->kDim;
   // Estimate throughput as fma's per cycle.
   unsigned opsPerCycle;
   if (maxBitWidth <= 8) { // fp8, bf8, i8
@@ -124,12 +105,18 @@ unsigned getCyclesPerMfma(DotOp dotOp) {
   } else {
     opsPerCycle = 64; // fp64
   }
-  // total floating point mfmas
-  int64_t totalOps =
-      maybeMfmaInsn->mDim * maybeMfmaInsn->nDim * maybeMfmaInsn->kDim;
   unsigned cyclesPerMfma = static_cast<unsigned>(totalOps / opsPerCycle);
   LDBG(maybeMfmaInsn->name << " = " << cyclesPerMfma << " cycles\n");
   return cyclesPerMfma;
+}
+
+uint32_t getCyclesPerAsm(DotOp dotOp) {
+  FailureOr<MfmaIntrinsic> mfma = maybeGetMfma(dotOp);
+  if (!failed(mfma)) {
+    return getCyclesPerMfma(dotOp);
+  }
+  // TODO(dtanner) add wmma
+  return 0;
 }
 
 /*
@@ -252,7 +239,8 @@ SmallVector<unsigned, 3> getMfmasPerRep(const ArrayRef<int64_t> &ctaTile,
   low-level details of the device.
   For example, just a ratio of flops/byte for the given mfma precision.
   And maybe info regarding transpose and how many loads of what precision
-  to know if we'll have
+  to know if we'll have.
+  TODO(dtanner) query localLoadDataLatency from machine model.
 */
 using DotTileShapeType = SmallVector<unsigned, 3>;
 DotTileShapeType

@@ -25,6 +25,14 @@ using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
+// Knobs for doing scheduling research, especially for optimizing for LLVM.
+#define SCHED_OPT_NUM_PASSES 3
+#define SCHED_OPT_SETPRIO_DOTHIGHLOW false
+#define SCHED_OPT_SCHEDBAR_OPTYPE true
+#define SCHED_OPT_SCHEDBAR_DOT_LOCALLOAD true
+#define SCHED_OPT_SCHEDBAR_DOT_LOCALSTORE true
+#define SCHED_OPT_SCHEDBAR_DOT_GLOBAL true
+
 /******************************************************************************
   Reschedule ttgir after refine-ops-pass to interleave refined ops at the ttgir
   level, and thereby improve llir order which will improve
@@ -48,6 +56,13 @@ namespace ttg = mlir::triton::gpu;
 ******************************************************************************/
 
 namespace {
+
+Operation *createSetPrio(OpBuilder &rewriter, Location loc,
+                              int32_t prioValue) {
+  IntegerAttr prio =
+      rewriter.getI32IntegerAttr(static_cast<int32_t>(prioValue));
+  return rewriter.create<ROCDL::SetPrioOp>(loc, prioValue);
+}
 
 // TODO (ravil): Note, took function from `SchedInstructions.cpp`.
 // we need to combine these two implementations
@@ -1355,6 +1370,10 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
                         std::function<bool(SchedDagNode *)> isCategoryA,
                         std::function<bool(SchedDagNode *)> isCategoryB) {
+  // If ops of category A and B are already ordered,
+  // then we don't need deps between all A's and B's,
+  // we only need a dep between the first match found.
+  bool firstMatchOnly = true;
   SchedDagNode *prevA = nullptr;
   SchedDagNode *prevB = nullptr;
 
@@ -1365,6 +1384,9 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
         dep.parent = prevB;
         dep.child = node;
         depSet.insert(dep);
+        if (firstMatchOnly) {
+          prevB = nullptr;
+        }
       }
       prevA = node;
     } else if (isCategoryB(node)) {
@@ -1373,6 +1395,9 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
         dep.parent = prevA;
         dep.child = node;
         depSet.insert(dep);
+        if (firstMatchOnly) {
+          prevA = nullptr;
+        }
       }
       prevB = node;
     }
@@ -1878,6 +1903,88 @@ struct SchedHeuristicOriginalOrder
 };
 
 /*
+  After scheduling the mlirBlock, we place setprio to achieve
+  higher multi-wave performance.
+  This applies when there are multiple waves / simd.
+  TODO(dtanner) hiding ds-write issue cycles also benefit from
+  using setprio to pingpong between the 2 waves so they make equal progress.
+*/
+enum class SetPrioStrategy {
+  None,
+  DotHighLow
+};
+struct ApplySetPrio {
+  ApplySetPrio(SchedDag &dag, OpBuilder &builder)
+      : dag(dag), builder(builder) {}
+  const int32_t highPriority = 3;
+  const int32_t lowPriority = 0;
+
+  /*
+    Setprio high before first mfma of dot, and low after last mfma of dot.
+    This works well for non-pingpong FA on mi300X with 4 waves/wg and 2 waves/wg,
+    as it keeps one wg's mfmas overlapped with the other wg's softmax.
+  */
+  void applySetPrioDotHighLow() {
+    dag.nodeList.reserve(dag.nodeList.size() + 16);
+    // TopDown
+    SetVector<int32_t> dotIds;
+    for (SchedDagNodeList::iterator it = std::next(dag.nodeList.begin()); it != dag.nodeList.end(); ++it) {
+      SchedDagNode *node = *it;
+      if (nodeCategoryDot(node)) {
+        Operation *op = node->getOp();
+        if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+                triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          int32_t id = attr.getIdUnrefinedOp();
+          if (!dotIds.contains(id)) {
+            dotIds.insert(id);
+            // Set priority high before this dot.
+            Operation *insertOp = (*std::prev(it))->getOp();
+            builder.setInsertionPointAfter(insertOp);
+            auto setPrioOp = createSetPrio(builder, op->getLoc(), highPriority);
+            SchedDagNode *setPrioNode = new SchedDagNode(setPrioOp);
+            dag.nodeList.insert(it, setPrioNode);
+          }
+        }
+      }
+    }
+
+    // BottomUp
+    dotIds.clear();
+    for (SchedDagNodeList::reverse_iterator it = std::next(dag.nodeList.rbegin()); it != dag.nodeList.rend(); ++it) {
+      SchedDagNode *node = *it;
+      if (nodeCategoryDot(node)) {
+        Operation *op = node->getOp();
+        if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+                triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          int32_t id = attr.getIdUnrefinedOp();
+          if (!dotIds.contains(id)) {
+            dotIds.insert(id);
+            // Set priority high after this dot.
+            builder.setInsertionPointAfter(node->getOp());
+            auto setPrioOp = createSetPrio(builder, op->getLoc(), lowPriority);
+            SchedDagNode *setPrioNode = new SchedDagNode(setPrioOp);
+            dag.nodeList.insert(it.base(), setPrioNode);
+          }
+        }
+      }
+    }
+  }
+
+  // Select which set prio to apply.
+  void applySetPrioStrategy(SetPrioStrategy strategy) {
+    switch (strategy) {
+      case SetPrioStrategy::DotHighLow:
+      applySetPrioDotHighLow();
+      return;
+    }
+  }
+  
+
+  SchedDag &dag;
+  OpBuilder &builder;
+};
+
+/*
   After scheduling the mlirBlock, we place sched.barriers(mask) to convey
   certain scheduling constraints to LLVM. E.g., we know one of the Deps passes
   added deps between LocalLoads and Dots, therefore we iterate through
@@ -1910,6 +2017,10 @@ struct ApplySchedBarriers {
     if (!parentCategory(parentNode)) {
       return false;
     }
+    if (!dag.deps.contains(depTypeName)) {
+      return false;
+    }
+
     // Find next op matching childCategory.
     for (SchedDagNode *const *it = parentIter + 1; it != dag.nodeList.end();
          it++) {
@@ -1956,48 +2067,57 @@ struct ApplySchedBarriers {
       SchedDagNode *node = *it;
 
       // Dot / Lds
-      bool addedDotLds =
-          maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
-                               "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!addedDotLds)
+      bool addedDotLds = false;
+      if (SCHED_OPT_SCHEDBAR_DOT_LOCALLOAD) {
         addedDotLds =
-            maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryDot,
-                                 "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!addedDotLds)
-        addedDotLds =
-            maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalStore,
-                                 "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!addedDotLds)
-        addedDotLds =
-            maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryDot,
-                                 "DotLdsOrder", schedBarMaskBlockDotLds);
+              maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
+                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+        if (!addedDotLds)
+          addedDotLds =
+              maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryDot,
+                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+      }
+      if (SCHED_OPT_SCHEDBAR_DOT_LOCALSTORE) {
+        if (!addedDotLds)
+          addedDotLds =
+              maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalStore,
+                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+        if (!addedDotLds)
+          addedDotLds =
+              maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryDot,
+                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+      }
 
       // Dot / GlobalLoad
-      bool addedDotGlobal =
-          maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryGlobal,
+      bool addedDotGlobal = false;
+      if (SCHED_OPT_SCHEDBAR_DOT_GLOBAL) {
+        maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryGlobal,
                                "DotGlobalOrder", schedBarMaskBlockDotGlobal);
-      if (!addedDotGlobal)
-        addedDotGlobal =
-            maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryDot,
-                                 "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+        if (!addedDotGlobal)
+          addedDotGlobal =
+              maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryDot,
+                                  "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+      }
 
-      // Dot / Dot
-      if (!addedDotLds && !addedDotGlobal)
-        maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryDot, "DotOrder",
-                             schedBarMaskBlockDot);
-      // LocalLoad / LocalLoad
-      if (!addedDotLds)
-        maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryLocalLoad,
-                             "LocalLoadOrder", schedBarMaskBlockDsRead);
-      // LocalStore / LocalStore
-      if (!addedDotLds)
-        maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryLocalStore,
-                             "LocalStoreOrder", schedBarMaskBlockDsWrite);
+      if (SCHED_OPT_SCHEDBAR_OPTYPE) {
+        // Dot / Dot
+        if (!addedDotLds && !addedDotGlobal)
+          maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryDot, "DotOrder",
+                              schedBarMaskBlockDot);
+        // LocalLoad / LocalLoad
+        if (!addedDotLds)
+          maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryLocalLoad,
+                              "LocalLoadOrder", schedBarMaskBlockDsRead);
+        // LocalStore / LocalStore
+        if (!addedDotLds)
+          maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryLocalStore,
+                              "LocalStoreOrder", schedBarMaskBlockDsWrite);
 
-      // GlobalLoad / GlobalLoad
-      if (!addedDotGlobal)
-        maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryGlobal,
-                             "GlobalLoadOrder", schedBarMaskBlockGlobal);
+        // GlobalLoad / GlobalLoad
+        if (!addedDotGlobal)
+          maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryGlobal,
+                              "GlobalLoadOrder", schedBarMaskBlockGlobal);
+      }
     }
     LDBG("insertSchedBarriers() - DONE");
   }
@@ -2119,12 +2239,21 @@ struct SchedManager {
     return selected;
   }
 
+  void applySetPrio() {
+    ApplySetPrio asp(dag, builder);
+    // TODO(dtanner) select strategy here based on wg and kernel.
+    // Note: it is valid to apply multiple strategies.
+    if (SCHED_OPT_SETPRIO_DOTHIGHLOW) {
+      asp.applySetPrioStrategy(SetPrioStrategy::DotHighLow);
+    }
+  }
+
   void insertSchedBarriers() {
     ApplySchedBarriers asb(dag, builder);
     asb.insertSchedBarriers();
   }
 
-  SmallVector<Operation *> getOpList(bool applySchedBarriers = true) {
+  SmallVector<Operation *> getOpList() {
     SmallVector<Operation *> opList;
     for (auto node : dag.nodeList) {
       Operation *op = node->getOp();
@@ -2170,20 +2299,14 @@ struct TritonAMDGPURescheduleOps
     SchedManager schedManager(mlirBlock, builder);
     bool dumpGraphs = false;
 
+#if SCHED_OPT_NUM_PASSES >= 0
     /*
-      Scheduling Pass 0
-      - Dependencies: Data, DotOrder, LocalStoreOrder, Barriers
-      - Priorities: DotCriticalPath, LocalStoreCriticalPath
-      - Heuristic: Priority
-
-      Dependencies accomplish:
-      - Enforced dot relative order.
-      - Enforced LocalStoreOp relative order.
-      Scheduling in order of priority (critical path) accomplishes:
-      - Note that LoadOp are close to LocalStoreOp on purpose.
-      - Determines relative order of LocalLoadOps.
-      - Determines order of tertiary ops to get to the DotOps asap.
-      - Determines the order of LoadOps to match LocalStoreOps.
+      Prepare for Scheduling Pass 1
+      Dependencies: Data, DotOrder, LocalStoreOrder, Barriers:
+      - Enforce dot relative order.
+      - Enforce LocalStoreOp relative order.
+      Priorities: DotCriticalPath, LocalStoreCriticalPath:
+      - Enables critical path scheduling.
     */
     // Add Data deps based on def-use chains.
     schedManager.addDeps(std::make_unique<DataDependencyCalculator>());
@@ -2217,26 +2340,22 @@ struct TritonAMDGPURescheduleOps
       LLVM_DEBUG(LDBG("Dag: data, dot:dot, ls:ls, bar:*");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
-    SchedHeuristicPriority<SchedDirection::TopDown> shp;
-    schedManager.reschedule<SchedDirection::TopDown>(&shp);
+#endif
 
+#if SCHED_OPT_NUM_PASSES >= 1
     /*
       Scheduling Pass 1
-      - Dependencies: LocalLoadOrder, GlobalLoadOrder
-      - Priorities: none
-      - Heuristic: MachineModel<BottomUp>
-
-      Dependencies accomplish:
+      Heuristic: Priority (critical path):
+      - Note that LoadOp will be close to LocalStoreOp on purpose.
+      - Determines relative order of LocalLoadOps.
+      - Determines order of tertiary ops to get to the DotOps asap.
+      - Determines the order of LoadOps to match LocalStoreOps.
+      Dependencies: LocalLoadOrder, GlobalLoadOrder:
       - Enforce LocalLoadOp relative order.
       - Enforce LoadOp relative order.
-      Scheduled in order of MachineModel<BottomUp> accomplishes:
-      - Determines LocalStoreOps before barriers and end of loop.
-      - Spreads LocalStoreOps out.
-      - Determines LocalLoadOps prefetched before DotOps.
-      - Spreads LocalLoadOps out.
-      - Lifts LoadOps as high as possible, which is likely top of block.
     */
-    // Preserve memory op order determined by critical paths above.
+    SchedHeuristicPriority<SchedDirection::TopDown> shp;
+    schedManager.reschedule<SchedDirection::TopDown>(&shp);
     schedManager.addDeps(
         std::make_unique<LocalLoadOrderDependencyCalculator>());
     schedManager.addDeps(
@@ -2245,25 +2364,27 @@ struct TritonAMDGPURescheduleOps
       LLVM_DEBUG(LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
-    // Now that we've ordered lds ops, spread them out with machine model.
-    // This comes first because we want LL and LS as late as possible.
-    // This pass pushes the GL up as high as possible.
-    SchedHeuristicMachineModel<SchedDirection::BottomUp> sh1;
-    schedManager.reschedule<SchedDirection::BottomUp>(&sh1);
+#endif
 
+#if SCHED_OPT_NUM_PASSES >= 2
     /*
       Scheduling Pass 2
-      - Dependencies: DotLdsOrder; PriorityOrder
-      - Priorities: 0
-      - Heuristic: EarlyGlobalLoads
+      - Heuristic: MachineModel<BottomUp>
+      - Dependencies: DotLdsOrder
 
+      Scheduled in order of MachineModel<BottomUp> accomplishes:
+      - Determines LocalStoreOps before barriers and end of loop.
+      - Spreads LocalStoreOps out.
+      - Determines LocalLoadOps prefetched before DotOps.
+      - Spreads LocalLoadOps out.
+      - Lifts LoadOps as high as possible, which is likely top of block.
       Dependencies accomplish:
       - Enforce LocalLoadOp relative to DotOps.
       - Enforce LocalStoreOp relative to DotOps.
-      Scheduled in order of MachineModel<TopDown> accomplishes:
-      - Delays LoadOps until issuing them is hidden by DotOps.
-      - Spreads out LoadOps.
     */
+    SchedHeuristicMachineModel<SchedDirection::BottomUp> sh1;
+    schedManager.reschedule<SchedDirection::BottomUp>(&sh1);
+
     schedManager.addDeps(std::make_unique<DotLdsOrderDependencyCalculator>());
     if (dumpGraphs) {
       LLVM_DEBUG(
@@ -2271,19 +2392,21 @@ struct TritonAMDGPURescheduleOps
               "Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl, ll:dot, ls:dot");
           schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
+#endif
+
+#if SCHED_OPT_NUM_PASSES >= 3
+    /*
+      Scheduling Pass 3
+      Heuristic: MachineModel<TopDown>
+      - Schedule LoadOps as early as possible within all other constraints.
+      - Delays LoadOps until issuing them is hidden by DotOps.
+      - Spreads out LoadOps.
+      Dependencies: DotGlobalOrder
+      - Enforce Global relative to DotOps.
+    */
     SchedHeuristicMachineModel<SchedDirection::TopDown> sh2;
     schedManager.reschedule<SchedDirection::TopDown>(&sh2);
 
-    /*
-      TODO(dtanner) - flash-attention (or anything with multiple GL/LS)
-      will need to have some anti-deps to keep some GL after LS so they
-      can use the same registers. This should probably be added after
-      DotLdsOrder dependencies and before the machine model top-down, so that it
-      just delays the LoadOps even further until after the anti-dep.
-      schedManager.addDeps(std::make_unique<LocalStoreGlobalLoadAntiDepsDependencyCalculator>());
-      This is already the beginning of working on this.
-      schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
-    */
     schedManager.addDeps(
         std::make_unique<DotGlobalOrderDependencyCalculator>());
     if (dumpGraphs) {
@@ -2291,6 +2414,9 @@ struct TritonAMDGPURescheduleOps
                       "ls:dot, gl:dot");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
+#endif
+
+    schedManager.applySetPrio();
     schedManager.insertSchedBarriers();
 
     // Copy scheduled order to basic block.
