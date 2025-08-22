@@ -18,6 +18,10 @@ import argparse
 import os
 
 
+ATOL_fp8 = 2.5e-1
+RTOL_fp8 = 2.5e-1
+
+
 @triton.jit
 def _attn_fwd_inner(
     acc,
@@ -82,7 +86,8 @@ def _attn_fwd_inner(
         l_i = l_i * alpha + l_ij
         m_i = m_ij
 
-        acc += tl.dot_scaled(p.to(tl.bfloat16), None, 'bf16', v, v_scale, 'e2m1')
+        #acc += tl.dot_scaled(p.to(tl.bfloat16), None, 'bf16', v, v_scale, 'e2m1')
+        acc += tl.dot_scaled(p.to(tl.float8e5), None, "e5m2", v, v_scale, "e2m1")
 
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += (BLOCK_N // 2) * stride_vk
@@ -403,7 +408,7 @@ def test_mha(config, args):
     torch_out = attn_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
 
     try:
-      torch.testing.assert_close(triton_out, torch_out, atol=1e-1, rtol=1e-1)
+      torch.testing.assert_close(triton_out, torch_out, atol=ATOL_fp8, rtol=RTOL_fp8)
     except Exception as err:
         print("❌ Triton and Torch differ")
         print(err)
@@ -416,7 +421,7 @@ def test_mha(config, args):
 
 
 def generate_configs():
-    MAX_BATCH = 16 # set to 16 for debugging but must be 64
+    MAX_BATCH = 64 # set to 16 for debugging but must be 64
     base_configs = [
         #{"BATCH": 1, "NUM_Q_HEADS": 1, "NUM_K_HEADS": 1, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "HEAD_SZ": 128, "BLOCK_M": 32, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
         #{"BATCH": 1, "NUM_Q_HEADS": 1, "NUM_K_HEADS": 1, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 32, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
@@ -444,7 +449,9 @@ if __name__ == "__main__":
   parser.add_argument("-v", "--verbose", action='store_true', help='verbose output')
   args = parser.parse_args()
 
-  print(f'{args.q_type=}; {args.kv_type=}')
+  print(f'Testing with {args.q_type=}; {args.kv_type=}')
+  print(f'Testing with {ATOL_fp8=}; {RTOL_fp8=}')
+
 
   configs = generate_configs()
   for config in configs:
