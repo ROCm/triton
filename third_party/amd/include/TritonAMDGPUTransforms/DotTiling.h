@@ -36,7 +36,6 @@ FailureOr<MfmaIntrinsic> maybeGetMfma(DotOp dotOp) {
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   const auto kDimOperandSize = aTensorTy.getShape().back();
-  // auto kDim = mfmaLayout.getKDim();
   auto mfmaVersion = mfmaLayout.getVersion();
   bool allowXF32 =
       dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
@@ -80,7 +79,8 @@ SmallVector<uint32_t> getAsmNumRepsForDotOp(DotOp dotOp) {
           warpShape[2] / asmShape[2]};
 }
 
-// Get cycles per mfma asm instruction, e.g. 32 cycles for rocdl.mfma.f32.32x32x8f16.
+// Get cycles per mfma asm instruction, e.g. 32 cycles for
+// rocdl.mfma.f32.32x32x8_f16.
 // TODO(dtanner) add support for machine version; this is for mi300X.
 uint32_t getCyclesPerMfma(DotOp dotOp) {
   FailureOr<MfmaIntrinsic> maybeMfmaInsn = maybeGetMfma(dotOp);

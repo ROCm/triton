@@ -195,8 +195,8 @@ struct MachineModelGFX942 : MachineModelGFX90A {
       // How many asm instructions are in dot op.
       auto numRepsVec = getAsmNumRepsForDotOp(dotOp);
       auto numReps = product<uint32_t>(numRepsVec);
-      //SmallVector<uint32_t> dotWarpShape = getWarpShapeForDotOp(op);
-      
+      // SmallVector<uint32_t> dotWarpShape = getWarpShapeForDotOp(op);
+
       FailureOr<MfmaIntrinsic> mfma = maybeGetMfma(dotOp);
       if (!failed(mfma)) {
         unsigned cyclesPerMfma = getCyclesPerMfma(dotOp);
@@ -206,9 +206,9 @@ struct MachineModelGFX942 : MachineModelGFX90A {
         int k = mfma->mDim;
         int32_t sequencerBusyCycles = cyclesPerMfma / 4;
         int32_t mfmaPipeBusyCycles = cyclesPerMfma - sequencerBusyCycles;
-        return MachineModelOpProperties(MachineModelResourcePipe::Mfma,
-                                      sequencerBusyCycles * numReps, mfma->name,
-                                      mfmaPipeBusyCycles * numReps);
+        return MachineModelOpProperties(
+            MachineModelResourcePipe::Mfma, sequencerBusyCycles * numReps,
+            mfma->name, mfmaPipeBusyCycles * numReps);
       }
       // TODO(dtanner) check for wmma here.
 

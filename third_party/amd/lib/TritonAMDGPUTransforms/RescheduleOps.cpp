@@ -57,8 +57,7 @@ namespace ttg = mlir::triton::gpu;
 
 namespace {
 
-Operation *createSetPrio(OpBuilder &rewriter, Location loc,
-                              int32_t prioValue) {
+Operation *createSetPrio(OpBuilder &rewriter, Location loc, int32_t prioValue) {
   IntegerAttr prio =
       rewriter.getI32IntegerAttr(static_cast<int32_t>(prioValue));
   return rewriter.create<ROCDL::SetPrioOp>(loc, prioValue);
@@ -1909,10 +1908,7 @@ struct SchedHeuristicOriginalOrder
   TODO(dtanner) hiding ds-write issue cycles also benefit from
   using setprio to pingpong between the 2 waves so they make equal progress.
 */
-enum class SetPrioStrategy {
-  None,
-  DotHighLow
-};
+enum class SetPrioStrategy { None, DotHighLow };
 struct ApplySetPrio {
   ApplySetPrio(SchedDag &dag, OpBuilder &builder)
       : dag(dag), builder(builder) {}
@@ -1921,14 +1917,15 @@ struct ApplySetPrio {
 
   /*
     Setprio high before first mfma of dot, and low after last mfma of dot.
-    This works well for non-pingpong FA on mi300X with 4 waves/wg and 2 waves/wg,
-    as it keeps one wg's mfmas overlapped with the other wg's softmax.
+    This works well for non-pingpong FA on mi300X with 4 waves/wg and 2
+    waves/wg, as it keeps one wg's mfmas overlapped with the other wg's softmax.
   */
   void applySetPrioDotHighLow() {
     dag.nodeList.reserve(dag.nodeList.size() + 16);
     // TopDown
     SetVector<int32_t> dotIds;
-    for (SchedDagNodeList::iterator it = std::next(dag.nodeList.begin()); it != dag.nodeList.end(); ++it) {
+    for (SchedDagNodeList::iterator it = std::next(dag.nodeList.begin());
+         it != dag.nodeList.end(); ++it) {
       SchedDagNode *node = *it;
       if (nodeCategoryDot(node)) {
         Operation *op = node->getOp();
@@ -1950,7 +1947,9 @@ struct ApplySetPrio {
 
     // BottomUp
     dotIds.clear();
-    for (SchedDagNodeList::reverse_iterator it = std::next(dag.nodeList.rbegin()); it != dag.nodeList.rend(); ++it) {
+    for (SchedDagNodeList::reverse_iterator it =
+             std::next(dag.nodeList.rbegin());
+         it != dag.nodeList.rend(); ++it) {
       SchedDagNode *node = *it;
       if (nodeCategoryDot(node)) {
         Operation *op = node->getOp();
@@ -1973,12 +1972,13 @@ struct ApplySetPrio {
   // Select which set prio to apply.
   void applySetPrioStrategy(SetPrioStrategy strategy) {
     switch (strategy) {
-      case SetPrioStrategy::DotHighLow:
+    case SetPrioStrategy::DotHighLow:
       applySetPrioDotHighLow();
+      return;
+    case SetPrioStrategy::None:
       return;
     }
   }
-  
 
   SchedDag &dag;
   OpBuilder &builder;
@@ -2070,53 +2070,54 @@ struct ApplySchedBarriers {
       bool addedDotLds = false;
       if (SCHED_OPT_SCHEDBAR_DOT_LOCALLOAD) {
         addedDotLds =
-              maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
-                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+            maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
+                                 "DotLdsOrder", schedBarMaskBlockDotLds);
         if (!addedDotLds)
           addedDotLds =
               maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryDot,
-                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+                                   "DotLdsOrder", schedBarMaskBlockDotLds);
       }
       if (SCHED_OPT_SCHEDBAR_DOT_LOCALSTORE) {
         if (!addedDotLds)
           addedDotLds =
               maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalStore,
-                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+                                   "DotLdsOrder", schedBarMaskBlockDotLds);
         if (!addedDotLds)
           addedDotLds =
               maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryDot,
-                                  "DotLdsOrder", schedBarMaskBlockDotLds);
+                                   "DotLdsOrder", schedBarMaskBlockDotLds);
       }
 
       // Dot / GlobalLoad
       bool addedDotGlobal = false;
       if (SCHED_OPT_SCHEDBAR_DOT_GLOBAL) {
         maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryGlobal,
-                               "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+                             "DotGlobalOrder", schedBarMaskBlockDotGlobal);
         if (!addedDotGlobal)
-          addedDotGlobal =
-              maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryDot,
-                                  "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+          addedDotGlobal = maybeAddSchedBarrier(
+              it, nodeCategoryGlobal, nodeCategoryDot, "DotGlobalOrder",
+              schedBarMaskBlockDotGlobal);
       }
 
       if (SCHED_OPT_SCHEDBAR_OPTYPE) {
         // Dot / Dot
         if (!addedDotLds && !addedDotGlobal)
           maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryDot, "DotOrder",
-                              schedBarMaskBlockDot);
+                               schedBarMaskBlockDot);
         // LocalLoad / LocalLoad
         if (!addedDotLds)
           maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryLocalLoad,
-                              "LocalLoadOrder", schedBarMaskBlockDsRead);
+                               "LocalLoadOrder", schedBarMaskBlockDsRead);
         // LocalStore / LocalStore
         if (!addedDotLds)
-          maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryLocalStore,
-                              "LocalStoreOrder", schedBarMaskBlockDsWrite);
+          maybeAddSchedBarrier(it, nodeCategoryLocalStore,
+                               nodeCategoryLocalStore, "LocalStoreOrder",
+                               schedBarMaskBlockDsWrite);
 
         // GlobalLoad / GlobalLoad
         if (!addedDotGlobal)
           maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryGlobal,
-                              "GlobalLoadOrder", schedBarMaskBlockGlobal);
+                               "GlobalLoadOrder", schedBarMaskBlockGlobal);
       }
     }
     LDBG("insertSchedBarriers() - DONE");
