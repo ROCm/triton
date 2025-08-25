@@ -323,6 +323,7 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
 
 def attn_ref(q, k, v, q_scale, k_scale, v_scale):
     dtype_og = q.dtype
+    print(f'`attn_ref` in {dtype_og=}')
 
     q = q * q_scale
     k = k * k_scale
@@ -430,4 +431,5 @@ if __name__ == "__main__":
 
     configs = generate_configs()
     for config in configs:
+        print(f'{config=}')
         test_mha(config, args)
