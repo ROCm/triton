@@ -274,6 +274,15 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
     v_scale_strides = (v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3))
     o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
 
+
+    q = q.cuda()
+    k = k.cuda()
+    v = v.cuda()
+    q_scale = q_scale.cuda()
+    k_scale = k_scale.cuda()
+    v_scale = v_scale.cuda()
+    o = o.cuda()
+
     q_type = args.q_type
     kv_type = args.kv_type
 
@@ -318,12 +327,11 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
         with open(os.path.join(curr_dir, filename), "w") as file:
             file.write(handle.asm[args.dump_ir])
 
-    return o
+    return o.cpu()
 
 
 def attn_ref(q, k, v, q_scale, k_scale, v_scale):
     dtype_og = q.dtype
-    print(f'`attn_ref` in {dtype_og=}')
 
     q = q * q_scale
     k = k * k_scale
@@ -348,25 +356,25 @@ def test_mha(config, args):
     NUM_K_HEADS = config['NUM_K_HEADS']
     HEAD_SZ = config['HEAD_SZ']
 
-    def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int=-1, device: str='cuda'):
+    def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int=-1):
         if dtype == 'e4m3':
-            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8, device=device)
+            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8)
             v_ref = v.view(torch.float8_e4m3fn).to(torch.float32)
         elif dtype == 'e5m2':
-            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8, device=device)
+            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8)
             v_ref = v.view(torch.float8_e5m2).to(torch.float32)
         else:
             assert dtype == 'e2m1'
             assert pack_dim >= 0
-            v_mxfp4 = MXFP4Tensor(size=(b, s, h, d), device=device).random()
+            v_mxfp4 = MXFP4Tensor(size=(b, s, h, d)).random()
             v = v_mxfp4.to_packed_tensor(pack_dim)
             v_ref = v_mxfp4.to(torch.float32)
         return v, v_ref
 
-    def create_scale(b: int, s: int, h: int, d: int, scale_dim: int, device: str='cuda'):
+    def create_scale(b: int, s: int, h: int, d: int, scale_dim: int):
         size=[b, s, h, d]
         size[scale_dim] //= 32
-        scale = MXScaleTensor(size=tuple(size), device=device).random(high=24)
+        scale = MXScaleTensor(size=tuple(size)).random(high=24)
         scale_ref = scale.to(torch.float32).repeat_interleave(32, dim=scale_dim)
         return scale.data, scale_ref
 
@@ -384,12 +392,12 @@ def test_mha(config, args):
     try:
       torch.testing.assert_close(triton_out, torch_out, atol=ATOL_fp8, rtol=RTOL_fp8)
     except Exception as err:
-        print("❌ Triton and Torch differ")
-        print(err)
-        if args.verbose:
-          print(f"{triton_out=}")
-          print(f"{triton_out=}")
-        return
+      print("❌ Triton and Torch differ")
+      print(err)
+      if args.verbose:
+        print(f"{triton_out=}")
+        print(f"{torch_out=}")
+      return
 
     print("✅ Triton and Torch match")
 
@@ -398,8 +406,8 @@ def generate_configs():
     MAX_BATCH = 64 # set to 16 for debugging but must be 64
     base_configs = [
         # HEAD_SZ 128
-        {"BATCH": 1,         "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-        {"BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1,    "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
+        {"BATCH": 1,         "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
+        {"BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1,    "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
 
         # HEAD_SZ 64
         {"BATCH": 1,         "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 64, "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
