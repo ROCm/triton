@@ -1623,7 +1623,7 @@ void SwizzledSharedEncodingAttr::print(AsmPrinter &printer) const {
           << "vec = " << getVec() //
           << ", perPhase = " << getPerPhase()
           << ", maxPhase = " << getMaxPhase() //
-          << "]";
+          << ", order = [" << getOrder() << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getOrder().size());
   printer << "}>";
