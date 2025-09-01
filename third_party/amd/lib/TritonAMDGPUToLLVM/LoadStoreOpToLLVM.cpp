@@ -2161,7 +2161,7 @@ struct TDMGlobalPrefetchConversion
     // Is the cta order enough? Or do we need more?
     auto order = encoding.getCTAOrder();
     unsigned dimIdxToSplit = order.back();
-    unsigned dimIdxToNotSplit = 1 - dimIdxToNotSplit;
+    unsigned dimIdxToNotSplit = 1 - dimIdxToSplit;
     unsigned dimToSplit = blockShape[dimIdxToSplit];
     unsigned dimToNotSplit = blockShape[dimIdxToNotSplit];
     unsigned tilePerCTA = dimToSplit;
