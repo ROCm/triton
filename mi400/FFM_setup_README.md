@@ -115,7 +115,9 @@ RUN apt-get update && \
     ca-certificates \
     python3-pip \
     less \
-    vim && \
+    vim \
+    python3.12-dev \
+    libzstd-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -127,7 +129,9 @@ RUN apt -y install rocm-llvm rocm-llvm-dev rocm-device-libs rocprofiler-register
 
 RUN wget --no-check-certificate https://confluence.amd.com/download/attachments/1035169166/AMD_CA.crt
 
-RUN pip install conan
+RUN pip config set global.break-system-packages true
+
+RUN pip install conan einops
 
 RUN echo "export PATH=~/.local/bin:/opt/rocm/bin:$PATH" >> ~/.bashrc
 RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
@@ -167,6 +171,8 @@ RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
 	// Configure tool-specific properties.
 	// "customizations": {},
 	// Uncomment to connect as an existing user other than the container default. More info: https://aka.ms/dev-containers-non-root.
+	"capAdd": [ "SYS_PTRACE" ],
+	"securityOpt": [ "seccomp=unconfined" ],
 	"remoteUser": "root",
 	"privileged": true
 }
@@ -205,10 +211,14 @@ rm -rf ffm
 # Multithreading has now been merged to main branch
 git clone git@github.amd.com:GFX-Modeling/shader_complex_ffm.git ffm
 
+# Fix a known compilation failure
+sed -i 's|^#include[[:space:]]*<sq_uc/sp3_inst_info.h>|#include <sq_uc/sp3_mi400_inst_info.h>|' ./ffm/libs/funclib/shader/jitcu_base/src/jitcu_analyze.h
+
 conan remote add gfxip_conan_local https://atlartifactory.amd.com/artifactory/api/conan/gfxip_conan_local --force
 conan remote login gfxip_conan_local $USERNAME -p $PASSWORD
 
 # Ran conan profile detect from within the jitcu_docker/mi450_5 directory
+# Add --exist-ok if you want to rerun the script
 conan profile detect
 
 # Release build
@@ -229,20 +239,60 @@ export LD_LIBRARY_PATH=/opt/rocm/lib
 export TARGET_ARCH=gfx1250
 export HSA_MODEL_NUM_THREADS=$(nproc)
 ```
-- Ensure `NUM CPU THREADS` has a value for multithreading to work.
+- Ensure `HSA_MODEL_NUM_THREADS` has a value for multithreading to work.
 
 ## Sanity Check: Run simple.cpp test
 
 Copied from [here](https://amd.atlassian.net/wiki/spaces/GFXAM/pages/721063271/FFM+Jitcu+Package+-+ROCR+in+WSL) (Build and Run Simple.cpp section)
 
-Simple.cpp [link](https://amd.atlassian.net/wiki/download/attachments/721063271/simple.cpp?version=1&modificationDate=1738883082143&cacheVersion=1&api=v2).
+simple.cpp: (you can also get the latest from [here](https://amd.atlassian.net/wiki/download/attachments/721063271/simple.cpp?version=1&modificationDate=1738883082143&cacheVersion=1&api=v2)).
+```cpp
+#define __HIP_PLATFORM_AMD__
+#define __HIP_CLANG_ONLY__
+#include <hip/hip_runtime.h>
+#include <iostream>
+#include <vector>
+ 
+// GPU Kernel
+__global__ void kernel_add(int* a, int b) {
+  int idx = hipThreadIdx_x + hipBlockDim_x * hipBlockIdx_x;
+  a[idx] += b;
+}
+ 
+int main() {
+  constexpr size_t size = 100;
+  int* ptr;
+  hipMalloc(&ptr, sizeof(int) * size);
+  hipMemset(ptr, 0, sizeof(int) * size);
+  std::vector<int> input(size, 0);
+  size_t i = 100;
+  std::for_each(input.begin(), input.end(), [&](int& a) { a = i; });
+  // Print input vector
+  std::for_each(input.begin(), input.end(), [&](int a) { std::cout << a << " " ;});
+  std::cout << std::endl;
+  hipMemcpy(ptr, input.data(), sizeof(int) * size, hipMemcpyHostToDevice);
+  // Run kernel
+  kernel_add<<<1, size>>>(ptr, 10);
+  std::vector<int> output = input;
+  hipMemcpy(output.data(), ptr, sizeof(int) * size, hipMemcpyDeviceToHost);
+  // Print output vector
+  std::for_each(output.begin(), output.end(), [&](int a) { std::cout << a << " " ;});
+  std::cout << std::endl;
+  // Verify the output vector against the expected one.
+  std::cout << ((std::all_of(output.begin(), output.end(), [&](int a) { return a == (i + 10); }))
+                    ? "passed"
+                    : "failed")
+            << std::endl;
+  hipFree(ptr);
+}
+```
 
 ```bash
 cd /workspaces/jitcu_docker
 
 mkdir simple_hip
 cd simple_hip
-
+touch simple.cpp # copy & paste the content here
 
 # Copy simple.cpp into this folder.  Link to the source file for simple.cpp above
 amdclang -g -O1 -x hip --offload-arch=$TARGET_ARCH --rocm-path=$ROCM_PATH -rpath $ROCM_PATH/lib -lstdc++ simple.cpp -I$ROCM_PATH/include
@@ -274,12 +324,11 @@ git clone https://github.amd.com/GFX-IP-Arch/triton.git
 git checkout mi400_triton_dev
 ```
 
-
 Then, clone the llvm repository and build:
 ```bash
 git clone https://github.com/AMD-Lightning-Internal/llvm-project.git
 cd llvm-project
-git checkout `cat path_to_triton_repo/cmake/llvm-hash.txt
+git checkout `cat path_to_triton_repo/cmake/llvm-hash.txt`
 mkdir build && cd build
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON ../llvm -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"
 # build
@@ -287,7 +336,15 @@ ninja
 ```
 
 Once LLVM is built, `cd` into the triton repo root directory. build/install the triton python package with:
-```
+```bash
+# [Optional]If you run into any "Command not found" error, you may want to install these dependencies
+apt-get install -y cmake
+pip install ninja cmake wheel pybind11
+pip install numpy==1.26.4
+
+# Build and install Triton with custom llvm
+export LLVM_BUILD_DIR=/path/to/llvm-project/build
+
  LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib \
   LLVM_SYSPATH=$LLVM_BUILD_DIR \
   pip3 install --no-build-isolation --verbose .
@@ -314,8 +371,8 @@ cd <triton_dir>/mi400/notorch
 pip install -e .
 ```
 You can just run any kernel by running the associated test script. Example for MXFA kernels
-`python3 mi400/test_aiter_fa.py`
+`python3 mi400/test_mxfa_hipdriver.py`
 Or for MXGEMM:
 `python3 mi400/test_mxgemm_hipdriver.py`
-- Requires a pytorch installation. Use any ROCm pytorch nightly build `pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm6.4`
+- Requires a pytorch installation. Use any ROCm pytorch nightly build `pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm6.4 && pip3 uninstall -y pytorch-triton-rocm`
 (doesn't matter if it doesn't support gfx1250 - the point is to only use the CPU part of pytorch and while `.cuda()` maps directly to the HIP runtime, which doesn't require gfx1250 specific support.)
