@@ -49,7 +49,7 @@ sudo chown -R <system_username>:<system_username> ~/.ssh
 chmod 700 ~/.ssh
 chmod 600 ~/.ssh/id_private_key_A ~/.ssh/id_private_key_B ... (continue for all keys)
 chmod 644 ~/.ssh/id_public_key_A.pub ~/.ssh/id_public_key_B.pub ... (continue for all keys)
-chmod 644 ~/.ssh/config ~/.ssh/known_hosts 
+chmod 644 ~/.ssh/config ~/.ssh/known_hosts
 
 ```
 
@@ -78,9 +78,9 @@ Steps adopted from the [FFM Jitcu Package Docker WSL](https://amd.atlassian.net/
 
 Create a folder on your home directory:
 ```bash
-mkdir jitcu_docker 
-cd jitcu_docker 
-``` 
+mkdir jitcu_docker
+cd jitcu_docker
+```
 Inside it, create a `.devcontainer/` folder containing two files:
 - `devcontainer.json`
 - `Dockerfile`
@@ -115,7 +115,7 @@ RUN apt-get update && \
     ca-certificates \
     python3-pip \
     less \
-    vim && \           
+    vim && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -153,7 +153,7 @@ RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
 	"mounts": [
         // Required for ssh key forwarding
 		"type=bind,source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind",
-		
+
 		// Optional, mount some dev directory
     	// "type=bind,source=C:\\dev,target=/mnt/c/dev,consistency=cached"
 		"type=bind,source=/home/atgdebug/dev/,target=/mnt/c/dev,consistency=cached"
@@ -246,7 +246,7 @@ cd simple_hip
 
 # Copy simple.cpp into this folder.  Link to the source file for simple.cpp above
 amdclang -g -O1 -x hip --offload-arch=$TARGET_ARCH --rocm-path=$ROCM_PATH -rpath $ROCM_PATH/lib -lstdc++ simple.cpp -I$ROCM_PATH/include
- 
+
 #Run
 ./a.out
 ```
@@ -254,7 +254,7 @@ If the tests works, you should see a line of "100"'s, and then a second line wit
 
 If it doesn't work, check:
 - $TARGET_ARCH is gfx1200 for navi44, gfx1250 for mi450
-- Check your $HSA_MODEL_TOPOLOGY - it should point to the folder that contains the generation_id file. 
+- Check your $HSA_MODEL_TOPOLOGY - it should point to the folder that contains the generation_id file.
 
 ## Using Triton to Write & Test Kernels for MI450 in FFM
 

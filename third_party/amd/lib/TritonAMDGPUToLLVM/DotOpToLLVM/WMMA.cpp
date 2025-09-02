@@ -74,8 +74,25 @@ ValueTable getValuesFromDotOperandLayoutStruct(
   for (int b = 0; b < batch; b++) {
     for (int i = 0; i < n0; i++) {
       for (int j = 0; j < n1; j++) {
-        Type ty = vec_ty(elemTy, vecSize);
+        const auto actualVecSize = kWidth == 2 ? vecSize * 2 : vecSize;
+        Type ty = vec_ty(elemTy, actualVecSize);
         Value rawElems = tb.undef(ty);
+        for (size_t i = 0; i < actualVecSize; ++i) {
+          Value zero;
+          if (auto t = dyn_cast<mlir::IntegerType>(elemTy)) {
+            if (t.getWidth() == 8) {
+              const int i8bias = 127;
+              zero =
+                  rewriter.create<mlir::arith::ConstantIntOp>(loc, t, i8bias);
+            } else
+              zero = rewriter.create<mlir::arith::ConstantIntOp>(loc, t, 0);
+          } else {
+            zero = rewriter.create<mlir::arith::ConstantFloatOp>(
+                loc, cast<mlir::FloatType>(elemTy), llvm::APFloat(0.0f));
+          }
+          tb.insert_element(ty, rawElems, zero, tb.i32_val(i));
+        }
+
         for (int k = 0, ki = 0; k < kWidth; ++k) {
           if (isFp6 && ((k + 1) % 4 == 0))
             continue;
@@ -93,7 +110,8 @@ ValueTable getValuesFromDotOperandLayoutStruct(
           convertedElems = tb.bitcast(rawElems, vec_ty(i16_ty, kWidth));
         } else if (kWidth == 1) {
           convertedElems = tb.zext(i32_ty, tb.bitcast(rawElems, i8_ty));
-        } else if (kWidth == 4 && type.getIntOrFloatBitWidth() == 8) {
+        } else if (((kWidth == 2) || (kWidth == 4)) &&
+                   type.getIntOrFloatBitWidth() == 8) {
           convertedElems = tb.bitcast(rawElems, i32_ty);
         } else if (kWidth == 8 && type.getIntOrFloatBitWidth() == 8) {
           convertedElems = tb.bitcast(rawElems, i64_ty);
@@ -318,7 +336,7 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
                                   Value valB, Value valScaleB, Value valC,
                                   Type aElType, Type bElType, Type dElType,
                                   int scaleKWidth) {
-  assert(scaleKWidth == 4 || scaleKWidth == 8);
+  assert(scaleKWidth == 2 || scaleKWidth == 4 || scaleKWidth == 8);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   std::string name = "llvm.amdgcn.wmma.scale";
   if (scaleKWidth == 8) {
@@ -550,10 +568,18 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto numRepN = repB[2];
   auto numRepK = repA[2];
   auto numRepB = repA[0];
+
+  const auto kDimTensorA = aTensorTy.getShape().back();
+  const auto kWWMADim = mnkDim.back();
+  int paddingFactor = 1;
+  if (kWWMADim > kDimTensorA) {
+    paddingFactor = kWWMADim / kDimTensorA;
+  }
+
   auto scaleShapeA = aScaleTensorTy.getShape();
-  int scaleKWidthA = 4;
+  int scaleKWidthA = 4 / paddingFactor;
   auto scaleShapeB = bScaleTensorTy.getShape();
-  int scaleKWidthB = 4;
+  int scaleKWidthB = 4 / paddingFactor;
   constexpr int scaleKBase = 1;
 
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
