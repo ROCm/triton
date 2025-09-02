@@ -109,9 +109,9 @@ def gemm_kernel(
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     if USE_TDM:
-        a_desc = tl._experimental_make_tensor_descriptor(base=a_ptr + (pid_m * BLOCK_SIZE_M) * K, shape=(M, K),
+        a_desc = tl.make_tensor_descriptor(base=a_ptr + (pid_m * BLOCK_SIZE_M) * K, shape=(M, K),
                                                          strides=(K, 1), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K))
-        b_desc = tl._experimental_make_tensor_descriptor(base=b_ptr + pid_n * BLOCK_SIZE_N, shape=(K, N),
+        b_desc = tl.make_tensor_descriptor(base=b_ptr + pid_n * BLOCK_SIZE_N, shape=(K, N),
                                                          strides=(N, 1), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N))
     else:
         offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
