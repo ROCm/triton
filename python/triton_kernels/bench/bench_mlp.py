@@ -235,9 +235,10 @@ if __name__ == "__main__":
 
     batch_ranges_moe = [(1, 2, 1), (2, 5, 2), (8, 18, 8), (32, 65, 32), (128, 257, 128), (1024, 4100, 1024),
                         (8192, 8200, 32)]
-    # batch_ranges_moe = [(1024, 4100, 1024), (8192, 8200, 32)]
+    batch_ranges_moe = [(1024, 4100, 1024), (8192, 8200, 32)]
     # batch_ranges_moe = [(8192, 8200, 32)]
 
     quantized_dtypes = ["bf16", "mx4"]
-    roofline_mlp(batch_ranges_moe, 3072, 6144, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
+    # roofline_mlp(batch_ranges_moe, 3072, 6144, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
+    roofline_mlp(batch_ranges_moe, 2880, 5760, 2880, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
     # roofline_mlp(batch_ranges_moe, 5888, 3072, 128, 4, *quantized_dtypes, TP=1, EP=1, name="oai")
