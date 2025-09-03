@@ -89,7 +89,7 @@ def streaming_topk(X, stride_xm, n_expts_tot, offs_m, mask_m, N_EXPTS_PAD: tl.co
 @triton.jit
 def _topk_forward(X, stride_xm,  # inputs
                   Yv, Yi, stride_ym,  # topk values/indices
-                  USE_PROVIDED_INDX: tl.constexpr, Bits, stride_rm: tl.constexpr, stride_rn: tl.constexpr,  # bitmatrix
+                  USE_PROVIDED_INDX: tl.constexpr, Bits, stride_rm, stride_rn,  # bitmatrix
                   n_rows, n_expts_tot,  # shape
                   S, BLOCK_S: tl.constexpr, s_blocks,  # thing to memset
                   APPLY_SOFTMAX: tl.constexpr,  # constant

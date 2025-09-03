@@ -50,8 +50,8 @@ def _sum_bitmatrix_memset(Ret, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _sum_bitmatrix_rows(B, shape_bm, stride_bm: tl.constexpr, stride_bn: tl.constexpr,  # input bitmatrix
-                        Ret, Partials, stride_pm: tl.constexpr, stride_pn, shape_pn,  # outputs
+def _sum_bitmatrix_rows(B, shape_bm, stride_bm, stride_bn,  # input bitmatrix
+                        Ret, Partials, stride_pm, stride_pn, shape_pn,  # outputs
                         BLOCK_MM: tl.constexpr, BLOCK_M: tl.constexpr):
 
     tl.static_assert(BLOCK_MM % BLOCK_M == 0)
