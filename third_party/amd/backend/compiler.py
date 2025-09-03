@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import functools
 import warnings
 from pathlib import Path
@@ -256,6 +257,28 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
+
+        '''
+        if '_ragged_hstu_attn_bwd' in str(mod):
+            print("compiling bwd kernel")
+            #pm.run(mod)
+            tname = "/app/meta-hstu/hstu_attn/study_hstu_bwd/milestone1_atomic_AsyncCopyAllLoad/hack0.ttgir"
+            outname = "./tempout.ir"
+            with open(outname, 'wb') as fd_out:
+                fd_out.write(str(mod).encode())
+                fd_out.close()
+            if os.path.isfile(tname) is False:
+                tname = outname
+                print("cannot find the ttgir")
+            mod2 = ir.parse_mlir_module(tname, mod.context)
+            mod2.context = mod.context
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            mod = mod2
+        else:
+            print("compiling fwd kernel")
+        '''
+
         return mod
 
     @staticmethod
