@@ -733,6 +733,9 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
+runonce = False
+
+
 def unified_attention(
     q,
     k,
@@ -821,10 +824,14 @@ def unified_attention(
 
         if max_seqlen_q >= 512 and block_size == 64:
             BLOCK_M = 128
-            num_stages_2d = 1
-            num_warps = 4
+            num_stages_2d = 4
+            num_warps = 8
             BLOCK_Q = BLOCK_M // num_queries_per_kv
             total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+        global runonce
+        if not runonce:
+            print(f'2d {num_stages_2d=}, {num_warps=}, BLOCK_SIZE={block_size}, HEAD_SIZE={head_size}, {BLOCK_M=}, {BLOCK_Q=}')
+            runonce = True
         kernel_unified_attention_2d[
             (
                 num_kv_heads,

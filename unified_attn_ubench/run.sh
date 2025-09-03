@@ -9,7 +9,7 @@ batch_size=2
 window_size=0
 block_size=64
 repeat=500
-# export TRITON_HIP_USE_ASYNC_COPY=1
+export TRITON_HIP_USE_ASYNC_COPY=1
 # export TRITON_HIP_USE_BLOCK_PINGPONG=1
 mkdir -p $path
 rocprofv2 -o attn python run_kernel.py --window_size $window_size  --block_size $block_size \
