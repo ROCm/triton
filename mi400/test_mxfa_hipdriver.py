@@ -6,6 +6,7 @@
 #   - aiter/test_mha_common.py
 
 import hip
+
 hip.hip.hipInit(0)
 
 import torch
@@ -16,7 +17,6 @@ import argparse
 import math
 from einops import repeat
 import os
-
 
 ATOL_fp8 = 2.5e-1
 RTOL_fp8 = 2.5e-1
@@ -102,13 +102,34 @@ def _attn_fwd(
     k_scale_ptr: torch.Tensor,
     v_scale_ptr: torch.Tensor,
     out_ptr: torch.Tensor,
-    stride_qz, stride_qh, stride_qm, stride_qk,
-    stride_kz, stride_kh, stride_kn, stride_kk,
-    stride_vz, stride_vh, stride_vn, stride_vk,
-    stride_q_scale_z, stride_q_scale_h, stride_q_scale_m, stride_q_scale_k,
-    stride_k_scale_z, stride_k_scale_h, stride_k_scale_n, stride_k_scale_k,
-    stride_v_scale_z, stride_v_scale_h, stride_v_scale_n, stride_v_scale_k,
-    stride_oz, stride_oh, stride_om, stride_on,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_q_scale_z,
+    stride_q_scale_h,
+    stride_q_scale_m,
+    stride_q_scale_k,
+    stride_k_scale_z,
+    stride_k_scale_h,
+    stride_k_scale_n,
+    stride_k_scale_k,
+    stride_v_scale_z,
+    stride_v_scale_h,
+    stride_v_scale_n,
+    stride_v_scale_k,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,
     sm_scale,
     q_type: tl.constexpr,
     kv_type: tl.constexpr,
@@ -146,56 +167,31 @@ def _attn_fwd(
 
     # q       [BLOCK_M, BLOCK_DMODEL]
     # q_scale [BLOCK_M, BLOCK_DMODEL / 32]
-    q_offs = (
-        off_z * stride_qz
-        + off_q_head * stride_qh
-        + offs_m[:, None] * stride_qm
-        + offs_d[None, :] * stride_qk
-    )
+    q_offs = (off_z * stride_qz + off_q_head * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
     q_ptrs = q_ptr + q_offs
 
-    q_scale_offs = (
-        off_z * stride_q_scale_z
-        + off_q_head * stride_q_scale_h
-        + offs_m[:, None] * stride_q_scale_m
-        + offs_d_scale[None, :] * stride_q_scale_k
-    )
+    q_scale_offs = (off_z * stride_q_scale_z + off_q_head * stride_q_scale_h + offs_m[:, None] * stride_q_scale_m +
+                    offs_d_scale[None, :] * stride_q_scale_k)
     q_scale_ptrs = q_scale_ptr + q_scale_offs
 
     # k       [BLOCK_DMODEL / KV_PACK_DIV, BLOCK_N]
     # k_scale [BLOCK_N, BLOCK_DMODEL / 32]
-    k_offs = (
-        off_z * stride_kz
-        + off_k_head * stride_kh
-        + offs_d_packed[:, None] * stride_kk
-        + offs_n[None, :] * stride_kn
-    )
+    k_offs = (off_z * stride_kz + off_k_head * stride_kh + offs_d_packed[:, None] * stride_kk +
+              offs_n[None, :] * stride_kn)
     k_ptrs = k_ptr + k_offs
 
-    k_scale_offs = (
-        off_z * stride_k_scale_z
-        + off_k_head * stride_k_scale_h
-        + offs_n[:, None] * stride_k_scale_n
-        + offs_d_scale[None, :] * stride_k_scale_k
-    )
+    k_scale_offs = (off_z * stride_k_scale_z + off_k_head * stride_k_scale_h + offs_n[:, None] * stride_k_scale_n +
+                    offs_d_scale[None, :] * stride_k_scale_k)
     k_scale_ptrs = k_scale_ptr + k_scale_offs
 
     # v       [BLOCK_N / KV_PACK_DIV, BLOCK_DMODEL]
     # v_scale [BLOCK_DMODEL, BLOCK_N / 32]
-    v_offs = (
-        off_z * stride_vz
-        + off_k_head * stride_vh
-        + offs_n_packed[:, None] * stride_vn
-        + offs_d[None, :] * stride_vk
-    )
+    v_offs = (off_z * stride_vz + off_k_head * stride_vh + offs_n_packed[:, None] * stride_vn +
+              offs_d[None, :] * stride_vk)
     v_ptrs = v_ptr + v_offs
 
-    v_scale_offs = (
-        off_z * stride_v_scale_z
-        + off_k_head * stride_v_scale_h
-        + offs_d[:, None] * stride_v_scale_k
-        + offs_n_scale[None, :] * stride_v_scale_n
-    )
+    v_scale_offs = (off_z * stride_v_scale_z + off_k_head * stride_v_scale_h + offs_d[:, None] * stride_v_scale_k +
+                    offs_n_scale[None, :] * stride_v_scale_n)
     v_scale_ptrs = v_scale_ptr + v_scale_offs
 
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -245,12 +241,7 @@ def _attn_fwd(
     # write back O
     overflow_size = end_m_idx - seqlen_q
 
-    offs_out = (
-        off_z * stride_oz
-        + off_q_head * stride_oh
-        + offs_m[:, None] * stride_om
-        + offs_d[None, :] * stride_on
-    )
+    offs_out = (off_z * stride_oz + off_q_head * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_on)
     out_mask = tl.full([BLOCK_M, BLOCK_DMODEL], 1, dtype=tl.int1)
     if overflow_size > 0:
         out_mask = out_mask & (offs_m[:, None] < seqlen_q)
@@ -260,7 +251,7 @@ def _attn_fwd(
 
 
 def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
-    softmax_scale = q.shape[-1] ** (-0.5)
+    softmax_scale = q.shape[-1]**(-0.5)
 
     o = torch.zeros_like(q, dtype=torch.float32)
 
@@ -274,7 +265,6 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
     v_scale_strides = (v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3))
     o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
 
-
     q = q.cuda()
     k = k.cuda()
     v = v.cuda()
@@ -286,9 +276,7 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
     q_type = args.q_type
     kv_type = args.kv_type
 
-    grid = lambda META: (
-        batch * num_q_heads * triton.cdiv(seqlen_q, META["BLOCK_M"]),
-    )
+    grid = lambda META: (batch * num_q_heads * triton.cdiv(seqlen_q, META["BLOCK_M"]), )
 
     handle = _attn_fwd[grid](
         q,
@@ -319,7 +307,6 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
         num_warps=config["NUM_WARPS"],
         num_stages=config["NUM_STAGES"],
     )
-
 
     if args.dump_ir != 'none':
         curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -356,12 +343,12 @@ def test_mha(config, args):
     NUM_K_HEADS = config['NUM_K_HEADS']
     HEAD_SZ = config['HEAD_SZ']
 
-    def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int=-1):
+    def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int = -1):
         if dtype == 'e4m3':
-            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8)
+            v = torch.randint(20, 40, (b, s, h, d), dtype=torch.uint8)
             v_ref = v.view(torch.float8_e4m3fn).to(torch.float32)
         elif dtype == 'e5m2':
-            v = torch.randint(20, 40,(b, s, h, d), dtype=torch.uint8)
+            v = torch.randint(20, 40, (b, s, h, d), dtype=torch.uint8)
             v_ref = v.view(torch.float8_e5m2).to(torch.float32)
         else:
             assert dtype == 'e2m1'
@@ -372,7 +359,7 @@ def test_mha(config, args):
         return v, v_ref
 
     def create_scale(b: int, s: int, h: int, d: int, scale_dim: int):
-        size=[b, s, h, d]
+        size = [b, s, h, d]
         size[scale_dim] //= 32
         scale = MXScaleTensor(size=tuple(size)).random(high=24)
         scale_ref = scale.to(torch.float32).repeat_interleave(32, dim=scale_dim)
@@ -390,14 +377,14 @@ def test_mha(config, args):
     torch_out = attn_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
 
     try:
-      torch.testing.assert_close(triton_out, torch_out, atol=ATOL_fp8, rtol=RTOL_fp8)
+        torch.testing.assert_close(triton_out, torch_out, atol=ATOL_fp8, rtol=RTOL_fp8)
     except Exception as err:
-      print("❌ Triton and Torch differ")
-      print(err)
-      if args.verbose:
-        print(f"{triton_out=}")
-        print(f"{torch_out=}")
-      return
+        print("❌ Triton and Torch differ")
+        print(err)
+        if args.verbose:
+            print(f"{triton_out=}")
+            print(f"{torch_out=}")
+        return
 
     print("✅ Triton and Torch match")
 
@@ -405,32 +392,37 @@ def test_mha(config, args):
 def generate_configs():
     MAX_BATCH = 64
     base_configs = [
-        # HEAD_SZ 128
-        {"BATCH": 1,         "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-        {"BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1,    "SEQLEN_K": 8192, "HEAD_SZ": 128, "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-
-        # HEAD_SZ 64
-        #{"BATCH": 1,         "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 64, "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-        #{"BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1,    "SEQLEN_K": 8192, "HEAD_SZ": 64, "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-
-        # WMMA K-padding is not implemented, Triton compiler error (use types: "float8_e5m2", "float4")
-        # {"BATCH": 1, "NUM_Q_HEADS": 1, "NUM_K_HEADS": 1, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 64, "BLOCK_M": 32, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
-        # {"BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1, "SEQLEN_K": 8192, "HEAD_SZ": 64, "BLOCK_M": 32, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1},
+        # HEAD_SZ == 128
+        {
+            "BATCH": 1, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128,
+            "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+        },
+        {
+            "BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1, "SEQLEN_K": 8192, "HEAD_SZ": 128,
+            "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+        },
+        # HEAD_SZ == 64
+        {
+            "BATCH": 1, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 64,
+            "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+        },
+        {
+            "BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1, "SEQLEN_K": 8192, "HEAD_SZ": 64,
+            "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+        },
     ]
     return base_configs
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--q-type", choices=["e5m2", "e4m3"],
-                        default="e5m2",
+    parser.add_argument("--q-type", choices=["e5m2", "e4m3"], default="e4m3",
                         help="data type for K and V (default e4m3)")
-    parser.add_argument("--kv-type", choices=["e5m2", "e4m3", "e2m1"],
-                        default="e5m2",
+    parser.add_argument("--kv-type", choices=["e5m2", "e4m3", "e2m1"], default="e4m3",
                         help="data type for K and V (default e2m1)")
-    parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir','llir', 'amdgcn'],
-                        default="none",
+    parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir', 'llir', 'amdgcn'], default="none",
                         help="dump IR format")
+    parser.add_argument("-c", "--case", type=int, required=True, help='case id')
     parser.add_argument("-v", "--verbose", action='store_true', help='verbose output')
     args = parser.parse_args()
 
@@ -438,6 +430,6 @@ if __name__ == "__main__":
     print(f'Testing with {ATOL_fp8=}; {RTOL_fp8=}')
 
     configs = generate_configs()
-    for config in configs:
-        print(f'{config=}')
-        test_mha(config, args)
+    config = configs[args.case]
+    print(f'{config=}')
+    test_mha(config, args)
