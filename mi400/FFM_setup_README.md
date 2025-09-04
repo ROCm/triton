@@ -131,7 +131,7 @@ RUN wget --no-check-certificate https://confluence.amd.com/download/attachments/
 
 RUN pip config set global.break-system-packages true
 
-RUN pip install conan einops
+RUN apt-get remove -y python3-distro && pip install conan einops
 
 RUN echo "export PATH=~/.local/bin:/opt/rocm/bin:$PATH" >> ~/.bashrc
 RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
@@ -213,6 +213,7 @@ git clone git@github.amd.com:GFX-Modeling/shader_complex_ffm.git ffm
 
 # Fix a known compilation failure
 sed -i 's|^#include[[:space:]]*<sq_uc/sp3_inst_info.h>|#include <sq_uc/sp3_mi400_inst_info.h>|' ./ffm/libs/funclib/shader/jitcu_base/src/jitcu_analyze.h
+sed -i 's|clang-llvm|llvm-core|' ./conanfile.py
 
 conan remote add gfxip_conan_local https://atlartifactory.amd.com/artifactory/api/conan/gfxip_conan_local --force
 conan remote login gfxip_conan_local $USERNAME -p $PASSWORD
@@ -222,7 +223,7 @@ conan remote login gfxip_conan_local $USERNAME -p $PASSWORD
 conan profile detect
 
 # Release build
-conan build . -pr:a /root/.conan2/profiles/default -s build_type=Release -of . -o rocr_bridge=ON --build=missing
+conan build . -pr:a $HOME/.conan2/profiles/default -s build_type=Release -of . -o rocr_bridge=ON --build=missing
 
 ```
 
