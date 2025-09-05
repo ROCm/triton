@@ -190,36 +190,6 @@ def roofline_mlp(batch_ranges, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dty
                 f"Batch: {batch}; Kernel Latency (us): {perfs[-1].time * 1e-3 * 1e-2}; Util: {perfs[-1].util}; TFLOPS: {perfs[-1].tflops}; TBPS: {perfs[-1].tbps}"
             )
     print("===============================================================")
-    # machine limits
-    max_tbps = perfs[0].max_tbps
-    max_tflops = perfs[0].max_tflops
-    fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
-    ax.set_xlabel("batch size (toks/expt)")
-    ax.set_ylabel("performance  [TFLOP/s]")
-    ax.set_title(f"{bench_case} roofline")
-    # add a tiny margin so points are not flush with the frame
-    xs = [batch * n_expts_act / n_expts_tot for batch in batches]
-    perf = [p.tflops for p in perfs]
-    xmin, xmax = min(xs), max(xs)
-    dx = 0.05 * (xmax - xmin) if xmax > xmin else 1.0
-    ax.set_xlim(xmin - dx, xmax + dx)
-    ax.set_ylim(100, max_tflops + 500)
-    # plot roofline
-    opints = [p.opint for p in perfs]
-    knee = bisect_left(opints, max_tflops / max_tbps) - 1
-    x_bw, x_comp = xs[:knee], xs[knee:]
-    x_bw = [x_bw[0], x_comp[0]]
-    y_bw = [opints[0] * max_tbps, max_tflops]
-    y_comp = [max_tflops] * len(x_comp)
-    ax.plot(x_bw, y_bw, "--", label=f"BW-bound  ({max_tbps:.1f} TB/s)")
-    ax.plot(x_comp, y_comp, "--", label=f"Compute-bound  ({max_tflops:.0f} TFLOP/s)")
-    # plot data
-    ax.scatter(xs, perf, marker="+")
-    ax.legend(frameon=False, loc="lower right")
-    ax.grid(True, which="both", ls=":", lw=0.5)
-    fig.tight_layout()
-    fpath = Path(f"logs/{name}/{x_dtype}-{w_dtype}-TP{TP}-EP{EP}/roofline.png")
-    plt.savefig(fpath)
 
 
 if __name__ == "__main__":
@@ -233,8 +203,7 @@ if __name__ == "__main__":
     # roofline_mlp(batch_ranges_moe, 5120, 8192, 128, 4, *dense_dtypes, TP=1, EP=1, name="llama4-maverick")
     # roofline_mlp(batch_ranges_moe, 5120, 8192, 128, 4, *quantized_dtypes, TP=1, EP=1, name="llama4-maverick")
 
-    batch_ranges_moe = [(1, 2, 1), (2, 5, 2), (8, 18, 8), (32, 65, 32), (128, 257, 128), (1024, 4100, 1024),
-                        (8192, 8200, 32)]
+    batch_ranges_moe = [(4,8,16)]
     # batch_ranges_moe = [(1024, 4100, 1024), (8192, 8200, 32)]
     # batch_ranges_moe = [(8192, 8200, 32)]
 
