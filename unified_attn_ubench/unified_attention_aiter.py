@@ -823,7 +823,7 @@ def unified_attention(
             total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
         if max_seqlen_q >= 512 and block_size == 64:
-            BLOCK_M = 128
+            BLOCK_M = 256
             num_stages_2d = 4
             num_warps = 8
             BLOCK_Q = BLOCK_M // num_queries_per_kv

@@ -706,6 +706,7 @@ enum Clusters {
   CLUSTER_ASYNC_WAIT_2,
   CLUSTER_LOCAL_WRITE_1,
   CLUSTER_LOCAL_LOAD_2,
+  CLUSTER_INDIRECT_LOAD,
   CLUSTER_GLOBAL_LOAD_1,
   // ComputeCluster2
   CLUSTER_DOT_2,
@@ -752,12 +753,6 @@ LogicalResult checkPreconditions(scf::ForOp forOp, int numStages,
     return failure();
   }
 
-  // Reject loops with indirect loads
-  // TODO support indirect loads
-  if (llvm::any_of(loadToInfo,
-                   [](auto it) { return it.second.distToUse != 0; })) {
-    return failure();
-  }
 
   return success();
 }
@@ -775,6 +770,10 @@ scheduleLoads(std::array<tt::DotOp, 2> dotOps,
     } else if (info.use == dotOps[1]) {
       schedule.insert(loadOp, STAGE_GLOBAL_LOAD_2,
                       clusters[CLUSTER_GLOBAL_LOAD_2]);
+    } else if (loadToInfo.count(info.use)) {
+      // Indirect load
+      schedule.insert(loadOp, STAGE_GLOBAL_LOAD_1,
+                      clusters[CLUSTER_INDIRECT_LOAD]);
     } else {
       LDBG(*loadOp << " will not be pipelined because it's not used by a dot");
     }
@@ -964,8 +963,11 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
   scheduleStreamOps(loadToStreamOps, schedule, clusters);
   dumpSchedule("Coarse schedule stream ops:");
 
-  for (auto [l, _] : loadToInfo) {
+  for (auto [l, info] : loadToInfo) {
     schedule.erase(l);
+    if (isa<tt::LoadOp>(info.use))
+      // Don't erase indirect load
+      continue;
     l->erase();
   }
 

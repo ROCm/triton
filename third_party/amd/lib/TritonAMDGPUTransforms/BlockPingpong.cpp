@@ -675,6 +675,7 @@ LogicalResult Pingponger::transformTwoClusterWithAsyncAndAll(OpBuilder &builder,
 LogicalResult Pingponger::transformChainedDotSchedule(OpBuilder &builder,
                                                       Location loc) {
   assert(dotOps.size() == 2);
+  LDBG("Enter transformChainedDotSchedule");
 
   // Memory clusters start with either ttg.async_wait or ttg.local_store
   auto findNextMemoryCluster = [](Operation *op) {
@@ -894,6 +895,7 @@ void Pingponger::getDotPingponged() {
       return;
     }
     addAsymmetricSyncToLoop(builder, loc);
+    return;
   }
 
   useAsyncCopy = (asyncCopyOps.size() > 0);

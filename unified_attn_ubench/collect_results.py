@@ -115,7 +115,7 @@ for k, vals in kernel_data.items():
     results = [np.mean(vals), np.min(vals), np.max(vals), np.std(vals),np.median(vals)]
     mem_BW = calculate_mem_bw(args.bs, args.seq_q_l, args.seq_kv_l, args.num_heads_q, args.num_heads_k, args.head_size, args.block_size, np.mean(vals), "3d" in k)
     tflops = calculate_tflops(args.bs, args.seq_q_l, args.seq_kv_l, args.num_heads_q, args.num_heads_k, args.head_size, np.mean(vals))
-    print(f"{k}:{args.bs},{args.window_size},{args.seq_q_l},{args.seq_kv_l},{args.num_heads_q},{args.num_heads_k},{args.head_size}, {results[0]},{results[1]}, {results[2]}, {results[3]}, {results[4]},{mem_BW}, {tflops}")
+    print(f"{k}:{args.bs=},{args.window_size=},{args.seq_q_l=},{args.seq_kv_l=},{args.num_heads_q=},{args.num_heads_k=},{args.head_size=}, {results[0]},{results[1]}, {results[2]}, {results[3]}, {results[4]},{mem_BW=}, {tflops=}")
     k = name_map[k]
     file_path = f"{path}/{k}_data.csv"
     if not os.path.exists(file_path):
