@@ -1,6 +1,7 @@
 import triton
 import triton.language as tl
 
+
 # @triton.jit
 def getMixedType(fpflag):
     if fpflag == 4:
@@ -16,20 +17,12 @@ def getMixedType(fpflag):
         return "e5m2"
         # accumulator = tl.dot_scaled(a, scale_a, "e5m2", b, scale_b, "e5m2", accumulator)
 
+
 @triton.jit
-def mxgemm_kernel(
-        a_ptr, b_ptr, output_ptr,
-        a_scale, b_scale,
-        M, N, K,
-        stride_scale: tl.constexpr,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
-        fpflag_a :tl.constexpr,
-        fpflag_b :tl.constexpr,
-        SCALE_BLOCK : tl.constexpr,
-        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr, USE_TDM : tl.constexpr):
+def mxgemm_kernel(a_ptr, b_ptr, output_ptr, a_scale, b_scale, M, N, K, stride_scale: tl.constexpr, stride_am, stride_ak,
+                  stride_bk, stride_bn, stride_cm, stride_cn, fpflag_a: tl.constexpr, fpflag_b: tl.constexpr,
+                  SCALE_BLOCK: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                  GROUP_SIZE_M: tl.constexpr, USE_TDM: tl.constexpr):
     DIV_FACTOR_A: tl.constexpr = 2 if fpflag_a == 4 else 1
     DIV_FACTOR_B: tl.constexpr = 2 if fpflag_b == 4 else 1
     pid = tl.program_id(axis=0)
@@ -50,17 +43,10 @@ def mxgemm_kernel(
     a_scale_ptr = a_scale + offs_am[:, None] * stride_scale + offs_scale_k[None, :]
     b_scale_ptr = b_scale + offs_bn[:, None] * stride_scale + offs_scale_k[None, :]
     if USE_TDM:
-        a_desc = tl.make_tensor_descriptor(
-            base=a_ptr+(pid_m*BLOCK_M)*stride_am,
-            shape=(M, K),
-            strides=(stride_am, 1),
-            block_shape=(BLOCK_M, BLOCK_K//DIV_FACTOR_A)
-        )
-        b_desc = tl.make_tensor_descriptor(
-            base=b_ptr+(pid_n*BLOCK_N)*stride_bn,
-            shape=(K, N),
-            strides=(stride_bk, 1),
-            block_shape=(BLOCK_K//DIV_FACTOR_B, BLOCK_N))
+        a_desc = tl.make_tensor_descriptor(base=a_ptr + (pid_m * BLOCK_M) * stride_am, shape=(M, K),
+                                           strides=(stride_am, 1), block_shape=(BLOCK_M, BLOCK_K // DIV_FACTOR_A))
+        b_desc = tl.make_tensor_descriptor(base=b_ptr + (pid_n * BLOCK_N) * stride_bn, shape=(K, N),
+                                           strides=(stride_bk, 1), block_shape=(BLOCK_K // DIV_FACTOR_B, BLOCK_N))
     else:
         a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k_a[None, :] * stride_ak)
         b_ptrs = b_ptr + (offs_k_b[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
@@ -75,8 +61,8 @@ def mxgemm_kernel(
         scale_b = tl.load(b_scale_ptr)
 
         if USE_TDM:
-            a = a_desc.load([0, k*(BLOCK_K//DIV_FACTOR_A)])
-            b = b_desc.load([k*(BLOCK_K//DIV_FACTOR_B), 0])
+            a = a_desc.load([0, k * (BLOCK_K // DIV_FACTOR_A)])
+            b = b_desc.load([k * (BLOCK_K // DIV_FACTOR_B), 0])
         else:
             a = tl.load(a_ptrs, mask=valid_k_a[None, :], other=0.)
             b = tl.load(b_ptrs, mask=valid_k_b[:, None], other=0.)

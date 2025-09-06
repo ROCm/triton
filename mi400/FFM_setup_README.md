@@ -253,13 +253,13 @@ simple.cpp: (you can also get the latest from [here](https://amd.atlassian.net/w
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>
- 
+
 // GPU Kernel
 __global__ void kernel_add(int* a, int b) {
   int idx = hipThreadIdx_x + hipBlockDim_x * hipBlockIdx_x;
   a[idx] += b;
 }
- 
+
 int main() {
   constexpr size_t size = 100;
   int* ptr;

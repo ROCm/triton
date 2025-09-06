@@ -1,12 +1,25 @@
-name: Pre-Commit Check
+name: Pre-Commit
 
 on:
-  workflow_call:
+  push:
+    branches:
+      - mi400_triton_dev
+  pull_request:
+    branches:
+      - mi400_triton_dev
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
 
 jobs:
   pre-commit:
-    name: pre-commit (code formatting)
-    runs-on: ubuntu-latest
+    name: Format
+    runs-on: lnx-set
     steps:
       - name: Checkout
         uses: actions/checkout@v4
