@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - mi400_triton_dev
+  pull_request:
+    branches:
+      - mi400_triton_dev
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+jobs:
+  gfx1250:
+    name: gfx1250
+    runs-on: self-hosted
+    env:
+      RUNNER_PROJECT_ROOT: "/data/actions-runner/_work/triton/triton"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: 'true'
+      - name: Build and Test
+        run: |
+          set -xeo pipefail
+          RENDER_GID=$(getent group render | cut -d: -f3)
+          echo "Render group ID: ${RENDER_GID}"
+          echo "Runner project root:: ${RUNNER_PROJECT_ROOT}"
+          docker run --pull=never --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v /home/lzhang20/.cache/ccache:/ccache -v /home/lzhang20/ci-triton-cache:/home/mirror/.triton \
+            -v /home/lzhang20/actions-runner/_work/triton:/_work \
+            -v /home/lzhang20:/data \
+            -w /_work/triton \
+            --entrypoint zsh \
+            lei-gfx1250-dev -lc "./.github/workflows/gfx1250.sh"
