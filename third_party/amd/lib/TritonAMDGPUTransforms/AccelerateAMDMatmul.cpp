@@ -21,6 +21,23 @@ using ::mlir::LLVM::AMD::isChainDotTail;
 using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using mlir::triton::gpu::chooseScaledMfmaScaleLayout;
 
+bool isUsedByAtomic(tt::DotOpInterface dotOp) {
+  auto isInSameRegion = [&dotOp](Operation *op) {
+    return op->getParentRegion() == dotOp->getParentRegion();
+  };
+  ForwardSliceOptions fwdOpt;
+  fwdOpt.filter = isInSameRegion;
+  SetVector<mlir::Operation *> fwdSlices;
+  getForwardSlice(dotOp, &fwdSlices, fwdOpt);
+  for (Operation *op : fwdSlices) {
+    if (auto dOp = dyn_cast<tt::AtomicRMWOp>(op)) {
+      assert(dOp != dotOp);
+      return true;
+    }
+  }
+  return false;
+}
+
 namespace mlir {
 
 namespace {
@@ -432,6 +449,9 @@ public:
     auto oldBType = cast<RankedTensorType>(b.getType());
     auto ctx = oldAType.getContext();
 
+    bool usedByAtomic = isUsedByAtomic(dotOp) && !isChainDotHead(dotOp, 0) &&
+                        !isChainDotHead(dotOp, 1);
+
     Type aElemType = oldAType.getElementType();
     Type bElemType = oldBType.getElementType();
     bool withScale =
@@ -476,6 +496,9 @@ public:
     bool isTransposed = !(mDim == 4 && nDim == 64);
     auto aElemTy = mfmaInstr->aElementType;
     auto is16BitElemTy = (aElemTy.isF16() || aElemTy.isBF16());
+
+    if (usedByAtomic)
+      isTransposed = false;
 
     SmallVector<unsigned, 2> tilesPerWarp = {1, 1};
 
