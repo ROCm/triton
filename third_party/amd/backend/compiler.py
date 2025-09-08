@@ -257,7 +257,6 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
-
         '''
         if '_ragged_hstu_attn_bwd' in str(mod):
             print("compiling bwd kernel")
@@ -448,6 +447,19 @@ class HIPBackend(BaseBackend):
         features = '-real-true16' if 'gfx11' in options.arch else ''
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
                                        False)
+
+        if '_ragged_hstu_attn_bwd' in amdgcn:
+            print("compiling bwd kernel!")
+            if "AMD_INSERT_AMDGCN" in os.environ.keys():
+                insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+                if not os.path.exists(insert_module_path):
+                    raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+                with open(insert_module_path, "r") as file:
+                    file_content = file.readlines()
+                amdgcn = ''.join(file_content)
+        else:
+            print("compiling fwd kernel!")
+
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
