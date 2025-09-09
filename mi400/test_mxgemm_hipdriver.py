@@ -215,35 +215,35 @@ def generate_configs():
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
         },
         {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
         },
         {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
         },
         {
-            "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
         },
         {
-            "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
         },
         {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
         },
         {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
         },
         {
-            "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
         },
         {
-            "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
         },
     ]
