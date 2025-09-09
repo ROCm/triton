@@ -35,8 +35,9 @@ LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-de
 
 echo "=== Run GEMM Tests ==="
 
-# python3 mi400/test_mxgemm_hipdriver.py
+python3 mi400/test_mxgemm_hipdriver.py
 
 echo "=== Run Attention Tests ==="
 
 python3 mi400/test_mxfa_hipdriver.py -c 0
+python3 mi400/test_mxfa_hipdriver.py -c 1
