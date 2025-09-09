@@ -419,8 +419,8 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     }
     LDBG("RMW supported type");
 
-    // float16 is the only 16-bit dtype supported by buffer atomic fadd on
-    // gfx942
+    // gfx942 only supports f16 for buffer_atomic_add
+    // gfx950 supports both f16 and bf16 for buffer_atomic_add
     if (isaFamily == ISAFamily::CDNA3 && checkType.isBF16() &&
         atomicRmwOp == RMWOp::FADD) {
       return rewriter.notifyMatchFailure(op, "RMW FADD does not support bf16");
@@ -636,7 +636,8 @@ struct TritonAMDGPUConvertToBufferOpsPass
     // lowering to LLVM
     triton::AMD::ISAFamily isaFamily =
         triton::AMD::deduceISAFamily(archGenerationName);
-    if (this->allowBufferAtomics && ISAFamily::CDNA3 == isaFamily)
+    if (this->allowBufferAtomics &&
+        ((ISAFamily::CDNA3 == isaFamily) || (ISAFamily::CDNA4 == isaFamily)))
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
           context, assumptions, axisInfoAnalysis, solver, isaFamily);
     patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
