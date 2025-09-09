@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches:
-      - mi400_triton_dev
+      - shared/gfx1250-dev-*
   pull_request:
     branches:
-      - mi400_triton_dev
+      - shared/gfx1250-dev-*
     types:
       - opened
       - reopened

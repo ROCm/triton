@@ -529,8 +529,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     // We pass laneId==0 because GFX9 requires a scalar base pointer into LDS
     laneId = useContigWarpAddr ? b.i32_val(0) : laneId;
     lowerLdSt(loc, ctx, cvt, loadVals, resElemTy, smemObj.getBase(),
-              calcPaddedOffset, affineOffset, maskSpanAffineOffset,
-              laneId, warpId, rewriter, targetInfo, vec, lowerInst);
+              calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
+              warpId, rewriter, targetInfo, vec, lowerInst);
   }
 
   void emitOtherStore(RewriterBase &rewriter, Location loc,
@@ -848,8 +848,8 @@ struct BufferLoadToLocalOpConversion
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto emitBufferLoadLds =
         [this, &op, &b, &bufferEmitter, &rsrcDesc, laneId = laneId, threadPred,
-         offsetTy, otherTy, hasOther,
-         hasHWSwizzling, hasSwizzling](RewriterBase &rewriter, Location loc,
+         offsetTy, otherTy, hasOther, hasHWSwizzling,
+         hasSwizzling](RewriterBase &rewriter, Location loc,
                        ArrayRef<Value> loadVals, Value shmemAddr, int startIdx,
                        VectorType vecTy) -> SmallVector<Value> {
       auto [offsetElem, maskElem, otherElems, swizzleLaneOffset] =
