@@ -564,7 +564,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-
     // original values
     Value ptr = op.getPtr();
     Value mask = op.getMask();
