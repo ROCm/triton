@@ -96,6 +96,8 @@ def cktile_moe_stage1(
     b1,
     dtype,
     topk,
+    n_pad_zeros=0,
+    k_pad_zeros=0,
     block_size=32,
     sorted_weights=None,  # [max_num_tokens_padded]
 ):
@@ -117,6 +119,8 @@ def cktile_moe_stage1(
         sorted_expert_ids,
         num_valid_ids,
         topk,
+        n_pad_zeros,
+        k_pad_zeros,
         sorted_weights,
         a1_scale,
         w1_scale,
@@ -137,8 +141,11 @@ def cktile_moe_stage2(
     b2,
     dtype,
     topk,
+    n_pad_zeros=0,
+    k_pad_zeros=0,
     block_size=32,
     sorted_weights=None,  # [max_num_tokens_padded]
+    zeros_out=False,
 ):
     token_num = hidden_states.shape[0]
     D = w2.shape[1]
@@ -159,6 +166,8 @@ def cktile_moe_stage2(
         sorted_expert_ids,
         num_valid_ids,
         topk,
+        n_pad_zeros,
+        k_pad_zeros,
         sorted_weights,
         a2_scale,
         w2_scale,
@@ -325,7 +334,7 @@ def bench_mlp(batch, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dtype, w_dtyp
         
         ckmoe1_out = cktile_moe_stage1(
                 x, w1_aiter, w2_aiter, sorted_ids, sorted_expert_ids, num_valid_ids,
-                w1_scale_aiter, None, b1, x.dtype, n_expts_act, BLOCK_SIZE_M, None
+                w1_scale_aiter, None, b1, x.dtype, n_expts_act, 0, 0, BLOCK_SIZE_M, None
             )
         # ck1 = ck1.view(batch, n_expts_act, -1)
 
@@ -341,7 +350,7 @@ def bench_mlp(batch, dim1, dim2, dim3, n_expts_tot, n_expts_act, x_dtype, w_dtyp
         x_aiter = torch.gather(x_aiter, 1, topk_ids_reorder)
         checkAllclose(x_aiter, ckmoe1_out, msg="stage1 triton vs. aiter")
         
-        ck2 = cktile_moe_stage2(x_aiter, w1_aiter, w2_aiter, sorted_ids, sorted_expert_ids, num_valid_ids, w2_scale_aiter, None, b2, x.dtype, n_expts_act, BLOCK_SIZE_M, sorted_weights)
+        ck2 = cktile_moe_stage2(x_aiter, w1_aiter, w2_aiter, sorted_ids, sorted_expert_ids, num_valid_ids, w2_scale_aiter, None, b2, x.dtype, n_expts_act, 0, 0, BLOCK_SIZE_M, sorted_weights)
         x = matmul_ogs(x, w2, b2, rdata, scatter_indx=scatter_indx, precision_config=pc2)
         # triton moe2 vs. aiter moe2
         checkAllclose(x, ck2, msg="stage2 triton vs. aiter")
