@@ -154,10 +154,10 @@ static Value shuffleCommonImpl(Location loc, RewriterBase &rewriter,
       }
     } else {
       if (!llvm::is_contained({ISAFamily::CDNA2, ISAFamily::CDNA3,
-                               ISAFamily::CDNA4, ISAFamily::CDNA5,
+                               ISAFamily::CDNA4, ISAFamily::GFX1250,
                                ISAFamily::RDNA3, ISAFamily::RDNA4},
                               isaFamily)) {
-        // DPP is only supported for CDNA2/CDNA3/CDNA4/CDNA5/RDNA3/RDNA4 right
+        // DPP is only supported for CDNA2/CDNA3/CDNA4/RDNA3/RDNA4/GFX1250 right
         // now, so we fallback to ds_swizzle for other architectures.
         //
         // This map facilates the butterfly shuffle pattern for a stride less

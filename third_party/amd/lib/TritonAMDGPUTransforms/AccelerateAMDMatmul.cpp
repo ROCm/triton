@@ -1645,7 +1645,7 @@ struct TritonAMDGPUAccelerateMatmulPass
     RewritePatternSet mfmaPatterns(context);
     AMD::TargetInfo ti = AMD::TargetInfo(archGenerationName);
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
-    case ISAFamily::CDNA5:
+    case ISAFamily::GFX1250:
       mfmaPatterns.add<BlockedToWMMA, ::ScaledBlockedToScaledWMMAF8F6F4>(
           context, getWmmaVersion(archGenerationName), 16, /*benefit=*/10);
       break;

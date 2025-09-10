@@ -802,7 +802,7 @@ struct BufferLoadToLocalOpConversion
       vec = std::min(vec, padEnc.getMinInterval());
     }
 
-    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::CDNA5;
+    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250;
     auto maybeSwizzledEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstEnc);
     bool hasSwizzling = maybeSwizzledEnc && maybeSwizzledEnc.getMaxPhase() != 1;
     if (!hasHWSwizzling &&
@@ -935,7 +935,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       return;
     }
 
-    if (targetInfo.getISAFamily() == ISAFamily::CDNA5) {
+    if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
       std::string intrinsic = "llvm.amdgcn.global.load.async.to.lds.b" +
                               std::to_string(vecBytes * 8);
       auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
@@ -989,7 +989,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       vec = std::min(vec, padEnc.getMinInterval());
     }
 
-    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::CDNA5;
+    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250;
     auto maybeSwizzledEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstEnc);
     bool hasSwizzling = maybeSwizzledEnc && maybeSwizzledEnc.getMaxPhase() != 1;
     if (!hasHWSwizzling && failed(canWriteCoalesced(rewriter, op, srcTy, dstTy,
@@ -2039,7 +2039,7 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
     case ISAFamily::CDNA4:
-    case ISAFamily::CDNA5:
+    case ISAFamily::GFX1250:
       break;
     default:
       return rewriter.notifyMatchFailure(
@@ -2048,7 +2048,7 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
 
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    if (targetInfo.getISAFamily() == ISAFamily::CDNA5) {
+    if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
       LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
                                       "llvm.amdgcn.s.wait.asynccnt", {},
                                       {b.i16_val(op.getNum())});

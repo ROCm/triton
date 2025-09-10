@@ -239,7 +239,7 @@ private:
         ldsTransLayout, srcTy, llvmElemTy,
         /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
         laneId, warpId, [&](VectorType vecTy, Value vecAddr) {
-          if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA5) {
+          if (targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250) {
             auto vecVal =
                 transLoadGfx1250(rewriter, loc, bitwidth, vecTy, vecAddr);
             for (int v = 0; v < vecTy.getNumElements(); v++) {

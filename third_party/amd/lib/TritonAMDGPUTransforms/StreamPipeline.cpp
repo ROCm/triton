@@ -1503,7 +1503,7 @@ FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
     isaFamily = triton::AMD::deduceISAFamily(*arch);
   tt::PipeliningOption options;
   options.supportDynamicLoops = true;
-  options.peelEpilogue = isaFamily != triton::AMD::ISAFamily::CDNA5;
+  options.peelEpilogue = isaFamily != triton::AMD::ISAFamily::GFX1250;
   options.predicateFn = streamPredication;
   // Annotate loadOp in prologue for further moving up
   options.annotateFn = [](Operation *op,

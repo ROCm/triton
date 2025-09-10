@@ -288,8 +288,9 @@ cvtScalePkDowncastToFp8(Location loc, ConversionPatternRewriter &rewriter,
 
 // Fp16 -> OCP Bf8 (RTNE)
 static SmallVector<Value>
-Fp16_to_Fp8E5M2_RTNE_SW_CDNA5(Location loc, ConversionPatternRewriter &rewriter,
-                              const SmallVector<Value> &v) {
+Fp16_to_Fp8E5M2_RTNE_SW_GFX1250(Location loc,
+                                ConversionPatternRewriter &rewriter,
+                                const SmallVector<Value> &v) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto fp16x2VecTy = vec_ty(f16_ty, 2);
   Value fp16x2Vec0 = b.undef(fp16x2VecTy);
@@ -373,8 +374,8 @@ Fp16_to_Fp8E5M2_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
 ConverterT Fp16_to_Fp8E5M2_RTNE(AMD::ISAFamily isaFamily) {
   return isaFamily == AMD::ISAFamily::CDNA4
              ? Fp16_to_Fp8E5M2_RTNE_HW
-             : (isaFamily == AMD::ISAFamily::CDNA5
-                    ? Fp16_to_Fp8E5M2_RTNE_SW_CDNA5
+             : (isaFamily == AMD::ISAFamily::GFX1250
+                    ? Fp16_to_Fp8E5M2_RTNE_SW_GFX1250
                     : Fp16_to_Fp8E5M2_RTNE_SW);
 }
 
@@ -1840,7 +1841,7 @@ struct FpToFpOpConversion
     bool useFP16IntermediateSrc = true;
     srcElementType.isF32() && !dstElementType.isF16() &&
         roundingMode == RoundingMode::RTNE &&
-        (isaFamily == AMD::ISAFamily::CDNA5 ||
+        (isaFamily == AMD::ISAFamily::GFX1250 ||
          !(isaFamily == AMD::ISAFamily::CDNA4 &&
            (llvm::isa<Float8E4M3FNType, Float8E4M3FNUZType, Float8E5M2Type,
                       Float8E5M2FNUZType>(dstElementType))) &&

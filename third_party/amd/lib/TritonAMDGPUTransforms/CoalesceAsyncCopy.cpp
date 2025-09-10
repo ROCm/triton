@@ -157,7 +157,7 @@ public:
     case triton::AMD::ISAFamily::CDNA2:
     case triton::AMD::ISAFamily::CDNA3:
     case triton::AMD::ISAFamily::CDNA4:
-    case triton::AMD::ISAFamily::CDNA5: {
+    case triton::AMD::ISAFamily::GFX1250: {
       break;
     }
     default:

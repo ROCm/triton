@@ -333,7 +333,7 @@ void init_triton_amd(py::module &&m) {
   m.def("has_cluster_feature", [](const std::string &arch) {
     using mlir::triton::AMD::ISAFamily;
     switch (mlir::triton::AMD::deduceISAFamily(arch)) {
-    case ISAFamily::CDNA5:
+    case ISAFamily::GFX1250:
       return true;
     default:
       return false;

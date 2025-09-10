@@ -71,7 +71,7 @@ llvm::AMDGPU::GPUKind TargetInfo::getGPUKind() const {
 int TargetInfo::getWarpSize() const { return isCDNA(getISAFamily()) ? 64 : 32; }
 
 int TargetInfo::getSharedMemorySize() const {
-  int kbytes = (getISAFamily() == ISAFamily::CDNA5
+  int kbytes = (getISAFamily() == ISAFamily::GFX1250
                     ? 380
                     : (getISAFamily() == ISAFamily::CDNA4 ? 160 : 64));
   return kbytes * 1024;
@@ -79,19 +79,19 @@ int TargetInfo::getSharedMemorySize() const {
 
 bool TargetInfo::supportMaximumMinimum() const {
   return getISAFamily() == ISAFamily::CDNA4 ||
-         getISAFamily() == ISAFamily::CDNA5;
+         getISAFamily() == ISAFamily::GFX1250;
 }
 
 bool TargetInfo::supportLDSLoadTransposed() const {
   return getISAFamily() == ISAFamily::CDNA4 ||
-         getISAFamily() == ISAFamily::CDNA5;
+         getISAFamily() == ISAFamily::GFX1250;
 }
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   // On AMD hardware we don't have CTA clusters like NVIDIA. So this will always
   // be zero. Whoever calling into this should make sure the whole program does
   // not try to utilize CTA clusters.
-  if (getISAFamily() != ISAFamily::CDNA5) {
+  if (getISAFamily() != ISAFamily::GFX1250) {
     return rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
   }
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -150,7 +150,7 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
 
 bool TargetInfo::canUseLDSTransLoad(int bitwidth) const {
   return (getISAFamily() == ISAFamily::CDNA4 ||
-          getISAFamily() == ISAFamily::CDNA5) &&
+          getISAFamily() == ISAFamily::GFX1250) &&
          llvm::is_contained({16, 8, 4, 6}, bitwidth);
 }
 
@@ -333,7 +333,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   if ((getISAFamily() == ISAFamily::CDNA4 ||
-       getISAFamily() == ISAFamily::CDNA5) &&
+       getISAFamily() == ISAFamily::GFX1250) &&
       warpReduceSwap16or32(rewriter, loc, acc, op, numLaneToReduce, interleave))
     return true;
   if (numLaneToReduce != getWarpSize())
@@ -629,7 +629,7 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
   case ISAFamily::CDNA4:
     // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
     return llvm::is_contained({128, 64, /*96, */ 32, /*16, 8*/}, bitWidth);
-  case ISAFamily::CDNA5:
+  case ISAFamily::GFX1250:
     // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
     return llvm::is_contained({128, 64, /*96, */ 32, 16, 8}, bitWidth);
   default:
