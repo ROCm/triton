@@ -41,3 +41,7 @@ echo "=== Run Attention Tests ==="
 
 python3 mi400/test_mxfa_hipdriver.py -c 0
 python3 mi400/test_mxfa_hipdriver.py -c 1
+
+echo "=== Run Gluon GEMM Tests ==="
+
+python3 mi400/test_gemm_gluon.py

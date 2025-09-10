@@ -1153,7 +1153,7 @@ public:
     auto warpsPerTile = warpsPerTileWMMA(dotOp, oldShape, numWarps, {16, 16});
 
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, /*versionMajor=*/wmmaVersion, true, 128, bitnessA, bitnessB,
+        ctx, /*versionMajor=*/wmmaVersion, true, bitnessA, bitnessB,
         warpsPerTile, ctaLayout);
 
     auto newRetType =
@@ -1400,7 +1400,6 @@ public:
 
     auto mDim = wmmaInstr->mDim;
     auto nDim = wmmaInstr->nDim;
-    auto kDim = wmmaInstr->kDim;
     auto kBase = wmmaInstr->kBase;
 
     // get WMMA encoding for the given number of warps
@@ -1415,15 +1414,8 @@ public:
     // Use transposed wmma layout to enable larger vectorization for global
     // store instructions.
     bool isTransposed = (wmmaVersion == 2 || wmmaVersion == 3);
-
-    if (llvm::isa<FloatType>(operandTypes[0]) &&
-        operandTypes[0].getIntOrFloatBitWidth() == 8 &&
-        llvm::isa<FloatType>(operandTypes[1]) &&
-        operandTypes[1].getIntOrFloatBitWidth() == 8) {
-      kDim = 64;
-    }
-    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, wmmaVersion, isTransposed, kDim, 0, 0, warpsPerTile, CTALayout);
+    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed, 0,
+                                            0, warpsPerTile, CTALayout);
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 

@@ -1298,7 +1298,6 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
   unsigned version = 0;
   bool isTransposed = false;
-  unsigned kDim = 16;
   unsigned bitnessA = 0;
   unsigned bitnessB = 0;
   SmallVector<unsigned> warpsPerCTA;
@@ -1313,10 +1312,6 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
     }
     if (attr.getName() == "isTranspose") {
       if (parseBool(parser, attr, isTransposed, "isTranspose").failed())
-        return {};
-    }
-    if (attr.getName() == "KDim") {
-      if (parseUInt(parser, attr, kDim, "KDim").failed())
         return {};
     }
     if (attr.getName() == "warpsPerCTA") {
@@ -1354,14 +1349,14 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
     return {};
 
   return parser.getChecked<AMDWmmaEncodingAttr>(
-      parser.getContext(), version, isTransposed, kDim, bitnessA, bitnessB,
+      parser.getContext(), version, isTransposed, bitnessA, bitnessB,
       warpsPerCTA, *CTALayout);
 }
 
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "version = " << getVersion()
-          << ", isTranspose = " << getIsTransposed() << ", KDim = " << getKdim()
+          << ", isTranspose = " << getIsTransposed()
           << ", bitnessA = " << getBitnessA()
           << ", bitnessB = " << getBitnessB() << ", warpsPerCTA = ["
           << ArrayRef(getWarpsPerCTA()) << "]";
@@ -1372,7 +1367,7 @@ void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
 
 LogicalResult
 AMDWmmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
-                            unsigned version, bool isTransposed, unsigned kDim,
+                            unsigned version, bool isTransposed,
                             unsigned bitnessA, unsigned bitnessB,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             mlir::triton::gpu::CTALayoutAttr) {
@@ -2367,7 +2362,7 @@ AMDWmmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
 
 SmallVector<unsigned> AMDWmmaEncodingAttr::getMNKDimPerInstr() const {
   // TODO: move magic numbers out of the code
-  return {16, 16, getKdim()};
+  return {16, 16};
 }
 
 SwizzledSharedEncodingAttr AMDWmmaEncodingAttr::composeSharedLayoutForOperand(

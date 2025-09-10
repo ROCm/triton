@@ -82,13 +82,14 @@ ValueTable getValuesFromDotOperandLayoutStruct(
           if (auto t = dyn_cast<mlir::IntegerType>(elemTy)) {
             if (t.getWidth() == 8) {
               const int i8bias = 127;
-              zero =
-                  rewriter.create<mlir::arith::ConstantIntOp>(loc, t, i8bias);
+              zero = rewriter.create<LLVM::ConstantOp>(
+                  loc, t, rewriter.getIntegerAttr(t, i8bias));
             } else
-              zero = rewriter.create<mlir::arith::ConstantIntOp>(loc, t, 0);
+              zero = rewriter.create<LLVM::ConstantOp>(
+                  loc, t, rewriter.getIntegerAttr(t, 0));
           } else {
-            zero = rewriter.create<mlir::arith::ConstantFloatOp>(
-                loc, cast<mlir::FloatType>(elemTy), llvm::APFloat(0.0f));
+            zero = rewriter.create<LLVM::ConstantOp>(
+                loc, elemTy, rewriter.getFloatAttr(elemTy, 0.0));
           }
           tb.insert_element(ty, rawElems, zero, tb.i32_val(i));
         }
@@ -570,7 +571,7 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto numRepB = repA[0];
 
   const auto kDimTensorA = aTensorTy.getShape().back();
-  const auto kWWMADim = mnkDim.back();
+  const auto kWWMADim = 128;
   int paddingFactor = 1;
   if (kWWMADim > kDimTensorA) {
     paddingFactor = kWWMADim / kDimTensorA;

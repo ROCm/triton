@@ -377,7 +377,7 @@ void init_gluon_ir(py::module &&m) {
              auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
                  ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return ttg::AMDWmmaEncodingAttr::get(ctx, version, transposed,
-                                                  /*kDim=*/16, /*bitnessA=*/0,
+                                                  /*bitnessA=*/0,
                                                   /*bitnessB=*/0, warpsPerCta,
                                                   ctaLayout);
            })

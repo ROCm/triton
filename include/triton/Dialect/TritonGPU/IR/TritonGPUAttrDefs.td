@@ -1294,7 +1294,6 @@ Row |
     ins
     "unsigned": $version,
     "bool":$isTransposed,
-    "unsigned": $Kdim,
     "unsigned":$bitnessA,
     "unsigned":$bitnessB,
     ArrayRefParameter<"unsigned">:$warpsPerCTA,
