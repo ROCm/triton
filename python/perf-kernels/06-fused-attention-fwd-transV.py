@@ -154,7 +154,6 @@ class _attention(torch.autograd.Function):
             num_stages = 1
             ## causal=False likes to pre load v but causal=True does not
             pre_load_v = False if causal else True
-            slice_k_tile = 32
             kpack = 1
         else:
             ## D_HEAD = 128
@@ -167,7 +166,6 @@ class _attention(torch.autograd.Function):
             num_warps = BLOCK_M // 32
             num_stages = 1
             pre_load_v = False
-            slice_k_tile = 32
             kpack = 1
 
         grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
@@ -206,7 +204,6 @@ class _attention(torch.autograd.Function):
             num_warps=num_warps,
             num_stages=num_stages,
             pre_load_v=pre_load_v,
-            slice_k_tile=slice_k_tile,
             kpack=kpack,
         )
 
