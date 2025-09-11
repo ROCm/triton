@@ -36,6 +36,10 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-debug pip3 install --no-build-isolation .
 
+echo "=== Run Gluon Tests ==="
+
+pytest -s third_party/amd/python/test/test_gluon_gfx1250.py
+
 echo "=== Run GEMM Tests ==="
 
 python3 mi400/test_mxgemm_hipdriver.py
@@ -44,7 +48,3 @@ echo "=== Run Attention Tests ==="
 
 python3 mi400/test_mxfa_hipdriver.py -c 0
 python3 mi400/test_mxfa_hipdriver.py -c 1
-
-echo "=== Run Gluon GEMM Tests ==="
-
-python3 mi400/test_gemm_gluon.py
