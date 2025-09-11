@@ -2,13 +2,14 @@ import torch
 
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 # -----------------------------------------------------------------------------
 #                                  Utilities
 # -----------------------------------------------------------------------------
 
 
-@triton.constexpr_function
+@tl.constexpr_function
 def get_scaled_dot_format_string(dtype: tl.dtype):
     mapping = {
         tl.float16: "fp16",
@@ -94,7 +95,7 @@ def matmul_launch_metadata(grid, kernel, args):
 
     ret = dict()
     M, N, K = args["M"], args["N"], args["K"]
-    Y, X, W = args["YPtr"], args["XPtr"], args["WPtr"]
+    Y, X, W = [t.base if isinstance(t, TensorDescriptor) else t for t in [args["Y"], args["X"], args["W"]]]
     tokens_per_expt = args.get("TOKENS_PER_EXPT_FOR_ANNOTATION")
     hist = args["ExptHist"]
     if hist is not None:

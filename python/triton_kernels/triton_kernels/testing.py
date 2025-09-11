@@ -22,9 +22,6 @@ def assert_close(ref, tri, maxtol=None, rmstol=None, description="--", verbose=T
             return
         ref = ref_as_type
 
-    if ref.numel() == 0:
-        return
-
     if maxtol is None:
         maxtol = 2e-2
     if rmstol is None:
