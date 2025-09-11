@@ -92,7 +92,7 @@ public:
     SmallVector<unsigned> cOrd(warps.size());
     std::iota(cOrd.begin(), cOrd.end(), 0);
     return AMDWmmaEncodingAttr::get(
-        &ctx, version, transposed, 0, 0, warps,
+        &ctx, version, transposed, warps,
         CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd));
   }
 

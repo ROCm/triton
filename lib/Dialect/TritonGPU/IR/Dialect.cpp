@@ -1298,8 +1298,6 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
   unsigned version = 0;
   bool isTransposed = false;
-  unsigned bitnessA = 0;
-  unsigned bitnessB = 0;
   SmallVector<unsigned> warpsPerCTA;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
@@ -1316,14 +1314,6 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
     }
     if (attr.getName() == "warpsPerCTA") {
       if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
-        return {};
-    }
-    if (attr.getName() == "bitnessA") {
-      if (parseUInt(parser, attr, bitnessA, "bitness").failed())
-        return {};
-    }
-    if (attr.getName() == "bitnessB") {
-      if (parseUInt(parser, attr, bitnessB, "bitness").failed())
         return {};
     }
     if (attr.getName() == "CTAsPerCGA") {
@@ -1349,16 +1339,13 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
     return {};
 
   return parser.getChecked<AMDWmmaEncodingAttr>(
-      parser.getContext(), version, isTransposed, bitnessA, bitnessB,
-      warpsPerCTA, *CTALayout);
+      parser.getContext(), version, isTransposed, warpsPerCTA, *CTALayout);
 }
 
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "version = " << getVersion()
-          << ", isTranspose = " << getIsTransposed()
-          << ", bitnessA = " << getBitnessA()
-          << ", bitnessB = " << getBitnessB() << ", warpsPerCTA = ["
+          << ", isTranspose = " << getIsTransposed() << ", warpsPerCTA = ["
           << ArrayRef(getWarpsPerCTA()) << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getWarpsPerCTA().size());
@@ -1368,7 +1355,6 @@ void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
 LogicalResult
 AMDWmmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
                             unsigned version, bool isTransposed,
-                            unsigned bitnessA, unsigned bitnessB,
                             llvm::ArrayRef<unsigned int> warpsPerCTA,
                             mlir::triton::gpu::CTALayoutAttr) {
   if (version != 1 && version != 2 && version != 3) {
@@ -2325,12 +2311,10 @@ AMDWmmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 
 SmallVector<int64_t>
 AMDWmmaEncodingAttr::getElemsPerInstrForOperands(int kDim, int opIdx) const {
-  int bitness = opIdx == 0 ? getBitnessA() : getBitnessB();
-  int factor = (bitness == 4 ? 2 : 1);
   if (opIdx == 0)
-    return {16, kDim / factor};
+    return {16, kDim};
   else
-    return {kDim / factor, 16};
+    return {kDim, 16};
 }
 
 SmallVector<int64_t>
