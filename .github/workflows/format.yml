@@ -18,7 +18,7 @@ permissions:
 jobs:
   pre-commit:
     name: Format
-    runs-on: lnx-set
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
