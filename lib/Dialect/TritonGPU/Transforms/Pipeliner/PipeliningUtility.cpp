@@ -165,7 +165,7 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     return op;
   if (isa<ttg::AsyncCommitGroupOp, ttg::AsyncWaitOp>(op))
     return op;
-  if (isa<ttg::LocalLoadOp, ttg::LocalStoreOp>(op))
+  if (isa<ttg::LocalAllocOp, ttg::LocalLoadOp, ttg::LocalStoreOp>(op))
     return op;
   if (isa<ttng::TMEMAllocOp, ttng::TMEMLoadOp>(op))
     return op;

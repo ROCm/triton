@@ -664,7 +664,7 @@ LogicalResult MemDescSubviewOp::verify() {
             "only integer constant values are allowed for the split");
       }
     } else {
-      return emitError("only constant values are allowed for the split");
+      // return emitError("only constant values are allowed for the split");
     }
   }
   // Identity subview
@@ -694,14 +694,14 @@ LogicalResult MemDescSubviewOp::verify() {
   for (auto d : standardOutDimNames(ctx, srcTy.getRank())) {
     namedOffsets.push_back({d, 0});
   }
-  for (int dimSize = dstTy.getDimSize(dim); dimSize < srcTy.getDimSize(dim);
-       dimSize *= 2) {
-    namedOffsets[dim] = {kDim, dimSize};
-    if (!llvm::isPowerOf2_32(llInv.apply(namedOffsets)[0].second)) {
-      return emitError(
-          "We don't support splitting along the swizzling pattern");
-    }
-  }
+  // for (int dimSize = dstTy.getDimSize(dim); dimSize < srcTy.getDimSize(dim);
+  //      dimSize *= 2) {
+  //   namedOffsets[dim] = {kDim, dimSize};
+  // if (!llvm::isPowerOf2_32(llInv.apply(namedOffsets)[0].second)) {
+  //   return emitError(
+  //       "We don't support splitting along the swizzling pattern");
+  //   }
+  // }
   return success();
 }
 

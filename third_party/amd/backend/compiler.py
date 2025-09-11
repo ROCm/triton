@@ -66,6 +66,11 @@ class HIPOptions:
     #            - iglp 2 and sched.barrier around it
     #            - sink-insts-to-avoid-spills flag to avoid register spills
     schedule_hint: str = 'none'
+    # number of loop iterations to aggregate in aggregate_load pass
+    # -1 is an automatic mode
+    # 0 and 1 disables pass
+    # other values limits number of iteration by given number
+    aggregate_load_factor: int = 0
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
@@ -226,6 +231,15 @@ class HIPBackend(BaseBackend):
                                                  preshuffle_scales)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
+
+        import os
+        la_factor = options.aggregate_load_factor
+        if "TRITON_HIP_AGGREGATE_LOAD_FACTOR" in os.environ:
+            la_factor = int(os.environ["TRITON_HIP_AGGREGATE_LOAD_FACTOR"])
+        if la_factor == -1 or la_factor > 1:
+            amd.passes.ttgpuir.add_aggregate_load(pm, options.arch, la_factor)
+            passes.ttgpuir.add_coalesce(pm)
+
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
 

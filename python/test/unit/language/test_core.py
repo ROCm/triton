@@ -3949,7 +3949,15 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
                           for mxfp_type in ["e2m1", "e4m3", "e5m2"]
                           for normal_type in ["e4m3", "e5m2", "bf16", "fp16"]
                           for mma in (mma_nonk_sizes if is_hip() else [16])
-                          for kpack in ([1, 2] if (is_hip() and not is_hip_cdna4()) else [1])])
+                          for kpack in ([1, 2] if (is_hip() and not is_hip_cdna4()) else [1])] +
+                         [(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, 1, mma, kpack)
+                          for M, N, K in [(32, 64, 128)]
+                          for col_a, col_b in itertools.product([True, False], repeat=2)
+                          for rhs_scale in [False, True]
+                          for mxfp_type in ["e2m1"]
+                          for normal_type in ["e4m3", "e5m2", "bf16", "fp16"]
+                          for mma in (mma_nonk_sizes if is_hip() else [16])
+                          for kpack in [1]])
 def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, num_warps, mma, kpack, device):
     if is_cuda():
         cc = torch.cuda.get_device_capability()
