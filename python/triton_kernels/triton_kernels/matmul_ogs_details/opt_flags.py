@@ -111,7 +111,7 @@ def make_default_opt_flags_amd(
     target_kernel_kwargs = {"waves_per_eu": 3, "matrix_instr_nonkdim": 16, "kpack": 1}
     block_n=128
 
-    use_scale_preshuffling = os.environ.get("TRITON_HIP_PRESHUFFLE_SCALES", "1") == "1"
+    use_scale_preshuffling = os.environ.get("ROCM_TRITON_MOE_PRESHUFFLE_SCALES", "1") == "1"
 
     if rhs_dtype is FP4 and m <= 1024:
         block_k=256
