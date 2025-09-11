@@ -9,6 +9,9 @@ set -xeo pipefail
 
 pwd && ls
 
+echo "=== Clean up cache ==="
+rm -rf ~/.triton/cache
+
 echo "=== Setup Environment ==="
 
 export FFM_PATH=/data/mi450
