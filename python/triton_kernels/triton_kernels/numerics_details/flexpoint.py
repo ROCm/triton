@@ -52,7 +52,7 @@ def rcp_max_finite(dtype):
         tl.static_assert(tl.constexpr(False), f"{dtype} not supported in flexpoint")
 
 
-@tl.constexpr_function
+@triton.constexpr_function
 def cuda_capability_geq(major, minor):
     return target_info.cuda_capability_geq(major, minor)
 

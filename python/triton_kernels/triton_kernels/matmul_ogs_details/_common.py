@@ -9,7 +9,7 @@ from triton.tools.tensor_descriptor import TensorDescriptor
 # -----------------------------------------------------------------------------
 
 
-@tl.constexpr_function
+@triton.constexpr_function
 def get_scaled_dot_format_string(dtype: tl.dtype):
     mapping = {
         tl.float16: "fp16",

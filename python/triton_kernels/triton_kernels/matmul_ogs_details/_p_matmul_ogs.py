@@ -8,11 +8,11 @@ from ._common import make_matmul_repr, matmul_launch_metadata, swizzle2d, xcd_sw
 
 # fmt: off
 
-@tl.constexpr_function
+@triton.constexpr_function
 def cuda_capability_geq(major, minor):
     return target_info.cuda_capability_geq(major, minor)
 
-@tl.constexpr_function
+@triton.constexpr_function
 def get_dtype(tensor_or_desc: tl.tensor | tl.tensor_descriptor) -> tl.dtype:
     if isinstance(tensor_or_desc, tl.tensor):
         return tensor_or_desc.dtype.element_ty
