@@ -331,7 +331,11 @@ git clone https://github.com/AMD-Lightning-Internal/llvm-project.git
 cd llvm-project
 git checkout `cat path_to_triton_repo/cmake/llvm-hash.txt`
 mkdir build && cd build
-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON ../llvm -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"
+cmake -G Ninja ../llvm -DCMAKE_BUILD_TYPE=Release \
+-DLLVM_ENABLE_ASSERTIONS=ON \
+-DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
+-DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"
+
 # build
 ninja
 ```
@@ -365,15 +369,33 @@ export FFM_BIN_PATH=/path/to/ffm/_builds/Release/bin
 ```
 
 Install hip-python from pypi:
-`pip install -i https://test.pypi.org/simple/ hip-python`
+
+```bash
+pip install -i https://test.pypi.org/simple/ hip-python
+```
+
 Then install notorch:
+
 ```bash
 cd <triton_dir>/mi400/notorch
 pip install -e .
 ```
-You can just run any kernel by running the associated test script. Example for MXFA kernels
-`python3 mi400/test_mxfa_hipdriver.py`
-Or for MXGEMM:
-`python3 mi400/test_mxgemm_hipdriver.py`
-- Requires a pytorch installation. Use any ROCm pytorch nightly build `pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm6.4 && pip3 uninstall -y pytorch-triton-rocm`
+
+You can just run any kernel by running the associated test script. Example for MXFA kernels:
+
+```bash
+# MXFP-FA
+python3 mi400/test_mxfa_hipdriver.py
+
+# or MXFP-GEMM
+python3 mi400/test_mxgemm_hipdriver.py
+```
+
+This requires a pytorch installation. Use any ROCm pytorch nightly build:
+
+```bash
+pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm6.4
+pip3 uninstall -y pytorch-triton-rocm
+```
+
 (doesn't matter if it doesn't support gfx1250 - the point is to only use the CPU part of pytorch and while `.cuda()` maps directly to the HIP runtime, which doesn't require gfx1250 specific support.)
