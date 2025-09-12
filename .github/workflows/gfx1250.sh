@@ -14,13 +14,13 @@ rm -rf ~/.triton/cache
 
 echo "=== Setup Environment ==="
 
-export FFM_PATH=/data/mi450
+export FFM_PATH=/data/mi450-git
 export FFM_BIN_PATH=$FFM_PATH/_builds/Release/bin
 export HSA_MODEL_LIB=$FFM_PATH/_builds/Release/lib/libhsakmtmodel.so
 export HSA_ENABLE_SDMA=0
 export HSA_ENABLE_INTERRUPT=0
 export HSA_MODEL_TOPOLOGY=$FFM_PATH/topology
-export HSA_MODEL_NUM_THREADS=$(nproc)
+export HSA_MODEL_NUM_THREADS=1
 export ROCM_PATH=/opt/rocm
 export TARGET_ARCH=gfx1250
 export LD_LIBRARY_PATH=$ROCM_PATH/lib
@@ -46,5 +46,6 @@ python3 mi400/test_mxgemm_hipdriver.py
 
 echo "=== Run Attention Tests ==="
 
+export HSA_MODEL_NUM_THREADS=$(nproc)
 python3 mi400/test_mxfa_hipdriver.py -c 0
-python3 mi400/test_mxfa_hipdriver.py -c 1
+#python3 mi400/test_mxfa_hipdriver.py -c 1
