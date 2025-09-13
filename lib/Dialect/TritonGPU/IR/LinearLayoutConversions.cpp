@@ -837,7 +837,6 @@ AMDWmmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
                  {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 8}}}},
                 {outDimNames[threadOrder[0]], outDimNames[threadOrder[1]]});
 
-  // tileLayout.getInDimSize(str_attr("register")));
   if (hasBatchDim) {
     int batchIndex = 0;
     // Extend the base vector with one value to accommodate for the batch
@@ -861,8 +860,7 @@ AMDWmmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   LinearLayout ctaLayout = tileLayout.transposeOuts(repDimNames) *
                            warpLayout.transposeOuts(repDimNames);
 
-  auto r = combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
-  return r;
+  return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
 }
 
 LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
@@ -877,7 +875,6 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
   StringAttr kRegister = S("register");
   StringAttr kLane = S("lane");
   StringAttr kWarp = S("warp");
-
   // lane order
   // operand A: [1, 0] / [2, 1, 0]
   // operand B: [0, 1] / [1, 2, 0]
@@ -885,26 +882,22 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
   auto laneOrder =
       getOrderForDotOperand(dotWmmaLayout.getOpIdx(), rank, /*kContig*/ true);
   // generate continuous part of register bases(i.e. kWidth)
-  std::vector<std::vector<int32_t>> registerBase;
   const int32_t kWidth = dotWmmaLayout.getKWidth();
-
-  for (int i = 1; i < kWidth; i *= 2)
-    registerBase.push_back(std::vector<int32_t>{i, 0});
-  std::vector<std::vector<int32_t>> laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}};
-  switch (wmmaLayout.getVersion()) {
-  case 1:
+  auto version = wmmaLayout.getVersion();
+  std::vector<std::vector<int32_t>> registerBase, laneBase;
+  if (version == 1 || version == 2) {
+    for (int i = 1; i < kWidth; i *= 2)
+      registerBase.push_back(std::vector<int32_t>{i, 0});
     // WMMA version 1 duplicates values in lanes 0-15 and 16-31
-    laneBase.push_back({0, 0});
-    break;
-  case 2:
     // WMMA version 2 offset values in lanes 0-15 and 16-31 across k dimensions
-    laneBase.push_back({kWidth, 0});
-    break;
-  case 3:
-    // WMMA version 3 offset values in lanes 0-15 and 16-31 across k dimensions
+    laneBase = {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {version == 1 ? 0 : kWidth}};
+  } else {
+    assert(version == 3 && "unexpected wmma version");
     if (kWidth == 16) {
-      registerBase.back() = {kWidth, 0};
-      laneBase.push_back({kWidth / 2, 0});
+      registerBase =
+          std::vector<std::vector<int32_t>>{{1, 0}, {2, 0}, {4, 0}, {16, 0}};
+      laneBase = std::vector<std::vector<int32_t>>{
+          {0, 1}, {0, 2}, {0, 4}, {0, 8}, {8, 0}};
     } else if (kWidth == 32) {
       registerBase = std::vector<std::vector<int32_t>>{
           {1, 0}, {2, 0}, {4, 0}, {16, 0}, {32, 0}};
@@ -916,11 +909,8 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
       laneBase = std::vector<std::vector<int32_t>>(
           {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}});
     } else {
-      laneBase.push_back({kWidth, 0});
+      assert(false && "unexpected kWidth for WMMA v3");
     }
-    break;
-  default:
-    assert(false && "unexpected version");
   }
   // Generate layout for one wmma instruction
   LinearLayout tileLayout(
@@ -952,10 +942,7 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
   LinearLayout ctaLayout = tileLayout.transposeOuts(repDimNames) *
                            warpLayout.transposeOuts(repDimNames);
 
-  // wmmaLayout.getCTALayout();
-  auto r =
-      combineCtaCgaWithShape(ctaLayout, getCTALayout(dotWmmaLayout), shape);
-  return r;
+  return combineCtaCgaWithShape(ctaLayout, wmmaLayout.getCTALayout(), shape);
 }
 
 LinearLayout

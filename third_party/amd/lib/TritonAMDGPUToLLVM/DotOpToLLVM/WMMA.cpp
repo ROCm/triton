@@ -64,7 +64,6 @@ ValueTable getValuesFromDotOperandLayoutStruct(
     Location loc) {
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
   auto elems = unpackLLElements(loc, value, rewriter);
-  Type elemTy = typeConverter->convertType(type);
 
   int vecSize = kWidth;
   if (isFp6)
@@ -75,6 +74,7 @@ ValueTable getValuesFromDotOperandLayoutStruct(
     for (int i = 0; i < n0; i++) {
       for (int j = 0; j < n1; j++) {
         const auto actualVecSize = kWidth == 2 ? vecSize * 2 : vecSize;
+        Type elemTy = typeConverter->convertType(type);
         Type ty = vec_ty(elemTy, actualVecSize);
         Value rawElems = tb.undef(ty);
         for (size_t i = 0; i < actualVecSize; ++i) {
@@ -97,7 +97,6 @@ ValueTable getValuesFromDotOperandLayoutStruct(
         for (int k = 0, ki = 0; k < kWidth; ++k) {
           if (isFp6 && ((k + 1) % 4 == 0))
             continue;
-          int index = n0 * n1 * kWidth * b + kWidth * (n1 * i + j) + k;
           rawElems = tb.insert_element(
               ty, rawElems,
               elems[n0 * n1 * kWidth * b + kWidth * (n1 * i + j) + k],
@@ -389,11 +388,8 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   int wmmaVer = wmmaLayout.getVersion();
   auto warpsPerCTA = wmmaLayout.getWarpsPerCTA();
   auto mnkDim = wmmaLayout.getMNKDimPerInstr();
-  auto wmmaInstrType = getWMMAInstrTypeFromDot(op);
 
   auto loc = op.getLoc();
-  Value loadedA = adaptor.getA();
-
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
   Value a = op.getA();
   Value b = op.getB();
@@ -422,7 +418,6 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
   auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
   int kWidth = aEncoding.getKWidth();
-
   intrinsicName = maybeWmmaIntrinsic->name;
   auto repA = wmmaLayout.getRepForOperand(
       gpu::getShapePerCTA(aEncoding, aTensorTy.getShape()), aTensorTy, kWidth,
@@ -433,6 +428,7 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
 
   assert(repA[2] == repB[1]);
 
+  Value loadedA = adaptor.getA();
   Value loadedB = adaptor.getB();
   Value loadedC = adaptor.getC();
   auto numRepM = repA[1];
