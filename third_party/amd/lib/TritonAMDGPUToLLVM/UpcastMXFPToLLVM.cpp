@@ -25,7 +25,7 @@ namespace {
 
 SmallVector<Value, 8> upcastMxfp4_SW(RewriterBase &rewriter,
                                      amdgpu::UpcastMXFPOp upcastOp, bool toFp16,
-                                     ArrayRef<Value> values, int idx) {
+                                     ArrayRef<Value> values, int idx, Value scale = nullptr) {
   Location loc = upcastOp.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -35,7 +35,7 @@ SmallVector<Value, 8> upcastMxfp4_SW(RewriterBase &rewriter,
   for (int i : llvm::seq(4))
     packedVec = b.insert_element(packedVec, values[idx + i], b.i32_val(i));
   SmallVector<Value, 4> v4i32 =
-      upcast8xMxfp4_SW(rewriter, upcastOp, toFp16, packedVec);
+      upcast8xMxfp4_SW(rewriter, upcastOp, toFp16, packedVec, scale);
   for (int j = 0; j < 4; j++) {
     Value elements = b.bitcast(v4i32[j], vec_ty(elemType, 2));
     results.push_back(b.extract_element(elements, b.i32_val(0)));
@@ -156,7 +156,7 @@ static void upcast8xMxfp4(RewriterBase &rewriter, Location loc,
     }
   } else {
     SmallVector<Value, 8> vf16 =
-        upcastMxfp4_SW(rewriter, op, useFp16, xVals, idx);
+        upcastMxfp4_SW(rewriter, op, useFp16, xVals, idx, scale);
     for (int i = 0; i < 8; i++) {
       auto result = useFp16 ? mxfpScaleFp16(rewriter, loc, vf16[i], scale,
                                             op.getFastMath())

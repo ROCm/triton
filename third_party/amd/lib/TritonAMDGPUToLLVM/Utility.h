@@ -118,7 +118,7 @@ bool isChainDotTail(mlir::triton::DotOpInterface dotOp);
 // Software implementation of converting an 8-element vector of MXFP4 elements
 // to a wider type: BF16 or FP16
 SmallVector<Value, 4> upcast8xMxfp4_SW(RewriterBase &rewriter, Operation *op,
-                                       bool toFp16, Value packedVec);
+                                       bool toFp16, Value packedVec, Value scale = nullptr);
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_
