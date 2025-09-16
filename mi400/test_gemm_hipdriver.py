@@ -41,34 +41,35 @@ def generate_configs():
             "M": 256, "N": 256, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "USE_TDM": 1
         },
-        {
-            "M": 32, "N": 32, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-            "USE_TDM": 1
-        },
-        {
-            "M": 32, "N": 32, "K": 32, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 32, "NUM_WARPS": 4, "NUM_CTAS": 2,
-            "USE_TDM": 1
-        },
-        {
-            "M": 64, "N": 64, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 4,
-            "USE_TDM": 1
-        },
-        {
-            "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
-            "USE_TDM": 1
-        },
-        {
-            "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
-            "USE_TDM": 0
-        },
-        {
-            "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-            "USE_TDM": 1
-        },
-        {
-            "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-            "USE_TDM": 0
-        },
+        # TODO: enable multi-casting
+        #{
+        #    "M": 32, "N": 32, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+        #    "USE_TDM": 1
+        #},
+        #{
+        #    "M": 32, "N": 32, "K": 32, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 32, "NUM_WARPS": 4, "NUM_CTAS": 2,
+        #    "USE_TDM": 1
+        #},
+        #{
+        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 4,
+        #    "USE_TDM": 1
+        #},
+        #{
+        #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
+        #    "USE_TDM": 1
+        #},
+        #{
+        #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
+        #    "USE_TDM": 0
+        #},
+        #{
+        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+        #    "USE_TDM": 1
+        #},
+        #{
+        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+        #    "USE_TDM": 0
+        #},
         {
             "M": 1, "N": 2 * 43, "K": 512, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 8, "NUM_CTAS":
             1, "USE_TDM": 1

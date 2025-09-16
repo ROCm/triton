@@ -310,7 +310,7 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
 
     if args.dump_ir != 'none':
         curr_dir = os.path.dirname(os.path.abspath(__file__))
-        filename = f'{handle.name}.{args.dump_ir}'
+        filename = f'attn_kernel.{args.dump_ir}'
         with open(os.path.join(curr_dir, filename), "w") as file:
             file.write(handle.asm[args.dump_ir])
 
@@ -389,26 +389,30 @@ def test_mha(config, args):
     print("✅ Triton and Torch match")
 
 
-def generate_configs():
+def generate_configs(args):
     MAX_BATCH = 64
+    num_stages = args.num_stages if args.num_stages != -1 else 3
+    BLOCK_M_FOR_HEAD_SIZE_128 = 128 if args.kv_type == 'e4m3' or args.kv_type == "e5m2" else 256
     base_configs = [
         # HEAD_SZ == 128
         {
             "BATCH": 1, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 128,
-            "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+            "BLOCK_M": BLOCK_M_FOR_HEAD_SIZE_128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "NUM_STAGES": num_stages
         },
         {
             "BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1, "SEQLEN_K": 8192, "HEAD_SZ": 128,
-            "BLOCK_M": 128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+            "BLOCK_M": BLOCK_M_FOR_HEAD_SIZE_128, "BLOCK_N": 128, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "NUM_STAGES": num_stages
         },
         # HEAD_SZ == 64
         {
             "BATCH": 1, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 8192, "SEQLEN_K": 8192, "HEAD_SZ": 64,
-            "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+            "BLOCK_M": 512, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": num_stages
         },
         {
             "BATCH": MAX_BATCH, "NUM_Q_HEADS": 16, "NUM_K_HEADS": 16, "SEQLEN_Q": 1, "SEQLEN_K": 8192, "HEAD_SZ": 64,
-            "BLOCK_M": 128, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": 1
+            "BLOCK_M": 512, "BLOCK_N": 64, "WAVES_PER_EU": 1, "NUM_WARPS": 4, "NUM_CTAS": 1, "NUM_STAGES": num_stages
         },
     ]
     return base_configs
@@ -423,13 +427,22 @@ if __name__ == "__main__":
     parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir', 'llir', 'amdgcn'], default="none",
                         help="dump IR format")
     parser.add_argument("-c", "--case", type=int, required=True, help='case id')
+    parser.add_argument("--num-stages", type=int, default=-1, required=False, help='num stages')
     parser.add_argument("-v", "--verbose", action='store_true', help='verbose output')
     args = parser.parse_args()
 
     print(f'{args.q_type=}; {args.kv_type=}')
     print(f'Testing with {ATOL_fp8=}; {RTOL_fp8=}')
 
-    configs = generate_configs()
+    configs = generate_configs(args)
     config = configs[args.case]
+
     print(f'{config=}')
+    curr_dir = os.path.dirname(os.path.abspath(__file__))
+    filename = f'mxfa-curr-config.txt'
+    with open(os.path.join(curr_dir, filename), "w") as file:
+        file.write(f'{config=}\n')
+        file.write(f'{args.q_type=}\n')
+        file.write(f'{args.kv_type=}\n')
+
     test_mha(config, args)
