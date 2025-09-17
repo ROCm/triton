@@ -38,12 +38,13 @@ LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-de
 
 echo "=== Run Gluon Tests ==="
 
-pytest -s third_party/amd/python/test/test_gluon_gfx1250.py
+pytest -s third_party/amd/python/test/test_gluon_gfx1250.py -n 8
 
 echo "=== Run GEMM Tests ==="
 
-python3 mi400/test_gemm_hipdriver.py
-python3 mi400/test_mxgemm_hipdriver.py
+export PYTHONPATH=$PWD/mi400
+pytest -s mi400/test_gemm_hipdriver.py -n 8
+pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 
 # TODO(Ravil) enable failing MXFP FA Test
 #echo "=== Run Attention Tests ==="

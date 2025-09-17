@@ -2,11 +2,11 @@ import hip
 
 hip.hip.hipInit(0)
 
+import pytest
 import torch
 import triton
 import triton.language as tl
 import numpy as np
-from kernels.test_common import allclose_numpy
 
 
 def shouldFilter(dtype, config):
@@ -148,7 +148,8 @@ def gemm_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def testGemm(config):
+@pytest.mark.parametrize("config", generate_configs())
+def test_gemm(config):
     print(config)
     DTYPE = config["DTYPE"]
     M = config["M"]
@@ -175,12 +176,4 @@ def testGemm(config):
                       GROUP_SIZE_M=groupSizeM, USE_TDM=USE_TDM, num_warps=NUM_WARPS, num_ctas=NUM_CTAS)
     c_triton = c_d.cpu().numpy()
     c_numpy = a_h.to(torch.float32).numpy() @ b_h.to(torch.float32).numpy()
-    if not allclose_numpy(c_triton, c_numpy):
-        print("FAIL")
-    else:
-        print("OK")
-
-
-if __name__ == "__main__":
-    for config in generate_configs():
-        testGemm(config)
+    torch.testing.assert_close(c_triton, c_numpy, rtol=1e-05, atol=1e-08)
