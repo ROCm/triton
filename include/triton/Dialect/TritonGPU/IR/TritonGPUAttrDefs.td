@@ -1294,6 +1294,8 @@ Row |
     ins
     "unsigned": $version,
     "bool":$isTransposed,
+    "unsigned":$bitnessA,
+    "unsigned":$bitnessB,
     ArrayRefParameter<"unsigned">:$warpsPerCTA,
     "CTALayoutAttr":$CTALayout
   );

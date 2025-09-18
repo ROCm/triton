@@ -221,10 +221,11 @@ private:
     auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
     if (auto wmmaLayout = llvm::cast<AMDWmmaEncodingAttr>(dotEnc.getParent())) {
-      auto kWidth = dotEnc.getKWidth();
+      int bitness = dotEnc.getOpIdx() == 0 ? wmmaLayout.getBitnessA()
+                                           : wmmaLayout.getBitnessB();
       // We cannot use transpose linear layouts for mx data types, because the
       // layouts don't match
-      if (kWidth == 64)
+      if (bitness != 0)
         return failure();
     }
     auto ldsTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, llBitwidth);

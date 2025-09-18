@@ -541,16 +541,8 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto dTensorTy = cast<RankedTensorType>(d.getType());
   auto elemTy = aTensorTy.getElementType();
 
-  int kDim = 128;
-  int kWidth = 64;
-
-  bool isFp4A = op.getAElemType() == triton::ScaleDotElemType::E2M1;
-  int kWidthA = isFp4A ? kWidth / 2 : kWidth;
-  int kDimA = isFp4A ? kDim / 2 : kDim;
-
-  bool isFp4B = op.getBElemType() == triton::ScaleDotElemType::E2M1;
-  int kWidthB = isFp4B ? kWidth / 2 : kWidth;
-  int kDimB = isFp4B ? kDim / 2 : kDim;
+  int kWidthA = (op.getAElemType() == triton::ScaleDotElemType::E2M1 ? 32 : 64);
+  int kWidthB = (op.getBElemType() == triton::ScaleDotElemType::E2M1 ? 32 : 64);
 
   bool isFp6A = (op.getAElemType() == triton::ScaleDotElemType::E2M3) ||
                 (op.getAElemType() == triton::ScaleDotElemType::E3M2);
@@ -558,9 +550,9 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
                 (op.getBElemType() == triton::ScaleDotElemType::E3M2);
 
   auto repA = wmmaLayout.getRepForOperand(aTensorTy.getShape(), elemTy, kWidthA,
-                                          kDimA, 0);
+                                          128, 0);
   auto repB = wmmaLayout.getRepForOperand(bTensorTy.getShape(), elemTy, kWidthB,
-                                          kDimB, 1);
+                                          128, 1);
 
   assert(repA[2] == repB[1]);
 

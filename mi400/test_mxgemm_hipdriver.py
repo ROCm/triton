@@ -106,88 +106,78 @@ def generate_configs():
             "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
             "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
         },
-        # Disable mixed precision cases due to failures
-        # {
-        #     "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # Not sure why the following one is failing?
-        # {
-        #     "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # Not sure why the following one is failing?
-        # {
-        #     "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # Disable mixed precision cases due to failures
-        # {
-        #     "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # Not sure why the following one is failing?
-        # {
-        #     "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # Not sure why the following one is failing?
-        # {
-        #     "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # Disable mixed precision cases due to failures
-        # {
-        #     "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        # },
-        # Disable M = 1 cases due to failures
-        # {
-        #     "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # Not sure why the following one is failing?
-        # {
-        #     "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # Disable BLOCK_K = 64 cases due to failures
-        # {
-        #     "M": 1, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
-        # {
-        #     "M": 8192, "N": 8192, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-        #     "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        # },
+        {
+            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
+        {
+            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
+            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
+        },
     ]
     configs = base_configs
 
