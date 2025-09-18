@@ -51,3 +51,11 @@ pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 #export HSA_MODEL_NUM_THREADS=$(nproc)
 #python3 mi400/test_mxfa_hipdriver.py -c 0 --disable-masking
 #python3 mi400/test_mxfa_hipdriver.py -c 1 --disable-masking
+
+
+# TODO: add all upstream tests here
+echo "=== Run E2E Upstream Tests ==="
+
+pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: enable
