@@ -5,9 +5,11 @@
 #   - aiter/ops/triton/mha.py
 #   - aiter/test_mha_common.py
 
-import hip
+import os
 
-hip.hip.hipInit(0)
+if 'FFM_PATH' in os.environ:
+    import hip
+    hip.hip.hipInit(0)
 
 import torch
 import triton
@@ -16,7 +18,6 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 import argparse
 import math
 from einops import repeat
-import os
 
 ATOL_fp8 = 2.5e-1
 RTOL_fp8 = 2.5e-1
@@ -44,6 +45,7 @@ def _attn_fwd_inner(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SM_SCALE: tl.constexpr,
+    DISABLE_MASKING: tl.constexpr,
 ):
     RCP_LN2: tl.constexpr = 1.4426950408889634
     KV_PACK_DIV: tl.constexpr = 2 if kv_type == 'e2m1' else 1
@@ -141,6 +143,7 @@ def _attn_fwd(
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BATCH,
+    DISABLE_MASKING: tl.constexpr,
 ):
     NUM_BLOCKS = (SEQLEN_Q + BLOCK_M - 1) // BLOCK_M
     seqlen_q = SEQLEN_Q
@@ -198,34 +201,15 @@ def _attn_fwd(
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-    q_mask = offs_m[:, None] < seqlen_q
+    q_mask = True if DISABLE_MASKING else offs_m[:, None] < seqlen_q
     q = tl.load(q_ptrs, mask=q_mask, other=0.0)
     q_scale = tl.load(q_scale_ptrs, mask=q_mask, other=0x7F)
 
     block_min = 0
     block_max = n_blocks * BLOCK_N
-    acc, l_i, m_i = _attn_fwd_inner(
-        acc,
-        l_i,
-        m_i,
-        q,
-        k_ptrs,
-        v_ptrs,
-        stride_kn,
-        stride_vn,
-        q_scale,
-        k_scale_ptrs,
-        v_scale_ptrs,
-        stride_k_scale_n,
-        stride_v_scale_n,
-        block_min,
-        block_max,
-        q_type,
-        kv_type,
-        BLOCK_M,
-        BLOCK_N,
-        sm_scale,
-    )
+    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, stride_kn, stride_vn, q_scale, k_scale_ptrs,
+                                    v_scale_ptrs, stride_k_scale_n, stride_v_scale_n, block_min, block_max, q_type,
+                                    kv_type, BLOCK_M, BLOCK_N, sm_scale, DISABLE_MASKING)
 
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
@@ -246,6 +230,7 @@ def _attn_fwd(
     if overflow_size > 0:
         out_mask = out_mask & (offs_m[:, None] < seqlen_q)
 
+    out_mask = True if DISABLE_MASKING else out_mask
     op = acc.to(out_ptr.dtype.element_ty)
     tl.store(out_ptr + offs_out, op, mask=out_mask)
 
@@ -304,6 +289,7 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
         BATCH=batch,
         BLOCK_M=config["BLOCK_M"],
         BLOCK_N=config["BLOCK_N"],
+        DISABLE_MASKING=args.disable_masking,
         num_warps=config["NUM_WARPS"],
         num_stages=config["NUM_STAGES"],
     )
@@ -428,10 +414,11 @@ if __name__ == "__main__":
                         help="dump IR format")
     parser.add_argument("-c", "--case", type=int, required=True, help='case id')
     parser.add_argument("--num-stages", type=int, default=-1, required=False, help='num stages')
+    parser.add_argument("-m", "--disable-masking", action='store_true', help='use masked loads')
     parser.add_argument("-v", "--verbose", action='store_true', help='verbose output')
     args = parser.parse_args()
 
-    print(f'{args.q_type=}; {args.kv_type=}')
+    print(f'{args.q_type=}; {args.kv_type=}; {args.disable_masking=}')
     print(f'Testing with {ATOL_fp8=}; {RTOL_fp8=}')
 
     configs = generate_configs(args)
@@ -444,5 +431,6 @@ if __name__ == "__main__":
         file.write(f'{config=}\n')
         file.write(f'{args.q_type=}\n')
         file.write(f'{args.kv_type=}\n')
+        file.write(f'{args.disable_masking=}\n')
 
     test_mha(config, args)

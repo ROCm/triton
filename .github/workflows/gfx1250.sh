@@ -46,8 +46,8 @@ export PYTHONPATH=$PWD/mi400
 pytest -s mi400/test_gemm_hipdriver.py -n 8
 pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 
-# TODO(Ravil) enable failing MXFP FA Test
+# TODO(Ravil) enable failing MXFP FA Test; enable masked loads/stores
 #echo "=== Run Attention Tests ==="
 #export HSA_MODEL_NUM_THREADS=$(nproc)
-#python3 mi400/test_mxfa_hipdriver.py -c 0
-#python3 mi400/test_mxfa_hipdriver.py -c 1
+#python3 mi400/test_mxfa_hipdriver.py -c 0 --disable-masking
+#python3 mi400/test_mxfa_hipdriver.py -c 1 --disable-masking
