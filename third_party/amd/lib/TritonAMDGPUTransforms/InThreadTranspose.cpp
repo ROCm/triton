@@ -124,8 +124,11 @@ Attribute createNewSharedEncoding(RankedTensorType operandType) {
   auto perPhase = tempAttr.getPerPhase();
   auto maxPhase = tempAttr.getMaxPhase();
 
-  auto newSharedEnc = ttg::AMDRotatingSharedEncodingAttr::get(
-      ctx, sharedVec, perPhase, maxPhase, order, ctaLayout);
+  // auto newSharedEnc = ttg::AMDRotatingSharedEncodingAttr::get(
+  //    ctx, sharedVec, perPhase, maxPhase, order, ctaLayout);
+
+  auto newSharedEnc = ttg::PaddedSharedEncodingAttr::get(
+      ctx, {{64, 4}, {1024, 4}}, order, ctaLayout);
 
   return newSharedEnc;
 }
