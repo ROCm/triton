@@ -1407,9 +1407,8 @@ public:
     auto newAcc =
         convertAndCastTensor(rewriter, oldAcc, wmmaEnc, operandTypes[2]);
 
-    // kBase, kWidth and kDim follow the same logic as in mfma
-    // for now kwidth = kbase always
-    auto kWidth = kBase;
+    // kWidth is always 8 for WMMA v3, and equals to kBase for WMMA v1/2
+    auto kWidth = wmmaVersion == 3 ? 8 : kBase;
     auto newAType = RankedTensorType::get(
         aShape, operandTypes[0],
         ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kWidth));
