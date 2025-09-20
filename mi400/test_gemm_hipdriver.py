@@ -16,65 +16,125 @@ def shouldFilter(dtype, config):
 
 
 def generate_configs():
-    base_configs = [
-        {
-            "M": 16, "N": 16, "K": 32, "BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 32, "NUM_WARPS": 1, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        {
-            "M": 64, "N": 64, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        {
-            "M": 128, "N": 128, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        {
-            "M": 256, "N": 256, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        {
-            "M": 256, "N": 256, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "USE_TDM": 1
-        },
-        # TODO: enable multi-casting
-        #{
-        #    "M": 32, "N": 32, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-        #    "USE_TDM": 1
-        #},
-        #{
-        #    "M": 32, "N": 32, "K": 32, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 32, "NUM_WARPS": 4, "NUM_CTAS": 2,
-        #    "USE_TDM": 1
-        #},
-        #{
-        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 4,
-        #    "USE_TDM": 1
-        #},
-        #{
-        #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
-        #    "USE_TDM": 1
-        #},
-        #{
-        #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
-        #    "USE_TDM": 0
-        #},
-        #{
-        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-        #    "USE_TDM": 1
-        #},
-        #{
-        #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
-        #    "USE_TDM": 0
-        #},
-        {
-            "M": 1, "N": 2 * 43, "K": 512, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 8, "NUM_CTAS":
-            1, "USE_TDM": 1
-        },
-    ]
+    base_configs = []
+
+    # TODO: need to enable (0, 1) for load+mask
+    for (tdm, mask) in [(1, 1), (0, 0)]:
+        base_configs.extend([
+            {
+                "M": 16,
+                "N": 16,
+                "K": 32,
+                "BLOCK_M": 16,
+                "BLOCK_N": 16,
+                "BLOCK_K": 32,
+                "NUM_WARPS": 1,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            {
+                "M": 32,
+                "N": 32,
+                "K": 128,
+                "BLOCK_M": 32,
+                "BLOCK_N": 32,
+                "BLOCK_K": 128,
+                "NUM_WARPS": 1,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            {
+                "M": 64,
+                "N": 64,
+                "K": 64,
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64,
+                "NUM_WARPS": 4,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            {
+                "M": 128,
+                "N": 128,
+                "K": 64,
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64,
+                "NUM_WARPS": 4,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            {
+                "M": 256,
+                "N": 256,
+                "K": 64,
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 32,
+                "NUM_WARPS": 4,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            {
+                "M": 256,
+                "N": 256,
+                "K": 64,
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64,
+                "NUM_WARPS": 4,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+            # TODO: enable multi-casting
+            #{
+            #    "M": 32, "N": 32, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+            #    "USE_TDM": 1, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 32, "N": 32, "K": 32, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 32, "NUM_WARPS": 4, "NUM_CTAS": 2,
+            #    "USE_TDM": 1, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 4,
+            #    "USE_TDM": 1, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
+            #    "USE_TDM": 1, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 128, "N": 128, "K": 128, "BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "NUM_WARPS": 1, "NUM_CTAS": 4,
+            #    "USE_TDM": 0, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+            #    "USE_TDM": 1, "USE_MASK": mask,
+            #},
+            #{
+            #    "M": 64, "N": 64, "K": 64, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 64, "NUM_WARPS": 1, "NUM_CTAS": 2,
+            #    "USE_TDM": 0, "USE_MASK": mask,
+            #},
+            {
+                "M": 1,
+                "N": 2 * 43,
+                "K": 512,
+                "BLOCK_M": 128,
+                "BLOCK_N": 128,
+                "BLOCK_K": 128,
+                "NUM_WARPS": 8,
+                "NUM_CTAS": 1,
+                "USE_TDM": tdm,
+                "USE_MASK": mask,
+            },
+        ])
     configs = []
     for dtype in ["bfloat16", "float8_e5m2"]:
         for config in base_configs:
@@ -86,6 +146,7 @@ def generate_configs():
     return configs
 
 
+# Transpose case: NN
 @triton.jit
 def gemm_kernel(
         # Pointers to matrices
@@ -98,7 +159,7 @@ def gemm_kernel(
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
         GROUP_SIZE_M: tl.constexpr,  #
-        USE_TDM: tl.constexpr):
+        USE_TDM: tl.constexpr, USE_MASK: tl.constexpr):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -130,8 +191,12 @@ def gemm_kernel(
             a = a_desc.load([0, k])
             b = b_desc.load([k, 0])
         else:
-            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k, other=0.0)
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k, other=0.0)
+            if USE_MASK:
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k, other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k, other=0.0)
+            else:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
 
         # We accumulate along the K dimension.
         accumulator = tl.dot(a, b, acc=accumulator)
@@ -161,6 +226,8 @@ def test_gemm(config):
     NUM_WARPS = config["NUM_WARPS"]
     NUM_CTAS = config["NUM_CTAS"]
     USE_TDM = config["USE_TDM"]
+    USE_MASK = config["USE_MASK"]
+
     groupSizeM = 1
 
     torch.manual_seed(42)
@@ -173,7 +240,8 @@ def test_gemm(config):
     numBlocks = int((M + BLOCK_M - 1) / BLOCK_M) * int((N + BLOCK_N - 1) / BLOCK_N)
     grid = [numBlocks, 1, 1]
     gemm_kernel[grid](a_d, b_d, c_d, M, N, K, N, 1, BLOCK_SIZE_M=BLOCK_M, BLOCK_SIZE_N=BLOCK_N, BLOCK_SIZE_K=BLOCK_K,
-                      GROUP_SIZE_M=groupSizeM, USE_TDM=USE_TDM, num_warps=NUM_WARPS, num_ctas=NUM_CTAS)
+                      GROUP_SIZE_M=groupSizeM, USE_TDM=USE_TDM, USE_MASK=USE_MASK, num_warps=NUM_WARPS,
+                      num_ctas=NUM_CTAS)
     c_triton = c_d.cpu().numpy()
     c_numpy = a_h.to(torch.float32).numpy() @ b_h.to(torch.float32).numpy()
     torch.testing.assert_close(c_triton, c_numpy, rtol=1e-05, atol=1e-08)
