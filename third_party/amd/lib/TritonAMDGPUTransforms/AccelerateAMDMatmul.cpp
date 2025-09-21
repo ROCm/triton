@@ -1122,20 +1122,6 @@ public:
              elemType == ScaleDotElemType::E5M2;
     };
 
-    auto getBitness = [](ScaleDotElemType elemType) {
-      if (elemType == ScaleDotElemType::E2M1)
-        return 4;
-      if (elemType == ScaleDotElemType::E2M3 ||
-          elemType == ScaleDotElemType::E3M2)
-        return 6;
-      if (elemType == ScaleDotElemType::E4M3 ||
-          elemType == ScaleDotElemType::E5M2)
-        return 8;
-      return 0;
-    };
-    auto bitnessA = getBitness(aElemType);
-    auto bitnessB = getBitness(bElemType);
-
     if (!supportsTypes(aElemType) || !supportsTypes(bElemType)) {
       return rewriter.notifyMatchFailure(dotOp, "NYI: mxfp6");
     }
@@ -1153,8 +1139,7 @@ public:
     auto warpsPerTile = warpsPerTileWMMA(dotOp, oldShape, numWarps, {16, 16});
 
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, /*versionMajor=*/wmmaVersion, true, bitnessA, bitnessB,
-        warpsPerTile, ctaLayout);
+        ctx, /*versionMajor=*/wmmaVersion, true, warpsPerTile, ctaLayout);
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), wmmaEnc);
@@ -1414,8 +1399,8 @@ public:
     // Use transposed wmma layout to enable larger vectorization for global
     // store instructions.
     bool isTransposed = (wmmaVersion == 2 || wmmaVersion == 3);
-    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed, 0,
-                                            0, warpsPerTile, CTALayout);
+    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed,
+                                            warpsPerTile, CTALayout);
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 

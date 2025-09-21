@@ -230,12 +230,12 @@ py::object layoutToGluon(Attribute layout) {
         toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto amdWmma = dyn_cast<ttg::AMDWmmaEncodingAttr>(layout)) {
     auto ctaLayout = amdWmma.getCTALayout();
-    return layouts.AMDWMMALayout(
-        amdWmma.getVersion(), amdWmma.getIsTransposed(), amdWmma.getBitnessA(),
-        amdWmma.getBitnessB(), toStdVector(amdWmma.getWarpsPerCTA()),
-        toStdVector(ctaLayout.getCTAsPerCGA()),
-        toStdVector(ctaLayout.getCTASplitNum()),
-        toStdVector(ctaLayout.getCTAOrder()));
+    return layouts.AMDWMMALayout(amdWmma.getVersion(),
+                                 amdWmma.getIsTransposed(),
+                                 toStdVector(amdWmma.getWarpsPerCTA()),
+                                 toStdVector(ctaLayout.getCTAsPerCGA()),
+                                 toStdVector(ctaLayout.getCTASplitNum()),
+                                 toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
     auto *ctx = paddedShared.getContext();
@@ -369,7 +369,7 @@ void init_gluon_ir(py::module &&m) {
            })
       .def("get_amd_wmma_layout",
            [](GluonOpBuilder &self, unsigned version, bool transposed,
-              int bitnessA, int bitnessB, std::vector<unsigned> &warpsPerCta,
+              std::vector<unsigned> &warpsPerCta,
               std::vector<unsigned> &ctasPerCga,
               std::vector<unsigned> &ctaSplitNum,
               std::vector<unsigned> &ctaOrder) -> Attribute {
@@ -377,7 +377,6 @@ void init_gluon_ir(py::module &&m) {
              auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
                  ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return ttg::AMDWmmaEncodingAttr::get(ctx, version, transposed,
-                                                  bitnessA, bitnessB,
                                                   warpsPerCta, ctaLayout);
            })
       .def("get_padded_shared_layout",

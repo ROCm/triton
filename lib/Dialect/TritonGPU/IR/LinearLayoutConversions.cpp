@@ -875,7 +875,6 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
   StringAttr kRegister = S("register");
   StringAttr kLane = S("lane");
   StringAttr kWarp = S("warp");
-  using basisT = std::vector<std::vector<int32_t>>;
   // lane order
   // operand A: [1, 0] / [2, 1, 0]
   // operand B: [0, 1] / [1, 2, 0]
@@ -904,28 +903,11 @@ LinearLayout wmmaDotOperandToLinearLayout(DotOperandEncodingAttr dotWmmaLayout,
           {1, 0}, {2, 0}, {4, 0}, {16, 0}, {32, 0}};
       laneBase = std::vector<std::vector<int32_t>>{
           {0, 1}, {0, 2}, {0, 4}, {0, 8}, {8, 0}};
-    } else if (kWidth == 64) { // mxfp8 layouts
-      unsigned bitness =
-          (dotWmmaLayout.getOpIdx() == 0 ? wmmaLayout.getBitnessA()
-                                         : wmmaLayout.getBitnessB());
-      // mxfp8
-      registerBase = basisT({{1, 0}, {2, 0}, {4, 0}, {8, 0}, {32, 0}, {64, 0}});
-      laneBase = basisT({{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}});
-      int64_t tileSize = 128;
-      if (bitness == 4) {
-        // mxfp4
-        registerBase = basisT({{1, 0}, {2, 0}, {4, 0}, {8, 0}, {32, 0}});
-        laneBase = basisT({{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}});
-        tileSize = tileSize / 2;
-      } else if (bitness == 6) {
-        // mxfp6
-        registerBase =
-            basisT({{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, {64, 0}});
-        laneBase = basisT({{0, 1}, {0, 2}, {0, 4}, {0, 8}, {32, 0}});
-      }
-      for (int32_t elem = tileSize; elem < kSize; elem *= 2) {
-        registerBase.emplace_back(std::vector<int32_t>{elem, 0});
-      }
+    } else if (kWidth == 64) {
+      registerBase = std::vector<std::vector<int32_t>>(
+          {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {32, 0}, {64, 0}});
+      laneBase = std::vector<std::vector<int32_t>>(
+          {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {16, 0}});
     } else {
       assert(false && "unexpected kWidth for WMMA v3");
     }

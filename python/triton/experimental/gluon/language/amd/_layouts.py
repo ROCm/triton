@@ -125,8 +125,6 @@ class AMDWMMALayout(DistributedLayout):
     """
     version: int
     transposed: bool
-    bitness_a: int
-    bitness_b: int
     warps_per_cta: List[int]
     ctas_per_cga: Optional[List[int]] = None
     cta_split_num: Optional[List[int]] = None
@@ -135,8 +133,6 @@ class AMDWMMALayout(DistributedLayout):
     def __post_init__(self):
         super().__setattr__("version", _unwrap_if_constexpr(self.version))
         super().__setattr__("transposed", _unwrap_if_constexpr(self.transposed))
-        super().__setattr__("bitness_a", _unwrap_if_constexpr(self.bitness_a))
-        super().__setattr__("bitness_b", _unwrap_if_constexpr(self.bitness_b))
         super().__setattr__("warps_per_cta", _unwrap_if_constexpr(self.warps_per_cta))
         super().__setattr__("ctas_per_cga", _unwrap_if_constexpr(self.ctas_per_cga))
         super().__setattr__("cta_split_num", _unwrap_if_constexpr(self.cta_split_num))
@@ -144,8 +140,8 @@ class AMDWMMALayout(DistributedLayout):
         self.verify()
 
     def _to_ir(self, builder):
-        return builder.get_amd_wmma_layout(self.version, self.transposed, self.bitness_a, self.bitness_b,
-                                           self.warps_per_cta, self.ctas_per_cga, self.cta_split_num, self.cta_order)
+        return builder.get_amd_wmma_layout(self.version, self.transposed, self.warps_per_cta, self.ctas_per_cga,
+                                           self.cta_split_num, self.cta_order)
 
     def mangle(self) -> str:
 
@@ -154,7 +150,7 @@ class AMDWMMALayout(DistributedLayout):
                 return ""
             return "_".join(map(str, x))
 
-        return f"WMMA_{self.version}_{self.transposed}_{self.bitness_a}_{self.bitness_b}_{stringify(self.warps_per_cta)}_{stringify(self.ctas_per_cga)}_{stringify(self.cta_split_num)}_{stringify(self.cta_order)}_WMMA"
+        return f"WMMA_{self.version}_{self.transposed}_{stringify(self.warps_per_cta)}_{stringify(self.ctas_per_cga)}_{stringify(self.cta_split_num)}_{stringify(self.cta_order)}_WMMA"
 
     def verify(self):
         assert self.version >= 1 and self.version <= 3, "version must be in the [1, 3] range"
@@ -169,8 +165,6 @@ class AMDWMMALayout(DistributedLayout):
         return hash((
             self.version,
             self.transposed,
-            self.bitness_a,
-            self.bitness_b,
             tuple(self.warps_per_cta),
             tuple(self.ctas_per_cga) if self.ctas_per_cga else None,
             tuple(self.cta_split_num) if self.cta_split_num else None,
