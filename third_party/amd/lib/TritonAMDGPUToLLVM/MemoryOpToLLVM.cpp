@@ -224,7 +224,7 @@ private:
       auto kWidth = dotEnc.getKWidth();
       // We cannot use transpose linear layouts for mx data types, because the
       // layouts don't match
-      if (kWidth == 64)
+      if (wmmaLayout.getInstrShape()[2] == 128)
         return failure();
     }
     auto ldsTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, llBitwidth);

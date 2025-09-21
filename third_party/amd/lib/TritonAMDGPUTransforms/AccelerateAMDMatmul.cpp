@@ -1131,15 +1131,15 @@ public:
     ttg::CTALayoutAttr ctaLayout = ttg::getCTALayout(oldRetType.getEncoding());
     unsigned numWarps = ttg::lookupNumWarps(dotOp);
 
-    auto mDim = 16;
-    auto nDim = 16;
-    auto kDim = 128;
-    assert(mDim == nDim);
+    unsigned mDim = 16;
+    unsigned nDim = 16;
+    unsigned kDim = 128;
 
     auto warpsPerTile = warpsPerTileWMMA(dotOp, oldShape, numWarps, {16, 16});
 
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, /*versionMajor=*/wmmaVersion, true, warpsPerTile, ctaLayout);
+        ctx, /*versionMajor=*/wmmaVersion, true, warpsPerTile, ctaLayout,
+        {mDim, nDim, kDim});
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), wmmaEnc);
@@ -1163,18 +1163,14 @@ public:
 
     auto aShape = a.getType().getShape();
     auto bShape = b.getType().getShape();
-    // auto aEncLL = chooseScaledWmmaOperandLayout(
-    //     mfmaEnc, kWidth, /*dotOperandIdx=*/0, aElemType, aShape);
-    // auto bEncLL = chooseScaledWmmaOperandLayout(
-    //     mfmaEnc, kWidth, /*dotOperandIdx=*/1, bElemType, bShape);
+
     auto aEncLL = LinearLayout::empty();
     auto bEncLL = LinearLayout::empty();
 
     auto convertInputLayout = [&](TensorValue v,
                                   unsigned opIdx) -> TensorValue {
       auto vType = v.getType();
-      // auto newEnc = ttg::LinearEncodingAttr::get(ctx, layout);
-      auto newEnc = DotOperandEncodingAttr::get(ctx, opIdx, wmmaEnc, kWidth);
+      auto newEnc = DotOperandEncodingAttr::get(ctx, opIdx, wmmaEnc, 16);
       auto newVType = RankedTensorType::get(vType.getShape(),
                                             vType.getElementType(), newEnc);
       (opIdx == 0 ? aEncLL : bEncLL) *=
@@ -1385,6 +1381,7 @@ public:
 
     auto mDim = wmmaInstr->mDim;
     auto nDim = wmmaInstr->nDim;
+    auto kDim = wmmaInstr->kDim;
     auto kBase = wmmaInstr->kBase;
 
     // get WMMA encoding for the given number of warps
@@ -1400,7 +1397,8 @@ public:
     // store instructions.
     bool isTransposed = (wmmaVersion == 2 || wmmaVersion == 3);
     wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed,
-                                            warpsPerTile, CTALayout);
+                                            warpsPerTile, CTALayout,
+                                            {mDim, nDim, kDim});
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 

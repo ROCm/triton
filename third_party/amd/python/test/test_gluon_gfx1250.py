@@ -25,7 +25,7 @@ def gemm_kernel(a_ptr, b_ptr, c_ptr,  #
                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr):
 
     BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, 16, 16, [2, 2])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [2, 2], [16, 16, 32])
 
     pid = ttgl.program_id(axis=0)
     num_pid_m = ttgl.cdiv(M, BLOCK_M)
@@ -48,9 +48,8 @@ def gemm_kernel(a_ptr, b_ptr, c_ptr,  #
         a = ttgl.load(a_ptr + offs_a, mask=mask_a, other=0.0)
         b = ttgl.load(b_ptr + offs_b, mask=mask_b, other=0.0)
 
-        a = ttgl.convert_layout(a, ttgl.DotOperandLayout(0, WMMA_LAYOUT, 16))
-        b = ttgl.convert_layout(b, ttgl.DotOperandLayout(1, WMMA_LAYOUT, 16))
-
+        a = ttgl.convert_layout(a, ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8))
+        b = ttgl.convert_layout(b, ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8))
         accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
 
         offs_a += BLOCK_K * stride_ak
@@ -169,8 +168,8 @@ def test_amd_wmma_scaled(M, N, K, mxfp_type, hasScale):
             reg_bases=[[0, 1], [0, 2]], lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]],
             warp_bases=[[16, 0], [0, 0]], block_bases=[], shape=[32, 4])
 
-        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(version=3, transposed=True, bitness_a=4, bitness_b=4,
-                                                             warps_per_cta=[2, 2])
+        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(version=3, transposed=True, warps_per_cta=[2, 2],
+                                                             instr_shape=[16, 16, 128])
 
         zero = ttgl.zeros([BLOCK_M, BLOCK_N], dtype=ttgl.float32, layout=wmma_layout)
 
@@ -178,13 +177,13 @@ def test_amd_wmma_scaled(M, N, K, mxfp_type, hasScale):
         offs_ak = ttgl.arange(0, PACKED_BLOCK_K_A, layout=ttgl.SliceLayout(0, a_layout))
         a_offsets = offs_am[:, None] * stride_am + offs_ak[None, :] * stride_ak
         a = ttgl.load(a_base + a_offsets)
-        a = ttgl.convert_layout(a, ttgl.DotOperandLayout(operand_index=0, parent=wmma_layout, k_width=64))
+        a = ttgl.convert_layout(a, ttgl.DotOperandLayout(operand_index=0, parent=wmma_layout, k_width=16))
 
         offs_bk = ttgl.arange(0, PACKED_BLOCK_K_B, layout=ttgl.SliceLayout(1, b_layout))
         offs_bn = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, b_layout))
         b_offsets = offs_bk[:, None] * stride_bk + offs_bn[None, :] * stride_bn
         b = ttgl.load(b_base + b_offsets)
-        b = ttgl.convert_layout(b, ttgl.DotOperandLayout(operand_index=1, parent=wmma_layout, k_width=64))
+        b = ttgl.convert_layout(b, ttgl.DotOperandLayout(operand_index=1, parent=wmma_layout, k_width=16))
 
         if a_scale is not None:
             offs_scale_am = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, scale_blocked_layout))

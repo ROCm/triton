@@ -60,12 +60,12 @@ using ValueTable = std::map<std::tuple<unsigned, unsigned, unsigned>, Value>;
 
 ValueTable getValuesFromDotOperandLayoutStruct(
     ConversionPatternRewriter &rewriter, const LLVMTypeConverter *typeConverter,
-    Value value, int batch, int n0, int n1, int kWidth, Type type, bool isFp6,
-    Location loc) {
+    int wmmaVer, Value value, int batch, int n0, int n1, int kBase, Type type,
+    bool isFp6, Location loc) {
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
   auto elems = unpackLLElements(loc, value, rewriter);
 
-  int vecSize = kWidth;
+  int vecSize = kBase;
   if (isFp6)
     vecSize = vecSize * 3 / 4;
 
@@ -73,7 +73,7 @@ ValueTable getValuesFromDotOperandLayoutStruct(
   for (int b = 0; b < batch; b++) {
     for (int i = 0; i < n0; i++) {
       for (int j = 0; j < n1; j++) {
-        const auto actualVecSize = kWidth == 2 ? vecSize * 2 : vecSize;
+        const auto actualVecSize = kBase == 2 ? vecSize * 2 : vecSize;
         Type elemTy = typeConverter->convertType(type);
         Type ty = vec_ty(elemTy, actualVecSize);
         Value rawElems = tb.undef(ty);
@@ -94,26 +94,26 @@ ValueTable getValuesFromDotOperandLayoutStruct(
           tb.insert_element(ty, rawElems, zero, tb.i32_val(i));
         }
 
-        for (int k = 0, ki = 0; k < kWidth; ++k) {
+        for (int k = 0, ki = 0; k < kBase; ++k) {
           if (isFp6 && ((k + 1) % 4 == 0))
             continue;
           rawElems = tb.insert_element(
               ty, rawElems,
-              elems[n0 * n1 * kWidth * b + kWidth * (n1 * i + j) + k],
+              elems[n0 * n1 * kBase * b + kBase * (n1 * i + j) + k],
               tb.i32_val(ki++));
         }
 
         Value convertedElems;
-        if (type.isF16() || type.isBF16() && kWidth == 16) {
+        if (type.isF16() || type.isBF16() && kBase == 16) {
           convertedElems = rawElems;
         } else if (type.isBF16()) {
-          convertedElems = tb.bitcast(rawElems, vec_ty(i16_ty, kWidth));
-        } else if (kWidth == 1) {
+          convertedElems = tb.bitcast(rawElems, vec_ty(i16_ty, kBase));
+        } else if (kBase == 1) {
           convertedElems = tb.zext(i32_ty, tb.bitcast(rawElems, i8_ty));
-        } else if (((kWidth == 2) || (kWidth == 4)) &&
+        } else if (((kBase == 2) || (kBase == 4)) &&
                    type.getIntOrFloatBitWidth() == 8) {
           convertedElems = tb.bitcast(rawElems, i32_ty);
-        } else if (kWidth == 8 && type.getIntOrFloatBitWidth() == 8) {
+        } else if (kBase == 8 && type.getIntOrFloatBitWidth() == 8) {
           convertedElems = tb.bitcast(rawElems, i64_ty);
         } else {
           convertedElems = tb.bitcast(
@@ -263,16 +263,16 @@ StringRef getWmmaIntrinsicName(Type aElTy, Type bElTy, Type dElTy, Type valATy,
   return intrinsics[h];
 }
 
-std::string addInstructionSuffix(std::string intrinsicName, unsigned kWidth,
-                                 Type aElTy, Type bElTy, Type dElTy,
-                                 bool tied) {
+std::string addInstructionSuffix(std::string intrinsicName, unsigned kBase,
+                                 unsigned elemsPerVec, Type aElTy, Type bElTy,
+                                 Type dElTy, bool tied) {
   if (tied) {
     intrinsicName += ".tied";
   } else {
     if (isa<FloatType>(aElTy) && aElTy.getIntOrFloatBitWidth() == 8)
       intrinsicName += "." + getTypeStr(bElTy);
-    intrinsicName += ".v" + std::to_string(kWidth) + getTypeStr(dElTy);
-    intrinsicName += ".v" + std::to_string(kWidth) + getTypeStr(aElTy);
+    intrinsicName += ".v" + std::to_string(elemsPerVec) + getTypeStr(dElTy);
+    intrinsicName += ".v" + std::to_string(kBase) + getTypeStr(aElTy);
   }
 
   return intrinsicName;
@@ -289,42 +289,56 @@ static inline int32_t getWmmaF8F6F4MatrixFormat(Type t) {
 }
 
 Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
-                            Value valA, Value valB, Value valC, Type aElType,
-                            Type bElType, Type dElType, StringRef name,
-                            std::optional<bool> tiedLower) {
+                            int wmmaVer, Value valA, Value valB, Value valC,
+                            Type aElType, Type bElType, Type dElType,
+                            StringRef name, std::optional<bool> tiedLower) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   LLVM::FastmathFlagsAttr defaultFlags{};
   SmallVector<Value> operands;
-  int64_t kWidth = cast<VectorType>(valA.getType()).getNumElements();
-  if (aElType.isInteger())
-    operands.push_back(b.int_val(1, !aElType.isUnsignedInteger()));
 
-  if (kWidth == 16 && (aElType.isBF16() || aElType.isF16()))
-    operands.push_back(b.int_val(1, 0));
-  operands.push_back(valA);
+  if (wmmaVer == 1 || wmmaVer == 2) {
+    // arguments for v1 and v2:
+    // int:   %A_sign, %A, %B_sign, %B, %C, [%clamp]
+    // float: %A, %B, %C, [%tied_to_high]
+    if (aElType.isInteger())
+      operands.push_back(b.int_val(1, !aElType.isUnsignedInteger()));
+    operands.push_back(valA);
 
-  if (kWidth == 16 && (bElType.isBF16() || bElType.isF16()))
-    operands.push_back(b.int_val(1, 0));
+    if (bElType.isInteger())
+      operands.push_back(b.int_val(1, !bElType.isUnsignedInteger()));
+    operands.push_back(valB);
 
-  if (bElType.isInteger())
-    operands.push_back(b.int_val(1, !bElType.isUnsignedInteger()));
-  operands.push_back(valB);
+    operands.push_back(valC);
 
-  if (kWidth == 16 || (kWidth == 8 && aElType.getIntOrFloatBitWidth() == 8))
-    operands.push_back(b.int_val(16, 0));
-  operands.push_back(valC);
+    if (tiedLower.has_value() || 32 / dElType.getIntOrFloatBitWidth() > 1 ||
+        dElType.isInteger(32))
+      operands.push_back(b.int_val(1, tiedLower.value_or(false)));
+  } else {
+    assert(wmmaVer == 3 && "unexpected wmma version");
+    // arguments for v3:
+    // int:       %A_mod, %A, %B_mod, %B, %C, %A_reuse, %B_reuse
+    // fp16/bf16: %A_mod, %A, %B_mod, %B, %C_mod, %C, %A_reuse, %B_reuse
+    // fp8/bf8:   %A, %B, %C_mod, %C, %A_reuse, %B_reuse
+    if (aElType.isInteger())
+      operands.push_back(b.int_val(1, !aElType.isUnsignedInteger()));
+    else if (aElType.isBF16() || aElType.isF16())
+      operands.push_back(b.int_val(1, 0));
+    operands.push_back(valA);
 
-  // Flag for using low bits in registers. Result could be already packed to
-  // int32. Set low bits by default for now.
-  if (tiedLower.has_value() || 32 / dElType.getIntOrFloatBitWidth() > 1 ||
-      dElType.isInteger(32)) {
-    operands.push_back(b.int_val(1, tiedLower.value_or(false)));
+    if (bElType.isInteger())
+      operands.push_back(b.int_val(1, !bElType.isUnsignedInteger()));
+    else if (bElType.isBF16() || bElType.isF16())
+      operands.push_back(b.int_val(1, 0));
+    operands.push_back(valB);
+
+    if ((bElType.isBF16() || bElType.isF16()) || aElType.isInteger())
+      operands.push_back(b.int_val(16, 0));
+    operands.push_back(valC);
+
+    operands.push_back(b.i1_val(0));
+    operands.push_back(b.i1_val(0));
   }
-
-  // add two addtional operands perf llvm changes
-  operands.push_back(b.i1_val(0));
-  operands.push_back(b.i1_val(0));
 
   auto wmmaIntrinsic = LLVM::createLLVMIntrinsicCallOp(
       rewriter, loc, name, valC.getType(), operands);
@@ -370,13 +384,14 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
 }
 
 Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
-                     Value valA, Value valB, Value valC, Type aElType,
-                     Type bElType, Type dElType, StringRef intrinsicName,
-                     std::optional<bool> tiedLower) {
+                     int version, Value valA, Value valB, Value valC,
+                     Type aElType, Type bElType, Type dElType,
+                     StringRef intrinsicName, std::optional<bool> tiedLower) {
   // Independent of wmma version because builtin functions are backward
   // compatible
-  return generateWMMAIntrinsic(rewriter, loc, valA, valB, valC, aElType,
-                               bElType, dElType, intrinsicName, tiedLower);
+  return generateWMMAIntrinsic(rewriter, loc, version, valA, valB, valC,
+                               aElType, bElType, dElType, intrinsicName,
+                               tiedLower);
 }
 
 // Conduct the Dot conversion.
@@ -387,7 +402,7 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
       cast<RankedTensorType>(op.getResult().getType()).getEncoding());
   int wmmaVer = wmmaLayout.getVersion();
   auto warpsPerCTA = wmmaLayout.getWarpsPerCTA();
-  auto mnkDim = wmmaLayout.getMNKDimPerInstr();
+  auto mnkDim = wmmaLayout.getInstrShape();
 
   auto loc = op.getLoc();
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
@@ -417,14 +432,12 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
 
   auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
   auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
-  int kWidth = aEncoding.getKWidth();
   intrinsicName = maybeWmmaIntrinsic->name;
-  auto repA = wmmaLayout.getRepForOperand(
-      gpu::getShapePerCTA(aEncoding, aTensorTy.getShape()), aTensorTy, kWidth,
-      kDim, 0);
-  auto repB = wmmaLayout.getRepForOperand(
-      gpu::getShapePerCTA(bEncoding, bTensorTy.getShape()), bTensorTy, kWidth,
-      kDim, 1);
+
+  auto repA =
+      wmmaLayout.getRepForOperand(aTensorTy.getShape(), /*packed=*/false, 0);
+  auto repB =
+      wmmaLayout.getRepForOperand(bTensorTy.getShape(), /*packed=*/false, 1);
 
   assert(repA[2] == repB[1]);
 
@@ -436,12 +449,13 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto numRepK = repA[2];
   auto numRepB = repA[0];
 
+  int kBase = maybeWmmaIntrinsic->kBase;
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedA, numRepB, numRepM, numRepK, kWidth,
-      aTensorTy.getElementType(), false, loc);
+      rewriter, typeConverter, wmmaVer, loadedA, numRepB, numRepM, numRepK,
+      kBase, aTensorTy.getElementType(), false, loc);
   ValueTable hb = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedB, numRepB, numRepN, numRepK, kWidth,
-      aTensorTy.getElementType(), false, loc);
+      rewriter, typeConverter, wmmaVer, loadedB, numRepB, numRepN, numRepK,
+      kBase, aTensorTy.getElementType(), false, loc);
   auto dstElemTy = dTensorTy.getElementType();
   auto fc = unpackLLElements(loc, loadedC, rewriter);
 
@@ -457,8 +471,8 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   bool tied = numRepM % 2 == 0 && paddedOutputElemSize == 2;
   int tiedGroup = tied ? 2 : 1;
 
-  intrinsicName = addInstructionSuffix(intrinsicName, kWidth, aElemTy, bElemTy,
-                                       dElemTy, tied);
+  intrinsicName = addInstructionSuffix(intrinsicName, kBase, elemsPerVec,
+                                       aElemTy, bElemTy, dElemTy, tied);
   for (int b = 0; b < numRepB; ++b) {
     for (int m = 0; m < numRepM / tiedGroup; ++m) {
       for (int n = 0; n < numRepN; ++n) {
@@ -482,16 +496,17 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
             auto optTied =
                 tied ? std::optional<bool>(subTied != 0) : std::nullopt;
             acc = wmmaLayout.getIsTransposed()
-                      ? generateWMMAOp(rewriter, loc, hb[{b, n, k}],
+                      ? generateWMMAOp(rewriter, loc, wmmaVer, hb[{b, n, k}],
                                        ha[{b, m * tiedGroup + subTied, k}], acc,
                                        bTensorTy.getElementType(),
                                        aTensorTy.getElementType(), dstElemTy,
                                        intrinsicName, optTied)
-                      : generateWMMAOp(
-                            rewriter, loc, ha[{b, m * tiedGroup + subTied, k}],
-                            hb[{b, n, k}], acc, aTensorTy.getElementType(),
-                            bTensorTy.getElementType(), dstElemTy,
-                            intrinsicName, optTied);
+                      : generateWMMAOp(rewriter, loc, wmmaVer,
+                                       ha[{b, m * tiedGroup + subTied, k}],
+                                       hb[{b, n, k}], acc,
+                                       aTensorTy.getElementType(),
+                                       bTensorTy.getElementType(), dstElemTy,
+                                       intrinsicName, optTied);
           }
         }
         for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
@@ -525,7 +540,7 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   int wmmaVer = wmmaLayout.getVersion();
   assert(wmmaVer == 3 && "Scaled dot not supported for wmma1/wmma2");
   auto warpsPerCTA = wmmaLayout.getWarpsPerCTA();
-  auto mnkDim = wmmaLayout.getMNKDimPerInstr();
+  auto mnkDim = wmmaLayout.getInstrShape();
 
   auto loc = op.getLoc();
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
@@ -541,26 +556,24 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto dTensorTy = cast<RankedTensorType>(d.getType());
   auto elemTy = aTensorTy.getElementType();
 
-  int kDim = 128;
-  int kWidth = 64;
+  unsigned kDim = mnkDim[2];
+  unsigned kBase = 64;
 
   bool isFp4A = op.getAElemType() == triton::ScaleDotElemType::E2M1;
-  int kWidthA = isFp4A ? kWidth / 2 : kWidth;
-  int kDimA = isFp4A ? kDim / 2 : kDim;
+  int kBaseA = isFp4A ? kBase / 2 : kBase;
 
   bool isFp4B = op.getBElemType() == triton::ScaleDotElemType::E2M1;
-  int kWidthB = isFp4B ? kWidth / 2 : kWidth;
-  int kDimB = isFp4B ? kDim / 2 : kDim;
+  int kBaseB = isFp4B ? kBase / 2 : kBase;
 
   bool isFp6A = (op.getAElemType() == triton::ScaleDotElemType::E2M3) ||
                 (op.getAElemType() == triton::ScaleDotElemType::E3M2);
   bool isFp6B = (op.getBElemType() == triton::ScaleDotElemType::E2M3) ||
                 (op.getBElemType() == triton::ScaleDotElemType::E3M2);
 
-  auto repA = wmmaLayout.getRepForOperand(aTensorTy.getShape(), elemTy, kWidthA,
-                                          kDimA, 0);
-  auto repB = wmmaLayout.getRepForOperand(bTensorTy.getShape(), elemTy, kWidthB,
-                                          kDimB, 1);
+  auto repA =
+      wmmaLayout.getRepForOperand(aTensorTy.getShape(), /*packed=*/isFp4A, 0);
+  auto repB =
+      wmmaLayout.getRepForOperand(bTensorTy.getShape(), /*packed*/ isFp4B, 1);
 
   assert(repA[2] == repB[1]);
 
@@ -588,16 +601,16 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   constexpr int scaleKBase = 1;
 
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedA, numRepB, numRepM, numRepK, kWidthA,
-      aTensorTy.getElementType(), isFp6A, loc);
+      rewriter, typeConverter, wmmaVer, loadedA, numRepB, numRepM, numRepK,
+      kBaseA, aTensorTy.getElementType(), isFp6A, loc);
   ValueTable hb = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedB, numRepB, numRepN, numRepK, kWidthB,
-      bTensorTy.getElementType(), isFp6B, loc);
+      rewriter, typeConverter, wmmaVer, loadedB, numRepB, numRepN, numRepK,
+      kBaseB, bTensorTy.getElementType(), isFp6B, loc);
   ValueTable sa = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedAScale, numRepB, numRepM, numRepK,
+      rewriter, typeConverter, wmmaVer, loadedAScale, numRepB, numRepM, numRepK,
       scaleKWidthA, aScaleTensorTy.getElementType(), false, loc);
   ValueTable sb = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedBScale, numRepB, numRepN, numRepK,
+      rewriter, typeConverter, wmmaVer, loadedBScale, numRepB, numRepN, numRepK,
       scaleKWidthB, bScaleTensorTy.getElementType(), false, loc);
   auto dstElemTy = dTensorTy.getElementType();
   auto fc = unpackLLElements(loc, loadedC, rewriter);
