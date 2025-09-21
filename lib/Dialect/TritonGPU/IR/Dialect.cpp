@@ -2505,7 +2505,7 @@ SmallVector<unsigned> DotOperandEncodingAttr::getCTASplitNum() const {
 
 LogicalResult DotOperandEncodingAttr::verify(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
-    unsigned opIdx, Attribute parent, unsigned kWidth) {
+    unsigned opIdx, Attribute parent, unsigned kWidth, bool packed) {
   if (opIdx != 0 && opIdx != 1) {
     return emitError() << "ttg.dot_op opIdx parameter can be 0 or 1, got: "
                        << opIdx;
@@ -2539,7 +2539,8 @@ LogicalResult DotOperandEncodingAttr::verify(
              << "ttg.dot_op kWidth parameter must be 4/8/16 for WMMA v2 "
                 "(including packed cases for `scaled_dot`)";
     if (parentAttr.getVersion() == 3 && (kWidth != 8 && kWidth != 16))
-      return emitError() << "ttg.dot_op kWidth parameter must be 8/16 for WMMA v3";
+      return emitError()
+             << "ttg.dot_op kWidth parameter must be 8/16 for WMMA v3";
     return success();
   }
 

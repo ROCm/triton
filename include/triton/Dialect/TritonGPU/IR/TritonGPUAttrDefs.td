@@ -1519,20 +1519,26 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
     ins
     "unsigned":$opIdx,
     "Attribute":$parent,
-    DefaultValuedParameter<"unsigned", "0">:$kWidth
+    DefaultValuedParameter<"unsigned", "0">:$kWidth,
+    DefaultValuedParameter<"bool", "false">:$packed
   );
 
   let builders = [
     AttrBuilder<(ins "unsigned":$opIdx,
                      "Attribute":$parent,
+                     "unsigned":$kWidth), [{
+      return $_get($_ctxt, opIdx, parent, kWidth, false);
+    }]>,
+    AttrBuilder<(ins "unsigned":$opIdx,
+                     "Attribute":$parent,
                      "Type":$eltTy), [{
       NvidiaMmaEncodingAttr parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent);
       if (!parentAttr || (!parentAttr.isAmpere() && !parentAttr.isHopper()))
-        return $_get(context, opIdx, parent, 0);
+        return $_get(context, opIdx, parent, 0, false);
       // For MMAV2 and V3
       unsigned bitwidth = eltTy.getIntOrFloatBitWidth();
       unsigned kWidth = std::max(32 / bitwidth, 1u);
-      return $_get(context, opIdx, parent, kWidth);
+      return $_get(context, opIdx, parent, kWidth, false);
     }]>
   ];
 

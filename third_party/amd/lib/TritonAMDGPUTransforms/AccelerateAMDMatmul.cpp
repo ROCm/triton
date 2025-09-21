@@ -1167,18 +1167,21 @@ public:
     auto aEncLL = LinearLayout::empty();
     auto bEncLL = LinearLayout::empty();
 
-    auto convertInputLayout = [&](TensorValue v,
-                                  unsigned opIdx) -> TensorValue {
+    auto convertInputLayout = [&](TensorValue v, unsigned opIdx,
+                                  bool packed) -> TensorValue {
       auto vType = v.getType();
-      auto newEnc = DotOperandEncodingAttr::get(ctx, opIdx, wmmaEnc, 16);
+      auto newEnc =
+          DotOperandEncodingAttr::get(ctx, opIdx, wmmaEnc, 16, packed);
       auto newVType = RankedTensorType::get(vType.getShape(),
                                             vType.getElementType(), newEnc);
       (opIdx == 0 ? aEncLL : bEncLL) *=
           newEnc.toLinearLayout(opIdx == 0 ? aShape : bShape);
       return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
     };
-    a = convertInputLayout(a, 0);
-    b = convertInputLayout(b, 1);
+    a = convertInputLayout(a, 0,
+                           /*packed=*/aElemType == ScaleDotElemType::E2M1);
+    b = convertInputLayout(b, 1,
+                           /*packed=*/bElemType == ScaleDotElemType::E2M1);
 
     auto convertScaleLayout = [&](TensorValue scale,
                                   llvm::ArrayRef<int64_t> valShape,
