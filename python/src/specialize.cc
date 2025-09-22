@@ -5,7 +5,6 @@
 #include <functional>
 #include <pybind11/pybind11.h>
 #include <string>
-#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 
@@ -504,6 +503,14 @@ std::pair<py::object, py::object> specialize_arg(PyObject *backend,
   // fallback paths checking attributes directly
   if (PyObject_HasAttr(arg, data_ptr_attr)) {
     return handle_tensor(backend, arg, is_const, specialize_value, align);
+  }
+
+  // fallback for default types
+  if (PyLong_Check(arg)) {
+    return handle_long_type(backend, arg, is_const, specialize_value, align);
+  }
+  if (PyFloat_Check(arg)) {
+    return handle_float_type(backend, arg, is_const, specialize_value, align);
   }
 
   return {};

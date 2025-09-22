@@ -9,8 +9,10 @@
 #include "triton/Dialect/Gluon/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "triton/Tools/GenericSwizzling.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
 
@@ -96,6 +98,7 @@ struct GluonLayouts {
   py::handle NVMMADistributedLayout;
   py::handle NVMMASharedLayout;
   py::handle SwizzledSharedLayout;
+  py::handle SharedLinearLayout;
   py::handle AMDMFMALayout;
   py::handle AMDWMMALayout;
   py::handle PaddedSharedLayout;
@@ -117,6 +120,8 @@ struct GluonLayouts {
     NVMMASharedLayout = py::object(layouts.attr("NVMMASharedLayout")).release();
     SwizzledSharedLayout =
         py::object(layouts.attr("SwizzledSharedLayout")).release();
+    SharedLinearLayout =
+        py::object(layouts.attr("SharedLinearLayout")).release();
     AMDMFMALayout = py::object(amdLayouts.attr("AMDMFMALayout")).release();
     AMDWMMALayout = py::object(amdLayouts.attr("AMDWMMALayout")).release();
     PaddedSharedLayout =
@@ -202,6 +207,14 @@ py::object layoutToGluon(Attribute layout) {
         toStdVector(ctaLayout.getCTAsPerCGA()),
         toStdVector(ctaLayout.getCTASplitNum()),
         toStdVector(ctaLayout.getCTAOrder()));
+  } else if (auto sharedLl = dyn_cast<ttg::SharedLinearEncodingAttr>(layout)) {
+    const auto &ll = sharedLl.getLinearLayout();
+    auto ctx = layout.getContext();
+    auto kOffset = mlir::StringAttr::get(ctx, "offset");
+    auto kBlock = mlir::StringAttr::get(ctx, "block");
+    return layouts.SharedLinearLayout(
+        toStdVector(ll.getBases().lookup(kOffset)),
+        toStdVector(ll.getBases().lookup(kBlock)), sharedLl.getAlignment());
   } else if (auto autoEnc = dyn_cast<gluon::AutoEncodingAttr>(layout)) {
     return layouts.AutoLayout();
   } else if (auto amdMfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(layout)) {
@@ -334,6 +347,14 @@ void init_gluon_ir(py::module &&m) {
                                         /*requiresSurjective=*/true);
              return ttg::LinearEncodingAttr::get(ctx, ll);
            })
+      .def("to_linear_layout",
+           [](GluonOpBuilder &self, Attribute layout,
+              std::vector<int64_t> &shape) -> py::object {
+             auto ctx = self.getContext();
+             auto linearLayout = ttg::toLinearLayout(shape, layout);
+             auto attr = ttg::LinearEncodingAttr::get(ctx, linearLayout);
+             return layoutToGluon(attr);
+           })
       .def("get_dot_operand_layout",
            [](GluonOpBuilder &self, unsigned opIdx, Attribute parent,
               unsigned kWidth, bool packed) -> Attribute {
@@ -401,14 +422,13 @@ void init_gluon_ir(py::module &&m) {
       .def("get_shared_linear_layout",
            [](GluonOpBuilder &self, std::vector<std::vector<int>> &offsetBases,
               std::vector<std::vector<int>> &blockBases,
-              std::vector<int64_t> &shape, unsigned alignment) -> Attribute {
+              unsigned alignment) -> Attribute {
              auto ctx = self.getContext();
              auto kOffset = mlir::StringAttr::get(ctx, "offset");
              auto kBlock = mlir::StringAttr::get(ctx, "block");
+             auto outDims = tt::standardOutDimNames(ctx, offsetBases[0].size());
              auto ll = tt::LinearLayout(
-                 {{kOffset, offsetBases}, {kBlock, blockBases}},
-                 tt::standardOutDimPairs(ctx, shape),
-                 /*requireSurjective=*/true);
+                 {{kOffset, offsetBases}, {kBlock, blockBases}}, outDims);
              return self.getChecked<ttg::SharedLinearEncodingAttr>(ctx, ll,
                                                                    alignment);
            })
@@ -441,13 +461,14 @@ void init_gluon_ir(py::module &&m) {
                  ctx, vec, perPhase, maxPhase, order, ctaLayout);
            })
       .def("get_tensor_memory_layout",
-           [](GluonOpBuilder &self, std::vector<unsigned> &block, bool unpacked,
+           [](GluonOpBuilder &self, std::vector<unsigned> &block,
+              unsigned colStride,
               std::vector<unsigned> &ctaSplitNum) -> Attribute {
              auto ctx = self.getContext();
              assert(block.size() == 2);
              assert(ctaSplitNum.size() == 2);
              return self.getChecked<ttng::TensorMemoryEncodingAttr>(
-                 ctx, block[0], block[1], unpacked, ctaSplitNum[0],
+                 ctx, block[0], block[1], colStride, ctaSplitNum[0],
                  ctaSplitNum[1]);
            })
       .def("get_tensor_memory_scales_layout",
@@ -539,6 +560,14 @@ void init_gluon_ir(py::module &&m) {
       .def("create_local_load",
            [](GluonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
              return self.create<ttg::LocalLoadOp>(resultTy, memDesc);
+           })
+      .def("get_shared_bank_conflicts",
+           [](GluonOpBuilder &self, Attribute regLayoutAttr,
+              Attribute sharedLayoutAttr, std::vector<int64_t> &shape,
+              int bitwidth) -> int {
+             auto regLayout = ttg::toLinearLayout(shape, regLayoutAttr);
+             auto smemLayout = ttg::toLinearLayout(shape, sharedLayoutAttr);
+             return ttg::bankConflictsMemDesc(regLayout, smemLayout, bitwidth);
            })
       .def("create_local_dealloc",
            [](GluonOpBuilder &self, Value memDesc) -> Operation * {
@@ -736,6 +765,14 @@ void init_gluon_ir(py::module &&m) {
               Value mask, tt::CacheModifier cache) {
              self.create<ttag::BufferStoreOp>(storedValue, ptr, offsets,
                                               Value() /*stride*/, cache, mask);
+           })
+      .def("create_buffer_atomic_rmw",
+           [](GluonOpBuilder &self, tt::RMWOp op, Value ptr, Value offsets,
+              Value value, tt::MemSemantic sem, tt::MemSyncScope scope,
+              Value mask) -> Value {
+             return self.create<ttag::BufferAtomicRMWOp>(
+                 value.getType(), op, ptr, offsets, value, Value() /*stride*/,
+                 sem, scope, mask);
            })
       .def("create_buffer_load_to_local",
            [](GluonOpBuilder &self, Value dest, Value ptr, Value offsets,

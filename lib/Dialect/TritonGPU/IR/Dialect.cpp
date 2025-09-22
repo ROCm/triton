@@ -27,6 +27,7 @@
 
 // Include TableGen'erated code
 #include "triton/Dialect/TritonGPU/IR/Dialect.cpp.inc"
+#include "triton/Dialect/TritonGPU/IR/OpInterfaces.cpp.inc"
 #include "triton/Dialect/TritonGPU/IR/TypeInterfaces.cpp.inc"
 
 using namespace mlir;
@@ -1708,7 +1709,7 @@ void SharedLinearEncodingAttr::print(AsmPrinter &printer) const {
         layout.sublayout({kOffset}, llvm::to_vector(layout.getOutDimNames()));
   }
   printLinearLayout(printer, layout);
-  printer << "}, alignment = " << getAlignment() << "}>";
+  printer << "}, alignment = " << getAlignment() << ">";
 }
 
 Attribute SharedLinearEncodingAttr::parse(AsmParser &parser, Type type) {
@@ -1880,6 +1881,12 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
       }
     }
 
+    if (order.size() != shape.size()) {
+      parser.emitError(parser.getCurrentLocation(),
+                       "Mismatch of shape and order ranks in padded layout");
+      return {};
+    }
+
     // Create identity mapping based on shape and order
     auto kOffset = StringAttr::get(parser.getContext(), "offset");
     maybeLL = identityStandardND(kOffset, shape, order);
@@ -1997,8 +2004,8 @@ LogicalResult PaddedSharedEncodingAttr::verify(
     }
     // Ensure all non zero elements are a power of 2. Combined with the
     // broadcast check above this prevents per element swizzling. The intent of
-    // the linear component is to rearange whole rows or cache-line sized chunks
-    // of rows.
+    // the linear component is to rearrange whole rows or cache-line sized
+    // chunks of rows.
     if (!llvm::all_of(dimBases, [&](const auto &basis) {
           return llvm::all_of(
               basis, [](auto v) { return v == 0 || llvm::isPowerOf2_32(v); });
@@ -2684,19 +2691,17 @@ struct TritonGPUInferLayoutInterface
     }
 
     if (auto enc = dyn_cast<NVMMASharedEncodingAttr>(operandEncoding)) {
-      if (failed(checkRank(enc.getRank())))
-        return failure();
-      if (order != ArrayRef<int32_t>({1, 0})) {
-        return emitOptionalError(
-            loc, "NVMMSharedEncoding can only be transposed in 2D");
-      }
+      if (order == ArrayRef<int32_t>({1, 0})) {
+        if (failed(checkRank(enc.getRank())))
+          return failure();
 
-      CTALayoutAttr ctaLayout =
-          permuteCTALayout(ctx, enc.getCTALayout(), order);
-      resultEncoding = NVMMASharedEncodingAttr::get(
-          ctx, enc.getSwizzlingByteWidth(), !enc.getTransposed(),
-          enc.getElementBitWidth(), enc.getFp4Padded(), ctaLayout);
-      return success();
+        CTALayoutAttr ctaLayout =
+            permuteCTALayout(ctx, enc.getCTALayout(), order);
+        resultEncoding = NVMMASharedEncodingAttr::get(
+            ctx, enc.getSwizzlingByteWidth(), !enc.getTransposed(),
+            enc.getElementBitWidth(), enc.getFp4Padded(), ctaLayout);
+        return success();
+      }
     }
 
     if (auto enc = dyn_cast<BlockedEncodingAttr>(operandEncoding)) {
@@ -2712,20 +2717,25 @@ struct TritonGPUInferLayoutInterface
           applyPermutation(invOrderUnsigned, enc.getOrder()), ctaLayout);
       return success();
     }
+    // Generic case
+    auto padded = dyn_cast<PaddedSharedEncodingAttr>(operandEncoding);
 
-    if (auto enc = dyn_cast<PaddedSharedEncodingAttr>(operandEncoding)) {
-      if (failed(checkRank(enc.getRank())))
-        return failure();
-      const auto &transLL =
-          transposeLinearLayout(enc.getLinearComponent(), order);
-      resultEncoding = PaddedSharedEncodingAttr::get(
-          ctx, enc.getIntervals(), enc.getPaddings(), transLL);
-      return success();
-    }
-
-    auto ll = toLinearLayout(shape, operandEncoding);
+    auto ll = padded ? padded.getLinearComponent()
+                     : toLinearLayout(shape, operandEncoding);
+    if (failed(checkRank(ll.getNumOutDims())))
+      return failure();
     auto transposedLl = transposeLinearLayout(ll, order);
-    resultEncoding = LinearEncodingAttr::get(ctx, std::move(transposedLl));
+    if (isa<DistributedEncodingTrait>(operandEncoding)) {
+      resultEncoding = LinearEncodingAttr::get(ctx, std::move(transposedLl));
+    } else if (padded) {
+      resultEncoding = PaddedSharedEncodingAttr::get(ctx, padded.getIntervals(),
+                                                     padded.getPaddings(),
+                                                     std::move(transposedLl));
+    } else {
+      auto shared = cast<SharedEncodingTrait>(operandEncoding);
+      resultEncoding = SharedLinearEncodingAttr::get(
+          ctx, std::move(transposedLl), shared.getAlignment());
+    }
     return success();
   }
 
