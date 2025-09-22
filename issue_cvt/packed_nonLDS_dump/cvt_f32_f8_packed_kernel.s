@@ -1,0 +1,329 @@
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
+	.amdhsa_code_object_version 5
+	.text
+	.globl	cvt_f32_f8_packed_kernel        ; -- Begin function cvt_f32_f8_packed_kernel
+	.p2align	8
+	.type	cvt_f32_f8_packed_kernel,@function
+cvt_f32_f8_packed_kernel:               ; @cvt_f32_f8_packed_kernel
+.Lfunc_begin0:
+	.cfi_sections .debug_frame
+	.cfi_startproc
+; %bb.1:
+	.file	1 "/app/OAI-triton/myGluon" "cvt_f32_fp8.py"
+	s_load_dwordx2 s[2:3], s[0:1], 0x0
+	s_load_dwordx8 s[4:11], s[0:1], 0x8
+	s_waitcnt lgkmcnt(0)
+	s_branch .LBB0_0
+	.p2align	8
+; %bb.2:
+.LBB0_0:
+	s_mov_b64 s[8:9], s[2:3]
+	v_lshlrev_b32_e32 v128, 2, v0
+	s_and_b32 s9, s9, 0xffff
+	s_mov_b32 s11, 0x27000
+	s_mov_b32 s10, 0x7ffffffe
+	v_mul_lo_u32 v32, v128, s6
+	buffer_load_dwordx4 v[0:3], v32, s[8:11], 0 offen
+	buffer_load_dwordx4 v[4:7], v32, s[8:11], 0 offen offset:16
+	buffer_load_dwordx4 v[8:11], v32, s[8:11], 0 offen offset:32
+	buffer_load_dwordx4 v[12:15], v32, s[8:11], 0 offen offset:48
+	buffer_load_dwordx4 v[16:19], v32, s[8:11], 0 offen offset:64
+	buffer_load_dwordx4 v[20:23], v32, s[8:11], 0 offen offset:80
+	buffer_load_dwordx4 v[24:27], v32, s[8:11], 0 offen offset:96
+	buffer_load_dwordx4 v[28:31], v32, s[8:11], 0 offen offset:112
+	s_mov_b32 s0, s7
+	s_and_b32 s5, s5, 0xffff
+	s_mov_b32 s6, s10
+	s_mov_b32 s7, s11
+	v_mul_lo_u32 v128, v128, s0
+	s_waitcnt vmcnt(7)
+	v_cvt_scalef32_pk_f32_fp8 v[32:33], v0, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[34:35], v0, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[36:37], v1, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[38:39], v1, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[40:41], v2, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[42:43], v2, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[0:1], v3, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[2:3], v3, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(6)
+	v_cvt_scalef32_pk_f32_fp8 v[44:45], v4, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[46:47], v4, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[48:49], v5, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[50:51], v5, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[52:53], v6, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[54:55], v6, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[4:5], v7, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[6:7], v7, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(5)
+	v_cvt_scalef32_pk_f32_fp8 v[56:57], v8, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[58:59], v8, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[60:61], v9, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[62:63], v9, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[64:65], v10, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[66:67], v10, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[8:9], v11, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[10:11], v11, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(4)
+	v_cvt_scalef32_pk_f32_fp8 v[68:69], v12, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[70:71], v12, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[72:73], v13, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[74:75], v13, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[76:77], v14, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[78:79], v14, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[12:13], v15, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[14:15], v15, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(3)
+	v_cvt_scalef32_pk_f32_fp8 v[80:81], v16, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[82:83], v16, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[84:85], v17, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[86:87], v17, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[88:89], v18, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[90:91], v18, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[16:17], v19, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[18:19], v19, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(2)
+	v_cvt_scalef32_pk_f32_fp8 v[92:93], v20, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[94:95], v20, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[96:97], v21, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[98:99], v21, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[100:101], v22, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[102:103], v22, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[20:21], v23, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[22:23], v23, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(1)
+	v_cvt_scalef32_pk_f32_fp8 v[104:105], v24, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[106:107], v24, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[108:109], v25, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[110:111], v25, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[112:113], v26, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[114:115], v26, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[24:25], v27, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[26:27], v27, 1.0 op_sel:[1,0,0]
+	s_waitcnt vmcnt(0)
+	v_cvt_scalef32_pk_f32_fp8 v[116:117], v28, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[118:119], v28, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[120:121], v29, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[122:123], v29, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[124:125], v30, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[126:127], v30, 1.0 op_sel:[1,0,0]
+	v_cvt_scalef32_pk_f32_fp8 v[28:29], v31, 1.0
+	v_cvt_scalef32_pk_f32_fp8 v[30:31], v31, 1.0 op_sel:[1,0,0]
+	buffer_store_dwordx4 v[32:35], v128, s[4:7], 0 offen
+	buffer_store_dwordx4 v[36:39], v128, s[4:7], 0 offen offset:16
+	buffer_store_dwordx4 v[40:43], v128, s[4:7], 0 offen offset:32
+	buffer_store_dwordx4 v[0:3], v128, s[4:7], 0 offen offset:48
+	buffer_store_dwordx4 v[44:47], v128, s[4:7], 0 offen offset:64
+	buffer_store_dwordx4 v[48:51], v128, s[4:7], 0 offen offset:80
+	buffer_store_dwordx4 v[52:55], v128, s[4:7], 0 offen offset:96
+	buffer_store_dwordx4 v[4:7], v128, s[4:7], 0 offen offset:112
+	buffer_store_dwordx4 v[56:59], v128, s[4:7], 0 offen offset:128
+	buffer_store_dwordx4 v[60:63], v128, s[4:7], 0 offen offset:144
+	buffer_store_dwordx4 v[64:67], v128, s[4:7], 0 offen offset:160
+	buffer_store_dwordx4 v[8:11], v128, s[4:7], 0 offen offset:176
+	buffer_store_dwordx4 v[68:71], v128, s[4:7], 0 offen offset:192
+	buffer_store_dwordx4 v[72:75], v128, s[4:7], 0 offen offset:208
+	buffer_store_dwordx4 v[76:79], v128, s[4:7], 0 offen offset:224
+	buffer_store_dwordx4 v[12:15], v128, s[4:7], 0 offen offset:240
+	buffer_store_dwordx4 v[80:83], v128, s[4:7], 0 offen offset:256
+	buffer_store_dwordx4 v[84:87], v128, s[4:7], 0 offen offset:272
+	buffer_store_dwordx4 v[88:91], v128, s[4:7], 0 offen offset:288
+	buffer_store_dwordx4 v[16:19], v128, s[4:7], 0 offen offset:304
+	buffer_store_dwordx4 v[92:95], v128, s[4:7], 0 offen offset:320
+	buffer_store_dwordx4 v[96:99], v128, s[4:7], 0 offen offset:336
+	buffer_store_dwordx4 v[100:103], v128, s[4:7], 0 offen offset:352
+	buffer_store_dwordx4 v[20:23], v128, s[4:7], 0 offen offset:368
+	buffer_store_dwordx4 v[104:107], v128, s[4:7], 0 offen offset:384
+	buffer_store_dwordx4 v[108:111], v128, s[4:7], 0 offen offset:400
+	buffer_store_dwordx4 v[112:115], v128, s[4:7], 0 offen offset:416
+	buffer_store_dwordx4 v[24:27], v128, s[4:7], 0 offen offset:432
+	buffer_store_dwordx4 v[116:119], v128, s[4:7], 0 offen offset:448
+	buffer_store_dwordx4 v[120:123], v128, s[4:7], 0 offen offset:464
+	buffer_store_dwordx4 v[124:127], v128, s[4:7], 0 offen offset:480
+	buffer_store_dwordx4 v[28:31], v128, s[4:7], 0 offen offset:496
+	s_endpgm
+	.section	.rodata,"a",@progbits
+	.p2align	6, 0x0
+	.amdhsa_kernel cvt_f32_f8_packed_kernel
+		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_private_segment_fixed_size 0
+		.amdhsa_kernarg_size 40
+		.amdhsa_user_sgpr_count 12
+		.amdhsa_user_sgpr_dispatch_ptr 0
+		.amdhsa_user_sgpr_queue_ptr 0
+		.amdhsa_user_sgpr_kernarg_segment_ptr 1
+		.amdhsa_user_sgpr_dispatch_id 0
+		.amdhsa_user_sgpr_kernarg_preload_length 10
+		.amdhsa_user_sgpr_kernarg_preload_offset 0
+		.amdhsa_user_sgpr_private_segment_size 0
+		.amdhsa_uses_dynamic_stack 0
+		.amdhsa_enable_private_segment 0
+		.amdhsa_system_sgpr_workgroup_id_x 1
+		.amdhsa_system_sgpr_workgroup_id_y 0
+		.amdhsa_system_sgpr_workgroup_id_z 0
+		.amdhsa_system_sgpr_workgroup_info 0
+		.amdhsa_system_vgpr_workitem_id 0
+		.amdhsa_next_free_vgpr 257
+		.amdhsa_next_free_sgpr 96
+		.amdhsa_accum_offset 132
+		.amdhsa_reserve_vcc 0
+		.amdhsa_reserve_xnack_mask 1
+		.amdhsa_float_round_mode_32 0
+		.amdhsa_float_round_mode_16_64 0
+		.amdhsa_float_denorm_mode_32 3
+		.amdhsa_float_denorm_mode_16_64 3
+		.amdhsa_dx10_clamp 1
+		.amdhsa_ieee_mode 1
+		.amdhsa_fp16_overflow 0
+		.amdhsa_tg_split 0
+		.amdhsa_exception_fp_ieee_invalid_op 0
+		.amdhsa_exception_fp_denorm_src 0
+		.amdhsa_exception_fp_ieee_div_zero 0
+		.amdhsa_exception_fp_ieee_overflow 0
+		.amdhsa_exception_fp_ieee_underflow 0
+		.amdhsa_exception_fp_ieee_inexact 0
+		.amdhsa_exception_int_div_zero 0
+	.end_amdhsa_kernel
+	.text
+.Lfunc_end0:
+	.size	cvt_f32_f8_packed_kernel, .Lfunc_end0-cvt_f32_f8_packed_kernel
+	.cfi_endproc
+                                        ; -- End function
+	.set cvt_f32_f8_packed_kernel.num_vgpr, 129
+	.set cvt_f32_f8_packed_kernel.num_agpr, 0
+	.set cvt_f32_f8_packed_kernel.numbered_sgpr, 12
+	.set cvt_f32_f8_packed_kernel.private_seg_size, 0
+	.set cvt_f32_f8_packed_kernel.uses_vcc, 0
+	.set cvt_f32_f8_packed_kernel.uses_flat_scratch, 0
+	.set cvt_f32_f8_packed_kernel.has_dyn_sized_stack, 0
+	.set cvt_f32_f8_packed_kernel.has_recursion, 0
+	.set cvt_f32_f8_packed_kernel.has_indirect_call, 0
+	.section	.AMDGPU.csdata,"",@progbits
+; Kernel info:
+; codeLenInByte = 1192
+; TotalNumSgprs: 18
+; NumVgprs: 129
+; NumAgprs: 0
+; TotalNumVgprs: 129
+; ScratchSize: 0
+; MemoryBound: 0
+; FloatMode: 240
+; IeeeMode: 1
+; LDSByteSize: 0 bytes/workgroup (compile time only)
+; SGPRBlocks: 12
+; VGPRBlocks: 32
+; NumSGPRsForWavesPerEU: 102
+; NumVGPRsForWavesPerEU: 257
+; AccumOffset: 132
+; Occupancy: 1
+; WaveLimiterHint : 0
+; COMPUTE_PGM_RSRC2:SCRATCH_EN: 0
+; COMPUTE_PGM_RSRC2:USER_SGPR: 12
+; COMPUTE_PGM_RSRC2:TRAP_HANDLER: 0
+; COMPUTE_PGM_RSRC2:TGID_X_EN: 1
+; COMPUTE_PGM_RSRC2:TGID_Y_EN: 0
+; COMPUTE_PGM_RSRC2:TGID_Z_EN: 0
+; COMPUTE_PGM_RSRC2:TIDIG_COMP_CNT: 0
+; COMPUTE_PGM_RSRC3_GFX90A:ACCUM_OFFSET: 32
+; COMPUTE_PGM_RSRC3_GFX90A:TG_SPLIT: 0
+	.text
+	.p2alignl 6, 3212836864
+	.fill 256, 4, 3212836864
+	.section	.AMDGPU.gpr_maximums,"",@progbits
+	.set amdgpu.max_num_vgpr, 0
+	.set amdgpu.max_num_agpr, 0
+	.set amdgpu.max_num_sgpr, 0
+	.text
+	.section	.debug_abbrev,"",@progbits
+	.byte	1                               ; Abbreviation Code
+	.byte	17                              ; DW_TAG_compile_unit
+	.byte	0                               ; DW_CHILDREN_no
+	.byte	37                              ; DW_AT_producer
+	.byte	14                              ; DW_FORM_strp
+	.byte	19                              ; DW_AT_language
+	.byte	5                               ; DW_FORM_data2
+	.byte	3                               ; DW_AT_name
+	.byte	14                              ; DW_FORM_strp
+	.byte	16                              ; DW_AT_stmt_list
+	.byte	23                              ; DW_FORM_sec_offset
+	.byte	27                              ; DW_AT_comp_dir
+	.byte	14                              ; DW_FORM_strp
+	.byte	17                              ; DW_AT_low_pc
+	.byte	1                               ; DW_FORM_addr
+	.byte	18                              ; DW_AT_high_pc
+	.byte	6                               ; DW_FORM_data4
+	.byte	0                               ; EOM(1)
+	.byte	0                               ; EOM(2)
+	.byte	0                               ; EOM(3)
+	.section	.debug_info,"",@progbits
+.Lcu_begin0:
+	.long	.Ldebug_info_end0-.Ldebug_info_start0 ; Length of Unit
+.Ldebug_info_start0:
+	.short	4                               ; DWARF version number
+	.long	.debug_abbrev                   ; Offset Into Abbrev. Section
+	.byte	8                               ; Address Size (in bytes)
+	.byte	1                               ; Abbrev [1] 0xb:0x1f DW_TAG_compile_unit
+	.long	.Linfo_string0                  ; DW_AT_producer
+	.short	2                               ; DW_AT_language
+	.long	.Linfo_string1                  ; DW_AT_name
+	.long	.Lline_table_start0             ; DW_AT_stmt_list
+	.long	.Linfo_string2                  ; DW_AT_comp_dir
+	.quad	.Lfunc_begin0                   ; DW_AT_low_pc
+	.long	.Lfunc_end0-.Lfunc_begin0       ; DW_AT_high_pc
+.Ldebug_info_end0:
+	.section	.debug_str,"MS",@progbits,1
+.Linfo_string0:
+	.asciz	"triton"                        ; string offset=0
+.Linfo_string1:
+	.asciz	"cvt_f32_fp8.py"                ; string offset=7
+.Linfo_string2:
+	.asciz	"/app/OAI-triton/myGluon"       ; string offset=22
+	.section	".note.GNU-stack","",@progbits
+	.amdgpu_metadata
+---
+amdhsa.kernels:
+  - .agpr_count:     0
+    .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         16
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         20
+        .size:           4
+        .value_kind:     by_value
+      - .address_space:  global
+        .offset:         24
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         32
+        .size:           8
+        .value_kind:     global_buffer
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 40
+    .max_flat_workgroup_size: 64
+    .name:           cvt_f32_f8_packed_kernel
+    .private_segment_fixed_size: 0
+    .sgpr_count:     18
+    .sgpr_spill_count: 0
+    .symbol:         cvt_f32_f8_packed_kernel.kd
+    .uses_dynamic_stack: false
+    .vgpr_count:     129
+    .vgpr_spill_count: 0
+    .wavefront_size: 64
+amdhsa.target:   amdgcn-amd-amdhsa--gfx950
+amdhsa.version:
+  - 1
+  - 2
+...
+
+	.end_amdgpu_metadata
+	.section	.debug_line,"",@progbits
+.Lline_table_start0:

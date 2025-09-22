@@ -1,0 +1,261 @@
+; ModuleID = 'LLVMDialectModule'
+source_filename = "LLVMDialectModule"
+target datalayout = "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9"
+target triple = "amdgcn-amd-amdhsa"
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: readwrite)
+define amdgpu_kernel void @cvt_f32_f8_kernel(ptr addrspace(1) inreg readonly captures(none) %0, ptr addrspace(1) inreg writeonly captures(none) %1, i32 inreg %2, i32 inreg %3, ptr addrspace(1) inreg readnone captures(none) %4, ptr addrspace(1) inreg readnone captures(none) %5) local_unnamed_addr #0 !dbg !4 {
+  %7 = tail call i32 @llvm.amdgcn.workitem.id.x(), !dbg !7
+  %8 = and i32 %7, 63, !dbg !7
+  %9 = mul i32 %2, %8, !dbg !8
+  %10 = add i32 %9, 16, !dbg !9
+  %11 = add i32 %9, 32, !dbg !9
+  %12 = add i32 %9, 48, !dbg !9
+  %13 = add i32 %9, 64, !dbg !9
+  %14 = add i32 %9, 80, !dbg !9
+  %15 = add i32 %9, 96, !dbg !9
+  %16 = add i32 %9, 112, !dbg !9
+  %17 = tail call ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1(ptr addrspace(1) %0, i16 0, i32 2147483646, i32 159744), !dbg !10
+  %18 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %9, i32 0, i32 0), !dbg !10
+  %19 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %10, i32 0, i32 0), !dbg !10
+  %20 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %11, i32 0, i32 0), !dbg !10
+  %21 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %12, i32 0, i32 0), !dbg !10
+  %22 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %13, i32 0, i32 0), !dbg !10
+  %23 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %14, i32 0, i32 0), !dbg !10
+  %24 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %15, i32 0, i32 0), !dbg !10
+  %25 = tail call <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) %17, i32 %16, i32 0, i32 0), !dbg !10
+  %.extract = extractelement <4 x i32> %18, i64 0, !dbg !11
+  %26 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract, float 1.000000e+00, i1 false), !dbg !11
+  %27 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract, float 1.000000e+00, i1 true), !dbg !11
+  %.extract1 = extractelement <4 x i32> %18, i64 1, !dbg !11
+  %28 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract1, float 1.000000e+00, i1 false), !dbg !11
+  %29 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract1, float 1.000000e+00, i1 true), !dbg !11
+  %.extract2 = extractelement <4 x i32> %18, i64 2, !dbg !11
+  %30 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract2, float 1.000000e+00, i1 false), !dbg !11
+  %31 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract2, float 1.000000e+00, i1 true), !dbg !11
+  %.extract3 = extractelement <4 x i32> %18, i64 3, !dbg !11
+  %32 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract3, float 1.000000e+00, i1 false), !dbg !11
+  %33 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract3, float 1.000000e+00, i1 true), !dbg !11
+  %.extract4 = extractelement <4 x i32> %19, i64 0, !dbg !11
+  %34 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract4, float 1.000000e+00, i1 false), !dbg !11
+  %35 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract4, float 1.000000e+00, i1 true), !dbg !11
+  %.extract5 = extractelement <4 x i32> %19, i64 1, !dbg !11
+  %36 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract5, float 1.000000e+00, i1 false), !dbg !11
+  %37 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract5, float 1.000000e+00, i1 true), !dbg !11
+  %.extract6 = extractelement <4 x i32> %19, i64 2, !dbg !11
+  %38 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract6, float 1.000000e+00, i1 false), !dbg !11
+  %39 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract6, float 1.000000e+00, i1 true), !dbg !11
+  %.extract7 = extractelement <4 x i32> %19, i64 3, !dbg !11
+  %40 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract7, float 1.000000e+00, i1 false), !dbg !11
+  %41 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract7, float 1.000000e+00, i1 true), !dbg !11
+  %.extract8 = extractelement <4 x i32> %20, i64 0, !dbg !11
+  %42 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract8, float 1.000000e+00, i1 false), !dbg !11
+  %43 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract8, float 1.000000e+00, i1 true), !dbg !11
+  %.extract9 = extractelement <4 x i32> %20, i64 1, !dbg !11
+  %44 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract9, float 1.000000e+00, i1 false), !dbg !11
+  %45 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract9, float 1.000000e+00, i1 true), !dbg !11
+  %.extract10 = extractelement <4 x i32> %20, i64 2, !dbg !11
+  %46 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract10, float 1.000000e+00, i1 false), !dbg !11
+  %47 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract10, float 1.000000e+00, i1 true), !dbg !11
+  %.extract11 = extractelement <4 x i32> %20, i64 3, !dbg !11
+  %48 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract11, float 1.000000e+00, i1 false), !dbg !11
+  %49 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract11, float 1.000000e+00, i1 true), !dbg !11
+  %.extract12 = extractelement <4 x i32> %21, i64 0, !dbg !11
+  %50 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract12, float 1.000000e+00, i1 false), !dbg !11
+  %51 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract12, float 1.000000e+00, i1 true), !dbg !11
+  %.extract13 = extractelement <4 x i32> %21, i64 1, !dbg !11
+  %52 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract13, float 1.000000e+00, i1 false), !dbg !11
+  %53 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract13, float 1.000000e+00, i1 true), !dbg !11
+  %.extract14 = extractelement <4 x i32> %21, i64 2, !dbg !11
+  %54 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract14, float 1.000000e+00, i1 false), !dbg !11
+  %55 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract14, float 1.000000e+00, i1 true), !dbg !11
+  %.extract15 = extractelement <4 x i32> %21, i64 3, !dbg !11
+  %56 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract15, float 1.000000e+00, i1 false), !dbg !11
+  %57 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract15, float 1.000000e+00, i1 true), !dbg !11
+  %.extract16 = extractelement <4 x i32> %22, i64 0, !dbg !11
+  %58 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract16, float 1.000000e+00, i1 false), !dbg !11
+  %59 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract16, float 1.000000e+00, i1 true), !dbg !11
+  %.extract17 = extractelement <4 x i32> %22, i64 1, !dbg !11
+  %60 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract17, float 1.000000e+00, i1 false), !dbg !11
+  %61 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract17, float 1.000000e+00, i1 true), !dbg !11
+  %.extract18 = extractelement <4 x i32> %22, i64 2, !dbg !11
+  %62 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract18, float 1.000000e+00, i1 false), !dbg !11
+  %63 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract18, float 1.000000e+00, i1 true), !dbg !11
+  %.extract19 = extractelement <4 x i32> %22, i64 3, !dbg !11
+  %64 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract19, float 1.000000e+00, i1 false), !dbg !11
+  %65 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract19, float 1.000000e+00, i1 true), !dbg !11
+  %.extract20 = extractelement <4 x i32> %23, i64 0, !dbg !11
+  %66 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract20, float 1.000000e+00, i1 false), !dbg !11
+  %67 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract20, float 1.000000e+00, i1 true), !dbg !11
+  %.extract21 = extractelement <4 x i32> %23, i64 1, !dbg !11
+  %68 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract21, float 1.000000e+00, i1 false), !dbg !11
+  %69 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract21, float 1.000000e+00, i1 true), !dbg !11
+  %.extract22 = extractelement <4 x i32> %23, i64 2, !dbg !11
+  %70 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract22, float 1.000000e+00, i1 false), !dbg !11
+  %71 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract22, float 1.000000e+00, i1 true), !dbg !11
+  %.extract23 = extractelement <4 x i32> %23, i64 3, !dbg !11
+  %72 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract23, float 1.000000e+00, i1 false), !dbg !11
+  %73 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract23, float 1.000000e+00, i1 true), !dbg !11
+  %.extract24 = extractelement <4 x i32> %24, i64 0, !dbg !11
+  %74 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract24, float 1.000000e+00, i1 false), !dbg !11
+  %75 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract24, float 1.000000e+00, i1 true), !dbg !11
+  %.extract25 = extractelement <4 x i32> %24, i64 1, !dbg !11
+  %76 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract25, float 1.000000e+00, i1 false), !dbg !11
+  %77 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract25, float 1.000000e+00, i1 true), !dbg !11
+  %.extract26 = extractelement <4 x i32> %24, i64 2, !dbg !11
+  %78 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract26, float 1.000000e+00, i1 false), !dbg !11
+  %79 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract26, float 1.000000e+00, i1 true), !dbg !11
+  %.extract27 = extractelement <4 x i32> %24, i64 3, !dbg !11
+  %80 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract27, float 1.000000e+00, i1 false), !dbg !11
+  %81 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract27, float 1.000000e+00, i1 true), !dbg !11
+  %.extract28 = extractelement <4 x i32> %25, i64 0, !dbg !11
+  %82 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract28, float 1.000000e+00, i1 false), !dbg !11
+  %83 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract28, float 1.000000e+00, i1 true), !dbg !11
+  %.extract29 = extractelement <4 x i32> %25, i64 1, !dbg !11
+  %84 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract29, float 1.000000e+00, i1 false), !dbg !11
+  %85 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract29, float 1.000000e+00, i1 true), !dbg !11
+  %.extract30 = extractelement <4 x i32> %25, i64 2, !dbg !11
+  %86 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract30, float 1.000000e+00, i1 false), !dbg !11
+  %87 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract30, float 1.000000e+00, i1 true), !dbg !11
+  %.extract31 = extractelement <4 x i32> %25, i64 3, !dbg !11
+  %88 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract31, float 1.000000e+00, i1 false), !dbg !11
+  %89 = tail call <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32 %.extract31, float 1.000000e+00, i1 true), !dbg !11
+  %90 = tail call ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1(ptr addrspace(1) %1, i16 0, i32 2147483646, i32 159744), !dbg !12
+  %91 = shufflevector <2 x float> %26, <2 x float> %27, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %92 = shl nuw nsw i32 %8, 2, !dbg !13
+  %93 = mul i32 %92, %3, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %91, ptr addrspace(8) %90, i32 %93, i32 0, i32 0), !dbg !12
+  %94 = shufflevector <2 x float> %28, <2 x float> %29, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %95 = add i32 %93, 16, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %94, ptr addrspace(8) %90, i32 %95, i32 0, i32 0), !dbg !12
+  %96 = shufflevector <2 x float> %30, <2 x float> %31, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %97 = add i32 %93, 32, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %96, ptr addrspace(8) %90, i32 %97, i32 0, i32 0), !dbg !12
+  %98 = shufflevector <2 x float> %32, <2 x float> %33, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %99 = add i32 %93, 48, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %98, ptr addrspace(8) %90, i32 %99, i32 0, i32 0), !dbg !12
+  %100 = shufflevector <2 x float> %34, <2 x float> %35, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %101 = add i32 %93, 64, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %100, ptr addrspace(8) %90, i32 %101, i32 0, i32 0), !dbg !12
+  %102 = shufflevector <2 x float> %36, <2 x float> %37, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %103 = add i32 %93, 80, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %102, ptr addrspace(8) %90, i32 %103, i32 0, i32 0), !dbg !12
+  %104 = shufflevector <2 x float> %38, <2 x float> %39, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %105 = add i32 %93, 96, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %104, ptr addrspace(8) %90, i32 %105, i32 0, i32 0), !dbg !12
+  %106 = shufflevector <2 x float> %40, <2 x float> %41, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %107 = add i32 %93, 112, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %106, ptr addrspace(8) %90, i32 %107, i32 0, i32 0), !dbg !12
+  %108 = shufflevector <2 x float> %42, <2 x float> %43, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %109 = add i32 %93, 128, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %108, ptr addrspace(8) %90, i32 %109, i32 0, i32 0), !dbg !12
+  %110 = shufflevector <2 x float> %44, <2 x float> %45, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %111 = add i32 %93, 144, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %110, ptr addrspace(8) %90, i32 %111, i32 0, i32 0), !dbg !12
+  %112 = shufflevector <2 x float> %46, <2 x float> %47, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %113 = add i32 %93, 160, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %112, ptr addrspace(8) %90, i32 %113, i32 0, i32 0), !dbg !12
+  %114 = shufflevector <2 x float> %48, <2 x float> %49, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %115 = add i32 %93, 176, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %114, ptr addrspace(8) %90, i32 %115, i32 0, i32 0), !dbg !12
+  %116 = shufflevector <2 x float> %50, <2 x float> %51, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %117 = add i32 %93, 192, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %116, ptr addrspace(8) %90, i32 %117, i32 0, i32 0), !dbg !12
+  %118 = shufflevector <2 x float> %52, <2 x float> %53, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %119 = add i32 %93, 208, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %118, ptr addrspace(8) %90, i32 %119, i32 0, i32 0), !dbg !12
+  %120 = shufflevector <2 x float> %54, <2 x float> %55, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %121 = add i32 %93, 224, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %120, ptr addrspace(8) %90, i32 %121, i32 0, i32 0), !dbg !12
+  %122 = shufflevector <2 x float> %56, <2 x float> %57, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %123 = add i32 %93, 240, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %122, ptr addrspace(8) %90, i32 %123, i32 0, i32 0), !dbg !12
+  %124 = shufflevector <2 x float> %58, <2 x float> %59, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %125 = add i32 %93, 256, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %124, ptr addrspace(8) %90, i32 %125, i32 0, i32 0), !dbg !12
+  %126 = shufflevector <2 x float> %60, <2 x float> %61, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %127 = add i32 %93, 272, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %126, ptr addrspace(8) %90, i32 %127, i32 0, i32 0), !dbg !12
+  %128 = shufflevector <2 x float> %62, <2 x float> %63, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %129 = add i32 %93, 288, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %128, ptr addrspace(8) %90, i32 %129, i32 0, i32 0), !dbg !12
+  %130 = shufflevector <2 x float> %64, <2 x float> %65, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %131 = add i32 %93, 304, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %130, ptr addrspace(8) %90, i32 %131, i32 0, i32 0), !dbg !12
+  %132 = shufflevector <2 x float> %66, <2 x float> %67, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %133 = add i32 %93, 320, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %132, ptr addrspace(8) %90, i32 %133, i32 0, i32 0), !dbg !12
+  %134 = shufflevector <2 x float> %68, <2 x float> %69, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %135 = add i32 %93, 336, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %134, ptr addrspace(8) %90, i32 %135, i32 0, i32 0), !dbg !12
+  %136 = shufflevector <2 x float> %70, <2 x float> %71, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %137 = add i32 %93, 352, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %136, ptr addrspace(8) %90, i32 %137, i32 0, i32 0), !dbg !12
+  %138 = shufflevector <2 x float> %72, <2 x float> %73, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %139 = add i32 %93, 368, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %138, ptr addrspace(8) %90, i32 %139, i32 0, i32 0), !dbg !12
+  %140 = shufflevector <2 x float> %74, <2 x float> %75, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %141 = add i32 %93, 384, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %140, ptr addrspace(8) %90, i32 %141, i32 0, i32 0), !dbg !12
+  %142 = shufflevector <2 x float> %76, <2 x float> %77, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %143 = add i32 %93, 400, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %142, ptr addrspace(8) %90, i32 %143, i32 0, i32 0), !dbg !12
+  %144 = shufflevector <2 x float> %78, <2 x float> %79, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %145 = add i32 %93, 416, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %144, ptr addrspace(8) %90, i32 %145, i32 0, i32 0), !dbg !12
+  %146 = shufflevector <2 x float> %80, <2 x float> %81, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %147 = add i32 %93, 432, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %146, ptr addrspace(8) %90, i32 %147, i32 0, i32 0), !dbg !12
+  %148 = shufflevector <2 x float> %82, <2 x float> %83, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %149 = add i32 %93, 448, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %148, ptr addrspace(8) %90, i32 %149, i32 0, i32 0), !dbg !12
+  %150 = shufflevector <2 x float> %84, <2 x float> %85, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %151 = add i32 %93, 464, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %150, ptr addrspace(8) %90, i32 %151, i32 0, i32 0), !dbg !12
+  %152 = shufflevector <2 x float> %86, <2 x float> %87, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %153 = add i32 %93, 480, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %152, ptr addrspace(8) %90, i32 %153, i32 0, i32 0), !dbg !12
+  %154 = shufflevector <2 x float> %88, <2 x float> %89, <4 x i32> <i32 0, i32 1, i32 2, i32 3>, !dbg !12
+  %155 = add i32 %93, 496, !dbg !12
+  tail call void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float> %154, ptr addrspace(8) %90, i32 %155, i32 0, i32 0), !dbg !12
+  ret void, !dbg !14
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare noundef range(i32 0, 1024) i32 @llvm.amdgcn.workitem.id.x() #1
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1(ptr addrspace(1) readnone, i16, i32, i32) #1
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: read)
+declare <4 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v4i32(ptr addrspace(8) readonly captures(none), i32, i32, i32 immarg) #2
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32, float, i1 immarg) #1
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: write)
+declare void @llvm.amdgcn.raw.ptr.buffer.store.v4f32(<4 x float>, ptr addrspace(8) writeonly captures(none), i32, i32, i32 immarg) #3
+
+attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: readwrite) "amdgpu-agpr-alloc"="0" "amdgpu-flat-work-group-size"="1,64" "amdgpu-no-completion-action" "amdgpu-no-default-queue" "amdgpu-no-dispatch-id" "amdgpu-no-dispatch-ptr" "amdgpu-no-flat-scratch-init" "amdgpu-no-heap-ptr" "amdgpu-no-hostcall-ptr" "amdgpu-no-implicitarg-ptr" "amdgpu-no-lds-kernel-id" "amdgpu-no-multigrid-sync-arg" "amdgpu-no-queue-ptr" "amdgpu-no-workgroup-id-x" "amdgpu-no-workgroup-id-y" "amdgpu-no-workgroup-id-z" "amdgpu-no-workitem-id-x" "amdgpu-no-workitem-id-y" "amdgpu-no-workitem-id-z" "amdgpu-waves-per-eu"="1,1" "denormal-fp-math-f32"="ieee" "uniform-work-group-size"="false" }
+attributes #1 = { mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #2 = { mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: read) }
+attributes #3 = { mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: write) }
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2, !3}
+
+!0 = distinct !DICompileUnit(language: DW_LANG_C, file: !1, producer: "triton", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly)
+!1 = !DIFile(filename: "cvt_f32_fp8.py", directory: "/app/OAI-triton/myGluon")
+!2 = !{i32 2, !"Debug Info Version", i32 3}
+!3 = !{i32 1, !"amdhsa_code_object_version", i32 500}
+!4 = distinct !DISubprogram(name: "cvt_f32_f8_kernel", linkageName: "cvt_f32_f8_kernel", scope: !1, file: !1, line: 17, type: !5, scopeLine: 17, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!5 = !DISubroutineType(cc: DW_CC_normal, types: !6)
+!6 = !{}
+!7 = !DILocation(line: 50, column: 34, scope: !4)
+!8 = !DILocation(line: 52, column: 77, scope: !4)
+!9 = !DILocation(line: 52, column: 54, scope: !4)
+!10 = !DILocation(line: 58, column: 44, scope: !4)
+!11 = !DILocation(line: 59, column: 13, scope: !4)
+!12 = !DILocation(line: 61, column: 60, scope: !4)
+!13 = !DILocation(line: 54, column: 77, scope: !4)
+!14 = !DILocation(line: 61, column: 4, scope: !4)
