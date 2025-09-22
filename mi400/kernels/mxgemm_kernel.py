@@ -22,7 +22,7 @@ def getMixedType(fpflag):
 def mxgemm_kernel(a_ptr, b_ptr, output_ptr, a_scale, b_scale, M, N, K, stride_scale: tl.constexpr, stride_am, stride_ak,
                   stride_bk, stride_bn, stride_cm, stride_cn, fpflag_a: tl.constexpr, fpflag_b: tl.constexpr,
                   SCALE_BLOCK: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                  GROUP_SIZE_M: tl.constexpr, USE_TDM: tl.constexpr):
+                  GROUP_SIZE_M: tl.constexpr, USE_TDM: tl.constexpr, USE_MASK: tl.constexpr):
     DIV_FACTOR_A: tl.constexpr = 2 if fpflag_a == 4 else 1
     DIV_FACTOR_B: tl.constexpr = 2 if fpflag_b == 4 else 1
     pid = tl.program_id(axis=0)
@@ -64,8 +64,12 @@ def mxgemm_kernel(a_ptr, b_ptr, output_ptr, a_scale, b_scale, M, N, K, stride_sc
             a = a_desc.load([0, k * (BLOCK_K // DIV_FACTOR_A)])
             b = b_desc.load([k * (BLOCK_K // DIV_FACTOR_B), 0])
         else:
-            a = tl.load(a_ptrs, mask=valid_k_a[None, :], other=0.)
-            b = tl.load(b_ptrs, mask=valid_k_b[:, None], other=0.)
+            if USE_MASK:
+                a = tl.load(a_ptrs, mask=valid_k_a[None, :], other=0.)
+                b = tl.load(b_ptrs, mask=valid_k_b[:, None], other=0.)
+            else:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
             a_ptrs += (BLOCK_K // DIV_FACTOR_A) * stride_ak
             b_ptrs += (BLOCK_K // DIV_FACTOR_B) * stride_bk
 

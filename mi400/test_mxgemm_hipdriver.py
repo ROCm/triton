@@ -64,121 +64,45 @@ def getfpflag(dtype):
 
 
 def generate_configs():
-    # for dtype in ['float8_e5m2', 'float4']:
-    base_configs = [
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 256, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 256, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 256, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 256, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 32, "N": 32, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 64, "N": 64, "K": 512, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 128, "N": 128, "K": 512, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 1, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-        {
-            "M": 8192, "N": 8192, "K": 128, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float8_e5m2", "DTYPE_B": "float8_e5m2", "SCALE_BLOCK": 32
-        },
-    ]
+    base_configs = []
+    # Add many small shapes.
+    for (tdm, mask) in [(1, 0), (0, 0), (0, 1)]:
+        for dtypeA in ['float8_e5m2', 'float4']:
+            for dtypeB in ['float8_e5m2', 'float4']:
+                for (M, N, K, BM, BN, BK) in [(32, 32, 32, 32, 32, 64), (32, 32, 64, 32, 32, 64),
+                                              (32, 32, 128, 32, 32, 128), (64, 64, 256, 32, 32, 256),
+                                              (128, 128, 512, 64, 64, 128), (1, 8192, 512, 64, 64, 128),
+                                              (1, 8192, 128, 64, 64, 64)]:
+                    # Masked loads give numerical incorrectness some cases; sometimes segfault.
+                    if (mask == 1):
+                        continue
+                    # For correctness, we need masking when not using exact tiles.
+                    if ((tdm == 0 and mask == 0) and (M % BM != 0 or N % BN != 0 or K % BK != 0)):
+                        continue
+                    # python3: /home/dtanner/repos/gfx_triton/third_party/amd/lib/TritonAMDGPUToLLVM/DotOpToLLVM/WMMA.cpp:233: mlir::Value mlir::triton::AMD::{anonymous}::generateScaledWMMAIntrinsic(mlir::ConversionPatternRewriter&, mlir::Location, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Type, mlir::Type, mlir::Type, int): Assertion `scaleKWidth == 2 ||     scaleKWidth == 4 || scaleKWidth == 8' failed.
+                    if (dtypeA == 'float4' and BK < K):
+                        continue
+                    # Similar assertion as above.
+                    if (dtypeA == 'float4' and BK < 128):
+                        continue
+                    base_configs.append({
+                        "M": M, "N": N, "K": K, "BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK, "NUM_WARPS": 4, "NUM_CTAS":
+                        1, "SCALE_BLOCK": 32, "DTYPE_A": dtypeA, "DTYPE_B": dtypeB, "USE_TDM": tdm, "USE_MASK": mask
+                    })
+    # Add a few large shapes.
+    for (tdm, mask) in [(1, 0), (0, 0), (0, 1)]:
+        for dtypeA in ['float8_e5m2']:
+            for dtypeB in ['float8_e5m2', 'float4']:
+                for (M, N, K, BM, BN, BK) in [
+                    (1024, 1024, 128, 64, 64, 64),
+                    (1024, 1024, 128, 64, 64, 128),
+                ]:
+                    if (mask == 1 and BK == 128):
+                        continue
+                    base_configs.append({
+                        "M": M, "N": N, "K": K, "BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK, "NUM_WARPS": 4, "NUM_CTAS":
+                        1, "SCALE_BLOCK": 32, "DTYPE_A": dtypeA, "DTYPE_B": dtypeB, "USE_TDM": tdm, "USE_MASK": mask
+                    })
     configs = base_configs
 
     return configs
@@ -198,6 +122,8 @@ def test_mxfp_gemm(config):
     dtype_a = config['DTYPE_A']
     dtype_b = config['DTYPE_B']
     scale_block = config['SCALE_BLOCK']
+    use_tdm = config['USE_TDM']
+    use_mask = config['USE_MASK']
 
     # num_stages = 3
 
@@ -235,14 +161,12 @@ def test_mxfp_gemm(config):
     numBlocks = triton.cdiv(M, blockSizeM) * triton.cdiv(N, blockSizeN)
     grid = [numBlocks, 1, 1]
     group_size_m = 1
-    USE_TDM = 1
-
     stride_scale = a_scale_d.stride(0)
 
     mxgemm_kernel[grid](a_d, b_d, c_triton, a_scale_d, b_scale_d, M, N, K, stride_scale, a_d.stride(0), a_d.stride(1),
                         b_d.stride(0), b_d.stride(1), c_triton.stride(0), c_triton.stride(1), fpflag_a, fpflag_b,
-                        scale_block, blockSizeM, blockSizeN, blockSizeK, group_size_m, USE_TDM, num_warps=numWarps,
-                        num_ctas=numCtas)
+                        scale_block, blockSizeM, blockSizeN, blockSizeK, group_size_m, use_tdm, use_mask,
+                        num_warps=numWarps, num_ctas=numCtas)
 
     c_ref_numpy = c_ref.cpu().numpy()
     c_triton_numpy = c_triton.cpu().numpy()
