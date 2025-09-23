@@ -189,7 +189,7 @@ class HIPBackend(BaseBackend):
         pm.enable_debug()
         passes.common.add_inliner(pm)
         passes.ttir.add_rewrite_tensor_pointer(pm)
-        if options.arch not in {"gfx1250", "gfx1251"}:
+        if options.arch not in {"gfx1250", "gfx1251"} or not knobs.amd.use_async_copy:
             passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_combine(pm)
@@ -234,7 +234,7 @@ class HIPBackend(BaseBackend):
 
         global_prefetch = options.global_prefetch
         local_prefetch = knobs.amd.local_prefetch
-        use_async_copy = True  #knobs.amd.use_async_copy
+        use_async_copy = knobs.amd.use_async_copy
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
 
         amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,

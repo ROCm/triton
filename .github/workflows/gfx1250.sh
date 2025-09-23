@@ -34,6 +34,8 @@ export TRITON_BUILD_WITH_CLANG_LLD="TRUE"
 export TRITON_BUILD_WITH_CCACHE="TRUE"
 export CCACHE_COMPRESS="true"
 
+export TRITON_HIP_USE_ASYNC_COPY=1
+
 LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-debug pip3 install --no-build-isolation .
 
 echo "=== Run Gluon Tests ==="
@@ -47,10 +49,10 @@ pytest -s mi400/test_gemm_hipdriver.py -n 8
 pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 
 # TODO(Ravil) enable failing MXFP FA Test; enable masked loads/stores
-#echo "=== Run Attention Tests ==="
-#export HSA_MODEL_NUM_THREADS=$(nproc)
-#python3 mi400/test_mxfa_hipdriver.py -c 0 --disable-masking
-#python3 mi400/test_mxfa_hipdriver.py -c 1 --disable-masking
+echo "=== Run Attention Tests ==="
+let "NUM_PROC = $(nproc) / 2"
+export HSA_MODEL_NUM_THREADS=${NUM_PROC}
+TRITON_HIP_USE_ASYNC_COPY=0 pytest -v -s mi400/test_mxfa_hipdriver.py
 
 
 # TODO: add all upstream tests here
