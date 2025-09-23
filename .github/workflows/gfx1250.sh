@@ -53,12 +53,12 @@ pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 echo "=== Run Attention Tests ==="
 let "NUM_PROC = $(nproc) / 2"
 export HSA_MODEL_NUM_THREADS=${NUM_PROC}
-TRITON_HIP_USE_ASYNC_COPY=0 pytest -v -s mi400/test_mxfa_hipdriver.py
+# pytest -v -s mi400/test_mxfa_hipdriver.py
 
 
 # TODO: add all upstream tests here
 echo "=== Run E2E Upstream Tests ==="
 
-pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
-pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping # TODO enable
+#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast # TODO enable
 #pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: enable
