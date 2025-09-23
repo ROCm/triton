@@ -311,7 +311,11 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
   LogicalResult canWriteCoalesced(RewriterBase &rewriter, Operation *op,
                                   RankedTensorType srcTy, MemDescType dstTy,
                                   unsigned vectorSize,
-                                  bool hasSwizzling) const {
+                                  bool requiresSrcPtrSwizzling) const {
+    if (targetInfo.supportsDirectToLDSScattering()) {
+      return success();
+    }
+
     int vecBits = vectorSize * dstTy.getElementTypeBitWidth();
     if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
       LDBG(op << " results in unsupported load bitwidth: " << vecBits);
@@ -329,15 +333,16 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
 
     unsigned threadsPerWarp = lookupThreadsPerWarp(rewriter);
-    if (!hasSwizzling &&
+    if (!requiresSrcPtrSwizzling &&
         !LLVM::AMD::canCoalesceWriteIntoSharedMemory(
             rewriter, srcToSharedLayout, threadsPerWarp, vectorSize)) {
       LDBG(op << " does not write coalesced into LDS and is not swizzled");
       return failure();
     }
 
-    if (hasSwizzling && !LLVM::AMD::doesSwizzleInsideWarp(
-                            rewriter, srcToSharedLayout, threadsPerWarp)) {
+    if (requiresSrcPtrSwizzling &&
+        !LLVM::AMD::doesSwizzleInsideWarp(rewriter, srcToSharedLayout,
+                                          threadsPerWarp)) {
       LDBG(op << " does swizzle across warp boundaries");
       return failure();
     }
@@ -484,7 +489,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
   void lowerDirectToLDSLoad(
       RewriterBase &rewriter, Location loc, RankedTensorType srcTy,
       MemDescType dstTy, SmallVector<Value> loadVals, Value llDst,
-      Type resElemTy, unsigned vec, bool useContigWarpAddr,
+      Type resElemTy, unsigned vec,
       std::function<SmallVector<Value>(RewriterBase &, Location,
                                        ArrayRef<Value>, Value, int, VectorType)>
           lowerInst) const {
@@ -528,7 +533,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     };
 
     // We pass laneId==0 because GFX9 requires a scalar base pointer into LDS
-    laneId = useContigWarpAddr ? b.i32_val(0) : laneId;
+    laneId = targetInfo.supportsDirectToLDSScattering() ? laneId : b.i32_val(0);
     lowerLdSt(loc, ctx, cvt, loadVals, resElemTy, smemObj.getBase(),
               calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
               warpId, rewriter, targetInfo, vec, lowerInst);
@@ -537,15 +542,20 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
   void emitOtherStore(RewriterBase &rewriter, Location loc,
                       const LLVMTypeConverter *typeConverter, VectorType vecTy,
                       Value mask, ArrayRef<Value> otherElems, Value shmemAddr,
-                      Value laneId, bool hasSwizzling,
+                      Value laneId, bool requiresSrcPtrSwizzling,
                       Value swizzleLaneOffset) const {
     TritonLLVMOpBuilder b(loc, rewriter);
     Value storeVal = packElementRangeIntoVector(rewriter, typeConverter, loc,
                                                 vecTy, otherElems, 0);
     Type ptrTy = shmemAddr.getType();
-    Value ldsAddr = b.gep(ptrTy, vecTy, shmemAddr, laneId);
-    if (hasSwizzling)
-      ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzleLaneOffset);
+    Value ldsAddr = shmemAddr;
+    // When scattering is unsupported, shmemAddr is the warp base address.
+    // Use shmemAddr + (lane_id + swizzleOffset) to compute each lane's address.
+    if (!targetInfo.supportsDirectToLDSScattering()) {
+      ldsAddr = b.gep(ptrTy, vecTy, shmemAddr, laneId);
+      if (requiresSrcPtrSwizzling)
+        ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzleLaneOffset);
+    }
     llStore(rewriter, loc, ldsAddr, storeVal, b.icmp_ne(mask, b.true_val()),
             CacheModifier::NONE, /*forceNoAliasAsyncLoads=*/true);
   }
@@ -803,12 +813,12 @@ struct BufferLoadToLocalOpConversion
       vec = std::min(vec, padEnc.getMinInterval());
     }
 
-    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250;
     auto maybeSwizzledEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstEnc);
-    bool hasSwizzling = maybeSwizzledEnc && maybeSwizzledEnc.getMaxPhase() != 1;
-    if (!hasHWSwizzling &&
-        failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
-                                 hasSwizzling))) {
+    bool requiresSrcPtrSwizzling =
+        !targetInfo.supportsDirectToLDSScattering() && maybeSwizzledEnc &&
+        maybeSwizzledEnc.getMaxPhase() != 1;
+    if (failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
+                                 requiresSrcPtrSwizzling))) {
       return failure();
     }
 
@@ -817,7 +827,7 @@ struct BufferLoadToLocalOpConversion
     auto flatDstTy = dstTy;
     SmallVector<Value> swizzledLaneOffsets;
 
-    if (!hasHWSwizzling && hasSwizzling) {
+    if (requiresSrcPtrSwizzling) {
       // TODO (alex): this is only correct as long as the lds view is a
       // contiguous block. So this can break if we slice along the 2 minor
       // dimensions.
@@ -848,10 +858,10 @@ struct BufferLoadToLocalOpConversion
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto emitBufferLoadLds =
         [this, &op, &b, &bufferEmitter, &rsrcDesc, laneId = laneId, threadPred,
-         offsetTy, otherTy, hasOther, hasHWSwizzling,
-         hasSwizzling](RewriterBase &rewriter, Location loc,
-                       ArrayRef<Value> loadVals, Value shmemAddr, int startIdx,
-                       VectorType vecTy) -> SmallVector<Value> {
+         offsetTy, otherTy, hasOther, requiresSrcPtrSwizzling](
+            RewriterBase &rewriter, Location loc, ArrayRef<Value> loadVals,
+            Value shmemAddr, int startIdx,
+            VectorType vecTy) -> SmallVector<Value> {
       auto [offsetElem, maskElem, otherElems, swizzleLaneOffset] =
           unzipLoadValues(rewriter, loc, startIdx, loadVals, offsetTy, otherTy,
                           hasOther, vecTy.getNumElements());
@@ -860,7 +870,7 @@ struct BufferLoadToLocalOpConversion
       Value vecBytesVal = b.i32_val(vecBits / 8);
 
       Value maybeSwizzledMaskElem = maskElem;
-      if (!hasHWSwizzling && hasSwizzling)
+      if (requiresSrcPtrSwizzling)
         applySwizzling(rewriter, loc, offsetElem, maybeSwizzledMaskElem, laneId,
                        swizzleLaneOffset);
 
@@ -879,7 +889,7 @@ struct BufferLoadToLocalOpConversion
 
       if (hasOther) {
         emitOtherStore(rewriter, loc, this->getTypeConverter(), vecTy, maskElem,
-                       otherElems, shmemAddr, laneId, hasSwizzling,
+                       otherElems, shmemAddr, laneId, requiresSrcPtrSwizzling,
                        swizzleLaneOffset);
       }
 
@@ -889,7 +899,7 @@ struct BufferLoadToLocalOpConversion
     };
 
     lowerDirectToLDSLoad(rewriter, loc, ptrType, flatDstTy, loadVals, llDst,
-                         resElemTy, vec, !hasHWSwizzling, emitBufferLoadLds);
+                         resElemTy, vec, emitBufferLoadLds);
 
     // Drop the result token.
     Value zero = rewriter.create<LLVM::ConstantOp>(
@@ -986,11 +996,13 @@ struct AsyncCopyGlobalToLocalOpConversion
       vec = std::min(vec, padEnc.getMinInterval());
     }
 
-    bool hasHWSwizzling = targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250;
     auto maybeSwizzledEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstEnc);
-    bool hasSwizzling = maybeSwizzledEnc && maybeSwizzledEnc.getMaxPhase() != 1;
-    if (!hasHWSwizzling && failed(canWriteCoalesced(rewriter, op, srcTy, dstTy,
-                                                    vec, hasSwizzling))) {
+    bool requiresSrcPtrSwizzling =
+        !targetInfo.supportsDirectToLDSScattering() && maybeSwizzledEnc &&
+        maybeSwizzledEnc.getMaxPhase() != 1;
+
+    if (failed(canWriteCoalesced(rewriter, op, srcTy, dstTy, vec,
+                                 requiresSrcPtrSwizzling))) {
       return failure();
     }
 
@@ -998,7 +1010,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     // the LDS addresses since we gather into LDS
     auto flatDstTy = dstTy;
     SmallVector<Value> swizzledLaneOffsets;
-    if (!hasHWSwizzling && hasSwizzling) {
+    if (requiresSrcPtrSwizzling) {
       auto flatSharedEnc = SwizzledSharedEncodingAttr::get(
           op->getContext(), maybeSwizzledEnc.getVec(), 1, 1,
           maybeSwizzledEnc.getOrder(), maybeSwizzledEnc.getCTALayout());
@@ -1029,7 +1041,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto emitGlobalLoadLds =
         [this, &op, &b, laneId = laneId, threadPred, srcPtrTy, otherTy,
-         hasOther, hasHWSwizzling, hasSwizzling, numCTAs,
+         hasOther, requiresSrcPtrSwizzling, numCTAs,
          ctaLayout](RewriterBase &rewriter, Location loc,
                     ArrayRef<Value> loadValues, Value shmemAddr, int startIdx,
                     VectorType vecTy) -> SmallVector<Value> {
@@ -1040,7 +1052,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       assert(targetInfo.supportsDirectToLdsLoadBitWidth(vecBits));
       Value maybeSwizzledMaskElem = maskElem;
 
-      if (!hasHWSwizzling && hasSwizzling)
+      if (requiresSrcPtrSwizzling)
         applySwizzling(rewriter, loc, srcElem, maybeSwizzledMaskElem, laneId,
                        swizzleLaneOffset);
 
@@ -1059,7 +1071,7 @@ struct AsyncCopyGlobalToLocalOpConversion
 
       if (hasOther) {
         emitOtherStore(rewriter, loc, this->getTypeConverter(), vecTy, maskElem,
-                       otherElems, shmemAddr, laneId, hasSwizzling,
+                       otherElems, shmemAddr, laneId, requiresSrcPtrSwizzling,
                        swizzleLaneOffset);
       }
 
@@ -1067,7 +1079,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     };
 
     lowerDirectToLDSLoad(rewriter, loc, srcTy, flatDstTy, loadVals, llDst,
-                         resElemTy, vec, !hasHWSwizzling, emitGlobalLoadLds);
+                         resElemTy, vec, emitGlobalLoadLds);
 
     // Drop the result token.
     Value zero = rewriter.create<LLVM::ConstantOp>(

@@ -79,6 +79,10 @@ public:
   void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                              Operation *llLoadOp) const override;
 
+  // Returns true if the target supports per lane addresses into LDS for
+  // direct-to-lds loads. Some architectures (e.g. GFX9) do not support
+  // scattering and instead have to write warp coalesced into LDS
+  bool supportsDirectToLDSScattering() const;
   bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
 
 private:
