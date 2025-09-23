@@ -584,7 +584,7 @@ public:
     // to #dotOp (operand 0 of 2nd dot) is a no-op.
     // TODO (lixun): relax the condition for 8-bit elementTy.
     if (is16BitElemTy && isDotChainTail) {
-      kWidth = 4;
+      kWidth = 8;
     }
 
     Value newDot;
