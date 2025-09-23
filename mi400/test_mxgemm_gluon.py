@@ -35,7 +35,7 @@ def mxgemm_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, str
     A_BLOCKED_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 16], [8, 4], [4, 1], [1, 0])
     B_BLOCKED_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 16], [16, 2], [4, 1], [1, 0])
 
-    WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, True, [2, 2])
+    WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, True, [2, 2], instr_shape=[16, 16, 128])
     A_SCALE_LINEAR_LAYOUT: gl.constexpr = gl.DistributedLinearLayout(
         reg_bases=[[0, 1], [0, 2]], lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]], warp_bases=[[0, 0], [16, 0]],
         block_bases=[], shape=[32, 4])
@@ -87,8 +87,8 @@ def mxgemm_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, str
         a_ptrs += (BLOCK_K // DIV_FACTOR_A) * stride_ak
         b_ptrs += (BLOCK_K // DIV_FACTOR_B) * stride_bk
 
-        a = gl.convert_layout(a, gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT, k_width=64))
-        b = gl.convert_layout(b, gl.DotOperandLayout(operand_index=1, parent=WMMA_LAYOUT, k_width=64))
+        a = gl.convert_layout(a, gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT, k_width=16))
+        b = gl.convert_layout(b, gl.DotOperandLayout(operand_index=1, parent=WMMA_LAYOUT, k_width=16))
 
         if fpflag_a == 4 and fpflag_b == 4:
             accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, "e2m1", b, scale_b, "e2m1", accumulator)

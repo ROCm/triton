@@ -41,6 +41,7 @@ LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-de
 echo "=== Run Gluon Tests ==="
 
 pytest -s third_party/amd/python/test/test_gluon_gfx1250.py -n 8
+pytest -s python/test/gluon/test_frontend.py -n 8
 
 echo "=== Run GEMM Tests ==="
 
