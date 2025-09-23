@@ -376,20 +376,27 @@ def run_mha(config, args):
         if args.verbose:
             print(f"{triton_out=}")
             print(f"{torch_out=}")
+        pytest.fail()
         return
 
     print("✅ Triton and Torch match")
 
 
-@pytest.mark.parametrize("batch", [1])
+# errors when fp4 and head_sz=128
+
+
+@pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("num_heads", [1])
 @pytest.mark.parametrize("seqlen", [256])
 @pytest.mark.parametrize("head_sz", [128, 64])
-@pytest.mark.parametrize("block_m", [64])
+@pytest.mark.parametrize("block_m", [128, 64])
 @pytest.mark.parametrize("q_type", ["e4m3"])
-@pytest.mark.parametrize("kv_type", ["e4m3"])
+@pytest.mark.parametrize("kv_type", ["e4m3", "e2m1"])
 @pytest.mark.parametrize("num_stages", [1, 3])
 def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_stages):
+    #TODO Re-enable these tests later.
+    if kv_type == "e2m1" and head_sz == 128:
+        pytest.skip("Has known numerical correctness problems.")
     block_n = head_sz
     config = {
         "BATCH": batch,  #

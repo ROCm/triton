@@ -18,8 +18,7 @@ def shouldFilter(dtype, config):
 def generate_configs():
     base_configs = []
 
-    # TODO: need to enable (0, 1) for load+mask
-    for (tdm, mask) in [(1, 1), (0, 0)]:
+    for (tdm, mask) in [(1, 0), (0, 1)]:
         base_configs.extend([
             {
                 "M": 16,

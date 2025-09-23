@@ -53,7 +53,7 @@ pytest -s mi400/test_mxgemm_hipdriver.py -n 8
 echo "=== Run Attention Tests ==="
 let "NUM_PROC = $(nproc) / 2"
 export HSA_MODEL_NUM_THREADS=${NUM_PROC}
-# pytest -v -s mi400/test_mxfa_hipdriver.py
+# pytest -v -s mi400/test_mxfa_hipdriver.py # TODO enable
 
 
 # TODO: add all upstream tests here

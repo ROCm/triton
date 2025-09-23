@@ -66,16 +66,13 @@ def getfpflag(dtype):
 def generate_configs():
     base_configs = []
     # Add many small shapes.
-    for (tdm, mask) in [(1, 0), (0, 0), (0, 1)]:
+    for (tdm, mask) in [(1, 0), (0, 1)]:
         for dtypeA in ['float8_e5m2', 'float4']:
             for dtypeB in ['float8_e5m2', 'float4']:
                 for (M, N, K, BM, BN, BK) in [(32, 32, 32, 32, 32, 64), (32, 32, 64, 32, 32, 64),
                                               (32, 32, 128, 32, 32, 128), (64, 64, 256, 32, 32, 256),
                                               (128, 128, 512, 64, 64, 128), (1, 8192, 512, 64, 64, 128),
                                               (1, 8192, 128, 64, 64, 64)]:
-                    # Masked loads give numerical incorrectness some cases; sometimes segfault.
-                    if (mask == 1):
-                        continue
                     # For correctness, we need masking when not using exact tiles.
                     if ((tdm == 0 and mask == 0) and (M % BM != 0 or N % BN != 0 or K % BK != 0)):
                         continue
