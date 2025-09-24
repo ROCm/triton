@@ -116,9 +116,13 @@ bool hasTransInDefChain(mlir::triton::DotOpInterface dotOp, unsigned opIdx);
 bool isChainDotTail(mlir::triton::DotOpInterface dotOp);
 
 // Software implementation of converting an 8-element vector of MXFP4 elements
-// to a wider type: BF16 or FP16
-SmallVector<Value, 4> upcast8xMxfp4_SW(RewriterBase &rewriter, Operation *op,
-                                       bool toFp16, Value packedVec, Value scale = nullptr);
+// to a wider type: BF16 or FP16 for target before CDNA4.
+// for CDNA3, we have optimized sequence that can combine scale during the
+// conversion
+SmallVector<Value> upcast8xMxfp4_SW(RewriterBase &rewriter, Operation *op,
+                                    bool toFp16, Value packedVec,
+                                    mlir::triton::AMD::ISAFamily isaFamily,
+                                    Value scale = nullptr);
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_
