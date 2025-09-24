@@ -58,7 +58,8 @@ int getNumberOfLoadInstructions(RankedTensorType srcTy,
 // [token] -> ttg.async_commit_group -> [token] -> ttg.async_wait. So here we
 // scan the operands of ttg.async_commit_group to count the number of issued
 // async load intrinsics.
-int getNumberOfLoadInstructions(Operation *op) {
+int getNumberOfLoadInstructionsForOp(Operation *op,
+                                     bool emitRemarkOnNonAsyncOp) {
   if (isa<ttg::AsyncCommitGroupOp>(op)) {
     int count = 0;
     for (auto token : op->getOperands()) {
@@ -68,9 +69,6 @@ int getNumberOfLoadInstructions(Operation *op) {
       if (auto copyOp = llvm::dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(defOp)) {
         count += getNumberOfLoadInstructions(copyOp.getSrc().getType(),
                                              copyOp.getResult().getType());
-      } else if (auto copyOp = llvm::dyn_cast<
-                     triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(defOp)) {
-        count++;
       } else if (auto copyOp =
                      llvm::dyn_cast<amdgpu::BufferLoadToLocalOp>(defOp)) {
         auto srcTy = cast<RankedTensorType>(LLVM::AMD::getPointerTypeWithShape(
@@ -80,7 +78,8 @@ int getNumberOfLoadInstructions(Operation *op) {
     }
     return count;
   }
-  if (isa<tt::LoadOp, tt::StoreOp, amdgpu::BufferLoadToLocalOp,
+  if (emitRemarkOnNonAsyncOp &&
+      isa<tt::LoadOp, tt::StoreOp, amdgpu::BufferLoadToLocalOp,
           amdgpu::BufferStoreOp, tt::AtomicRMWOp, tt::AtomicCASOp,
           amdgpu::BufferAtomicRMWOp>(op)) {
     op->emitRemark("Global memory operation between async wait and "
@@ -96,7 +95,9 @@ int getNumberOfLoadInstructions(Operation *op) {
 // interleaving with. This allows us to manually emit the waitcnt during
 // lowering.
 template <typename WaitType>
-void updateWaitCount(WaitType waitOp, RewriterBase &rewriter) {
+void updateWaitCount(WaitType waitOp,
+                     llvm::function_ref<int(Operation *)> computeCountForOp,
+                     RewriterBase &rewriter) {
   int waitCnt = std::numeric_limits<int>::max();
 
   // AsyncWait can await multiple tokens so we get the minimum from all
@@ -105,9 +106,7 @@ void updateWaitCount(WaitType waitOp, RewriterBase &rewriter) {
     // Traverse def chain from waitOp to the producer of the token and count
     // the minumum number of vmcnt instructions
     auto tokenWaitCnt =
-        deduceMinCountOnDefChain(token, waitOp, [](Operation *op) {
-          return getNumberOfLoadInstructions(op);
-        });
+        deduceMinCountOnDefChain(token, waitOp, computeCountForOp);
     waitCnt = std::min(waitCnt, tokenWaitCnt);
   }
 
@@ -130,19 +129,39 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
       return;
     }
 
+    // For HW which does not support async loads (GFX9) but only direct-to-lds,
+    // we still use the waitcnt to support interleaving of direct-to-lds loads
+    // when pipelining. The flag is used to emit warnings in case we find
+    // tt.loads/store which make the computed count conservative and hinder
+    // performance.
+    bool supportsAsyncLoads = true;
+    switch (targetInfo.getISAFamily()) {
+    case triton::AMD::ISAFamily::CDNA3:
+    case triton::AMD::ISAFamily::CDNA4:
+      supportsAsyncLoads = false;
+      break;
+    default:
+      break;
+    }
+
     ModuleOp m = getOperation();
 
-    // gfx950 async wait
+    // ttg.async_wait should only count async **non** tdm load:
     SmallVector<ttg::AsyncWaitOp> waitOps;
     getOperation()->walk(
         [&](ttg::AsyncWaitOp waitOp) { waitOps.push_back(waitOp); });
 
     for (auto waitOp : waitOps) {
       IRRewriter builder(waitOp->getContext());
-      updateWaitCount(waitOp, builder);
+      updateWaitCount(
+          waitOp,
+          [&](Operation *op) {
+            return getNumberOfLoadInstructionsForOp(op, !supportsAsyncLoads);
+          },
+          builder);
     }
 
-    // gfx125x async wait
+    // amdgpu.AsyncTDMWait should only count async tdm loads
     SmallVector<triton::amdgpu::AsyncTDMWait> waitTDMOps;
     getOperation()->walk([&](triton::amdgpu::AsyncTDMWait waitOp) {
       waitTDMOps.push_back(waitOp);
@@ -150,7 +169,12 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
 
     for (auto waitOp : waitTDMOps) {
       IRRewriter builder(waitOp->getContext());
-      updateWaitCount(waitOp, builder);
+      updateWaitCount(
+          waitOp,
+          [](Operation *op) {
+            return isa<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op) ? 1 : 0;
+          },
+          builder);
     }
   }
 };
