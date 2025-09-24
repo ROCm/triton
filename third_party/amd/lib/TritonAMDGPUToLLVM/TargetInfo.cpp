@@ -633,6 +633,16 @@ bool TargetInfo::supportsDirectToLDSScattering() const {
   }
 }
 
+bool TargetInfo::requiresAliasInfoForAsyncOps() const {
+  switch (getISAFamily()) {
+  case ISAFamily::CDNA3:
+  case ISAFamily::CDNA4:
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
   switch (getISAFamily()) {
   case ISAFamily::CDNA1:
@@ -656,7 +666,8 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
 
 void TargetInfo::localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                                        Operation *llLoadOp) const {
-  AMD::addLocalLoadNoAliasScope(localLoadOp, cast<LLVM::LoadOp>(llLoadOp));
+  if (requiresAliasInfoForAsyncOps())
+    AMD::addLocalLoadNoAliasScope(localLoadOp, cast<LLVM::LoadOp>(llLoadOp));
 }
 
 } // namespace mlir::triton::AMD

@@ -557,7 +557,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
         ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzleLaneOffset);
     }
     llStore(rewriter, loc, ldsAddr, storeVal, b.icmp_ne(mask, b.true_val()),
-            CacheModifier::NONE, /*forceNoAliasAsyncLoads=*/true);
+            CacheModifier::NONE, targetInfo.requiresAliasInfoForAsyncOps());
   }
 };
 
@@ -885,7 +885,8 @@ struct BufferLoadToLocalOpConversion
       auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
           vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
           hasOther ? b.true_val() : maybeSwizzledMaskElem, op.getCache());
-      AMD::addAsyncCopyAliasScope(bufferLoadToLds);
+      if (targetInfo.requiresAliasInfoForAsyncOps())
+        AMD::addAsyncCopyAliasScope(bufferLoadToLds);
 
       if (hasOther) {
         emitOtherStore(rewriter, loc, this->getTypeConverter(), vecTy, maskElem,
@@ -942,7 +943,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
           rewriter, loc, intrinsic, {},
           {srcPtr, addr, b.i32_val(0), b.i32_val(cacheModifiers), mask});
-      // AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
+      // if (targetInfo.requiresAsyncAlias())
+      //   AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
       return;
     }
 
@@ -952,7 +954,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
           rewriter, loc, intrinsic, {},
           {srcPtr, addr, b.i32_val(0), b.i32_val(cacheModifiers)});
-      // AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
+      // if (targetInfo.requiresAsyncAlias())
+      //   AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
       return;
     }
 
@@ -960,7 +963,8 @@ struct AsyncCopyGlobalToLocalOpConversion
         loc, /*globalPtr=*/srcPtr, /*ldsPtr=*/addr, /*size=*/vecBytes,
         /*offset=*/0, /*aux=*/cacheModifiers, /*alias_scopes=*/nullptr,
         /*noalias_scopes=*/nullptr, /*tbaa=*/nullptr);
-    AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
+    if (targetInfo.requiresAliasInfoForAsyncOps())
+      AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
   }
 
   LogicalResult

@@ -264,7 +264,9 @@ private:
             auto dsReadOp =
                 rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
             if constexpr (!isPackedLoad) {
-              AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+              if (targetInfo.requiresAliasInfoForAsyncOps()) {
+                AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+              }
             }
             Value vecVal = dsReadOp.getResult();
             for (int v = 0; v < vecTy.getNumElements(); v++) {
@@ -280,7 +282,9 @@ private:
             auto dsReadOp =
                 rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
             if constexpr (!isPackedLoad) {
-              AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+              if (targetInfo.requiresAliasInfoForAsyncOps()) {
+                AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+              }
             }
             Value vecVal = dsReadOp.getResult();
             for (auto i = 0; i < numElemsI32; ++i) {
