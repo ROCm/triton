@@ -1203,6 +1203,9 @@ public:
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
         ctx, /*versionMajor=*/wmmaVersion, true, warpsPerTile, ctaLayout,
         {mDim, nDim, kDim});
+    auto wmmaPackedEnc = ttg::AMDWmmaEncodingAttr::get(
+        ctx, /*versionMajor=*/wmmaVersion, true, warpsPerTile, ctaLayout,
+        {mDim, nDim, kDim / 2});
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), wmmaEnc);
@@ -1231,20 +1234,18 @@ public:
     auto bEncLL = LinearLayout::empty();
 
     auto convertInputLayout = [&](TensorValue v, unsigned opIdx,
-                                  bool packed) -> TensorValue {
+                                  bool isFp4) -> TensorValue {
+      auto parent = isFp4 ? wmmaPackedEnc : wmmaEnc;
       auto vType = v.getType();
-      auto newEnc =
-          DotOperandEncodingAttr::get(ctx, opIdx, wmmaEnc, 16, packed);
+      auto newEnc = DotOperandEncodingAttr::get(ctx, opIdx, parent, 16);
       auto newVType = RankedTensorType::get(vType.getShape(),
                                             vType.getElementType(), newEnc);
       (opIdx == 0 ? aEncLL : bEncLL) *=
           newEnc.toLinearLayout(opIdx == 0 ? aShape : bShape);
       return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
     };
-    a = convertInputLayout(a, 0,
-                           /*packed=*/aElemType == ScaleDotElemType::E2M1);
-    b = convertInputLayout(b, 1,
-                           /*packed=*/bElemType == ScaleDotElemType::E2M1);
+    a = convertInputLayout(a, 0, aElemType == ScaleDotElemType::E2M1);
+    b = convertInputLayout(b, 1, bElemType == ScaleDotElemType::E2M1);
 
     auto convertScaleLayout = [&](TensorValue scale,
                                   llvm::ArrayRef<int64_t> valShape,

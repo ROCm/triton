@@ -1,5 +1,5 @@
 from ..._core import builtin
-from .._ops import _wmma
+from .._ops import _wmma, _verify_wmma
 from triton.experimental.gluon.language import _core as ttgl
 from triton.experimental.gluon.language._semantic import _check
 from ..._layouts import DotOperandLayout
@@ -43,16 +43,15 @@ def wmma_scaled(a, a_scale, a_format, b, b_scale, b_format, acc, _semantic=None)
         b_format (str): Format of the operand B. Available formats: `e2m1'.
         acc (tensor): Accumulator tensor.
     """
-
-    _check(acc is not None, lambda: "acc is required")
-    layout = acc.type.layout
-    _check(isinstance(layout, AMDWMMALayout), lambda: "Expected layout to be an instance of AMDWMMALayout")
-    _check(
-        isinstance(a.type.layout, DotOperandLayout) and a.type.layout.parent == layout,
-        lambda: "Expected a's layout to be a DotOperandLayout with parent matching AMDWMMALayout")
-    _check(
-        isinstance(b.type.layout, DotOperandLayout) and b.type.layout.parent == layout,
-        lambda: "Expected b's layout to be a DotOperandLayout with parent matching AMDWMMALayout")
+    _verify_wmma(3, a, b, acc)
+    if a_format.value == "e2m1":
+        wmma_layout = a.type.layout.parent
+        assert isinstance(wmma_layout, AMDWMMALayout) and wmma_layout.instr_shape == (16, 16, 64), \
+            "e2m1 format expects instr_shape to be (16, 16, 64)"
+    if b_format.value == "e2m1":
+        wmma_layout = b.type.layout.parent
+        assert isinstance(wmma_layout, AMDWMMALayout) and wmma_layout.instr_shape == (16, 16, 64), \
+            "e2m1 format expects instr_shape to be (16, 16, 64)"
 
     # TODO: Add more formats
     assert a_format.value in {"e2m1"}, f"Unsupported lhs_format: {a_format.value}"

@@ -3,6 +3,7 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -10,6 +11,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/TargetParser/TargetParser.h"
 
+using ::mlir::LLVM::AMD::isUsedByDotScaledOp;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
@@ -184,6 +186,13 @@ private:
     // if (bitwidth != 16) {
     //   return false;
     // }
+
+    // We cannot use transpose linear layouts for wmma mx data types, because
+    // the layouts don't match
+    if (isUsedByDotScaledOp(localLoad)) {
+      return false;
+    }
+
     return true;
   }
 
@@ -220,13 +229,6 @@ private:
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
     auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
-    if (auto wmmaLayout = llvm::cast<AMDWmmaEncodingAttr>(dotEnc.getParent())) {
-      auto kWidth = dotEnc.getKWidth();
-      // We cannot use transpose linear layouts for mx data types, because the
-      // layouts don't match
-      if (wmmaLayout.getInstrShape()[2] == 128)
-        return failure();
-    }
     auto ldsTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, llBitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);

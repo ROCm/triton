@@ -170,6 +170,8 @@ def test_amd_wmma_scaled(M, N, K, mxfp_type, hasScale):
 
         wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(version=3, transposed=True, warps_per_cta=[2, 2],
                                                              instr_shape=[16, 16, 128])
+        wmma_layout_packed: ttgl.constexpr = ttgl.amd.AMDWMMALayout(version=3, transposed=True, warps_per_cta=[2, 2],
+                                                                    instr_shape=[16, 16, 64])
 
         zero = ttgl.zeros([BLOCK_M, BLOCK_N], dtype=ttgl.float32, layout=wmma_layout)
 
@@ -178,14 +180,18 @@ def test_amd_wmma_scaled(M, N, K, mxfp_type, hasScale):
         a_offsets = offs_am[:, None] * stride_am + offs_ak[None, :] * stride_ak
         a = ttgl.load(a_base + a_offsets)
         a = ttgl.convert_layout(
-            a, ttgl.DotOperandLayout(operand_index=0, parent=wmma_layout, k_width=16, packed=(type_a == "e2m1")))
+            a,
+            ttgl.DotOperandLayout(operand_index=0, parent=wmma_layout_packed if type_a == "e2m1" else wmma_layout,
+                                  k_width=16))
 
         offs_bk = ttgl.arange(0, PACKED_BLOCK_K_B, layout=ttgl.SliceLayout(1, b_layout))
         offs_bn = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, b_layout))
         b_offsets = offs_bk[:, None] * stride_bk + offs_bn[None, :] * stride_bn
         b = ttgl.load(b_base + b_offsets)
         b = ttgl.convert_layout(
-            b, ttgl.DotOperandLayout(operand_index=1, parent=wmma_layout, k_width=16, packed=(type_b == "e2m1")))
+            b,
+            ttgl.DotOperandLayout(operand_index=1, parent=wmma_layout_packed if type_b == "e2m1" else wmma_layout,
+                                  k_width=16))
 
         if a_scale is not None:
             offs_scale_am = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, scale_blocked_layout))

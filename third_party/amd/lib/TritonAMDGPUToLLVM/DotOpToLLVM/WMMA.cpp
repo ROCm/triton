@@ -314,10 +314,8 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
   intrinsicName = maybeWmmaIntrinsic->name;
 
-  auto repA =
-      wmmaLayout.getRepForOperand(aTensorTy.getShape(), /*packed=*/false, 0);
-  auto repB =
-      wmmaLayout.getRepForOperand(bTensorTy.getShape(), /*packed=*/false, 1);
+  auto repA = wmmaLayout.getRepForOperand(aTensorTy.getShape(), kDim, 0);
+  auto repB = wmmaLayout.getRepForOperand(bTensorTy.getShape(), kDim, 1);
 
   assert(repA[2] == repB[1]);
 
@@ -441,19 +439,19 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
 
   bool isFp4A = op.getAElemType() == triton::ScaleDotElemType::E2M1;
   int kBaseA = isFp4A ? kBase / 2 : kBase;
+  int kDimA = isFp4A ? kDim / 2 : kDim;
 
   bool isFp4B = op.getBElemType() == triton::ScaleDotElemType::E2M1;
   int kBaseB = isFp4B ? kBase / 2 : kBase;
+  int kDimB = isFp4B ? kDim / 2 : kDim;
 
   bool isFp6A = (op.getAElemType() == triton::ScaleDotElemType::E2M3) ||
                 (op.getAElemType() == triton::ScaleDotElemType::E3M2);
   bool isFp6B = (op.getBElemType() == triton::ScaleDotElemType::E2M3) ||
                 (op.getBElemType() == triton::ScaleDotElemType::E3M2);
 
-  auto repA =
-      wmmaLayout.getRepForOperand(aTensorTy.getShape(), /*packed=*/isFp4A, 0);
-  auto repB =
-      wmmaLayout.getRepForOperand(bTensorTy.getShape(), /*packed*/ isFp4B, 1);
+  auto repA = wmmaLayout.getRepForOperand(aTensorTy.getShape(), kDimA, 0);
+  auto repB = wmmaLayout.getRepForOperand(bTensorTy.getShape(), kDimB, 1);
 
   assert(repA[2] == repB[1]);
 

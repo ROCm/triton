@@ -2345,11 +2345,9 @@ AMDWmmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 }
 
 SmallVector<int64_t>
-AMDWmmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
-                                      bool packed, int opIdx) const {
+AMDWmmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape, int kDim,
+                                      int opIdx) const {
   auto mnkDim = getInstrShape();
-  auto kDim = mnkDim[2];
-  kDim = packed ? kDim / 2 : kDim;
   auto operandTileShape = opIdx == 0 ? SmallVector<int64_t>{mnkDim[0], kDim}
                                      : SmallVector<int64_t>{kDim, mnkDim[1]};
 
@@ -2512,7 +2510,7 @@ SmallVector<unsigned> DotOperandEncodingAttr::getCTASplitNum() const {
 
 LogicalResult DotOperandEncodingAttr::verify(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
-    unsigned opIdx, Attribute parent, unsigned kWidth, bool packed) {
+    unsigned opIdx, Attribute parent, unsigned kWidth) {
   if (opIdx != 0 && opIdx != 1) {
     return emitError() << "ttg.dot_op opIdx parameter can be 0 or 1, got: "
                        << opIdx;
