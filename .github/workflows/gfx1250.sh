@@ -25,40 +25,39 @@ export ROCM_PATH=/opt/rocm
 export TARGET_ARCH=gfx1250
 export LD_LIBRARY_PATH=$ROCM_PATH/lib
 
-echo "=== Build and Install Triton ==="
-
 pip uninstall -y triton pytorch-triton pytorch-triton-rocm
+pip install pytest-repeat
+
+echo "=== Build and Install Triton ==="
 
 export PYTHON="python3"
 export TRITON_BUILD_WITH_CLANG_LLD="TRUE"
 export TRITON_BUILD_WITH_CCACHE="TRUE"
 export CCACHE_COMPRESS="true"
 
-export TRITON_HIP_USE_ASYNC_COPY=1
-
 LLVM_LIBRARY_DIR=/data/build/amd-mlir-debug LLVM_SYSPATH=/data/build/amd-mlir-debug pip3 install --no-build-isolation .
+
+export TRITON_HIP_USE_ASYNC_COPY=1
 
 echo "=== Run Gluon Tests ==="
 
-pytest -s third_party/amd/python/test/test_gluon_gfx1250.py -n 8
-pytest -s python/test/gluon/test_frontend.py -n 8
+pytest --count=16 -n 16 -s -v third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=16 -n 16 -s -v python/test/gluon/test_frontend.py
+
+echo "=== Run E2E Upstream Tests ==="
+
+pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+# pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
 
 echo "=== Run GEMM Tests ==="
 
 export PYTHONPATH=$PWD/mi400
-pytest -s mi400/test_gemm_hipdriver.py -n 8
-pytest -s mi400/test_mxgemm_hipdriver.py -n 8
+pytest --count=16 -n 16 -s -v mi400/test_gemm_hipdriver.py
+pytest --count=16 -n 16 -s -v mi400/test_mxgemm_hipdriver.py
 
-# TODO(Ravil) enable failing MXFP FA Test; enable masked loads/stores
 echo "=== Run Attention Tests ==="
+
 let "NUM_PROC = $(nproc) / 2"
 export HSA_MODEL_NUM_THREADS=${NUM_PROC}
 # pytest -v -s mi400/test_mxfa_hipdriver.py # TODO enable
-
-
-# TODO: add all upstream tests here
-echo "=== Run E2E Upstream Tests ==="
-
-#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping # TODO enable
-#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast # TODO enable
-#pytest -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: enable
