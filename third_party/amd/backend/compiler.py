@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import functools
 import warnings
 from pathlib import Path
@@ -425,6 +426,15 @@ class HIPBackend(BaseBackend):
         features = '-real-true16' if 'gfx11' in options.arch else ''
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
                                        False)
+
+        if "AMD_INSERT_AMDGCN" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            amdgcn = ''.join(file_content)
+
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
