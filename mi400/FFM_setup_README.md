@@ -125,7 +125,7 @@ RUN apt-get update && \
 # get the latest build from http://rocm-ci.amd.com/job/compute-rocm-npi-mi450/lastSuccessfulBuild/
 RUN wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.1-24.04-1_all.deb
 RUN apt-get install ./amdgpu-install-internal_7.1-24.04-1_all.deb
-RUN amdgpu-repo --amdgpu-build=2204668 --rocm-build=compute-rocm-npi-mi450/544
+RUN amdgpu-repo --amdgpu-build=2219470 --rocm-build=compute-rocm-npi-mi450/605
 RUN apt -y install rocm-llvm rocm-llvm-dev rocm-device-libs rocprofiler-register comgr rocm-hip-runtime-dev rocblas rocblas-dev hipblas-common-dev hipblaslt hipblaslt-dev hipblas
 
 RUN wget --no-check-certificate https://confluence.amd.com/download/attachments/1035169166/AMD_CA.crt
@@ -138,7 +138,7 @@ RUN echo "export PATH=~/.local/bin:/opt/rocm/bin:$PATH" >> ~/.bashrc
 RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
 
 ```
-- Change `544` in the `RUN amdgpu-repo...build=compute-rocm-npi-mi450/544` line with whichever package version is most up to date. 544 contains the gfx1250 enabled hipBLASLt library.
+- You can get the latest build from http://rocm-ci.amd.com/job/compute-rocm-npi-mi450/lastSuccessfulBuild/ and update the `RUN amdgpu-repo ...` line. 544 contains the gfx1250 enabled hipBLASLt library.
 
 #### Updated `devcontainer.json`
 
