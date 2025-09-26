@@ -1108,9 +1108,6 @@ static LogicalResult matchPositiveTripCount(scf::ForOp loop) {
       if (llvm::none_of(cmp->getUsers(),
                         [](Operation *op) { return isa<LLVM::AssumeOp>(op); }))
         continue;
-      /*
-       * Use the following once bump LLVM beyond
-       * 21b607adbeb4326c10f899fb293d057ee1199794
       if (cmp.getPredicate() == (loop.getUnsignedCmp()
                                      ? arith::CmpIPredicate::ugt
                                      : arith::CmpIPredicate::sgt) &&
@@ -1120,15 +1117,6 @@ static LogicalResult matchPositiveTripCount(scf::ForOp loop) {
       if (cmp.getPredicate() == (loop.getUnsignedCmp()
                                      ? arith::CmpIPredicate::ult
                                      : arith::CmpIPredicate::slt) &&
-          cmp.getLhs() == loop.getLowerBound() &&
-          cmp.getRhs() == loop.getUpperBound())
-        return success();
-       */
-      if (cmp.getPredicate() == arith::CmpIPredicate::sgt &&
-          cmp.getLhs() == loop.getUpperBound() &&
-          cmp.getRhs() == loop.getLowerBound())
-        return success();
-      if (cmp.getPredicate() == arith::CmpIPredicate::slt &&
           cmp.getLhs() == loop.getLowerBound() &&
           cmp.getRhs() == loop.getUpperBound())
         return success();

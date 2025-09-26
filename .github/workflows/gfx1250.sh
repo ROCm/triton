@@ -35,7 +35,7 @@ export TRITON_BUILD_WITH_CLANG_LLD="TRUE"
 export TRITON_BUILD_WITH_CCACHE="TRUE"
 export CCACHE_COMPRESS="true"
 
-LLVM_LIBRARY_DIR=/data/build/amd-mlir-9cd1f55de715-debug-install LLVM_SYSPATH=/data/build/amd-mlir-9cd1f55de715-debug-install \
+LLVM_LIBRARY_DIR=/data/build/amd-mlir-9f0b4533535f-debug-install LLVM_SYSPATH=/data/build/amd-mlir-9f0b4533535f-debug-install \
     pip3 install --no-build-isolation .
 
 export TRITON_HIP_USE_ASYNC_COPY=1
