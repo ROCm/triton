@@ -241,8 +241,9 @@ public:
 
     mlir::RewritePatternSet patterns(context);
 
-    if (!AMD::isCDNA(targetInfo.getISAFamily()) &&
-        targetInfo.getISAFamily() != triton::AMD::ISAFamily::GFX1250)
+    if (!llvm::is_contained({AMD::ISAFamily::CDNA3, AMD::ISAFamily::CDNA4,
+                             AMD::ISAFamily::GFX1250},
+                            targetInfo.getISAFamily()))
       return;
 
     // Precompute the contiguity of all AsyncCopy ops based on the src and
