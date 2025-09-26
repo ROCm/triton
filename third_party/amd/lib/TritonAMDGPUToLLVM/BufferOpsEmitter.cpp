@@ -108,6 +108,23 @@ Value BufferEmitter::emitLoad(Type type, Value rsrcDesc, Value offset,
   return data;
 }
 
+Value BufferEmitter::emitStructLoad(Type type, Value rsrcDesc, Value offset,
+                                    Value pred, Value falseVal,
+                                    triton::CacheModifier cm) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  SmallVector<Value, 6> args;
+  fillCommonArgs(type, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/true, args);
+  Type bufferType = getBufferOpType(type, false);
+  Value vindex = b.int_val(32, 0);
+  Value data = rewriter.create<ROCDL::StructPtrBufferLoadOp>(
+      loc, bufferType, ValueRange{args[0], vindex, args[1], args[2], args[3]},
+      ArrayRef<NamedAttribute>());
+  data = b.bitcast(data, type);
+  if (!isZero(falseVal))
+    data = b.select(pred, data, falseVal);
+  return data;
+}
+
 ROCDL::RawPtrBufferLoadLdsOp
 BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
                              Value offset, Value dst, Value pred,
@@ -123,6 +140,31 @@ BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
           commonArgs[0], // Buffer descriptor
           dst,           // LDS base ptr
           byteWidth,     // Instr size
+          commonArgs[1], // Buffer offset
+          b.i32_val(0),  // LDS offset
+          commonArgs[2], // Instruction offset
+          commonArgs[3], // AUX
+      },
+      ArrayRef<NamedAttribute>());
+}
+
+ROCDL::StructPtrBufferLoadLdsOp
+BufferEmitter::emitStructLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
+                                   Value offset, Value dst, Value pred,
+                                   triton::CacheModifier cm) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  SmallVector<Value, 6> commonArgs;
+  fillCommonArgs(type, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/true,
+                 commonArgs);
+  Type bufferType = getBufferOpType(type, false);
+  Value vindex = b.int_val(32, 1);
+  return rewriter.create<ROCDL::StructPtrBufferLoadLdsOp>(
+      loc, TypeRange{},
+      ValueRange{
+          commonArgs[0], // Buffer descriptor
+          dst,           // LDS base ptr
+          byteWidth,     // Instr size
+          vindex,        // index
           commonArgs[1], // Buffer offset
           b.i32_val(0),  // LDS offset
           commonArgs[2], // Instruction offset
@@ -192,6 +234,23 @@ void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,
                  args);
   rewriter.create<ROCDL::RawPtrBufferStoreOp>(loc, TypeRange{}, args,
                                               ArrayRef<NamedAttribute>());
+}
+
+void BufferEmitter::emitStructStore(Value rsrcDesc, Value offset, Value data,
+                                    Value pred, triton::CacheModifier cm) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  VectorType vecTy = cast<VectorType>(data.getType());
+  Type bufferType = getBufferOpType(vecTy, false);
+  if (vecTy != bufferType)
+    data = b.bitcast(data, bufferType);
+  SmallVector<Value, 6> args{data};
+  Value vindex = b.int_val(32, 0);
+  fillCommonArgs(vecTy, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/false,
+                 args);
+  rewriter.create<ROCDL::StructPtrBufferStoreOp>(
+      loc, TypeRange{},
+      ValueRange{args[0], args[1], vindex, args[2], args[3], args[4]},
+      ArrayRef<NamedAttribute>());
 }
 
 Type BufferEmitter::getBufferOpType(Type type, bool atomicsOp) {

@@ -697,7 +697,7 @@ struct BufferLoadOpConversion
         falseVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, vecStart);
-      Value loadVal = bufferEmitter.emitLoad(
+      Value loadVal = bufferEmitter.emitStructLoad(
           vecTy, rsrcDesc, offsetElems[vecStart], pred, falseVal, cacheMod);
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
@@ -840,7 +840,7 @@ struct BufferLoadToLocalOpConversion
 
       auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, threadPred);
 
-      auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
+      auto bufferLoadToLds = bufferEmitter.emitStructLoadToLds(
           vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
           hasOther ? b.true_val() : maybeSwizzledMaskElem, op.getCache());
       AMD::addAsyncCopyAliasScope(bufferLoadToLds);
@@ -1391,8 +1391,8 @@ struct BufferStoreOpConversion
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
-      bufferEmitter.emitStore(rsrcDesc, offsetElems[vecStart], storeVal, pred,
-                              cacheMod);
+      bufferEmitter.emitStructStore(rsrcDesc, offsetElems[vecStart], storeVal,
+                                    pred, cacheMod);
     } // end vec
 
     rewriter.eraseOp(op);
