@@ -10,8 +10,22 @@ if TYPE_CHECKING:
     from ..._semantic import GluonSemantic
 
 __all__ = [
-    "buffer_atomic_add", "buffer_atomic_and", "buffer_atomic_min", "buffer_atomic_max", "buffer_atomic_or",
-    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma"
+    "buffer_atomic_add",
+    "buffer_atomic_and",
+    "buffer_atomic_min",
+    "buffer_atomic_max",
+    "buffer_atomic_or",
+    "buffer_atomic_xor",
+    "buffer_atomic_xor",
+    "buffer_load",
+    "buffer_store",
+    "mfma",
+    "sched_barrier",
+    "sched_group_barrier",
+    "s_barrier",
+    "s_set_prio",
+    "iglp_opt",
+    "warp_id",
 ]
 
 _atomic_op_str_to_op = {
@@ -241,3 +255,87 @@ def buffer_atomic_xchg(ptr, offsets, value, mask=None, sem=None, scope=None, _se
 
     return _buffer_atomic_rmw_impl('xchg', ptr, offsets, value, "cdna3", mask=mask, sem=sem, scope=scope,
                                    _semantic=_semantic)
+
+
+@builtin
+def sched_barrier(mask, _semantic: GluonSemantic = None):
+    """
+    sched_barrier to help instruction scheduling
+    Args:
+        mask (i32): mask for the types of instructions that may be allowed to cross the SCHED_BARRIER during scheduling.
+                    mask values (combinable via bitwise OR):
+                        0x000 = NONE       -> hard fence, nothing crosses
+                        0x001 = ALU        -> non-memory, non-side-effect
+                        0x002 = VALU       -> vector ALU
+                        0x004 = SALU       -> scalar ALU
+                        0x008 = MFMA/WMMA  -> matrix multiply-accumulate
+                        0x010 = ALL VMEM   -> all vector memory (read + write)
+                        0x020 = VMEM read  -> vector memory reads only
+                        0x040 = VMEM write -> vector memory writes only
+                        0x080 = ALL DS     -> all LDS operations (read + write)
+                        0x100 = DS read    -> LDS reads only
+                        0x200 = DS write   -> LDS writes only
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    _semantic.builder.create_sched_barrier(mask)
+
+
+@builtin
+def sched_group_barrier(mask, size, group_id, _semantic: GluonSemantic = None):
+    """
+    sched_group_barrier to help instruction scheduling
+    Args:
+        mask (i32): the type of instructions to synchronize around(0x008:MFMA, 0x020:VMEM, 0x100:LDS_READ, 0x200:DS_WRITE)
+        size (i32): the number of matching instructions associated with this barrier
+        group_id (i32): what other sched_group_barriers to synchronize with
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    size = ttgl._unwrap_if_constexpr(size)
+    group_id = ttgl._unwrap_if_constexpr(group_id)
+    _semantic.builder.create_sched_group_barrier(mask, size, group_id)
+
+
+@builtin
+def s_barrier(_semantic: GluonSemantic = None):
+    """
+    Synchronize waves within a threadgroup.
+    """
+    _semantic.builder.create_s_barrier()
+
+
+@builtin
+def s_set_prio(prio, _semantic: GluonSemantic = None):
+    """
+    Set the priority of waves within a threadgroup.
+    Args:
+        prio (i32): 0 = lowest, 3 = highest
+    """
+    prio = _unwrap_if_constexpr(prio)
+    _semantic.builder.create_s_set_prio(prio)
+
+
+@builtin
+def iglp_opt(mask, _semantic: GluonSemantic = None):
+    """
+    An experimental intrinsic for instruction group level parallelism. The intrinsic
+    implements predefined instruction scheduling orderings. The intrinsic
+    applies to the surrounding scheduling region. The intrinsic takes a value
+    that specifies the strategy. The compiler implements two strategies.
+    Args:
+        mask (i32):
+        0: Interleave DS and MFMA instructions for small GEMM kernels.
+        1: Interleave DS and MFMA instructions for single wave small GEMM kernels.
+        2: Interleave TRANS and MFMA instructions, as well as their VALU and DS predecessors, for attention kernels.
+        3: Interleave TRANS and MFMA instructions, with no predecessor interleaving, for attention kernels.
+    """
+    mask = _unwrap_if_constexpr(mask)
+    _semantic.builder.create_iglp_opt(mask)
+
+
+@builtin
+def warp_id(_semantic: GluonSemantic = None):
+    """
+    warp/wave id within a threadgroup.
+    """
+    handle = _semantic.builder.create_warp_id()
+    return ttgl.tensor(handle, ttgl.int32)

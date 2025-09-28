@@ -32,6 +32,7 @@ namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
 namespace gluon = mlir::triton::gluon;
 namespace ttag = mlir::triton::amdgpu;
+namespace rocdl = mlir::ROCDL;
 
 static ttg::CGAEncodingAttr
 buildCgaLayoutAttr(MLIRContext *ctx,
@@ -986,6 +987,29 @@ void init_gluon_ir(py::module &&m) {
               std::vector<int> &partitionNumWarps) {
              return self.create<ttg::WarpSpecializeOp>(resultTypes,
                                                        partitionNumWarps);
+           })
+      .def("create_sched_barrier",
+           [](GluonOpBuilder &self, unsigned mask) {
+             self.create<rocdl::SchedBarrier>(mask);
+           })
+      .def("create_sched_group_barrier",
+           [](GluonOpBuilder &self, unsigned mask, unsigned size,
+              unsigned groupId) {
+             self.create<rocdl::SchedGroupBarrier>(mask, size, groupId);
+           })
+      .def("create_s_barrier",
+           [](GluonOpBuilder &self) { self.create<rocdl::SBarrierOp>(); })
+      .def("create_s_set_prio",
+           [](GluonOpBuilder &self, unsigned prio) {
+             self.create<rocdl::SetPrioOp>(prio);
+           })
+      .def("create_iglp_opt",
+           [](GluonOpBuilder &self, unsigned mask) {
+             self.create<rocdl::IglpOpt>(mask);
+           })
+      .def("create_warp_id",
+           [](GluonOpBuilder &self) -> Value {
+             return self.create<ttg::WarpIdOp>();
            })
       .def("create_buffer_load",
            [](GluonOpBuilder &self, Type resultType, Value ptr, Value offsets,
