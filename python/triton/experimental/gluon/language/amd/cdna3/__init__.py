@@ -9,8 +9,7 @@ from ..._core import builtin, _unwrap_if_constexpr
 if TYPE_CHECKING:
     from ..._semantic import GluonSemantic
 
-__all__ = ["buffer_load", "buffer_store", "mfma"]
-
+__all__ = ["buffer_load", "buffer_store", "mfma", "sched_barrier", "sched_group_barrier"]
 
 def _verify_buffer_ops(ptr, offsets, mask=None, other=None):
     assert ptr.type.is_ptr(), "ptr must be a scalar pointer type"
@@ -98,3 +97,52 @@ def mfma(a, b, acc, _semantic: GluonSemantic = None):
     handle = _semantic.dot(a, b, acc, input_precision=knobs.language.fp32_default, max_num_imprecise_acc=None,
                            out_dtype=acc.dtype).handle
     return ttgl.tensor(handle, ret_type)
+
+@builtin
+def buffer_atomic_rmw(op, ptr, offsets, value, mask=None, sem=None, scope=None, _semantic=None):
+    """
+    AMD Buffer Atomic RMW operation.
+    Similar to normal atomic ops: it loads data at ptr plus offsets, do `op` with `value`, and store result to `ptr` plus `offsets` with
+    the specified memory semantics and scope.
+
+    Buffer atomics access global memory via a scalar base pointer and a tensor of offsets instead of a tensor of pointers.
+    Similar to other buffer ops, the `mask` is a boolean vector that determines if a given element should be processed with
+    the atomic RMW op. Elements with `mask[i] == 0` are dropped (i.e., the atomic is not executed).
+
+    Buffer Atomic RMW ops return the pre-op value in the global memory.
+
+    Args:
+        op (str) : The operator to be executed atomically.
+        ptr (pointer to scalar): Global memory scalar base pointer to load from.
+        offsets (tensor): Offsets tensor for the load operation.
+        value (tensor): Another operand of `op`.
+        mask (tensor, optional): Mask tensor for predicated loads. Defaults to None.
+        sem (str, optional): Memory Semantic Descriptor. Default is None which means acq_rel memory semantic.
+        scope (str, optional): Memory Sync Scope for atomic accesses. Default is None and it will be mapped to `gpu`, which is called `agent` for AMDGPU. Please ref https://llvm.org/docs/AMDGPUUsage.html#memory-model-gfx942 for details.
+    """
+
+    return _buffer_atomic_rmw_impl(op, ptr, offsets, value, "cdna3", mask=mask, sem=sem, scope=scope,
+                                   _semantic=_semantic)
+@builtin
+def sched_barrier(mask, _semantic: GluonSemantic = None):
+    """
+    sched_barrier to help instruction scheduling
+    Args:
+        mask (i32): mask for the types of instructions that may be allowed to cross the SCHED_BARRIER during scheduling
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    _semantic.builder.create_sched_barrier(mask)
+
+@builtin
+def sched_group_barrier(mask, size, group_id, _semantic: GluonSemantic = None):
+    """
+    sched_group_barrier to help instruction scheduling
+    Args:
+        mask (i32): the type of instructions to synchronize around(0x008:MFMA, 0x020:VMEM, 0x100:LDS_READ, 0x200:DS_WRITE)
+        size (i32): the number of matching instructions associated with this barrier
+        group_id (i32): what other sched_group_barriers to synchronize with
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    size = ttgl._unwrap_if_constexpr(size)
+    group_id = ttgl._unwrap_if_constexpr(group_id)
+    _semantic.builder.create_sched_group_barrier(mask, size, group_id)
