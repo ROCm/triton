@@ -137,6 +137,8 @@ RUN apt-get remove -y python3-distro && pip install conan einops
 RUN echo "export PATH=~/.local/bin:/opt/rocm/bin:$PATH" >> ~/.bashrc
 RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
 
+# installs nodejs and npm for compiler explorer
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
 ```
 - You can get the latest build from http://rocm-ci.amd.com/job/compute-rocm-npi-mi450/lastSuccessfulBuild/ and update the `RUN amdgpu-repo ...` line. 544 contains the gfx1250 enabled hipBLASLt library.
 
@@ -400,3 +402,74 @@ pip3 uninstall -y pytorch-triton-rocm
 ```
 
 (doesn't matter if it doesn't support gfx1250 - the point is to only use the CPU part of pytorch and while `.cuda()` maps directly to the HIP runtime, which doesn't require gfx1250 specific support.)
+
+
+### Compiler Explorer Setup
+
+##### On your local machine
+
+In order to display `compiler explorer` on your local machine (e.g., laptop) you need to establish a tunnel between your machine and a remote ssh server which you use for development (i.e., local port forwarding). For example:
+
+```bash
+ssh -L 3000:<server_name>:10240 <user_name>@<server_name>
+```
+
+This connects you to a `ssh-server`; opens port `10240` on the `ssh-server`; and forwards the traffic from that port to `3000` on your local machine.
+
+
+##### On your remote machine
+
+Make sure you sourced all necessary env. variables to run Triton (see above).
+
+Get inside of your dev. container. Make sure that you mapped the host network ports inside your dev. container. The mapping is done when you spin your dev. container. For example,
+
+```bash
+docker run --rm -it -d --network host ...
+```
+
+You need to install `compiler explorer`. The provided Dockerfile (see above) already has `nodejs` and `npm` installed.
+
+```bash
+git clone https://github.com/compiler-explorer/compiler-explorer.git
+cd compiler-explorer
+```
+
+Now you need to adjust the `compiler explorer` configuration with the location of your local Triton installation.
+
+```bash
+$ cat etc/config/triton.defaults.properties
+compilers=&triton_amd
+defaultCompiler=triton_amd_gfx1250
+compilerType=triton
+interpreted=true
+supportsBinary=false
+supportsExecute=false
+isSemVer=true
+notification=Experimental Triton support on Compiler Explorer. For tutorials, bugs reports, and feature requests, please visit <a href="https://github.com/ShawnZhong/compiler-explorer-triton">here</a>.
+
+group.triton_amd.compilers=triton_amd_gfx1250
+group.triton_amd.groupName=Triton (AMD)
+group.triton_amd.options=--backend hip --arch gfx1250 --warp_size 64
+
+compiler.triton_amd_gfx1250.name=Triton Custom (AMD)
+compiler.triton_amd_gfx1250.exe=<home>/venv/bin/python3
+```
+Make sure to substitute `<home>/venv/bin/python3` with the absolute path of your python interpreter.
+
+You will also need to copy `triton_wrapper.py` to the correct location.
+
+```bash
+make scripts
+cp ./etc/scripts/triton_wrapper.py ./out/dist/etc/scripts/
+```
+
+After that you can compile and run `compiler-explorer` as follows:
+
+
+```bash
+make
+```
+
+##### On your local machine
+
+Now go back to your local machine; open `http://localhost:3000/` with your browser; and select `Triton` in the drop-box on the left panel as the source language.
