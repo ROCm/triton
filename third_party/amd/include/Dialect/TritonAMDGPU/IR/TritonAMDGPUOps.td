@@ -285,28 +285,84 @@ def BufferLoadOp : TT_AMDGPU_Op<"buffer_load", [
   AttrSizedOperandSegments,
   TypesMatchWith<"result element type matches the pointed type of ptr", "result", "ptr", "getPointerTypeToElement($_self)">,
   TypesMatchWith<"result and offsets have the same shape", "result", "offsets", "getI32SameShape($_self)">,
+  TypesMatchWith<"result and index have the same shape", "result", "index", "getI32SameShape($_self)">,
   TypesMatchWith<"result and mask have the same shape", "result", "mask", "getI1SameShape($_self)",
                  "(cast<BufferLoadOp>($_op).getMask() == nullptr) || std::equal_to<>()">,
   TypesMatchWith<"result and other have the same type", "result", "other", "$_self",
                  "(cast<BufferLoadOp>($_op).getOther() == nullptr) || std::equal_to<>()">,
 ]>{
-    let summary = "Load from a scalar base pointer and a tensor offset";
+    let summary = "Load from a scalar base pointer with flexible addressing (flat, whole-record, or two-level)";
     let description = [{
-      AMD Buffer load operation. Buffer store is similar to
-      a normal store but it accesses global memory via a scalar base pointer
-      and a tensor of offsets instead of a tensor of pointers. The other fields
-      are similar to a normal load, i.e., the `mask` is a boolean vector that
-      determines if a given element should be read from memory, and `other` is the
-      element that should be returned on lane `i` when `mask[i] == 0`.
-      Stride is the distance between the beginning of contiguous memory chunks.
-      When performing a load of a block, the `stride` is the address difference between
-      the first elements of each row in bytes. Compiler tries to obtain the `stride`
-      when it converts to the buffer ops because it is important for optimizing
-      the cache memory access.
+      ## Memory Partitioning Model
+
+      Global memory is conceptually divided into **records**, where each record contains a contiguous group of elements.
+      The `stride` operand specifies the **record size** in *elements* (not bytes).
+      This partitioning enables hierarchical indexing:
+      1. **Record selection** via `index` – chooses which record to access.
+      2. **Element selection** via `offsets` – chooses an element *within* the selected record.
+
+      This hierarchical approach allows different trade-offs between addressing flexibility and memory footprint.
+
+      ## Addressing Modes
+
+      The op supports three addressing modes by optionally providing `index` and/or `offsets`:
+
+      ### 1. Two-Level Addressing
+      ```
+      %ptr[index = %idx, offsets = %ofs]
+      final_address = base_ptr + (index * stride + offsets)
+      ```
+      - Each thread specifies both a record (`index`) and an element within that record (`offsets`).
+      - **Maximum addressable space:**
+        - `stride` is **14-bit** in bytes, `index` and `offsets` are **32-bit**.
+        - Total = `32 + 14 = 46 bits`.
+        - Allows addressing up to **64 TiB of memory**.
+
+      ### 2. Whole-Record Addressing (Offsets Omitted)
+      ```
+      %ptr[index = %idx]
+      final_address = base_ptr + index * stride
+      ```
+      - Each thread loads an entire record, where each record contains `stride` elements.
+      - `offsets` is implicitly `0`.
+      - **Maximum addressable space:**
+        - Determined by `32 + log2(strideInBits)`.
+        - `strideInBits` max is 128 (14 bits but practically limited by vector width → 2^7 = 128).
+        - Maximum addressable space = **39 bits** (32 + 7).
+
+      ### 3. Flat Addressing (Index Omitted)
+      ```
+      %ptr[offsets = %ofs]
+      final_address = base_ptr + offsets
+      ```
+      - Threads directly index into a flat, linear memory buffer.
+      - `index` is implicitly `0`.
+      - **Maximum addressable space:**
+        - `offsets` is 32-bit in bytes.
+        - Total = **32 bits** → 4 GiB of addressable space.
+
+      ## Summary Table of Address Widths
+
+      | Mode         | Formula                    | Address Bits               | Max Memory |
+      |--------------|----------------------------|----------------------------|------------|
+      | Two-Level    | `index * stride + offsets` | 32 + 14 = **46**           | 64 TiB     |
+      | Whole-Record | `index * stride`           | 32 + log2(stride) ≤ **39** | ≤ 512 GiB  |
+      | Flat         | `offsets`                  | **32**                     | 4 GiB      |
+
+      ## Rules
+      - At least **one of `index` or `offsets` must be provided** (both cannot be omitted).
+      - Both can be provided together (two-level addressing).
+      - `stride` must always be provided when `index` is present.
+      - The element size and `stride` are always measured in **units of elements**, not bytes.
+
+      ## Mask and Other
+      - `mask` is a boolean tensor controlling which elements are loaded.
+      - `other` provides fallback values for masked-out lanes.
     }];
     let arguments = (ins
       Arg<TT_Ptr, "Global memory scalar base pointer to load from", [MemRead<GlobalMemory>]>:$ptr,
-      I32Tensor:$offsets,
+      Optional<I32Tensor>:$index,
+      Optional<I32Tensor>:$offsets,
       Optional<I32>:$stride,
       DefaultValuedAttr<TT_CacheModifierAttr, "::mlir::triton::CacheModifier::NONE">:$cache,
       Optional<TT_BoolTensor>:$mask,
@@ -315,11 +371,14 @@ def BufferLoadOp : TT_AMDGPU_Op<"buffer_load", [
     let results = (outs TT_Tensor:$result);
 
     let assemblyFormat = [{
-      $ptr `[` $offsets `]` (`,` $mask^)? (`,` $other^)?
+      $ptr `[` (`index` `=` $index^)? `,` (`offsets` `=` $offsets^)? `]`
+      (`,` $mask^)? (`,` $other^)?
       oilist(`cacheModifier` `=` $cache)
       (`stride` `=` $stride^)?
       attr-dict `:` type($result)
     }];
+
+    let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
