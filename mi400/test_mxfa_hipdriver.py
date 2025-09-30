@@ -30,8 +30,8 @@ def _attn_fwd_inner(
     l_i,
     m_i,
     q,
-    k_ptrs,
-    v_ptrs,
+    k_desc_or_ptrs,
+    v_desc_or_ptrs,
     stride_kn,
     stride_vk,
     q_scale,
@@ -47,12 +47,16 @@ def _attn_fwd_inner(
     BLOCK_N: tl.constexpr,
     SM_SCALE: tl.constexpr,
     DISABLE_MASKING: tl.constexpr,
+    USE_TDM: tl.constexpr,
 ):
     RCP_LN2: tl.constexpr = 1.4426950408889634
     KV_PACK_DIV: tl.constexpr = 2 if kv_type == 'e2m1' else 1
 
-    for _ in range(block_min, block_max, BLOCK_N):
-        k = tl.load(k_ptrs)
+    for i in range(block_min, block_max, BLOCK_N):
+        if USE_TDM:
+            k = k_desc_or_ptrs.load([i, 0]).T
+        else:
+            k = tl.load(k_desc_or_ptrs)
         k_scale = tl.load(k_scale_ptrs)
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -78,7 +82,10 @@ def _attn_fwd_inner(
         alpha = tl.math.exp2(m_diff_scaled)
         acc = acc * alpha[:, None]
 
-        v = tl.load(v_ptrs)
+        if USE_TDM:
+            v = v_desc_or_ptrs.load([i // KV_PACK_DIV, 0])
+        else:
+            v = tl.load(v_desc_or_ptrs)
         v_scale = tl.load(v_scale_ptrs)
 
         # update m_i and l_i
@@ -87,10 +94,12 @@ def _attn_fwd_inner(
 
         acc += tl.dot_scaled(p.to(tl.float8e4nv), None, 'e4m3', v, v_scale, kv_type)
 
-        k_ptrs += BLOCK_N * stride_kn
+        if not USE_TDM:
+            k_desc_or_ptrs += BLOCK_N * stride_kn
         k_scale_ptrs += BLOCK_N * stride_k_scale_n
 
-        v_ptrs += (BLOCK_N // KV_PACK_DIV) * stride_vk
+        if not USE_TDM:
+            v_desc_or_ptrs += (BLOCK_N // KV_PACK_DIV) * stride_vk
         v_scale_ptrs += (BLOCK_N // 32) * stride_v_scale_n
 
     return acc, l_i, m_i
@@ -145,6 +154,7 @@ def _attn_fwd(
     BLOCK_DMODEL: tl.constexpr,
     BATCH,
     DISABLE_MASKING: tl.constexpr,
+    USE_TDM: tl.constexpr,
 ):
     NUM_BLOCKS = (SEQLEN_Q + BLOCK_M - 1) // BLOCK_M
     seqlen_q = SEQLEN_Q
@@ -171,8 +181,15 @@ def _attn_fwd(
 
     # q       [BLOCK_M, BLOCK_DMODEL]
     # q_scale [BLOCK_M, BLOCK_DMODEL / 32]
-    q_offs = (off_z * stride_qz + off_q_head * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
-    q_ptrs = q_ptr + q_offs
+    if USE_TDM:
+        q_desc_or_ptrs = tl.make_tensor_descriptor(
+            base=q_ptr + off_z * stride_qz + off_q_head * stride_qh + start_m * BLOCK_M * stride_qm,
+            shape=(BATCH * seqlen_q * NUM_Q_HEADS, BLOCK_DMODEL), strides=(stride_qm, stride_qk),
+            block_shape=(BLOCK_M, BLOCK_DMODEL))
+    else:
+        q_offs = (off_z * stride_qz + off_q_head * stride_qh + offs_m[:, None] * stride_qm +
+                  offs_d[None, :] * stride_qk)
+        q_desc_or_ptrs = q_ptr + q_offs
 
     q_scale_offs = (off_z * stride_q_scale_z + off_q_head * stride_q_scale_h + offs_m[:, None] * stride_q_scale_m +
                     offs_d_scale[None, :] * stride_q_scale_k)
@@ -180,9 +197,16 @@ def _attn_fwd(
 
     # k       [BLOCK_DMODEL / KV_PACK_DIV, BLOCK_N]
     # k_scale [BLOCK_N, BLOCK_DMODEL / 32]
-    k_offs = (off_z * stride_kz + off_k_head * stride_kh + offs_d_packed[:, None] * stride_kk +
-              offs_n[None, :] * stride_kn)
-    k_ptrs = k_ptr + k_offs
+    if USE_TDM:
+        # TDM requires last_stride=1, so we need to load K in a different way then transpose it.
+        k_desc_or_ptrs = tl.make_tensor_descriptor(base=k_ptr + off_z * stride_kz + off_k_head * stride_kh,
+                                                   shape=(BATCH * seqlen_k * NUM_K_HEADS // KV_PACK_DIV, BLOCK_DMODEL),
+                                                   strides=(stride_kn, stride_kk),
+                                                   block_shape=(BLOCK_N, BLOCK_DMODEL // KV_PACK_DIV))
+    else:
+        k_offs = (off_z * stride_kz + off_k_head * stride_kh + offs_d_packed[:, None] * stride_kk +
+                  offs_n[None, :] * stride_kn)
+        k_desc_or_ptrs = k_ptr + k_offs
 
     k_scale_offs = (off_z * stride_k_scale_z + off_k_head * stride_k_scale_h + offs_n[:, None] * stride_k_scale_n +
                     offs_d_scale[None, :] * stride_k_scale_k)
@@ -190,9 +214,15 @@ def _attn_fwd(
 
     # v       [BLOCK_N / KV_PACK_DIV, BLOCK_DMODEL]
     # v_scale [BLOCK_DMODEL, BLOCK_N / 32]
-    v_offs = (off_z * stride_vz + off_k_head * stride_vh + offs_n_packed[:, None] * stride_vn +
-              offs_d[None, :] * stride_vk)
-    v_ptrs = v_ptr + v_offs
+    if USE_TDM:
+        v_desc_or_ptrs = tl.make_tensor_descriptor(
+            base=v_ptr + off_z * stride_vz + off_k_head * stride_vh,
+            shape=(BATCH * (seqlen_k // KV_PACK_DIV) * NUM_K_HEADS, BLOCK_DMODEL), strides=(stride_vn, stride_vk),
+            block_shape=(BLOCK_N // KV_PACK_DIV, BLOCK_DMODEL))
+    else:
+        v_offs = (off_z * stride_vz + off_k_head * stride_vh + offs_n_packed[:, None] * stride_vn +
+                  offs_d[None, :] * stride_vk)
+        v_desc_or_ptrs = v_ptr + v_offs
 
     v_scale_offs = (off_z * stride_v_scale_z + off_k_head * stride_v_scale_h + offs_d[:, None] * stride_v_scale_k +
                     offs_n_scale[None, :] * stride_v_scale_n)
@@ -203,14 +233,17 @@ def _attn_fwd(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     q_mask = True if DISABLE_MASKING else offs_m[:, None] < seqlen_q
-    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+    if USE_TDM:
+        q = q_desc_or_ptrs.load([0, 0])
+    else:
+        q = tl.load(q_desc_or_ptrs, mask=q_mask, other=0.0)
     q_scale = tl.load(q_scale_ptrs, mask=q_mask, other=0x7F)
 
     block_min = 0
     block_max = n_blocks * BLOCK_N
-    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, stride_kn, stride_vn, q_scale, k_scale_ptrs,
-                                    v_scale_ptrs, stride_k_scale_n, stride_v_scale_n, block_min, block_max, q_type,
-                                    kv_type, BLOCK_M, BLOCK_N, sm_scale, DISABLE_MASKING)
+    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_desc_or_ptrs, v_desc_or_ptrs, stride_kn, stride_vn, q_scale,
+                                    k_scale_ptrs, v_scale_ptrs, stride_k_scale_n, stride_v_scale_n, block_min,
+                                    block_max, q_type, kv_type, BLOCK_M, BLOCK_N, sm_scale, DISABLE_MASKING, USE_TDM)
 
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
@@ -264,36 +297,12 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
 
     grid = lambda META: (batch * num_q_heads * triton.cdiv(seqlen_q, META["BLOCK_M"]), )
 
-    handle = _attn_fwd[grid](
-        q,
-        k,
-        v,
-        q_scale,
-        k_scale,
-        v_scale,
-        o,
-        *q_strides,
-        *k_strides,
-        *v_strides,
-        *q_scale_strides,
-        *k_scale_strides,
-        *v_scale_strides,
-        *o_strides,
-        softmax_scale,
-        q_type,
-        kv_type,
-        SEQLEN_Q=q.shape[1],
-        SEQLEN_K=k.shape[1],
-        NUM_Q_HEADS=num_q_heads,
-        NUM_K_HEADS=num_k_heads,
-        BLOCK_DMODEL=head_sz,
-        BATCH=batch,
-        BLOCK_M=config["BLOCK_M"],
-        BLOCK_N=config["BLOCK_N"],
-        DISABLE_MASKING=args.disable_masking,
-        num_warps=config["NUM_WARPS"],
-        num_stages=config["NUM_STAGES"],
-    )
+    handle = _attn_fwd[grid](q, k, v, q_scale, k_scale, v_scale, o, *q_strides, *k_strides, *v_strides,
+                             *q_scale_strides, *k_scale_strides, *v_scale_strides, *o_strides, softmax_scale, q_type,
+                             kv_type, SEQLEN_Q=q.shape[1], SEQLEN_K=k.shape[1], NUM_Q_HEADS=num_q_heads,
+                             NUM_K_HEADS=num_k_heads, BLOCK_DMODEL=head_sz, BATCH=batch, BLOCK_M=config["BLOCK_M"],
+                             BLOCK_N=config["BLOCK_N"], DISABLE_MASKING=args.disable_masking,
+                             num_warps=config["NUM_WARPS"], num_stages=config["NUM_STAGES"], USE_TDM=args.tdm)
 
     if args.dump_ir != 'none':
         curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -393,7 +402,8 @@ def run_mha(config, args):
 @pytest.mark.parametrize("q_type", ["e4m3"])
 @pytest.mark.parametrize("kv_type", ["e4m3", "e2m1"])
 @pytest.mark.parametrize("num_stages", [1, 3])
-def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_stages):
+@pytest.mark.parametrize("USE_TDM", [True, False])
+def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_stages, USE_TDM):
     #TODO Re-enable these tests later.
     if kv_type == "e2m1" and head_sz == 128:
         pytest.skip("Has known numerical correctness problems.")
@@ -421,6 +431,7 @@ def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_st
             self.verbose = False
             self.disable_masking = False
             self.dump_ir = 'none'
+            self.tdm = USE_TDM
 
     args = Args(q_type, kv_type)
 
@@ -465,6 +476,7 @@ if __name__ == "__main__":
     parser.add_argument("--dump-ir", choices=['none', 'ttir', 'ttgir', 'llir', 'amdgcn'], default="none",
                         help="dump IR format")
     parser.add_argument("-c", "--case", type=int, required=True, help='case id')
+    parser.add_argument("-t", "--tdm", action='store_true', default=False, help='enable TDM')
     parser.add_argument("--num-stages", type=int, default=-1, required=False, help='num stages')
     parser.add_argument("-m", "--disable-masking", action='store_true', help='use masked loads')
     parser.add_argument("-v", "--verbose", action='store_true', help='verbose output')
