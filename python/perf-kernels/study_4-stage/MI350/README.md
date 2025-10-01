@@ -449,3 +449,21 @@ fused-attention-fwd-d128-layoutbshd-causal0:
 ```
 This version has 1127 tflops with mfma efficiency = 65%.
 So this version must has a much higher freq. Need to confirm with agt.
+
+
+# Update the compiler with PaddedSharedLayout
+
+- triton compiler: https://github.com/AlexAUT/triton/commits/benchPipelinePaddedAsyncDev/ @28f20c7b36ef7822
+- command
+  ```
+  DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+  ```
+- IR dump: `/python/perf-kernels/study_4-stage/MI350/paddedSharedLayout_0`
+
+Note that we have to disable the vector-combine pass otherwise the `mul` instruction used
+update the acc will be moved from cluster 0 to cluster 2.
+
+
+
+
+
