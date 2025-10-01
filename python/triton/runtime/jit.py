@@ -749,7 +749,7 @@ class JITFunction(JITCallable, KernelInterface[T]):
             # compile the kernel
             src = self.ASTSource(self, signature, constexprs, attrs)
             kernel = self.compile(src, target=target, options=options.__dict__)
-            print("runtime target shared size: ", kernel.metadata.shared)
+            # print("runtime target shared size: ", kernel.metadata.shared)
             save_temp_files = os.environ.get("TRITON_SAVETEMPS", "0") == "1"
             if save_temp_files:
                 self._save_temps(kernel, target)
