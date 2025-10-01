@@ -588,6 +588,28 @@ LogicalResult LocalLoadPackedTransposedOp::verify() {
   return success();
 }
 
+LogicalResult BufferLoadOp::verify() {
+  if (!getIndex() && !getOffsets()) {
+    return emitOpError(
+        "requires at least one of `index` or `offsets` to be provided");
+  }
+  if (getIndex() && !getStride()) {
+    return emitOpError("requires `stride` when `index` is provided");
+  }
+  return success();
+}
+
+LogicalResult BufferStoreOp::verify() {
+  if (!getIndex() && !getOffsets()) {
+    return emitOpError(
+        "requires at least one of `index` or `offsets` to be provided");
+  }
+  if (getIndex() && !getStride()) {
+    return emitOpError("requires `stride` when `index` is provided");
+  }
+  return success();
+}
+
 // This pattern removes a concatOp if it has a single input operand.
 // This scenario can potentially happen as a result of ops refinement.
 mlir::LogicalResult foldConcatOpFromSingleSource(amdgpu::ConcatOp op,

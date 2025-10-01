@@ -745,7 +745,8 @@ void init_gluon_ir(py::module &&m) {
       .def("create_buffer_store",
            [](GluonOpBuilder &self, Value storedValue, Value ptr, Value offsets,
               Value mask, tt::CacheModifier cache) {
-             self.create<ttag::BufferStoreOp>(storedValue, ptr, offsets,
+             self.create<ttag::BufferStoreOp>(storedValue, ptr,
+                                              Value() /*index*/, offsets,
                                               Value() /*stride*/, cache, mask);
            })
       .def("create_buffer_atomic_rmw",

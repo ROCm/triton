@@ -660,6 +660,7 @@ struct BufferLoadOpConversion
 
     // Converted values
     Value llPtr = adaptor.getPtr();
+    Value llIndex = adaptor.getIndex();
     Value llOffset = adaptor.getOffsets();
     Value llMask = adaptor.getMask();
     Value llOther = adaptor.getOther();
@@ -669,13 +670,18 @@ struct BufferLoadOpConversion
     Type valueTy = op.getType();
     Type valueElemTy =
         typeConverter->convertType(getElementTypeOrSelf(valueTy));
+    const int valueElemNBits =
+        std::max(8u, valueElemTy.getIntOrFloatBitWidth());
+    const size_t valueElemNBytes = valueElemNBits / 8;
     Type ptrType = getPointerTypeWithShape(ptr, offset);
     unsigned numElems = getTotalElemsPerThread(ptrType);
     unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
 
     // Get the offset
+    SmallVector<Value> indexElems = unpackLLElements(loc, llIndex, rewriter);
     SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
     assert(offsetElems.size() == numElems);
+    assert(indexElems.size() == numElems);
 
     // Get the mask
     SmallVector<Value> maskElems =
@@ -687,7 +693,10 @@ struct BufferLoadOpConversion
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
     // Create the resource descriptor and then emit the buffer_load intrinsic(s)
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
+    auto strideNBytes = rewriter.create<LLVM::MulOp>(
+        loc, llStride, b.int_val(32, valueElemNBytes));
+    Value rsrcDesc =
+        bufferEmitter.createResourceDescriptor(llPtr, strideNBytes);
     SmallVector<Value> loadedVals;
     Type vecTy = LLVM::getVectorType(valueElemTy, vec);
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
@@ -698,7 +707,8 @@ struct BufferLoadOpConversion
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, vecStart);
       Value loadVal = bufferEmitter.emitStructLoad(
-          vecTy, rsrcDesc, offsetElems[vecStart], pred, falseVal, cacheMod);
+          vecTy, rsrcDesc, indexElems[vecStart], offsetElems[vecStart], pred,
+          falseVal, cacheMod);
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
@@ -1348,6 +1358,7 @@ struct BufferStoreOpConversion
     auto cacheMod = op.getCache();
 
     Value llPtr = adaptor.getPtr();
+    Value llIndex = adaptor.getIndex();
     Value llOffset = adaptor.getOffsets();
     Value llMask = adaptor.getMask();
     Value llData = adaptor.getValue();
@@ -1357,12 +1368,16 @@ struct BufferStoreOpConversion
     Type valueTy = data.getType();
     Type valueElemTy =
         typeConverter->convertType(getElementTypeOrSelf(valueTy));
+    const int valueElemNBits =
+        std::max(8u, valueElemTy.getIntOrFloatBitWidth());
+    const size_t valueElemNBytes = valueElemNBits / 8;
     Type ptrType = getPointerTypeWithShape(ptr, offset);
 
     unsigned numElems = getTotalElemsPerThread(ptrType);
     unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
 
     // Get the offsets and value
+    SmallVector<Value> indexElems = unpackLLElements(loc, llIndex, rewriter);
     SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
     SmallVector<Value> valueElems = unpackLLElements(loc, llData, rewriter);
 
@@ -1370,7 +1385,10 @@ struct BufferStoreOpConversion
     SmallVector<Value> maskElems =
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
 
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
+    auto strideNBytes = rewriter.create<LLVM::MulOp>(
+        loc, llStride, b.int_val(32, valueElemNBytes));
+    Value rsrcDesc =
+        bufferEmitter.createResourceDescriptor(llPtr, strideNBytes);
     MLIRContext *ctx = rewriter.getContext();
     auto moduleOp = op->getParentOfType<ModuleOp>();
     auto freeVarMasks = getFreeVariableMasks(valueTy);
@@ -1391,8 +1409,9 @@ struct BufferStoreOpConversion
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
-      bufferEmitter.emitStructStore(rsrcDesc, offsetElems[vecStart], storeVal,
-                                    pred, cacheMod);
+      bufferEmitter.emitStructStore(rsrcDesc, indexElems[vecStart],
+                                    offsetElems[vecStart], storeVal, pred,
+                                    cacheMod);
     } // end vec
 
     rewriter.eraseOp(op);

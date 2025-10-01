@@ -64,7 +64,6 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
   Value stride = b.int_val(16, 0);
   if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                          targetInfo.getISAFamily())) {
-#if 0
     // Turn off cache-swizzling for the time being while we are figuring out
     // how to safely use it.
     if (blockStride) {
@@ -81,7 +80,6 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr,
       // stride[14] = swizzle enabling bit
       stride = rewriter.create<LLVM::OrOp>(loc, enableSwizzle, strideSat);
     }
-#endif
   }
 
   Value flagsConst = b.int_val(32, flags);
@@ -108,16 +106,15 @@ Value BufferEmitter::emitLoad(Type type, Value rsrcDesc, Value offset,
   return data;
 }
 
-Value BufferEmitter::emitStructLoad(Type type, Value rsrcDesc, Value offset,
-                                    Value pred, Value falseVal,
+Value BufferEmitter::emitStructLoad(Type type, Value rsrcDesc, Value index,
+                                    Value offset, Value pred, Value falseVal,
                                     triton::CacheModifier cm) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value, 6> args;
   fillCommonArgs(type, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/true, args);
   Type bufferType = getBufferOpType(type, false);
-  Value vindex = b.int_val(32, 0);
   Value data = rewriter.create<ROCDL::StructPtrBufferLoadOp>(
-      loc, bufferType, ValueRange{args[0], vindex, args[1], args[2], args[3]},
+      loc, bufferType, ValueRange{args[0], index, args[1], args[2], args[3]},
       ArrayRef<NamedAttribute>());
   data = b.bitcast(data, type);
   if (!isZero(falseVal))
@@ -236,20 +233,20 @@ void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,
                                               ArrayRef<NamedAttribute>());
 }
 
-void BufferEmitter::emitStructStore(Value rsrcDesc, Value offset, Value data,
-                                    Value pred, triton::CacheModifier cm) {
+void BufferEmitter::emitStructStore(Value rsrcDesc, Value index, Value offset,
+                                    Value data, Value pred,
+                                    triton::CacheModifier cm) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   VectorType vecTy = cast<VectorType>(data.getType());
   Type bufferType = getBufferOpType(vecTy, false);
   if (vecTy != bufferType)
     data = b.bitcast(data, bufferType);
   SmallVector<Value, 6> args{data};
-  Value vindex = b.int_val(32, 0);
   fillCommonArgs(vecTy, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/false,
                  args);
   rewriter.create<ROCDL::StructPtrBufferStoreOp>(
       loc, TypeRange{},
-      ValueRange{args[0], args[1], vindex, args[2], args[3], args[4]},
+      ValueRange{args[0], args[1], index, args[2], args[3], args[4]},
       ArrayRef<NamedAttribute>());
 }
 

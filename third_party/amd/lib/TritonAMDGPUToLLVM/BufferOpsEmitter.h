@@ -70,8 +70,8 @@ struct BufferEmitter {
   Value emitLoad(Type type, Value rsrcDesc, Value offset, Value pred,
                  Value falseVal, CacheModifier cm);
 
-  Value emitStructLoad(Type type, Value rsrcDesc, Value offset, Value pred,
-                       Value falseVal, CacheModifier cm);
+  Value emitStructLoad(Type type, Value rsrcDesc, Value index, Value offset,
+                       Value pred, Value falseVal, CacheModifier cm);
 
   // Emit a predicated rocdl.raw.ptr.buffer.load.lds
   ROCDL::RawPtrBufferLoadLdsOp emitLoadToLds(Type type, Value byteWidth,
@@ -95,8 +95,8 @@ struct BufferEmitter {
   void emitStore(Value rsrcDesc, Value offset, Value data, Value pred,
                  CacheModifier cm);
 
-  void emitStructStore(Value rsrcDesc, Value offset, Value data, Value pred,
-                       CacheModifier cm);
+  void emitStructStore(Value rsrcDesc, Value index, Value offset, Value data,
+                       Value pred, CacheModifier cm);
 
 private:
   // Fill common buffer operation arguments.

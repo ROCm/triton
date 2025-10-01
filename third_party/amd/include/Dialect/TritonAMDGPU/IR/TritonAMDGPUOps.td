@@ -513,6 +513,7 @@ def BufferStoreOp : TT_AMDGPU_Op<"buffer_store", [
   SameLoadStoreOperandsEncoding,
   TypesMatchWith<"value element type matches the pointed type of ptr", "value", "ptr", "getPointerTypeToElement($_self)">,
   TypesMatchWith<"value and offsets have the same shape", "value", "offsets", "getI32SameShape($_self)">,
+  TypesMatchWith<"result and index have the same shape", "value", "index", "getI32SameShape($_self)">,
   TypesMatchWith<"value and mask have the same shape", "value", "mask", "getI1SameShape($_self)",
                  "(cast<BufferStoreOp>($_op).getMask() == nullptr) || std::equal_to<>()">,
 ]>{
@@ -533,18 +534,22 @@ def BufferStoreOp : TT_AMDGPU_Op<"buffer_store", [
     let arguments = (ins
       TT_Tensor:$value,
       Arg<TT_Ptr, "Global memory scalar base pointer to write to", [MemWrite<GlobalMemory>]>:$ptr,
-      I32Tensor:$offsets,
+      Optional<I32Tensor>:$index,
+      Optional<I32Tensor>:$offsets,
       Optional<I32>:$stride,
       DefaultValuedAttr<TT_CacheModifierAttr, "mlir::triton::CacheModifier::NONE">:$cache,
       Optional<TT_BoolTensor>:$mask
     );
 
     let assemblyFormat = [{
-      $value `,` $ptr `[` $offsets `]` (`,` $mask^)?
+      $value `,` $ptr `[` (`index` `=` $index^)? `,` (`offsets` `=` $offsets^)? `]`
+      (`,` $mask^)?
       oilist(`cacheModifier` `=` $cache)
       (`stride` `=` $stride^)?
       attr-dict `:` type($value)
     }];
+
+    let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

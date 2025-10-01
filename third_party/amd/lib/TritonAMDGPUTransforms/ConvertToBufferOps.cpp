@@ -251,13 +251,42 @@ bool canUseBufferOps(Value ptr,
 
   // 2. Check if the offset is a 32-bit tensor
   Value offset = addPtrOp.getOffset();
-  if (cast<RankedTensorType>(offset.getType()).getElementTypeBitWidth() != 32)
-    return false;
-  LDBG("32 bit offset");
+  if (cast<RankedTensorType>(offset.getType()).getElementTypeBitWidth() != 32) {
+    LDBG("64 bit offset");
+  } else
+    LDBG("32 bit offset");
+  // return false;
 
   return verifyNonNegativeExpr(offset, assumptions, std::move(solver));
 }
 
+// Narrow `offset` into `toType` using a arith.trunci operation
+Value createTruncIOffset(RewriterBase &rewriter, Location loc, Value offset,
+                         Type toType) {
+  Type elementType = getElementTypeOrSelf(offset);
+  if (elementType.isInteger(32))
+    return offset;
+
+  if (auto tensorType = dyn_cast<RankedTensorType>(offset.getType())) {
+    auto shape = tensorType.getShape();
+    auto newTensorType =
+        RankedTensorType::get(shape, toType, tensorType.getEncoding());
+    return rewriter.createOrFold<arith::TruncIOp>(loc, newTensorType, offset);
+  }
+  return rewriter.createOrFold<arith::TruncIOp>(loc, toType, offset);
+}
+
+TypedValue<RankedTensorType> createConstIntTensor(RewriterBase &rewriter,
+                                                  Location loc,
+                                                  RankedTensorType tensorType,
+                                                  int64_t val) {
+  auto denseAttr = DenseElementsAttr::get(
+      tensorType, APInt(tensorType.getElementType().getIntOrFloatBitWidth(),
+                        val, /*isSigned=*/true));
+  return cast<TypedValue<RankedTensorType>>(
+      rewriter.create<arith::ConstantOp>(loc, tensorType, denseAttr)
+          .getResult());
+}
 // Extract stride of the blocked offset of LD/ST ops.
 Value getBlockStride(Location loc, Value offset, PatternRewriter &rewriter) {
   // canonicalize pointer pass sets block stride via
@@ -530,6 +559,7 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
   matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
     Value ptr = op.getOperand(0);
+    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
 
     if (canUseBufferOps(ptr, assumptions, solver)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
@@ -544,12 +574,35 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      // set stride = 64, log2(stride) = 6
+      int stride = 64;
+      blockStride = b.int_val(32, stride);
+      // Create two constant tensor for log2Stride (6) and blockStride - 1 (63)
+      RankedTensorType tensorType =
+          cast<RankedTensorType>(tensorOffset.getType());
+      auto log2StrideTensor = createConstIntTensor(
+          rewriter, op.getLoc(), tensorType, llvm::Log2_32(stride));
+      auto stride6BitMaskTensor =
+          createConstIntTensor(rewriter, op.getLoc(), tensorType, stride - 1);
+
+      auto strideTensor =
+          createConstIntTensor(rewriter, op.getLoc(), tensorType, stride);
+
+      auto index64 = rewriter.create<arith::DivUIOp>(op.getLoc(), tensorOffset,
+                                                     strideTensor);
+      auto offsets64 = rewriter.create<arith::RemUIOp>(
+          op.getLoc(), tensorOffset, strideTensor);
+      auto index = createTruncIOffset(rewriter, op.getLoc(), index64,
+                                      rewriter.getI32Type());
+      auto offsets = createTruncIOffset(rewriter, op.getLoc(), offsets64,
+                                        rewriter.getI32Type());
 
       auto bufferLoadOp = [&]() {
         if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
           return rewriter.create<triton::amdgpu::BufferLoadOp>(
-              op->getLoc(), op.getType(), basePtr, tensorOffset, blockStride,
-              op.getCache(), maybeMask, maybeOther);
+              op->getLoc(), op.getType(), basePtr, index /*index*/,
+              offsets /*offsets*/, blockStride, op.getCache(), maybeMask,
+              maybeOther);
         } else if constexpr (std::is_same_v<
                                  SourceOp,
                                  triton::gpu::AsyncCopyGlobalToLocalOp>) {
@@ -594,6 +647,7 @@ struct ConvertTritonStoreToBufferStore
                   PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
     Value ptr = op.getPtr();
+    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
 
     if (canUseBufferOps(ptr, assumptions, solver)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
@@ -605,9 +659,31 @@ struct ConvertTritonStoreToBufferStore
       if (op.getMask() && !isSplatOneConstTensor(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      int stride = 64;
+      blockStride = b.int_val(32, stride);
+      // Create two constant tensor for log2Stride (6) and blockStride - 1 (63)
+      RankedTensorType tensorType =
+          cast<RankedTensorType>(tensorOffset.getType());
+      auto log2StrideTensor = createConstIntTensor(
+          rewriter, op.getLoc(), tensorType, llvm::Log2_32(stride));
+      auto stride6BitMaskTensor =
+          createConstIntTensor(rewriter, op.getLoc(), tensorType, stride - 1);
+
+      auto strideTensor =
+          createConstIntTensor(rewriter, op.getLoc(), tensorType, stride);
+
+      auto index64 = rewriter.create<arith::DivUIOp>(op.getLoc(), tensorOffset,
+                                                     strideTensor);
+      auto offsets64 = rewriter.create<arith::RemUIOp>(
+          op.getLoc(), tensorOffset, strideTensor);
+      auto index = createTruncIOffset(rewriter, op.getLoc(), index64,
+                                      rewriter.getI32Type());
+      auto offsets = createTruncIOffset(rewriter, op.getLoc(), offsets64,
+                                        rewriter.getI32Type());
+
       rewriter.replaceOpWithNewOp<triton::amdgpu::BufferStoreOp>(
-          op, op.getValue(), basePtr, tensorOffset, blockStride, op.getCache(),
-          maybeMask);
+          op, op.getValue(), basePtr, index, offsets, blockStride,
+          op.getCache(), maybeMask);
       return success();
     }
     LDBG("Failed to convert: " << op);
