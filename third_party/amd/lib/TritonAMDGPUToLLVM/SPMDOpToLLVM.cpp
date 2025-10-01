@@ -67,29 +67,6 @@ struct CondBarrierOpConversion
     return success();
   }
 };
-
-struct GetWaveIdOpConversion
-    : public ConvertOpToLLVMPattern<triton::amdgpu::GetWaveIdOp> {
-  using ConvertOpToLLVMPattern<
-      triton::amdgpu::GetWaveIdOp>::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(triton::amdgpu::GetWaveIdOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto mod = op->getParentOfType<ModuleOp>();
-    auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    Value id = getThreadId(rewriter, loc);
-    int waveSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
-    Value waveId = LLVM::createLLVMIntrinsicCallOp(
-                       rewriter, loc, "llvm.amdgcn.readfirstlane", {i32_ty},
-                       {b.udiv(id, b.i32_val(waveSize))})
-                       ->getResult(0);
-    rewriter.replaceOp(op, waveId);
-    return success();
-  }
-};
-
 } // namespace
 
 void mlir::triton::AMD::populateSPMDOpToLLVMPattern(
@@ -97,6 +74,4 @@ void mlir::triton::AMD::populateSPMDOpToLLVMPattern(
     PatternBenefit benefit) {
   patterns.add<GetNumProgramsOpConversion>(typeConverter, benefit);
   patterns.add<CondBarrierOpConversion>(typeConverter, benefit);
-  patterns.add<GetNumProgramsOpConversion, GetWaveIdOpConversion>(typeConverter,
-                                                                  benefit);
 }

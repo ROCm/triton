@@ -2744,30 +2744,30 @@ def amd_tdm_kernel(ptr):
     buffer.load(layout=BLOCKED_LAYOUT)
 
 
-def test_amd_tdm():
+@pytest.mark.parametrize("target", [HIP_TARGET_GFX1250])
+def test_amd_tdm(target):
 
-    ptr = MockTensor(ttgl.float32)
-    module = run_parser(amd_tdm_kernel, *make_args(ptr), target=HIP_TARGET_GFX1250)
+    ptr = MockTensor(ttgl.float16)
+    module = run_parser(amd_tdm_kernel, *make_args(ptr), target)
     expecttest.assert_expected_inline(
         anonymize_ir(module.str_nodebug()), """\
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.padded_shared<[32:+4] {order = [1, 0], shape = [16, 64]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
-  tt.func public @amd_tdm_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+  tt.func public @amd_tdm_kernel(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
     %c32_i32 = arith.constant 32 : i32
     %c128_i32 = arith.constant 128 : i32
     %c128_i64 = arith.constant 128 : i64
     %c1_i64 = arith.constant 1 : i64
-    %0 = tt.make_tensor_descriptor %arg0, [%c32_i32, %c128_i32], [%c128_i64, %c1_i64] : <f32>, <tensor<16x64xf32>>
-    %1 = ttg.local_alloc : () -> !ttg.memdesc<16x64xf32, #shared, #smem, mutable>
+    %0 = tt.make_tensor_descriptor %arg0, [%c32_i32, %c128_i32], [%c128_i64, %c1_i64] : <f16>, <tensor<16x64xf16>>
+    %1 = ttg.local_alloc : () -> !ttg.memdesc<16x64xf16, #shared, #smem, mutable>
     %c0_i32 = arith.constant 0 : i32
     %c2_i32 = arith.constant 2 : i32
     %true = arith.constant true
-    %2 = amdgpu.get_wave_id : i32
-    %3 = amdgpu.async_tdm_copy_global_to_local %0 %c0_i32, %c2_i32 %1, %true, %2 : <tensor<16x64xf32>> -> <16x64xf32, #shared, #smem, mutable>
-    %4 = amdgpu.async_tdm_store_wait  {num = 0 : i32}
-    %5 = ttg.local_load %1 : !ttg.memdesc<16x64xf32, #shared, #smem, mutable> -> tensor<16x64xf32, #blocked>
+    %2 = amdgpu.async_tdm_copy_global_to_local %0[%c0_i32, %c2_i32] into %1, %true : !tt.tensordesc<tensor<16x64xf16>> -> !ttg.memdesc<16x64xf16, #shared, #smem, mutable>
+    %3 = amdgpu.async_tdm_wait  {num = 0 : i32}
+    %4 = ttg.local_load %1 : !ttg.memdesc<16x64xf16, #shared, #smem, mutable> -> tensor<16x64xf16, #blocked>
     tt.return
   }
 }

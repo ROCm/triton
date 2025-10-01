@@ -76,19 +76,17 @@ struct MakeTensorDescOpConversion
                   ConversionPatternRewriter &rewriter) const override {
 
     auto loc = op.getLoc();
-    // struct { shape0, shape1, stride0, stride1, base_ptr};
     auto tensorShape = adaptor.getShape();
     auto tensorStride = adaptor.getStrides();
     auto basePtr = adaptor.getBase();
     auto result = op.getResult();
 
     SmallVector<Value> elems;
+    elems.push_back(basePtr);
     for (auto s : tensorShape)
       elems.push_back(s);
     for (auto stride : tensorStride)
       elems.push_back(stride);
-
-    elems.push_back(basePtr);
 
     auto newValue = packLLElements(op.getLoc(), getTypeConverter(), elems,
                                    rewriter, result.getType());

@@ -65,12 +65,11 @@ public:
         MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
                          encoding, sharedMemorySpace, /*mutableMemory=*/true);
     Value alloc = rewriter.create<LocalAllocOp>(loc, memDescType);
-    Value waveId = rewriter.create<amdgpu::GetWaveIdOp>(loc);
     Value pred = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
     // rewriter.create<amdgpu::GlobalTDMPrefetch>(
     //     loc, op.getDesc(), op.getIndices(), pred, waveId, ctaLayout);
     rewriter.create<amdgpu::AsyncTDMCopyGlobalToLocalOp>(
-        loc, op.getDesc(), op.getIndices(), alloc, pred, waveId);
+        loc, op.getDesc(), op.getIndices(), alloc, pred);
     rewriter.create<amdgpu::AsyncTDMWait>(loc, ArrayRef<Value>{}, 0);
     rewriter.replaceOpWithNewOp<LocalLoadOp>(op, op.getType(), alloc);
     return success();

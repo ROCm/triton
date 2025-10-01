@@ -767,9 +767,8 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
               Value result) {
              Value pred = self.create<arith::ConstantIntOp>(1, 1);
-             Value waveId = self.create<ttag::GetWaveIdOp>();
-             self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(
-                 descPtr, indices, result, pred, waveId);
+             self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(descPtr, indices,
+                                                            result, pred);
            })
       .def("create_async_tdm_store_wait", [](GluonOpBuilder &self, int num) {
         ValueRange tokens;
