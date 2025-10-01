@@ -1191,20 +1191,29 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     auto tensorDescTy = op.getDesc().getType();
     auto smemTy = op.getResult().getType();
 
-    auto smemEnc =
+    auto swizzledEnc =
+        llvm::dyn_cast<SwizzledSharedEncodingAttr>(smemTy.getEncoding());
+    if (swizzledEnc && swizzledEnc.getMaxPhase() != 1)
+      return rewriter.notifyMatchFailure(op, "TDM does not support swizzling");
+
+    auto paddedEnc =
         llvm::dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
+    if (!paddedEnc && !swizzledEnc)
+      return rewriter.notifyMatchFailure(
+          op, "Invalid shared memory layout for TDM.");
+
     Type llvmElemTy = getTypeConverter()->convertType(smemTy.getElementType());
     auto elementBitWidth = llvmElemTy.getIntOrFloatBitWidth();
 
     unsigned padInterval = 0;
     unsigned padAmount = 0;
-    if (smemEnc) {
-      if (smemEnc.getIntervals().size() != 1 ||
-          smemEnc.getPaddings().size() != 1)
+    if (paddedEnc) {
+      if (paddedEnc.getIntervals().size() != 1 ||
+          paddedEnc.getPaddings().size() != 1)
         return rewriter.notifyMatchFailure(
-            op, "TDM only supports a single interval-padding pair");
-      padInterval = smemEnc.getIntervals()[0];
-      padAmount = smemEnc.getPaddings()[0];
+            op, "NYI: Multiple interval-padding pairs in TDM.");
+      padInterval = paddedEnc.getIntervals()[0];
+      padAmount = paddedEnc.getPaddings()[0];
     }
     unsigned dwordSize = 32;
     auto padIntervalInDwords = padInterval * elementBitWidth / dwordSize;
@@ -1239,22 +1248,27 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     int numCTAs = TritonGPUDialect::getNumCTAs(mod);
     Value multicastMask = b.i32_val(0);
     if (numCTAs > 1) {
-      assert(smemEnc != nullptr);
-      blockShapePerCTA = getShapePerCTA(smemEnc, blockShape);
+      auto enc = llvm::cast<LayoutEncodingTrait>(smemTy.getEncoding());
+      SmallVector<unsigned> order;
+      if (swizzledEnc)
+        auto order = swizzledEnc.getOrder();
+      else
+        order = paddedEnc.getOrder();
+
+      blockShapePerCTA = getShapePerCTA(enc, blockShape);
       Value clusterCTAId = targetInfo.getClusterCTAId(rewriter, loc);
-      auto multiDimClusterCTAId =
-          delinearize(rewriter, loc, clusterCTAId, smemEnc.getCTAsPerCGA(),
-                      smemEnc.getCTAOrder());
+      auto multiDimClusterCTAId = delinearize(
+          rewriter, loc, clusterCTAId, enc.getCTAsPerCGA(), enc.getCTAOrder());
       for (unsigned i = 0; i < blockShapePerCTA.size(); i++) {
-        int idx = smemEnc.getOrder()[i];
+        int idx = order[i];
         offset[i] =
             b.add(offset[i], b.urem(b.mul(multiDimClusterCTAId[i],
                                           b.i32_val(blockShapePerCTA[i])),
                                     b.i32_val(blockShape[i])));
       }
       multicastMask = LLVM::AMD::getGroupMask(
-          rewriter, loc, multiDimClusterCTAId, smemEnc.getCTAsPerCGA(),
-          smemEnc.getCTASplitNum(), smemEnc.getCTAOrder());
+          rewriter, loc, multiDimClusterCTAId, enc.getCTAsPerCGA(),
+          enc.getCTASplitNum(), enc.getCTAOrder());
     }
 
     Type globalPtrTy = ptr_ty(ctx, 1);
@@ -1281,8 +1295,8 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         loc, adaptor.getResult(), llvmElemTy, rewriter);
     Value dstBase = dstMemObj.getBase();
     Value dstOffset = b.mul(b.i32_val(outerBlockStride), outerOffset);
-    if (smemEnc) {
-      Value padding = emitPadding(loc, rewriter, smemEnc, elementBitWidth,
+    if (paddedEnc) {
+      Value padding = emitPadding(loc, rewriter, paddedEnc, elementBitWidth,
                                   dstOffset, false);
       dstOffset = b.add(dstOffset, padding);
     }
