@@ -424,17 +424,25 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto numRepK = repA[2];
   auto numRepB = repA[0];
 
-  const auto kDimTensorA = aTensorTy.getShape().back();
-  const auto kWWMADim = 128;
-  int paddingFactor = 1;
-  if (kWWMADim > kDimTensorA) {
-    paddingFactor = kWWMADim / kDimTensorA;
+  const auto rank = aTensorTy.getShape().size();
+  const auto kDimTensorA = aTensorTy.getShape()[rank - 1];
+  const auto kDimTensorB = bTensorTy.getShape()[rank - 2];
+
+  int paddingFactorA = 1;
+  int paddingFactorB = 1;
+
+  if (kDimA > kDimTensorA) {
+    paddingFactorA = kDimA / kDimTensorA;
+  }
+
+  if (kDimB > kDimTensorB) {
+    paddingFactorB = kDimB / kDimTensorB;
   }
 
   auto scaleShapeA = aScaleTensorTy.getShape();
-  int scaleKWidthA = 4 / paddingFactor;
+  int scaleKWidthA = 4 / paddingFactorA;
   auto scaleShapeB = bScaleTensorTy.getShape();
-  int scaleKWidthB = 4 / paddingFactor;
+  int scaleKWidthB = 4 / paddingFactorB;
   constexpr int scaleKBase = 1;
 
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
