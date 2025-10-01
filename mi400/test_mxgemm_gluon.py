@@ -4,6 +4,7 @@ hip.hip.hipInit(0)
 
 import torch
 import triton
+import pytest
 from triton.experimental import gluon
 import triton.experimental.gluon.language as gl
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
@@ -11,39 +12,57 @@ import numpy as np
 
 
 def generate_configs():
-    base_configs = [
-        {
-            "M": 32, "N": 32, "K": 128, "BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128, "NUM_WARPS": 4, "NUM_CTAS": 1,
-            "DTYPE_A": "float4", "DTYPE_B": "float4", "SCALE_BLOCK": 32
-        },
-        # TODO: Add more shapes
-    ]
     configs = []
-    for config in base_configs:
-        new_config = config.copy()
-        configs.append(new_config)
+    # Add many small shapes.
+    dtypes = [['float8_e5m2', 'float4'], ['float4', 'float8_e4m3'], ['float8_e4m3', 'float8_e5m2'],
+              ['float4', 'float4']]
+    for dtypeA, dtypeB in dtypes:
+        for (M, N, K, BM, BN, BK) in [(32, 32, 32, 32, 32, 64), (32, 32, 64, 32, 32, 64), (32, 32, 128, 32, 32, 128),
+                                      (64, 64, 256, 32, 32, 256), (128, 128, 512, 64, 64, 128),
+                                      (1, 8192, 512, 64, 64, 128), (1, 8192, 128, 64, 64, 64),
+                                      (1024, 1024, 128, 64, 64, 64), (1024, 1024, 128, 64, 64, 128)]:
+            # For correctness, we need masking when not using exact tiles.
+            # python3: /home/dtanner/repos/gfx_triton/third_party/amd/lib/TritonAMDGPUToLLVM/DotOpToLLVM/WMMA.cpp:233: mlir::Value mlir::triton::AMD::{anonymous}::generateScaledWMMAIntrinsic(mlir::ConversionPatternRewriter&, mlir::Location, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Type, mlir::Type, mlir::Type, int): Assertion `scaleKWidth == 2 ||     scaleKWidth == 4 || scaleKWidth == 8' failed.
+            if dtypeA == 'float4' and BK < K:
+                continue
+            # Similar assertion as above.
+            if dtypeA == 'float4' and BK < 128:
+                continue
+            configs.append({
+                "M": M, "N": N, "K": K, "BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK, "NUM_WARPS": 4, "NUM_CTAS": 1,
+                "SCALE_BLOCK": 32, "DTYPE_A": dtypeA, "DTYPE_B": dtypeB
+            })
     return configs
 
 
 @gluon.jit
 def mxgemm_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm,
-                  stride_cn, stride_scale: gl.constexpr, fpflag_a: gl.constexpr, fpflag_b: gl.constexpr,
-                  SCALE_BLOCK: gl.constexpr, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,
-                  GROUP_SIZE_M: gl.constexpr):
+                  stride_cn, stride_scale, DTYPE_A: gl.constexpr, DTYPE_B: gl.constexpr, SCALE_BLOCK: gl.constexpr,
+                  BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr, GROUP_SIZE_M: gl.constexpr):
 
     BLOCKED_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 1], [8, 4], [4, 1], [1, 0])
     A_BLOCKED_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 16], [8, 4], [4, 1], [1, 0])
     B_BLOCKED_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 16], [16, 2], [4, 1], [1, 0])
 
-    WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, True, [2, 2], instr_shape=[16, 16, 128])
+    WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2],
+                                                     instr_shape=[16, 16, 128])
+    WMMA_LAYOUT_PACKED: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2],
+                                                            instr_shape=[16, 16, 64])
     A_SCALE_LINEAR_LAYOUT: gl.constexpr = gl.DistributedLinearLayout(
         reg_bases=[[0, 1], [0, 2]], lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]], warp_bases=[[0, 0], [16, 0]],
         block_bases=[], shape=[32, 4])
     B_SCALE_LINEAR_LAYOUT: gl.constexpr = gl.DistributedLinearLayout(
         reg_bases=[[0, 1], [0, 2]], lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]], warp_bases=[[16, 0], [0, 0]],
         block_bases=[], shape=[32, 4])
-    DIV_FACTOR_A: gl.constexpr = 2 if fpflag_a == 4 else 1
-    DIV_FACTOR_B: gl.constexpr = 2 if fpflag_b == 4 else 1
+    DIV_FACTOR_A: gl.constexpr = 2 if DTYPE_A == "e2m1" else 1
+    DIV_FACTOR_B: gl.constexpr = 2 if DTYPE_B == "e2m1" else 1
+
+    DOT_LAYOUT_A: gl.constexpr = gl.DotOperandLayout(operand_index=0,
+                                                     parent=WMMA_LAYOUT_PACKED if DTYPE_A == "e2m1" else WMMA_LAYOUT,
+                                                     k_width=16)
+    DOT_LAYOUT_B: gl.constexpr = gl.DotOperandLayout(operand_index=1,
+                                                     parent=WMMA_LAYOUT_PACKED if DTYPE_B == "e2m1" else WMMA_LAYOUT,
+                                                     k_width=16)
 
     pid = gl.program_id(axis=0)
     num_pid_m = gl.cdiv(M, BLOCK_M)
@@ -84,14 +103,13 @@ def mxgemm_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, str
 
         a = gl.load(a_ptrs, mask=valid_k_a[None, :], other=0.0)
         b = gl.load(b_ptrs, mask=valid_k_b[:, None], other=0.0)
+        a = gl.convert_layout(a, DOT_LAYOUT_A)
+        b = gl.convert_layout(b, DOT_LAYOUT_B)
+
+        accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator)
+
         a_ptrs += (BLOCK_K // DIV_FACTOR_A) * stride_ak
         b_ptrs += (BLOCK_K // DIV_FACTOR_B) * stride_bk
-
-        a = gl.convert_layout(a, gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT, k_width=16))
-        b = gl.convert_layout(b, gl.DotOperandLayout(operand_index=1, parent=WMMA_LAYOUT, k_width=16))
-
-        if fpflag_a == 4 and fpflag_b == 4:
-            accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, "e2m1", b, scale_b, "e2m1", accumulator)
 
         a_scale_ptr += BLOCK_K // SCALE_BLOCK
         b_scale_ptr += BLOCK_K // SCALE_BLOCK
@@ -103,57 +121,31 @@ def mxgemm_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, str
     gl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def fp8e8m0_to_float32(scale):
-    scale = scale.view(torch.uint8)
-    scale = scale.to(torch.int32)
-    scale = scale << 23
-    scale = scale.view(torch.float32)
-    return scale
-
-
 def torch_gemm_mxfp(a, b, a_scale, b_scale, scale_block, M, N, K):
-    a_scale_f32 = fp8e8m0_to_float32(a_scale)
-    b_scale_f32 = fp8e8m0_to_float32(b_scale)
-
-    a_scale_f32 = a_scale_f32.to(torch.float32).repeat_interleave(scale_block, dim=1)[:M, :K]
-    b_scale_f32 = b_scale_f32.to(torch.float32).repeat_interleave(scale_block, dim=1).T.contiguous()[:K, :N]
+    a_scale_f32 = a_scale.to(torch.float32).repeat_interleave(scale_block, dim=1)[:M, :K]
+    b_scale_f32 = b_scale.to(torch.float32).repeat_interleave(scale_block, dim=1).T.contiguous()[:K, :N]
 
     a_f32 = a.to(torch.float32)
     b_f32 = b.to(torch.float32)
 
-    # b_scales are always col major
-    # b_scale_f32 = b_scale_f32.T.contiguous()
-
-    a = a_f32 * a_scale_f32
-    b = b_f32 * b_scale_f32
-
-    ref_out = torch.matmul(a, b).to(torch.float32)
-
-    return ref_out
+    return torch.matmul(a_f32 * a_scale_f32, b_f32 * b_scale_f32).to(torch.float32)
 
 
-def init_data(dtype, d0, d1, allones):
-    ub = 2 if allones else 5
+def init_data(dtype, d0: int, d1: int, constant: bool):
+    ub = 2 if constant else 5
     if dtype == 'float4':
-        dataa = torch.randint(1, ub, (d0, d1))
-        return MXFP4Tensor(data=dataa)
+        return MXFP4Tensor(size=(d0, d1)).random()
+    elif dtype == "float8_e5m2":
+        return torch.randint(20, 40, (d0, d1), dtype=torch.uint8).view(torch.float8_e5m2)
+    elif dtype == "float8_e4m3":
+        return torch.randint(20, 40, (d0, d1), dtype=torch.uint8).view(torch.float8_e4m3fn)
     else:
-        torch_type = getattr(torch, dtype)
-        return (torch.randint(1, ub, (d0, d1))).to(torch_type)
+        raise NotImplementedError(f"NYI: unsupported dtype: {dtype}")
 
 
-def getfpflag(dtype):
-    fpflag = 8
-    if dtype == 'float4':
-        fpflag = 4
-    elif dtype == 'float6_e2m3':
-        fpflag = 62
-    elif dtype == 'float6_e3m2':
-        fpflag = 63
-    return fpflag
-
-
-def testGemm(config):
+@pytest.mark.parametrize("config", generate_configs())
+def test_mxfp_gemm_gluon(config):
+    print(config)
     M = config["M"]
     N = config["N"]
     K = config["K"]
@@ -166,21 +158,21 @@ def testGemm(config):
     dtype_b = config['DTYPE_B']
     scale_block = config['SCALE_BLOCK']
 
-    fpflag_a = getfpflag(dtype_a)
-    fpflag_b = getfpflag(dtype_b)
-
-    torch.manual_seed(42)
+    torch.manual_seed(0)
     torch.set_printoptions(edgeitems=30, linewidth=100000)
     np.set_printoptions(threshold=np.inf)
 
     a = init_data(dtype_a, M, K, False)
     b = init_data(dtype_b, K, N, False)
-    a_size = (M, triton.cdiv(K, scale_block))
-    b_size = (N, triton.cdiv(K, scale_block))
-    a_scale = MXScaleTensor(size=a_size).random(high=32.0).data
-    b_scale = MXScaleTensor(size=b_size).random(high=32.0).data
+    a_size = (M, (K + scale_block - 1) // scale_block)
+    b_size = (N, (K + scale_block - 1) // scale_block)
+    a_scale_mxfp4 = MXScaleTensor(size=a_size).random(high=32.0)
+    b_scale_mxfp4 = MXScaleTensor(size=b_size).random(high=32.0)
 
-    c_ref = torch_gemm_mxfp(a, b, a_scale, b_scale, scale_block, M, N, K)
+    c_ref = torch_gemm_mxfp(a, b, a_scale_mxfp4, b_scale_mxfp4, scale_block, M, N, K)
+
+    a_scale = a_scale_mxfp4.data
+    b_scale = b_scale_mxfp4.data
 
     # mxfp4 input needs packed along the k dim, i.e., two mxfp4 are packed in one uint8
     if dtype_a in ['float4', 'float6_e2m3', 'float6_e3m2']:
@@ -188,7 +180,7 @@ def testGemm(config):
     if dtype_b in ['float4', 'float6_e2m3', 'float6_e3m2']:
         b = b.to_packed_tensor(dim=0)
 
-    c_d = torch.empty(M, N, dtype=torch.float32).cuda()
+    c_d = torch.zeros(M, N, dtype=torch.float32).cuda()
     a_d = a.data.contiguous().cuda()
     b_d = b.data.contiguous().cuda()
     a_scale_d = a_scale.cuda()
@@ -203,13 +195,11 @@ def testGemm(config):
     grid = [numBlocks, 1, 1]
     group_size_m = 1
 
+    dtype_converter = {'float8_e5m2': "e5m2", "float8_e4m3": "e4m3", "float4": "e2m1"}
+
     mxgemm_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
-                        stride_cm, stride_cn, stride_scale, fpflag_a, fpflag_b, scale_block, blockSizeM, blockSizeN,
-                        blockSizeK, group_size_m, num_warps=numWarps, num_ctas=numCtas)
+                        stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a], dtype_converter[dtype_b],
+                        scale_block, blockSizeM, blockSizeN, blockSizeK, group_size_m, num_warps=numWarps,
+                        num_ctas=numCtas)
 
-    torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-05, atol=1e-2)
-
-
-if __name__ == "__main__":
-    for config in generate_configs():
-        testGemm(config)
+    torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-5, atol=1e-8)
