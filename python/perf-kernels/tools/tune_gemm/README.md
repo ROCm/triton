@@ -16,7 +16,7 @@ This means `BLOCK_SIZE_K` does not need to divide K dim.
 Unlike the [matmul tutorial](https://github.com/triton-lang/triton/blob/main/python/tutorials/03-matrix-multiplication.py) (referred as the tutorial),
 the matmul kernel used in the tuning script (referred as the kernel) does not
 guard load along M and N dim
-([this](https://github.com/triton-lang/triton/blob/main/python/tutorials/03-matrix-multiplication.py#L282-L283) shows how this is done in the tutorial).
+([this](https://github.com/triton-lang/triton/blob/7fc1d5693827858e7595b6e858d740281456162f/python/tutorials/03-matrix-multiplication.py#L301-L302) shows how this is done in the tutorial).
 When `BLOCK_SIZE_M` or `BLOCK_SIZE_N` does not divide M or N, the kernel will
 load out-of-bound data.
 In most cases this is fine, since the kernel does masked store at the end.
