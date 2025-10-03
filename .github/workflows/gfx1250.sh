@@ -40,6 +40,9 @@ LLVM_LIBRARY_DIR=/data/build/amd-mlir-9f0b4533535f-debug-install LLVM_SYSPATH=/d
 
 export TRITON_HIP_USE_ASYNC_COPY=1
 
+echo "=== Run LIT Tests ==="
+make test-lit-warner
+
 echo "=== Run Gluon Tests ==="
 
 pytest --count=16 -n 16 -s -v third_party/amd/python/test/test_gluon_gfx1250.py
