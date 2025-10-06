@@ -118,6 +118,7 @@ RUN apt-get update && \
     less \
     vim \
     python3.12-dev \
+    python3.12-venv \
     libzstd-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -375,13 +376,6 @@ Install hip-python from pypi:
 
 ```bash
 pip install -i https://test.pypi.org/simple/ hip-python
-```
-
-Then install notorch:
-
-```bash
-cd <triton_dir>/mi400/notorch
-pip install -e .
 ```
 
 You can just run any kernel by running the associated test script. Example for MXFA kernels:
