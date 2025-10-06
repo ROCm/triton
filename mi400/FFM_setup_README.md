@@ -397,6 +397,10 @@ pip3 uninstall -y pytorch-triton-rocm
 
 (doesn't matter if it doesn't support gfx1250 - the point is to only use the CPU part of pytorch and while `.cuda()` maps directly to the HIP runtime, which doesn't require gfx1250 specific support.)
 
+### Install Rocplay to capture CAP files
+
+You can find the installation details [there](https://amd.atlassian.net/wiki/spaces/~avulisha/pages/1068105750/Duplicate+of+Replaying+AQL+traces+captured+on+FFM+on+top+of+AM#Compiling-Rocplaycap-4.5.0). [Here](https://github.amd.com/GFX-IP-Arch/triton/blob/shared/gfx1250-dev-sept/mi400/test_mxfa_hipdriver.sh) you can find an example how to generate CAP files for Triton.
+
 
 ### Compiler Explorer Setup
 
