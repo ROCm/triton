@@ -61,7 +61,7 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
 }
 
 /*
-  DotTilingIterator is used for controlling the order in which FMAs are
+  DotTiling is used for controlling the order in which FMAs are
   emitted to minimize lifetimes of A, B operands in registers.
   Doing so minimizes register pressure.
   Args:
@@ -72,8 +72,12 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
        based on whether having M or N be the outer loop would require
        fewer registers (based on aType, bType, M and N).
 
-  Example 0 - No tiling (m, n, k ordering)
-  numRep = {4, 4, 2}
+  TODO(dtanner) Add explanation for FA.
+  
+  == Example 0 ==
+  No tiling (m, n, k ordering)
+  numRep = {4, 8, 2}
+  tileSize = {4, 8, 2} // effectively
 
                         N
     +----+----+----+----+----+----+----+----+
@@ -97,12 +101,12 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
     | 49 | 51 | 53 | 55 | 57 | 59 | 61 | 63 |
     +----+----+----+----+----+----+----+----+  K[1]
 
-    Opds needed for first 16 FMAs: 18
-    Peak Opds (prefetch=8): 19
+    Loads needed for first 8 FMAs: 10
+    Peak live opds (to prefetch by 8 FMAs): 19
 
   
-  Example 1 - 2x2x1 tiling
-  numRep = {4, 4, 2}
+  == Example 1 == 2x2x1 tiling
+  numRep = {4, 8, 2}
   tileSize = {2, 2, 1}
   outerTileN = False
                         N
@@ -127,10 +131,16 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
     | 38 | 39 | 46 | 47 | 54 | 55 | 62 | 63 |
     +----+----+----+----+----+----+----+----+  K[1]
 
-    Opds needed for first 16: 8
-    Peak Opds (prefetch=8): 9
+    Loads needed for first 8 FMAs: 6
+    Peak life opds (to prefetch by 8 FMAs): 9
+    
+    Conclusion: a well-tiled order of FMAs can
+    (1) Require fewer local_loads at the top of loop
+        to feed the first several FMAs.
+    (2) Reduce the peak register pressure for A,B operands.
+
 */
-struct DotTilingIterator {
+struct DotTiling {
   const int numRepM;
   const int numRepN;
   const int numRepK;
@@ -147,7 +157,7 @@ struct DotTilingIterator {
   const int numTilesOuter;
   const int numTilesInner;
 
-  explicit DotTilingIterator(
+  explicit DotTiling(
     int numRepM,
     int numRepN,
     int numRepK,
@@ -487,7 +497,7 @@ struct DotOpMFMAConversionHelper {
     // TODO(dtanner) tileSize may be based on (a) number of mfmas which takes same cycles as LDS latency
     // or (b) specified by the user; it can be narrowed to powers of 1.
     int tileSize = 2;
-    DotTilingIterator dotTiling(numRepM, numRepN, numVecInKBase, tileSize, tileSize, kWidth/kBase, outerTileN);
+    DotTiling dotTiling(numRepM, numRepN, numVecInKBase, tileSize, tileSize, kWidth/kBase, outerTileN);
 
     // Iterate over tiles.
     for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
