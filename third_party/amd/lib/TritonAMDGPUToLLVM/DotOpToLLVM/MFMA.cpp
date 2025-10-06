@@ -26,6 +26,7 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -58,6 +59,153 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
       .Case<Float4E2M1FNType>([](Type) { return 4; })
       .Default([](Type) { return -1; });
 }
+
+/*
+  DotTilingIterator is used for controlling the order in which FMAs are
+  emitted to minimize lifetimes of A, B operands in registers.
+  Doing so minimizes register pressure.
+  Args:
+   - numRepM,N,K - total numReps for M, N or K.
+   - tileSizeM,N,K - how many reps belong to a tile.
+   - outerTileN - Since M and N form an outer product, it is numerically correct
+       to have either M or N be the outer or inner loop. This is calculated
+       based on whether having M or N be the outer loop would require
+       fewer registers (based on aType, bType, M and N).
+
+  Example 0 - No tiling (m, n, k ordering)
+  numRep = {4, 4, 2}
+
+                        N
+    +----+----+----+----+----+----+----+----+
+    |  0 |  2 |  4 |  6 |  8 | 10 | 12 | 14 |
+    +----+----+----+----+----+----+----+----+
+    | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 |
+  M +----+----+----+----+----+----+----+----+
+    | 32 | 34 | 36 | 38 | 40 | 42 | 44 | 46 |
+    +----+----+----+----+----+----+----+----+
+    | 48 | 50 | 52 | 54 | 56 | 58 | 60 | 62 |
+    +----+----+----+----+----+----+----+----+  K[0]
+
+                        N
+    +----+----+----+----+----+----+----+----+
+    |  1 |  3 |  5 |  7 |  9 | 11 | 13 | 15 |
+    +----+----+----+----+----+----+----+----+
+    | 17 | 19 | 21 | 23 | 25 | 27 | 29 | 31 |
+  M +----+----+----+----+----+----+----+----+
+    | 33 | 35 | 37 | 39 | 41 | 43 | 45 | 47 |
+    +----+----+----+----+----+----+----+----+
+    | 49 | 51 | 53 | 55 | 57 | 59 | 61 | 63 |
+    +----+----+----+----+----+----+----+----+  K[1]
+
+    Opds needed for first 16 FMAs: 18
+    Peak Opds (prefetch=8): 19
+
+  
+  Example 1 - 2x2x1 tiling
+  numRep = {4, 4, 2}
+  tileSize = {2, 2, 1}
+  outerTileN = False
+                        N
+    +----+----+----+----+----+----+----+----+
+    |  0 |  1 |  8 |  9 | 16 | 17 | 24 | 25 |
+    +----+----+----+----+----+----+----+----+
+    |  2 |  3 | 10 | 11 | 18 | 19 | 26 | 27 |
+  M +----+----+----+----+----+----+----+----+
+    |  4 |  5 | 12 | 13 | 20 | 21 | 28 | 29 |
+    +----+----+----+----+----+----+----+----+
+    |  6 |  7 | 14 | 15 | 22 | 23 | 30 | 31 |
+    +----+----+----+----+----+----+----+----+  K[0]
+
+                        N
+    +----+----+----+----+----+----+----+----+
+    | 32 | 33 | 40 | 41 | 48 | 49 | 56 | 57 |
+    +----+----+----+----+----+----+----+----+
+    | 34 | 35 | 42 | 43 | 50 | 51 | 58 | 59 |
+  M +----+----+----+----+----+----+----+----+
+    | 36 | 37 | 44 | 45 | 52 | 53 | 60 | 61 |
+    +----+----+----+----+----+----+----+----+
+    | 38 | 39 | 46 | 47 | 54 | 55 | 62 | 63 |
+    +----+----+----+----+----+----+----+----+  K[1]
+
+    Opds needed for first 16: 8
+    Peak Opds (prefetch=8): 9
+*/
+struct DotTilingIterator {
+  const int numRepM;
+  const int numRepN;
+  const int numRepK;
+  const int tileSizeM;
+  const int tileSizeN;
+  const int tileSizeK;
+  const bool outerTileN;
+
+  const int numTilesM;
+  const int numTilesN;
+  const int numTilesK;
+  const int tileSizeOuter;
+  const int tileSizeInner;
+  const int numTilesOuter;
+  const int numTilesInner;
+
+  explicit DotTilingIterator(
+    int numRepM,
+    int numRepN,
+    int numRepK,
+    int tileSizeM,
+    int tileSizeN,
+    int tileSizeK,
+    bool outerTileN)
+      : numRepM(numRepM),
+        numRepN(numRepN),
+        numRepK(numRepK),
+        tileSizeM(tileSizeM),
+        tileSizeN(tileSizeN),
+        tileSizeK(tileSizeK),
+        outerTileN(outerTileN),
+        numTilesM(numRepM / tileSizeM),
+        numTilesN(numRepN / tileSizeN),
+        numTilesK(numRepK / tileSizeK),
+        tileSizeOuter(outerTileN ? tileSizeN : tileSizeM),
+        tileSizeInner(outerTileN ? tileSizeM : tileSizeN),
+        numTilesOuter(outerTileN ? numTilesN : numTilesM),
+        numTilesInner(outerTileN ? numTilesM : numTilesN) {
+    // Num mfmas must evenly divide into tiles.
+    if (numTilesM * tileSizeM != numRepM) {
+      llvm::errs() << "DotTiling not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM;
+    }
+    if (numTilesN * tileSizeN != numRepN) {
+      llvm::errs() << "DotTiling not valid with numRepN=" << numRepN << ", and tileSizeN=" << tileSizeN;
+    }
+    if (numTilesK * tileSizeK != numRepK) {
+      llvm::errs() << "DotTiling not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK;
+    }
+  }
+  int getTileSizeM() const { return tileSizeM; }
+  int getTileSizeN() const { return tileSizeN; }
+  int getTileSizeK() const { return tileSizeK; }
+
+  int getNumTilesO() const { return numTilesOuter; }
+  int getNumTilesI() const { return numTilesInner; }
+  int getNumTilesK() const { return numTilesInner; }
+
+  int getTileStartM(int tileIdxOuter, int tileIdxInner) const {
+    if (outerTileN) {
+      return tileIdxInner * tileSizeInner; // M is inner tile loop.
+    } else {
+      return tileIdxOuter * tileSizeOuter; // M is outer tile loop.
+    }
+  }
+  int getTileStartN(int tileIdxOuter, int tileIdxInner) const {
+    if (outerTileN) {
+      return tileIdxOuter * tileSizeOuter;
+    } else {
+      return tileIdxInner * tileSizeInner;
+    }
+  }
+  int getTileStartK(int tileIdxK) const {
+    return tileIdxK * tileSizeK;
+  }
+};
 
 struct DotOpMFMAConversionHelper {
   AMDMfmaEncodingAttr mfmaLayout;
@@ -331,9 +479,28 @@ struct DotOpMFMAConversionHelper {
 
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+
+    // Tile along K, M, N to minimize register lifetimes / pressure.
+    // TODO(dtanner) Calculate outerTileN based on whether M or N needs fewer bits to store.
+    // If one is loaded into register before BB (e.g. FA), then that should be outer.
+    bool outerTileN = true;
+    // TODO(dtanner) tileSize may be based on (a) number of mfmas which takes same cycles as LDS latency
+    // or (b) specified by the user; it can be narrowed to powers of 1.
+    int tileSize = 2;
+    DotTilingIterator dotTiling(numRepM, numRepN, numVecInKBase, tileSize, tileSize, kWidth/kBase, outerTileN);
+
+    // Iterate over tiles.
+    for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
+    for (int tileIdxO = 0; tileIdxO < dotTiling.getNumTilesO(); ++tileIdxO) { // outer
+    for (int tileIdxI = 0; tileIdxI < dotTiling.getNumTilesI(); ++tileIdxI) { // inner
+      const int tileStartM = dotTiling.getTileStartM(tileIdxO, tileIdxI);
+      const int tileStartN = dotTiling.getTileStartN(tileIdxO, tileIdxI);
+      const int tileStartK = dotTiling.getTileStartK(tileIdxK);
+
+    // Iterate within tile.
     for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
+      for (int m = tileStartM; m < tileStartM + dotTiling.getTileSizeM(); ++m) {
+        for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
           Value acc = tb.undef(vecTy);
 
           for (int v = 0; v < elemsPerVec; ++v) {
@@ -342,7 +509,7 @@ struct DotOpMFMAConversionHelper {
             acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
           }
 
-          for (int k = 0; k < numVecInKBase; ++k) {
+          for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
             Value op1 = operandA[{b, m, k}];
             Value op2 = operandB[{b, n, k}];
             int cbsz = 0;
@@ -370,13 +537,16 @@ struct DotOpMFMAConversionHelper {
 
             if (!firstMfma)
               firstMfma = acc;
-          }
+          } // k
 
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
-        }
-      }
-    }
+        } // n
+      } // m
+    } // b
+    } // tile Inner
+    } // tile Outer
+    } // tile K
 
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
