@@ -1244,31 +1244,10 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         llvm::to_vector(tensorDescTy.getBlockType().getShape());
     SmallVector<int64_t> blockShapePerCTA = blockShape;
 
-    // Take clusters into account (if they are enabled)
     int numCTAs = TritonGPUDialect::getNumCTAs(mod);
     Value multicastMask = b.i32_val(0);
     if (numCTAs > 1) {
-      auto enc = llvm::cast<LayoutEncodingTrait>(smemTy.getEncoding());
-      SmallVector<unsigned> order;
-      if (swizzledEnc)
-        auto order = swizzledEnc.getOrder();
-      else
-        order = paddedEnc.getOrder();
-
-      blockShapePerCTA = getShapePerCTA(enc, blockShape);
-      Value clusterCTAId = targetInfo.getClusterCTAId(rewriter, loc);
-      auto multiDimClusterCTAId = delinearize(
-          rewriter, loc, clusterCTAId, enc.getCTAsPerCGA(), enc.getCTAOrder());
-      for (unsigned i = 0; i < blockShapePerCTA.size(); i++) {
-        int idx = order[i];
-        offset[i] =
-            b.add(offset[i], b.urem(b.mul(multiDimClusterCTAId[i],
-                                          b.i32_val(blockShapePerCTA[i])),
-                                    b.i32_val(blockShape[i])));
-      }
-      multicastMask = LLVM::AMD::getGroupMask(
-          rewriter, loc, multiDimClusterCTAId, enc.getCTAsPerCGA(),
-          enc.getCTASplitNum(), enc.getCTAOrder());
+      return rewriter.notifyMatchFailure(op, "NYI: Support multicast.");
     }
 
     Type globalPtrTy = ptr_ty(ctx, 1);
@@ -2114,21 +2093,6 @@ private:
   const AMD::TargetInfo &targetInfo;
 };
 
-struct AsyncCommitGroupOpConversion
-    : public ConvertOpToLLVMPattern<AsyncCommitGroupOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    // Drop the result AsyncToken
-    auto loc = op->getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    rewriter.replaceOp(op, b.i32_val(0));
-    return success();
-  }
-};
-
 struct AsyncTDMWaitConversion
     : public ConvertOpToLLVMPattern<triton::amdgpu::AsyncTDMWait> {
   AsyncTDMWaitConversion(LLVMTypeConverter &converter, PatternBenefit benefit)
@@ -2143,6 +2107,21 @@ struct AsyncTDMWaitConversion
                                     "llvm.amdgcn.s.wait.tensorcnt", {},
                                     {b.i16_val(op.getNum())});
     rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct AsyncCommitGroupOpConversion
+    : public ConvertOpToLLVMPattern<AsyncCommitGroupOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Drop the result AsyncToken
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    rewriter.replaceOp(op, b.i32_val(0));
     return success();
   }
 };
@@ -2282,7 +2261,7 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
            StoreOpConversion, BufferLoadOpConversion,
            BufferLoadToLocalOpConversion, BufferStoreOpConversion,
            BufferAtomicRMWOpConversion, AsyncCopyGlobalToLocalOpConversion,
-           BufferAtomicCASOpConversion, AsyncTDMCopyGlobalToLocalOpConversion>(
+           AsyncTDMCopyGlobalToLocalOpConversion, BufferAtomicCASOpConversion>(
           typeConverter, targetInfo, axisInfoAnalysis, benefit);
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<TDMGlobalPrefetchConversion>(typeConverter, targetInfo, benefit);

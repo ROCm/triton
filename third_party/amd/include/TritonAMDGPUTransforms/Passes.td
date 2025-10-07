@@ -17,12 +17,6 @@ def TritonAMDGPUStreamPipeline : Pass<"tritonamdgpu-stream-pipeline", "mlir::Mod
     Option<"numStages", "num_stages",
            "int32_t", /*default*/"2",
            "Number of Pipeline stages">,
-    Option<"globalPrefetch", "global_prefetch",
-           "int32_t", /*default*/"0",
-           "Set global prefetch stage count">,
-    Option<"localPrefetch", "local_prefetch",
-           "int32_t", /*default*/"0",
-           "Set local prefetch stage count">,
     Option<"useAsyncCopy", "use_async_copy",
            "bool", /*default*/"false",
            "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
@@ -140,6 +134,11 @@ def TritonAMDGPUCanonicalizePointers : Pass<"tritonamdgpu-canonicalize-pointers"
 
   let dependentDialects = [];
 
+  let options = [
+    Option<"enableLargeTensorPtrCanon", "enable-large-tensor-ptr-canon",
+           "bool", /*default=*/"false",
+           "Whether to enable canonicalization for pointers pointing to large-tensors (a specialization for tensors over 2GB)">
+  ];
 }
 
 def TritonAMDGPUReorderInstructions: Pass<"tritonamdgpu-reorder-instructions", "mlir::ModuleOp"> {
@@ -166,6 +165,9 @@ def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "ml
     Option<"allowBufferAtomics", "allow-buffer-atomics",
            "bool", /*default*/"true",
            "Allow buffer atomic operations when the hardware supports it.">,
+    Option<"analyzeSmallTensorOfst", "analyze-small-tensor-ofst",
+          "bool", /*default=*/"false",
+           "Whether to still analyze index range for tensors whose base has tt.pointer_range = 32 specialization. If false load/store from such tensors will go down buffer ops without analzying index range.">
   ];
 }
 

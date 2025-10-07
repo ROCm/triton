@@ -94,10 +94,6 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
 // 1. The user provides a `num_stages` that specifies how many stages the
 //    pipeline will have. The number of stages must be larger than the distance
 //    from the first independent load to the compute in order to pipeline.
-//    1.a. User may also specify `global_prefetch=<s>` to set the number of
-//         stages between tt.load and ttg.local_store ops.
-//    1.b. User may also specify `local_prefetch=<s>` to set the number of
-//         stages between ttg.local_load and compute.
 // 2. A schedule is created based on the distance between the global loads
 //    in the first stages and the compute that uses the loaded values in the
 //    last stage (num_stages - 1). Each operation will be clustered in the
@@ -878,15 +874,13 @@ using Stages = std::array<int, SCHED_SIZE>;
 //   WARNING: Changing the order of schedule.clusters.newAtBack() calls
 //            can cause invalid schedules to be produced.
 LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
-                           int &numBuffers, int globalPrefetch,
-                           int localPrefetch, bool useAsyncCopy,
-                           bool waitAtTail, Clusters &clusters,
-                           tt::CoarseSchedule &schedule) {
+                           int &numBuffers, bool useAsyncCopy, bool waitAtTail,
+                           Clusters &clusters, tt::CoarseSchedule &schedule) {
   LDBG("Init SingleDotSchedule");
   int lastStage = numStages - 1;
   stages[SCHED_GLOBAL_LOAD] = 0;
-  stages[SCHED_LOCAL_STORE] = globalPrefetch;
-  stages[SCHED_LOCAL_LOAD] = lastStage - localPrefetch;
+  stages[SCHED_LOCAL_STORE] = 0;
+  stages[SCHED_LOCAL_LOAD] = lastStage;
   stages[SCHED_COMPUTE] = lastStage;
   stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
@@ -1099,8 +1093,7 @@ void scheduleStreamOps(const LoadToStreamOpMap &loadToStreamOp,
 
 tt::CoarseSchedule
 buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
-              int globalPrefetch, int localPrefetch, bool useAsyncCopy,
-              bool waitAtTail,
+              bool useAsyncCopy, bool waitAtTail,
               triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
   LDBG("Build SingleDotSchedule");
   tt::CoarseSchedule schedule(numStages);
@@ -1121,8 +1114,7 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
   }
 
   int numBuffers = 1;
-  if (failed(initSchedule(maxDist, stages, numStages, numBuffers,
-                          globalPrefetch, localPrefetch, useAsyncCopy,
+  if (failed(initSchedule(maxDist, stages, numStages, numBuffers, useAsyncCopy,
                           waitAtTail, clusters, schedule)))
     return {};
 
@@ -1462,12 +1454,12 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
 } // namespace ChainedDotSchedule
 
 FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
-                                   int globalPrefetch, int localPrefetch,
                                    bool useAsyncCopy, bool waitAtTail) {
 
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
 
+  int globalPrefetch = 0; // TODO: use env var for experiments
   LoadToInfoMap loadToInfo =
       preprocessLoop(axisInfoAnalysis, forOp, numStages, globalPrefetch);
 
@@ -1478,18 +1470,15 @@ FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
 
   tt::CoarseSchedule schedule;
 
-  // For now disable this on MI450. This seems very specific for a given case on
-  // MI350. We can play later with FA+this optimization+TDM to see how much
-  // beneficial it is on mi450.
-  // (succeeded(ChainedDotSchedule::checkPreconditions(forOp, numStages,
-  //                                                      loadToInfo))) {
-  //   schedule = ChainedDotSchedule::buildSchedule(
-  //       forOp, numStages, loadToInfo, useAsyncCopy, axisInfoAnalysis);
-  // } else {
-  schedule = SingleDotSchedule::buildSchedule(
-      forOp, numStages, loadToInfo, globalPrefetch, localPrefetch, useAsyncCopy,
-      waitAtTail, axisInfoAnalysis);
-  // }
+  if (succeeded(ChainedDotSchedule::checkPreconditions(forOp, numStages,
+                                                       loadToInfo))) {
+    schedule = ChainedDotSchedule::buildSchedule(
+        forOp, numStages, loadToInfo, useAsyncCopy, axisInfoAnalysis);
+  } else {
+    schedule = SingleDotSchedule::buildSchedule(forOp, numStages, loadToInfo,
+                                                useAsyncCopy, waitAtTail,
+                                                axisInfoAnalysis);
+  }
 
   if (schedule.empty()) {
     return failure();
@@ -1554,18 +1543,6 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
   void runOnOperation() override {
     ModuleOp moduleOp = getOperation();
     // check numStages
-    if (globalPrefetch < 0 || globalPrefetch >= numStages) {
-      moduleOp.emitError("global prefetch control must be in [0, ")
-          << numStages << "); " << globalPrefetch << " is out of range";
-      return signalPassFailure();
-    }
-
-    if (localPrefetch < 0 || localPrefetch >= numStages) {
-      moduleOp.emitError("local prefetch control must be in [0, ")
-          << numStages << "); " << localPrefetch << " is out of range";
-      return signalPassFailure();
-    }
-
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
       // Bail out for loops with num_stage <= 1.
@@ -1582,8 +1559,7 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
       // pingpong, which is the only use case of this scheduling variant.
       int numStagesThis = tt::getNumStagesOrDefault(forOp, numStages);
       bool waitAtTail = usePingpong && (numStagesThis == 3) && useAsyncCopy;
-      (void)pipelineLoop(forOp, numStagesThis, globalPrefetch, localPrefetch,
-                         useAsyncCopy, waitAtTail);
+      (void)pipelineLoop(forOp, numStagesThis, useAsyncCopy, waitAtTail);
     }
 
     // NOTE: Leave empty for now, until we utilize customEpiloguePeeling

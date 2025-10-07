@@ -185,12 +185,13 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   return wmmaIntrinsic.getResult(0);
 }
 
+
 Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
                                   Location loc, Value valA, Value valScaleA,
                                   Value valB, Value valScaleB, Value valC,
                                   Type aElType, Type bElType, Type dElType,
                                   int scaleKWidth) {
-  assert(scaleKWidth == 2 || scaleKWidth == 4 || scaleKWidth == 8);
+  assert(scaleKWidth == 4 || scaleKWidth == 8);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   std::string name = "llvm.amdgcn.wmma.scale";
   if (scaleKWidth == 8) {
@@ -201,21 +202,29 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
   LLVM::FastmathFlagsAttr defaultFlags{};
   SmallVector<Value> operands;
 
+  // Reference: llvm/include/llvm/IR/IntrinsicsAMDGPU.td,
+  // int_amdgcn_wmma_scale_f32_16x16x128_f8f6f4
   Value fmtA = b.i32_val(getWmmaF8F6F4MatrixFormat(aElType));
   operands.push_back(fmtA);
   operands.push_back(valA);
   Value fmtB = b.i32_val(getWmmaF8F6F4MatrixFormat(bElType));
   operands.push_back(fmtB);
   operands.push_back(valB);
+  // C_mod is unused. Should be set to 0
   Value modC = b.i16_val(0);
   operands.push_back(modC);
   operands.push_back(valC);
+  // Set a_scale mantissa to zero as use E8M0 format (no mantissa bits)
   operands.push_back(b.i32_val(0));
+  // Set a_scale_fmt to 0 = E8M0
   operands.push_back(b.i32_val(0));
   operands.push_back(valScaleA);
+  // Set b_scale mantissa to zero as we use E8M0 format (no mantissa bits)
   operands.push_back(b.i32_val(0));
+  // Set b_scale fmt to 0 = E8M0
   operands.push_back(b.i32_val(0));
   operands.push_back(valScaleB);
+  // Set "Reuse matrix A" and "Reuse matrix B" to 0.
   operands.push_back(b.i1_val(0));
   operands.push_back(b.i1_val(0));
   auto wmmaIntrinsic = LLVM::createLLVMIntrinsicCallOp(

@@ -768,5 +768,4 @@ def AsyncTDMWait : TT_AMDGPU_Op<"async_tdm_wait"> {
   let assemblyFormat = "$asyncToken attr-dict";
 }
 
-
 #endif
