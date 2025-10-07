@@ -464,6 +464,77 @@ So this version must has a much higher freq. Need to confirm with agt.
 Note that we have to disable the vector-combine pass otherwise the `mul` instruction used
 update the acc will be moved from cluster 0 to cluster 2.
 
+## Collect traces
+
+command:
+```
+DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 ROCPROF_ATT_LIBRARY_PATH=/app/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att.json -d /app/AMD-triton/python/perf-kernels/study_4-stage/MI350/paddedSharedLayout_fixKPadding_att --  python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+```
+
+att.json looks like:
+```json
+{
+    "jobs": [
+        {
+        "kernel_include_regex": "attn_fwd",
+        "kernel_exclude_regex": "",
+        "kernel_iteration_range": "[10]",
+        "advanced_thread_trace": true,
+        "att_parse" : "trace",
+        "att_target_cu" : 0,
+        "att_shader_engine_mask" : "0xF",
+        "att_simd_select": "0xF",
+        "att_buffer_size": "0x60000000"
+    }
+    ]
+}
+```
+
+## Room for improvement
+
+While LLVM team is rebasing the patch for mfma and valu interleaving, there are
+a few things we can improve
+- bank conflicts for K
+  - old one
+    ```
+ #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16], [64, 0], [0, 32], [0, 1], [0, 2], [0, 4], [0, 8]], block = []}>
+ ```
+  - new one
+    ```
+    #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 1], [64, 0], [0, 32], [0, 2], [0, 4], [0, 8], [0, 16]], block = []}>
+    ```
+  - The issue is fixed by [37a9e809315a4](https://github.com/AlexAUT/triton/commit/37a9e809315a45c18e5d0ba5c20f4c416d8aafa2).
+    The bank conflicts are gone. But perf is slightly worse compared to the new one above.
+- 1st compute cluster
+  - It starts with `lgkmcnt(0)`, which always takes 20 cycles?
+  - The above `lgkmcnt(0)` is always followed by a 12-cycle NONE?
+  - Then the 3rd instruction is mfma. The above two take 32 cycles, is it coincident?
+    - If I move the above `lgkmcnt(0)` into the memory cluster, the NONE part takes 16 cycles ??
+      This is better than 32 cycles, but why???
+  - 2 `s_mov` + 2 x `v_mov` ?
+  - `s_nop` is followed by `v_permlane32_swap`?
+  - Long stall for some of the early valu instructions
+- 4th mem cluster
+  - transition from 3rd compute cluster (helps)
+    - `v_exp` --> `setprio` --> `s_waitcnt` --> `barrier`.
+      We can try to move the 2 `s_xx` instruction after the barrer so that the
+      mfma in the compute cluster can start earlier.
+    - 6 `v_add` instruction at the end of the loop
+      - 216-219 are about `buffer_load` address update.
+        Now it's always updating the vgpr address. We should update the sgpr address.
+        ==> The pointer canonicalization pass can update the inc onto the base ptr.
+      - 206 and 207 are coming from ttgir. There are redundant `addptr` ops for
+        k and v addresses: one with linear layout, which is selected for asyncCopy
+        for paddedSharedLayout, the other with blocked. It seems the layout progagation
+        does not cross the boundary of the loop
+- mem cluster
+  - We should place lgkmcnt(0) at the end of memory cluster
+        
+    
+
+
+
+
 
 
 
