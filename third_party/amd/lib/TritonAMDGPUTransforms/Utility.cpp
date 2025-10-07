@@ -287,6 +287,22 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
       std::swap(p[0], p[1]);
   }
 
+  if (kDim == 128) {
+      bases.clear();
+      bases.push_back({1, 0});
+      bases.push_back({2, 0});
+      bases.push_back({4, 0});
+      bases.push_back({8, 0});
+      bases.push_back({16, 0});
+      bases.push_back({32, 0});
+      bases.push_back({0, 1});
+      bases.push_back({64, 0});
+      bases.push_back({0, 32});
+      bases.push_back({0, 2});
+      bases.push_back({0, 4});
+      bases.push_back({0, 8});
+      bases.push_back({0, 16});
+  }
   auto ctaLayout = ttg::getCTALayout(srcTy.getEncoding());
   triton::LinearLayout linearComponent(
       {
