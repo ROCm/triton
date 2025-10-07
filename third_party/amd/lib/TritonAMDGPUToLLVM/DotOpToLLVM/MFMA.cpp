@@ -63,17 +63,45 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
 /*
   DotTiling is used for controlling the order in which FMAs are
   emitted to minimize lifetimes of A, B operands in registers.
-  Doing so minimizes register pressure.
+  Doing so helps backend compilers minimize register pressure
+  and hide latency.
+  Well-order of FMAs have two benefits.
+
+  (1) Whether M or N is the outer vs inner loop.
+  When the MxN shape of the dot is not square, it is prefferable to register
+  pressure to have the larger size be the outer loop and the shorter side be
+  the inner loop. Doing so reduces the peak register pressure for A,B operands
+  during the lifetime of the dot. The larger/smaller comparison is in terms of bits.
+
+  (2) Tiling.
+  Rather than simply ordering the FMAs as row-major or col-major according
+  to M, N loops, tiling gives a benefit to prefetching and register allocation
+  at the beginning and end of the dot. Starting the dot with a squarish
+  tile (along M, N dims) Means fewer local_loads will supply more mfmas.
+  The corollary of this is that, at the end of the dot, more
+  operands/registers are being freed while there are still more FMAs;
+  this allows a smoother transition from one dot to another in terms
+  of register pressure.
+
+  
   Args:
    - numRepM,N,K - total numReps for M, N or K.
    - tileSizeM,N,K - how many reps belong to a tile.
    - outerTileN - Since M and N form an outer product, it is numerically correct
-       to have either M or N be the outer or inner loop. This is calculated
+       to have either M or N be the outer or inner loop.
+       Whether the outer tiling should be N is calculated outside of
+       this class and based on wether it requires fewer registers to
+       keep all of A[M] or B[N] alive (and not re-fetch data from LDS);
        based on whether having M or N be the outer loop would require
        fewer registers (based on aType, bType, M and N).
-
-  TODO(dtanner) Add explanation for FA.
+       Some dots will have all of A or B already loaded into registers
+       outside of the loops, e.g. FA, and therefore that operand
+       should be the inner tile.
   
+  The below examples how a dot MxNxK needs a different number of live
+  operands/registers based on the order while still wanting to
+  prefetch the data from LDS to hide it's latency
+
   == Example 0 ==
   No tiling (m, n, k ordering)
   numRep = {4, 8, 2}
@@ -132,45 +160,40 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
     +----+----+----+----+----+----+----+----+  K[1]
 
     Loads needed for first 8 FMAs: 6
-    Peak life opds (to prefetch by 8 FMAs): 9
-    
-    Conclusion: a well-tiled order of FMAs can
-    (1) Require fewer local_loads at the top of loop
-        to feed the first several FMAs.
-    (2) Reduce the peak register pressure for A,B operands.
-
+    Peak live opds (to prefetch by 8 FMAs): 9
 */
 struct DotTiling {
-  const int numRepM;
-  const int numRepN;
-  const int numRepK;
-  const int tileSizeM;
-  const int tileSizeN;
-  const int tileSizeK;
+  const int64_t numRepM;
+  const int64_t numRepN;
+  const int64_t numRepK;
+  const int64_t tileSizeM;
+  const int64_t tileSizeN;
+  const int64_t tileSizeK;
   const bool outerTileN;
 
-  const int numTilesM;
-  const int numTilesN;
-  const int numTilesK;
-  const int tileSizeOuter;
-  const int tileSizeInner;
-  const int numTilesOuter;
-  const int numTilesInner;
+  const int64_t numTilesM;
+  const int64_t numTilesN;
+  const int64_t numTilesK;
+  const int64_t tileSizeOuter;
+  const int64_t tileSizeInner;
+  const int64_t numTilesOuter;
+  const int64_t numTilesInner;
 
+  // numRep* must be evenly divisible by tileSize*
   explicit DotTiling(
-    int numRepM,
-    int numRepN,
-    int numRepK,
-    int tileSizeM,
-    int tileSizeN,
-    int tileSizeK,
+    int64_t numRepM,
+    int64_t numRepN,
+    int64_t numRepK,
+    int64_t tileSizeM,
+    int64_t tileSizeN,
+    int64_t tileSizeK,
     bool outerTileN)
       : numRepM(numRepM),
         numRepN(numRepN),
         numRepK(numRepK),
-        tileSizeM(tileSizeM),
-        tileSizeN(tileSizeN),
-        tileSizeK(tileSizeK),
+        tileSizeM(std::min(tileSizeM, numRepM)),
+        tileSizeN(std::min(tileSizeN, numRepN)),
+        tileSizeK(std::min(tileSizeK, numRepK)),
         outerTileN(outerTileN),
         numTilesM(numRepM / tileSizeM),
         numTilesN(numRepN / tileSizeN),
@@ -181,38 +204,38 @@ struct DotTiling {
         numTilesInner(outerTileN ? numTilesM : numTilesN) {
     // Num mfmas must evenly divide into tiles.
     if (numTilesM * tileSizeM != numRepM) {
-      llvm::errs() << "DotTiling not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM;
+      llvm::errs() << "ERROR: DotTiling not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM << "\n";
     }
     if (numTilesN * tileSizeN != numRepN) {
-      llvm::errs() << "DotTiling not valid with numRepN=" << numRepN << ", and tileSizeN=" << tileSizeN;
+      llvm::errs() << "ERROR: DotTiling not valid with numRepN=" << numRepN << ", and tileSizeN=" << tileSizeN << "\n";
     }
     if (numTilesK * tileSizeK != numRepK) {
-      llvm::errs() << "DotTiling not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK;
+      llvm::errs() << "ERROR: DotTiling not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK << "\n";
     }
   }
-  int getTileSizeM() const { return tileSizeM; }
-  int getTileSizeN() const { return tileSizeN; }
-  int getTileSizeK() const { return tileSizeK; }
+  int64_t getTileSizeM() const { return tileSizeM; }
+  int64_t getTileSizeN() const { return tileSizeN; }
+  int64_t getTileSizeK() const { return tileSizeK; }
 
-  int getNumTilesO() const { return numTilesOuter; }
-  int getNumTilesI() const { return numTilesInner; }
-  int getNumTilesK() const { return numTilesInner; }
+  int64_t getNumTilesO() const { return numTilesOuter; }
+  int64_t getNumTilesI() const { return numTilesInner; }
+  int64_t getNumTilesK() const { return numTilesInner; }
 
-  int getTileStartM(int tileIdxOuter, int tileIdxInner) const {
+  int64_t getTileStartM(int tileIdxOuter, int tileIdxInner) const {
     if (outerTileN) {
       return tileIdxInner * tileSizeInner; // M is inner tile loop.
     } else {
       return tileIdxOuter * tileSizeOuter; // M is outer tile loop.
     }
   }
-  int getTileStartN(int tileIdxOuter, int tileIdxInner) const {
+  int64_t getTileStartN(int tileIdxOuter, int tileIdxInner) const {
     if (outerTileN) {
       return tileIdxOuter * tileSizeOuter;
     } else {
       return tileIdxInner * tileSizeInner;
     }
   }
-  int getTileStartK(int tileIdxK) const {
+  int64_t getTileStartK(int tileIdxK) const {
     return tileIdxK * tileSizeK;
   }
 };
@@ -490,19 +513,42 @@ struct DotOpMFMAConversionHelper {
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
 
+    ///////////////////////////////////////////////////////////////////////////
+    // DotTile preparation
+    // TODO(dtanner) are these actually loaded from lds in BB?
+
     // Tile along K, M, N to minimize register lifetimes / pressure.
     // TODO(dtanner) Calculate outerTileN based on whether M or N needs fewer bits to store.
     // If one is loaded into register before BB (e.g. FA), then that should be outer.
-    bool outerTileN = true;
+    size_t bitsAM = mDim * numRepM * aTensorTy.getElementType().getIntOrFloatBitWidth();
+    llvm::outs() << "mDim=" << mDim
+      << ", numRepM=" << numRepM
+      << ", typeBits=" << aTensorTy.getElementType().getIntOrFloatBitWidth()
+      << " -> bitsAM=" << bitsAM << "\n";
+
+    size_t bitsBN = nDim * numRepN * bTensorTy.getElementType().getIntOrFloatBitWidth();
+    llvm::outs() << "nDim=" << nDim
+      << ", numRepN=" << numRepN
+      << ", typeBits=" << bTensorTy.getElementType().getIntOrFloatBitWidth()
+      << " -> bitsBN=" << bitsBN << "\n";
+
+    // Outer tile should be larger one.
+    bool outerTileN = bitsBN > bitsAM;
+
     // TODO(dtanner) tileSize may be based on (a) number of mfmas which takes same cycles as LDS latency
     // or (b) specified by the user; it can be narrowed to powers of 1.
-    int tileSize = 2;
-    DotTiling dotTiling(numRepM, numRepN, numVecInKBase, tileSize, tileSize, kWidth/kBase, outerTileN);
+    int64_t tileSize = 2;
+    int64_t tileSizeM = std::min(tileSize, numRepM);
+    int64_t tileSizeN = std::min(tileSize, numRepN);
+    int64_t tileSizeK =  kWidth/kBase;
+
+    DotTiling dotTiling(numRepM, numRepN, numVecInKBase, tileSizeM, tileSizeN, tileSizeK, outerTileN);
+    ///////////////////////////////////////////////////////////////////////////
 
     // Iterate over tiles.
     for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
-    for (int tileIdxO = 0; tileIdxO < dotTiling.getNumTilesO(); ++tileIdxO) { // outer
-    for (int tileIdxI = 0; tileIdxI < dotTiling.getNumTilesI(); ++tileIdxI) { // inner
+    for (int tileIdxO = 0; tileIdxO < dotTiling.getNumTilesO(); ++tileIdxO) { // outer is larger
+    for (int tileIdxI = 0; tileIdxI < dotTiling.getNumTilesI(); ++tileIdxI) { // inner is smaller
       const int tileStartM = dotTiling.getTileStartM(tileIdxO, tileIdxI);
       const int tileStartN = dotTiling.getTileStartN(tileIdxO, tileIdxI);
       const int tileStartK = dotTiling.getTileStartK(tileIdxK);
@@ -520,6 +566,13 @@ struct DotOpMFMAConversionHelper {
           }
 
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
+            llvm::outs() << "tiK=" << tileIdxK
+              << ", tiO=" << tileIdxO
+              << ", tiI=" << tileIdxI
+              << ", b=" << b
+              << ", m=" << m
+              << ", n=" << n
+              << ", k=" << k << "\n";
             Value op1 = operandA[{b, m, k}];
             Value op2 = operandB[{b, n, k}];
             int cbsz = 0;
