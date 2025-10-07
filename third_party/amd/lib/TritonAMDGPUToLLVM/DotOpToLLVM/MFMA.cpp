@@ -219,7 +219,7 @@ struct DotTiling {
 
   int64_t getNumTilesO() const { return numTilesOuter; }
   int64_t getNumTilesI() const { return numTilesInner; }
-  int64_t getNumTilesK() const { return numTilesInner; }
+  int64_t getNumTilesK() const { return numTilesK; }
 
   int64_t getTileStartM(int tileIdxOuter, int tileIdxInner) const {
     if (outerTileN) {
@@ -504,6 +504,10 @@ struct DotOpMFMAConversionHelper {
     int warpSize = triton::gpu::lookupThreadsPerWarp(rewriter);
     int elemsPerVec = mDim * nDim / warpSize;
     int numVecInKBase = numRepK * kWidth / kBase;
+    llvm::outs() << "numRepK=" << numRepK
+        << ", kWidth=" << kWidth
+        << ", kBase=" << kBase
+        << " -> numVecInKBase=" << numVecInKBase << "\n";
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -541,9 +545,13 @@ struct DotOpMFMAConversionHelper {
     int64_t tileSizeM = std::min(tileSize, numRepM);
     int64_t tileSizeN = std::min(tileSize, numRepN);
     int64_t tileSizeK =  kWidth/kBase;
+    llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
 
     DotTiling dotTiling(numRepM, numRepN, numVecInKBase, tileSizeM, tileSizeN, tileSizeK, outerTileN);
     ///////////////////////////////////////////////////////////////////////////
+
+    llvm::outs() << "dotTiling.getNumTilesK()=" << dotTiling.getNumTilesK() << "\n";
+    llvm::outs() << "dotTiling.getTileSizeK()=" << dotTiling.getTileSizeK() << "\n";
 
     // Iterate over tiles.
     for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
@@ -562,7 +570,7 @@ struct DotOpMFMAConversionHelper {
           for (int v = 0; v < elemsPerVec; ++v) {
             int linearIdx = linearize({b, m, n, v}, fcStrides);
             Value c = fc[linearIdx];
-            llvm::outs() << "fc[" << linearIdx << "]: " << c << "\n";
+            //llvm::outs() << "fc[" << linearIdx << "]: " << c << "\n";
             acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
           }
 
@@ -607,12 +615,12 @@ struct DotOpMFMAConversionHelper {
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
 
-          for (int v = 0; v < elemsPerVec; ++v) {
-            int linearIdx = linearize({b, m, n, v}, fcStrides);
-            fc[linearIdx] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
-            //Value c = fc[linearIdx];
-            //acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
-          }
+          //for (int v = 0; v < elemsPerVec; ++v) {
+          //  int linearIdx = linearize({b, m, n, v}, fcStrides);
+          //  fc[linearIdx] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
+          //  //Value c = fc[linearIdx];
+          //  //acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
+          //}
         } // n
       } // m
     } // b
