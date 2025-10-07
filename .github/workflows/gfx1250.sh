@@ -59,8 +59,8 @@ echo "=== Run GEMM Tests ==="
 export PYTHONPATH=$PWD/mi400
 pytest --count=16 -n 16 -s -v mi400/test_gemm_hipdriver.py
 pytest --count=16 -n 16 -s -v mi400/test_mxgemm_hipdriver.py
-pytest --count=16 -n 16 -s -v mi400/test_mxgemm_gluon.py
 pytest --count=16 -n 16 -s -v mi400/perf_f16_gemm_gluon.py
+pytest --count=16 -n 16 -s -v mi400/perf_mxfp_gemm_gluon.py
 
 echo "=== Run Attention Tests ==="
 
