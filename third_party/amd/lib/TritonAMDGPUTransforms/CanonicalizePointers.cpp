@@ -738,8 +738,8 @@ public:
     RewriterBase::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(addPtrOp);
 
-    if (fatPtrs.at({fatPtrBase, fatPtrOffset}).smallTensorBase)
-      return rewriteSmallTensorPtr(addPtrOp, adaptor, rewriter);
+    //if (fatPtrs.at({fatPtrBase, fatPtrOffset}).smallTensorBase)
+    //  return rewriteSmallTensorPtr(addPtrOp, adaptor, rewriter);
 
     // Query all discardable attributes that we want to preserve
     std::array<StringRef, 3> propagateList{"tt.divisibility", "tt.contiguity",
