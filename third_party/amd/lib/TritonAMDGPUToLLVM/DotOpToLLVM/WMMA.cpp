@@ -185,13 +185,12 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   return wmmaIntrinsic.getResult(0);
 }
 
-
 Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
                                   Location loc, Value valA, Value valScaleA,
                                   Value valB, Value valScaleB, Value valC,
                                   Type aElType, Type bElType, Type dElType,
                                   int scaleKWidth) {
-  assert(scaleKWidth == 4 || scaleKWidth == 8);
+  assert(scaleKWidth == 2 || scaleKWidth == 4 || scaleKWidth == 8);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   std::string name = "llvm.amdgcn.wmma.scale";
   if (scaleKWidth == 8) {
