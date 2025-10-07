@@ -148,6 +148,14 @@ static void expandLoops(ModuleOp moduleOp) {
   resolveMaskOp(moduleOp, peeledMaskOps);
 }
 
+static void removeAttributes(ModuleOp moduleOp) {
+  moduleOp->walk([&](Operation *op) {
+    op->removeAttr(mlir::triton::kLoopStageAttrName);
+    op->removeAttr(mlir::triton::kLoopClusterAttrName);
+    op->removeAttr(mlir::triton::kScheduledMaxStageAttrName);
+  });
+}
+
 struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
 
   using impl::TritonGPUPipelineBase<PipelinePass>::TritonGPUPipelineBase;
@@ -172,7 +180,7 @@ struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
     }
 
     // Cleanup the IR from the pipeline attributes.
-    removePipeliningAttributes(moduleOp);
+    removeAttributes(moduleOp);
 
     pipelineWgmma(moduleOp, numStages);
 
