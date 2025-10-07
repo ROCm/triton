@@ -562,6 +562,7 @@ struct DotOpMFMAConversionHelper {
           for (int v = 0; v < elemsPerVec; ++v) {
             int linearIdx = linearize({b, m, n, v}, fcStrides);
             Value c = fc[linearIdx];
+            llvm::outs() << "fc[" << linearIdx << "]: " << c << "\n";
             acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
           }
 
@@ -600,10 +601,18 @@ struct DotOpMFMAConversionHelper {
 
             if (!firstMfma)
               firstMfma = acc;
+            
           } // k
 
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
+
+          for (int v = 0; v < elemsPerVec; ++v) {
+            int linearIdx = linearize({b, m, n, v}, fcStrides);
+            fc[linearIdx] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
+            //Value c = fc[linearIdx];
+            //acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
+          }
         } // n
       } // m
     } // b
