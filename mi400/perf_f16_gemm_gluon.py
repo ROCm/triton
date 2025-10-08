@@ -18,6 +18,7 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                               stride_cm, stride_cn,  #
                               BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
                               NUM_BUFFERS: ttgl.constexpr,  #
+                              TRANSPOSE_B: ttgl.constexpr,  #
                               NUM_WARPS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
@@ -28,8 +29,13 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [NUM_WARPS // 2, 2], [16, 16, 32])
     SHARED_LAYOUT_A: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_M, BLOCK_K],
                                                                                 [1, 0])
-    SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 8]], [BLOCK_K, BLOCK_N],
-                                                                                [1, 0])
+    if not TRANSPOSE_B:
+        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K, BLOCK_N],
+                                                                                    [1, 0])
+    else:
+        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_N, BLOCK_K],
+                                                                                    [1, 0])
+
     OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
     OPERAND_LAYOUT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
 
@@ -44,12 +50,20 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         strides=(stride_am, stride_ak),  #
         block_shape=(BLOCK_M, BLOCK_K),  #
         layout=SHARED_LAYOUT_A)
-    b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-        base=b_ptr + pid_n * BLOCK_N * stride_bn,  #
-        shape=(K, N),  #
-        strides=(stride_bk, stride_bn),  #
-        block_shape=(BLOCK_K, BLOCK_N),  #
-        layout=SHARED_LAYOUT_B)
+    if not TRANSPOSE_B:
+        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
+            base=b_ptr + pid_n * BLOCK_N * stride_bn,  #
+            shape=(K, N),  #
+            strides=(stride_bk, stride_bn),  #
+            block_shape=(BLOCK_K, BLOCK_N),  #
+            layout=SHARED_LAYOUT_B)
+    else:
+        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
+            base=b_ptr + pid_n * BLOCK_N * stride_bn,  #
+            shape=(N, K),  #
+            strides=(stride_bn, stride_bk),  #
+            block_shape=(BLOCK_N, BLOCK_K),  #
+            layout=SHARED_LAYOUT_B)
 
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
@@ -61,21 +75,33 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     for _ in ttgl.static_range(NUM_BUFFERS - 1):
         ttgl.amd.gfx1250.tdm.async_load(a_desc, [0, load_idx * BLOCK_K],  #
                                         a_buffer.index(load_idx % NUM_BUFFERS))
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [load_idx * BLOCK_K, 0],  #
-                                        b_buffer.index(load_idx % NUM_BUFFERS))
+        if not TRANSPOSE_B:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [load_idx * BLOCK_K, 0],  #
+                                            b_buffer.index(load_idx % NUM_BUFFERS))
+        else:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [0, load_idx * BLOCK_K],  #
+                                            b_buffer.index(load_idx % NUM_BUFFERS))
         load_idx += 1
 
     for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
         ttgl.amd.gfx1250.tdm.async_load(a_desc, [0, load_idx * BLOCK_K],  #
                                         a_buffer.index(load_idx % NUM_BUFFERS))
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [load_idx * BLOCK_K, 0],  #
-                                        b_buffer.index(load_idx % NUM_BUFFERS))
+        if not TRANSPOSE_B:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [load_idx * BLOCK_K, 0],  #
+                                            b_buffer.index(load_idx % NUM_BUFFERS))
+        else:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [0, load_idx * BLOCK_K],  #
+                                            b_buffer.index(load_idx % NUM_BUFFERS))
         load_idx += 1
 
         ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 1) * 2)
 
         a = a_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_A)
-        b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
+        if not TRANSPOSE_B:
+            b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
+        else:
+            b = b_buffer.index(wmma_idx % NUM_BUFFERS).permute([1, 0]).load(layout=OPERAND_LAYOUT_B)
+
         accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
         wmma_idx += 1
 
@@ -83,7 +109,11 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2 - i) * 2)
 
         a = a_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_A)
-        b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
+        if not TRANSPOSE_B:
+            b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
+        else:
+            b = b_buffer.index(wmma_idx % NUM_BUFFERS).permute([1, 0]).load(layout=OPERAND_LAYOUT_B)
+
         accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
         wmma_idx += 1
 
@@ -96,9 +126,10 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(32, 32, 64)])
 @pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("TRANSPOSE_B", [False, True])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
 @pytest.mark.parametrize("num_warps", [4, 8])
-def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N, K, num_warps):
+def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, M, N, K, num_warps):
     if triton.cdiv(K, BLOCK_K) < NUM_BUFFERS:
         pytest.skip("Skip tests where K/BLOCK_K < NUM_BUFFERS")
 
@@ -106,9 +137,11 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N
 
     a = torch.randn((M, K), dtype=torch.float16)
     b = torch.randn((K, N), dtype=torch.float16)
+    if TRANSPOSE_B:
+        b = b.T.contiguous()
     c = torch.zeros((M, N), dtype=torch.float32)
     stride_am, stride_ak = a.stride(0), a.stride(1)
-    stride_bk, stride_bn = b.stride(0), b.stride(1)
+    stride_bk, stride_bn = (b.stride(0), b.stride(1)) if not TRANSPOSE_B else (b.stride(1), b.stride(0))
     stride_cm, stride_cn = c.stride(0), c.stride(1)
 
     a_device = a.cuda()
@@ -122,11 +155,11 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-        NUM_BUFFERS=NUM_BUFFERS, NUM_WARPS=num_warps,  #
+        NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
         num_warps=num_warps, waves_per_eu=num_warps // 4)
 
     c_triton = c_device.cpu()
-    c_torch = a.to(torch.float32) @ b.to(torch.float32)
+    c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))
     torch.testing.assert_close(c_triton, c_torch, rtol=1e-4, atol=1e-4)
 
 
@@ -135,8 +168,9 @@ if __name__ == "__main__":
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
     NUM_BUFFERS = 2
     NUM_WARPS = 4
-    print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {NUM_WARPS=}")
-    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N, K, NUM_WARPS)
+    TRANSPOSE_B = True
+    print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {TRANSPOSE_B=}, {NUM_WARPS=}")
+    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, False, M, N, K, NUM_WARPS)
     NUM_WARPS = 8
-    print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {NUM_WARPS=}")
-    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N, K, NUM_WARPS)
+    print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {TRANSPOSE_B=}, {NUM_WARPS=}")
+    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, False, M, N, K, NUM_WARPS)
