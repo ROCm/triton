@@ -1,3 +1,4 @@
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TDMUtility.h"
 #include "Utility.h"
@@ -8,8 +9,23 @@
 
 using namespace mlir;
 using namespace mlir::triton;
+using namespace mlir::triton::gpu;
 
 namespace {
+Attribute findEncodingFromUsers(Operation *op) {
+  for (auto use : op->getUsers()) {
+    if (auto load = llvm::dyn_cast<amdgpu::AsyncTDMCopyGlobalToLocalOp>(use)) {
+      auto enc = load.getResult().getType().getEncoding();
+      return enc;
+    } else if (auto store =
+                   llvm::dyn_cast<amdgpu::AsyncTDMCopyLocalToGlobalOp>(use)) {
+      auto enc = store.getSrc().getType().getEncoding();
+      return enc;
+    }
+  }
+  return {};
+}
+
 struct MakeTensorPtrOpConversion
     : public ConvertOpToLLVMPattern<triton::MakeTensorPtrOp> {
   using ConvertOpToLLVMPattern<triton::MakeTensorPtrOp>::ConvertOpToLLVMPattern;
@@ -52,16 +68,48 @@ struct MakeTensorDescOpConversion
   LogicalResult
   matchAndRewrite(triton::MakeTensorDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto loc = op.getLoc();
     auto basePtr = adaptor.getBase();
     auto tensorShape = adaptor.getShape();
     auto tensorStride = adaptor.getStrides();
     auto result = op.getResult();
 
-    Value desc =
-        LLVM::AMD::packTensorDesc(rewriter, loc, getTypeConverter(), basePtr,
-                                  tensorShape, tensorStride, result.getType());
+    auto tensorDescTy = result.getType();
+    auto blockTy = tensorDescTy.getBlockType();
+    auto enc = blockTy.getEncoding();
+    if (!enc) {
+      // TODO: add an extra pass to assign layout to descriptors
+      enc = findEncodingFromUsers(op);
+      if (!enc)
+        return rewriter.notifyMatchFailure(op, "Descriptor has no layout.");
+    }
+    auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(enc);
+
+    unsigned padInterval = 0;
+    unsigned padAmount = 0;
+    if (paddedEnc) {
+      if (paddedEnc.getIntervals().size() != 1 ||
+          paddedEnc.getPaddings().size() != 1)
+        return rewriter.notifyMatchFailure(
+            op, "NYI: Multiple interval-padding pairs in TDM.");
+      padInterval = paddedEnc.getIntervals()[0];
+      padAmount = paddedEnc.getPaddings()[0];
+    }
+
+    Type elementType =
+        getTypeConverter()->convertType(blockTy.getElementType());
+    SmallVector<int64_t> blockShape = llvm::to_vector(blockTy.getShape());
+    int numWarps = lookupNumWarps(op);
+
+    auto [group0, group1] = LLVM::AMD::createTDMDescriptor(
+        rewriter, loc, getTypeConverter(), elementType, blockShape, numWarps,
+        padInterval, padAmount, tensorShape, tensorStride, basePtr);
+    SmallVector<Value> groups;
+    llvm::append_range(groups, group0);
+    llvm::append_range(groups, group1);
+    auto desc =
+        packLLElements(loc, getTypeConverter(), groups, rewriter, tensorDescTy);
+
     rewriter.replaceOp(op, desc);
     return success();
   }
