@@ -27,6 +27,7 @@
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/raw_ostream.h"
+#include <array>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -163,14 +164,17 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
     Peak live opds (to prefetch by 8 FMAs): 9
 */
 struct DotTiling {
+  const int64_t numRepB;
   const int64_t numRepM;
   const int64_t numRepN;
   const int64_t numRepK;
+  const int64_t tileSizeB;
   const int64_t tileSizeM;
   const int64_t tileSizeN;
   const int64_t tileSizeK;
   const bool outerTileN;
 
+  const int64_t numTilesB;
   const int64_t numTilesM;
   const int64_t numTilesN;
   const int64_t numTilesK;
@@ -181,20 +185,25 @@ struct DotTiling {
 
   // numRep* must be evenly divisible by tileSize*
   explicit DotTiling(
+    int64_t numRepB,
     int64_t numRepM,
     int64_t numRepN,
     int64_t numRepK,
+    int64_t tileSizeB,
     int64_t tileSizeM,
     int64_t tileSizeN,
     int64_t tileSizeK,
     bool outerTileN)
-      : numRepM(numRepM),
+      : numRepB(numRepB),
+        numRepM(numRepM),
         numRepN(numRepN),
         numRepK(numRepK),
+        tileSizeB(std::min(tileSizeB, numRepB)),
         tileSizeM(std::min(tileSizeM, numRepM)),
         tileSizeN(std::min(tileSizeN, numRepN)),
         tileSizeK(std::min(tileSizeK, numRepK)),
         outerTileN(outerTileN),
+        numTilesB(numRepB / tileSizeB),
         numTilesM(numRepM / tileSizeM),
         numTilesN(numRepN / tileSizeN),
         numTilesK(numRepK / tileSizeK),
@@ -203,6 +212,9 @@ struct DotTiling {
         numTilesOuter(outerTileN ? numTilesN : numTilesM),
         numTilesInner(outerTileN ? numTilesM : numTilesN) {
     // Num mfmas must evenly divide into tiles.
+    if (numTilesB * tileSizeB != numRepB) {
+      llvm::errs() << "ERROR: DotTiling not valid with numRepB=" << numRepB << ", and tileSizeB=" << tileSizeB << "\n";
+    }
     if (numTilesM * tileSizeM != numRepM) {
       llvm::errs() << "ERROR: DotTiling not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM << "\n";
     }
@@ -213,10 +225,14 @@ struct DotTiling {
       llvm::errs() << "ERROR: DotTiling not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK << "\n";
     }
   }
+  int64_t getTileSizeB() const { return tileSizeB; }
   int64_t getTileSizeM() const { return tileSizeM; }
   int64_t getTileSizeN() const { return tileSizeN; }
   int64_t getTileSizeK() const { return tileSizeK; }
+  int64_t getTileSizeO() const { return tileSizeOuter; }
+  int64_t getTileSizeI() const { return tileSizeInner; }
 
+  int64_t getNumTilesB() const { return numTilesB; }
   int64_t getNumTilesO() const { return numTilesOuter; }
   int64_t getNumTilesI() const { return numTilesInner; }
   int64_t getNumTilesK() const { return numTilesK; }
@@ -238,7 +254,143 @@ struct DotTiling {
   int64_t getTileStartK(int tileIdxK) const {
     return tileIdxK * tileSizeK;
   }
+
+  struct DotCoord{
+    DotTiling *dotTiling;
+    int b;
+    int m;
+    int n;
+    int k;
+    const int bIdx = 0;
+    const int mIdx = 1;
+    const int nIdx = 2;
+    const int kIdx = 3;
+    const int bTileIdx = 0;
+    const int mTileIdx = 1;
+    const int nTileIdx = 2;
+    const int kTileIdx = 3;
+
+    // 0 = inner-most loops, 7 = outer most loop
+    std::array<int, 8> indices{{kIdx, nIdx, mIdx, bIdx, nTileIdx, mTileIdx, kTileIdx, bTileIdx}};
+    std::array<int, 8> max_indices;
+
+    std::array<int, 4> tileOrder{{bIdx, kIdx, mIdx, nIdx}}; // B, K, M, N
+    std::array<int, 4> elemOrder{{bIdx, kIdx, mIdx, nIdx}}; // b, m, n, k
+    std::array<int, 4> elemId;
+    std::array<int, 4> tileId;
+    std::array<int, 4> tileSize;
+
+    int outer;
+    int inner;
+    /*
+      Determine how serial dot maps to b, m, n, k.
+    */
+    DotCoord(DotTiling *dotTiling, size_t i) : dotTiling(dotTiling) {
+      tileSize[bIdx] = dotTiling->getTileSizeB();
+      tileSize[mIdx] = dotTiling->getTileSizeM();
+      tileSize[nIdx] = dotTiling->getTileSizeN();
+      tileSize[kIdx] = dotTiling->getTileSizeK();
+
+      max_indices[bIdx] = dotTiling->getTileSizeB();
+      max_indices[mIdx] = dotTiling->getTileSizeM();
+      max_indices[nIdx] = dotTiling->getTileSizeN();
+      max_indices[kIdx] = dotTiling->getTileSizeK();
+      max_indices[bTileIdx] = dotTiling->getNumTilesB();
+      max_indices[mTileIdx] = dotTiling->getNumTilesM();
+      max_indices[nTileIdx] = dotTiling->getNumTilesN();
+      max_indices[kTileIdx] = dotTiling->getNumTilesK();
+
+      /*
+       tileB, tileO, tileI, tileK;
+       b, o, i, k;
+      */
+      b = i;
+      m = i;
+      n = i;
+      k = i;
+    }
+    void next(int idx) {
+      indices[idx]++;
+      if (indices[idx] >= max_indices[idx]) {
+        indices[idx] = 0;
+        next(idx+1);
+      }
+    }
+
+    void next() {
+      next(0);
+    }
+
+
+
+
+    bool operator++() const {
+      k++;
+      if (k > dotTiling.getTileSizeK()) {
+        k = 0;
+
+      }
+    };
+
+    bool operator==(const DotCoord& other) const {
+      return b == other.b && m == other.m && n == other.n && k == other.k;
+    };
+
+    int getB() const { return elemId[bIdx] + tileId[bIdx] * tileSize[bIdx]; }
+    int getM() const { return elemId[mIdx] + tileId[mIdx] * tileSize[mIdx]; }
+    int getN() const { return elemId[nIdx] + tileId[nIdx] * tileSize[nIdx]; }
+    int getK() const { return elemId[kIdx] + tileId[kIdx] * tileSize[kIdx]; }
+
+  };
+
+  /*
+    Iterator
+  */
+  class iterator {
+  private:
+    DotCoord dc;
+    size_t index;
+    DotTiling *dotTiling;
+  public:
+    // iterator() : index(0), dc(0) {}
+    iterator(size_t i) : index(i), dc(i) {}
+    // iterator(const DotCoord &dc, size_t i) : dc(dc), index(i) {}
+
+    DotCoord operator*() const {
+      return dc;
+    }
+
+    iterator& operator++() {
+      ++index;
+      dc = DotCoord(this, index);
+      dc.next();
+      return *this;
+    }
+
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
+    bool operator==(const iterator& other) const {
+      return dc == other.dc && index == other.index;
+    }
+
+    bool operator!=(const iterator& other) const {
+      return !(*this == other);
+    }
+  }; // iterator
+
+  iterator begin() const {
+    return iterator(0);
+  }
+
+  iterator end() const {
+    return iterator(numRepB * numRepM * numRepN * numRepK);
+  }
 };
+
 
 struct DotOpMFMAConversionHelper {
   AMDMfmaEncodingAttr mfmaLayout;
@@ -520,10 +672,9 @@ struct DotOpMFMAConversionHelper {
     ///////////////////////////////////////////////////////////////////////////
     // DotTile preparation
     // TODO(dtanner) are these actually loaded from lds in BB?
-
-    // Tile along K, M, N to minimize register lifetimes / pressure.
-    // TODO(dtanner) Calculate outerTileN based on whether M or N needs fewer bits to store.
     // If one is loaded into register before BB (e.g. FA), then that should be outer.
+    // Also, if one edge is already in vgprs, then we don't need 2D tile, it can just be
+    // rows, cols because loading any one operand enable entire row/col for FA.
     size_t bitsAM = mDim * numRepM * aTensorTy.getElementType().getIntOrFloatBitWidth();
     llvm::outs() << "mDim=" << mDim
       << ", numRepM=" << numRepM
@@ -536,7 +687,9 @@ struct DotOpMFMAConversionHelper {
       << ", typeBits=" << bTensorTy.getElementType().getIntOrFloatBitWidth()
       << " -> bitsBN=" << bitsBN << "\n";
 
+    int tileSizeB = 1; // TODO(dtanner) should this be numRepB?
     // Outer tile should be larger one.
+    // TODO(dtanner) this is working for same data type; verify for mixed mxfp8 * mxfp4.
     bool outerTileN = bitsBN > bitsAM;
 
     // TODO(dtanner) tileSize may be based on (a) number of mfmas which takes same cycles as LDS latency
@@ -544,14 +697,26 @@ struct DotOpMFMAConversionHelper {
     int64_t tileSize = 2;
     int64_t tileSizeM = std::min(tileSize, numRepM);
     int64_t tileSizeN = std::min(tileSize, numRepN);
+    // TODO(dtanner) verify the minute details of kWidth/kBase.
+    // What we really want are the FMAs served by a single ds_read_b128.
     int64_t tileSizeK =  kWidth/kBase;
-    llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
+    //llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
 
-    DotTiling dotTiling(numRepM, numRepN, numVecInKBase, tileSizeM, tileSizeN, tileSizeK, outerTileN);
+    DotTiling dotTiling(numRepB, numRepM, numRepN, numVecInKBase, tileSizeB, tileSizeM, tileSizeN, tileSizeK, outerTileN);
     ///////////////////////////////////////////////////////////////////////////
 
     llvm::outs() << "dotTiling.getNumTilesK()=" << dotTiling.getNumTilesK() << "\n";
-    llvm::outs() << "dotTiling.getTileSizeK()=" << dotTiling.getTileSizeK() << "\n";
+    //llvm::outs() << "dotTiling.getTileSizeK()=" << dotTiling.getTileSizeK() << "\n";
+
+    for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
+      DotTiling::DotCoord dc = *iter;
+      llvm::outs() << "b=" << dc.b
+        << ", m=" << dc.m
+        << ", n=" << dc.n
+        << ", k=" << dc.k << "\n";
+    }
+
+
 
     // Iterate over tiles.
     for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
@@ -575,13 +740,13 @@ struct DotOpMFMAConversionHelper {
           }
 
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
-            llvm::outs() << "tiK=" << tileIdxK
+            /*llvm::outs() << "tiK=" << tileIdxK
               << ", tiO=" << tileIdxO
               << ", tiI=" << tileIdxI
               << ", b=" << b
               << ", m=" << m
               << ", n=" << n
-              << ", k=" << k << "\n";
+              << ", k=" << k << "\n";*/
             Value op1 = operandA[{b, m, k}];
             Value op2 = operandB[{b, n, k}];
             int cbsz = 0;
@@ -614,13 +779,6 @@ struct DotOpMFMAConversionHelper {
 
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
-
-          //for (int v = 0; v < elemsPerVec; ++v) {
-          //  int linearIdx = linearize({b, m, n, v}, fcStrides);
-          //  fc[linearIdx] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
-          //  //Value c = fc[linearIdx];
-          //  //acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
-          //}
         } // n
       } // m
     } // b
