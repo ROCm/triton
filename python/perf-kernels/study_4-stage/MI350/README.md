@@ -453,25 +453,38 @@ So this version must has a much higher freq. Need to confirm with agt.
 
 # Update the compiler with PaddedSharedLayout
 
-- ~~triton compiler: https://github.com/AlexAUT/triton/commits/benchPipelinePaddedAsyncDev/ @28f20c7b36ef7822~~
-- triton compiler: https://github.com/AlexAUT/triton/tree/asyncPaddedPipeline @c25c2e25
-- command
-  ```
-  DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
-  ```
-- IR dump: `/python/perf-kernels/study_4-stage/MI350/paddedSharedLayout_1`
+Commands:
+- default, i.e. swizzle: `TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"`
+- PaddedSharedLayout: + `TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1`
+- disable vector-combine pass (noVC): + `DISABLE_LLVM_OPT="disable-vector-combine"`
+- customLLVM: insert iglp10 in the compute cluster
+  - LLVM branch: https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2
+- fixBasePtr refers to this commit: https://github.com/ROCm/triton/commit/5d8af4a6e2a70e7bcb17ea7c18367c36ad171bcb. More details can be found in https://github.com/ROCm/triton-internal/issues/1296
 
-Note that we have to disable the vector-combine pass otherwise the `mul` instruction used
-update the acc will be moved from cluster 0 to cluster 2.
 
-## Collect traces
+|                               | tflops | reg usage | mfma efficiency |
+|-------------------------------|--------|-----------|-----------------|
+| main swizzle                  | 1020   | 256 (2)   | 58.51%          |
+| main swizzle noVC             | 1015   | 249       | 58.02%          |
+| main swizzle customLLVM       | 1029   | 256 (1)   | 60.52%          |
+| main swizzle customLLVM noVC  | 1038   | 245       | 62.82%          |
+| main padded                   | 1023   | 256 (2)   | 58.53%          |
+| main padded noVC              | 1021   | 249       | 58.02%          |
+| main padded customLLVM        | 1024   | 256 (1)   | 60.51%          |
+| main padded customLLVM noVC   | 1036   | 245       | 62.82%          |
+| PR8398 padded customLLVM noVC | 1039   | 249       | 62.79%          |
+| fixBasePtr                    | 1049   | 256       | 64.08%          |
+| hack                          | 1107   |           | 71.7%           |
+|                               |        |           |                 |
 
-command:
+`AMD_INSERT_AMDGCN=/var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/MI350/MI355/IR/hack.s`
+
+Command to collect trace
 ```
-DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 ROCPROF_ATT_LIBRARY_PATH=/app/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att.json -d /app/AMD-triton/python/perf-kernels/study_4-stage/MI350/paddedSharedLayout_fixKPadding_att --  python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att.json -d /var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/MI350/MI355/fixBasePtr_padded_customLLVM_noVC -- python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
 ```
 
-att.json looks like:
+att.json:
 ```json
 {
     "jobs": [
@@ -490,6 +503,16 @@ att.json looks like:
 }
 ```
 
+Command to calculate mfma efficiency
+```
+./process_json.py MI350/MI355/fixBasePtr_padded_customLLVM_noVC/ui_output_agent_25932_dispatch_30/
+```
+
+Note that we have to disable the vector-combine pass otherwise the `mul` instruction used
+update the acc will be moved from cluster 0 to cluster 2.
+
+
+
 ## Room for improvement
 
 While LLVM team is rebasing the patch for mfma and valu interleaving, there are
@@ -497,8 +520,8 @@ a few things we can improve
 - bank conflicts for K
   - old one
     ```
- #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16], [64, 0], [0, 32], [0, 1], [0, 2], [0, 4], [0, 8]], block = []}>
- ```
+    #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16], [64, 0], [0, 32], [0, 1], [0, 2], [0, 4], [0, 8]], block = []}>
+    ```
   - new one
     ```
     #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 1], [64, 0], [0, 32], [0, 2], [0, 4], [0, 8], [0, 16]], block = []}>
@@ -529,13 +552,3 @@ a few things we can improve
         does not cross the boundary of the loop
 - mem cluster
   - We should place lgkmcnt(0) at the end of memory cluster
-        
-    
-
-
-
-
-
-
-
-
