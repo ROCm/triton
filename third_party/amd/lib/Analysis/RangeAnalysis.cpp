@@ -21,29 +21,20 @@
 //  1.1) This pass is based on MLIR's dataflow framework. In hindsight, maybe it
 //    is ill-fit for what we need.
 //  1.2) If I understand correctly, the MLIR's dataflow framework is a
-//  combination
-//     of traditional iterative dataflow analysis and Sparse Conditional
-//     Constant propagation (SCCP).
+//     combination of traditional iterative dataflow analysis and a mighty
+//     Sparse Conditional Constant propagation (SCCP).
 //  1.3) Iterative dataflow analysis requires transfer function to be monotone.
 //    However, not all value-ranges keep increasing when the analysis progress.
 //    Consider the expression x - y, while x and y's value-range may keep
 //    increasing, the difference between them does not necessarily keep
 //    increasing as well.
-//  1.4) SCCP part is not necessary for this pass. We don't expect many dead
-//  code at
-//    the moment this analysis is invoked. The SCCP part only make the anlaysis
-//    take longer time to converge, and it make more complicated to workaround
-//    the framework's limitations.
-//  1.5) The MLIR dataflow framework does not understand SCF. On top of that it
-//    provides little interfaces to customize it. So, we have to rely on hack
-//    to sidestep these limitations.
-//  1.6 Maybe just walking the code top-dowm is suffice for range-analysis?
+//  1.4) The 1st C in SCCP, i.e. "conditional" part in SCCP part is unnecessary
+//    for this pass, because we don't expect many dead code at the moment when
+//    this analysis is invoked. Price for being "conditional" is less about
+//    compile time but complexity (in terms of debugging and understanding).
+//  1.5 Maybe just walking the code top-dowm is sufficient for range-analysis:
 //    For loops, figuring out IVs' value-ranges before loops are entered, and
 //    progress to loop-body, without visiting back-edge for non-SCF loops.
-//  1.7 As with SCCP which maintain two worklists, one for control-flow
-//    dependence, one for data-flow dependence. The framework seems to maintain
-//    a single unified worklist, with each item being a pair of
-//    <particular-analysis, operation-to-be-analyzed>.
 //
 // 2: tl.assume statements
 //  2.1) A value may have multiple assume-operations (assume-ops for short)
@@ -51,68 +42,17 @@
 //    whose enclosing basic blocks dominate the basic-block where p belongs to.
 //  2.2) See some examples in the comment to maybeGetAssumedRangeHelper().
 //  2.3) The assumed value-range for source and result operands are inferred
-//  right
-//    before an operation is visited.
-//  2.4) For now, if a value a assumed value-range, we use assumed value-range.
-//    We should use the intersection of assumed-value-range and inferred-value-
-//    range. However, it is not always possible: iterative dataflow analysis
+//  right before an operation is visited.
+//  2.4) For now, if a value has a assumed value-range, we use assumed
+//    value-range and ignore its inferred value range. It would be nice to
+//    use the intersection of assumed-value-range and inferred-value-range.
+//    However, it is not always possible: iterative dataflow analysis
 //    requires that the transfer function must be monotone; in general it's
 //    dangerous to use both meet() and join() operations. In this pass,
 //    intersecting inferred value-range with assumed-value-range still guarantee
 //    its monotonicity. However, the underlying lattice's meet() operation is
 //    a silent no-op.
 //
-// 3. SCF.
-//  3.1 As mentioned above, MLIR's dataflow framework does not understand SCF.
-//  3.2 For example, yield-op will not be visited by subclass's
-//  visitOperation().
-//    That is because the base-class think yield-op has zero result and take
-//    for granted it has no value to analyze.
-//  3.3 The built-in SCCP part makes the visit order somewhat complicated.
-//    Operations are not visited in forward order.
-//  3.4 This is an example explaining how to SCF is processed, and how we
-//    workaround this problem.
-//
-//    op0: cond = ...
-//    x, y = scf.if cond {
-//      // then-block
-//      op1: a = ...
-//      op2: yield a, b
-//    } else {
-//      // else-block
-//      op3: d =
-//      op4: yield c, d
-//    }
-//    op5: z = add x, y
-//
-//  step 1: as mentioned in 1.7, multiple analyses comprise the framework with
-//    an unified worklist. DCE kick in first, when it visit the scf.if, the
-//    "cond" does not have lattice associated with it. So it initially
-//    considered both then-block and else-block are dead.
-//  step 2: after DCE going over all items in the worklist, range-analysis gets
-//    the chance. op0 is visited, a non-bottom lattice is created for op0's LHS.
-//  step 3. The baseclass (belong to framework) visits the scf.if
-//    it calls this class's visitRegionSuccessors(). Basically,
-//    visitRegionSuccessors() gives subclass a chance to prepare for RHS for
-//    SCF operations. This class does nothing for scf.if.
-//  step 3: The base-class returns once sub-class's visitRegionSuccessors()
-//    returns. Therefor, this class (subclass)'s visitOperand() function is
-//    *NOT* called with with scf.if.
-//  step 4: The base-class tries to visit the sub-regions (i.e. then- and else-
-//   blocks), only finds they are dead (due to step 1) and hence skip them.
-//  step 5: after step 4, the lattice of x and y are in "bottom" state.
-//   When op5 is visit, range-analysis find one of source operands is in
-//   "bottom" state, and do not update z's state.
-//  ...
-//  next round starts.
-//  step 5: DCE found "cond" has non-bottom state associated with it, and mark
-//    then- and else-block "live" accordingly.
-//  step 6: Range-analysis get a chance to visit the then- and else-block.
-//  step 7: when op1 is visited. *HACK KICK IN*. Range-analysis found op1 is
-//   used by yield-op, it then in turn updates x's state.
-//  step 8: likewise, then op3's visited, y's state is updated as well.
-//  step 9: finally, x and y has non-bottom state, when op5 is visited, z's
-//   state is updated.
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-range-analysis"
@@ -146,10 +86,12 @@ tt::FuncOp getEnclosingFunction(Value v) {
       definingOp = blk->getParentOp();
 
   if (definingOp) {
-    funcOp = dyn_cast_or_null<tt::FuncOp>(definingOp);
-    if (!funcOp)
+    if (auto selfIsFunc = dyn_cast<tt::FuncOp>(definingOp))
+      funcOp = selfIsFunc;
+    else
       funcOp = definingOp->getParentOfType<tt::FuncOp>();
   }
+
   assert(funcOp && "No enclosing tt::FuncOp");
   return funcOp;
 }
@@ -223,7 +165,7 @@ void inferResultRangesMaxNonNegSigned(Operation *op,
   }
 }
 
-// Given an assumption operaiton, try to derive the value range of the value
+// Given an assumption operation, try to derive the value range of the value
 // <anchor>'s value range at the somewhere in the block "useBlock".
 // Note that
 //  - The value "anchor" is defined or referenced in the "useBlock"
@@ -364,7 +306,7 @@ maybeGetAssumedRange(const SetVector<Operation *> &allAssumptions, Value anchor,
   if (result) {
     const auto &val = *result;
     if (val.smin().isNonNegative()) {
-      // Consider 0 < x && x < 1024.
+      // Consider 0 <= x && x <= 1024.
       // When processing x > 0, the value range of x is
       //  vr1={umin=0, umax=0xf...f, smin=0, smax=0x7...f}
       // When processing x < 1024, the value range of x is:
@@ -376,114 +318,6 @@ maybeGetAssumedRange(const SetVector<Operation *> &allAssumptions, Value anchor,
     }
   }
   return result;
-}
-
-// Many operations in arith dialect do not differentiate signed int and unsigned
-// int, e.g., arith::AddIOp, arith::MullOp. This function try to extrapolate the
-// type (sint or uint) of the Operation from the its UD and DU chains.
-//
-// TODO: This function seems to be useful for proving a quantity is a
-// non-negative. However, it is less so in proving a quantity is smaller than
-// specified upper bound. In fact, turning off this feature only sees 5 lines
-// difference in amd-range-analysis.mlir. For now, it is turned on only in
-// TestAMDRangeAnalysis.cpp. For now, we just keep this code for a while and
-// see if it will be useful for some real world applications.
-//
-static void collectValueOfSignedInt(Operation *top, DenseSet<Value> &valueSet) {
-  SetVector<Value> worklist;
-
-  // Initialize the worklist with some known signed interger values.
-  top->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    llvm::TypeSwitch<Operation *>(op)
-        .Case<triton::AddPtrOp>(
-            [&](auto addPtrOp) { worklist.insert(addPtrOp.getOffset()); })
-        .Case<arith::ShRSIOp, arith::CeilDivSIOp, arith::DivSIOp,
-              arith::MaxSIOp, arith::MinSIOp, arith::RemSIOp>([&](auto binop) {
-          worklist.insert(binop.getResult());
-          worklist.insert(binop.getOperand(0));
-          worklist.insert(binop.getOperand(1));
-        })
-        .Case<arith::ExtSIOp>(
-            [&](auto sExt) { worklist.insert(sExt.getResult()); })
-        .Case<arith::CmpIOp>([&](auto cmpOp) {
-          switch (cmpOp.getPredicate()) {
-          case arith::CmpIPredicate::sgt:
-          case arith::CmpIPredicate::sge:
-          case arith::CmpIPredicate::sle:
-          case arith::CmpIPredicate::slt:
-            worklist.insert(cmpOp.getOperand(0));
-            worklist.insert(cmpOp.getOperand(1));
-            break;
-          case arith::CmpIPredicate::uge:
-          case arith::CmpIPredicate::ugt:
-          case arith::CmpIPredicate::ule:
-          case arith::CmpIPredicate::ult:
-            worklist.insert(cmpOp.getOperand(0));
-            worklist.insert(cmpOp.getOperand(1));
-            break;
-          default:
-            break;
-          };
-        });
-  });
-
-  valueSet.clear();
-  auto addToWorklist = [&](Value v) {
-    if (!valueSet.count(v))
-      worklist.insert(v);
-  };
-
-  while (!worklist.empty()) {
-    auto v = worklist.back();
-    worklist.pop_back();
-    Operation *op = v.getDefiningOp();
-
-    // If the result of this op is signed int, then its source operands are
-    // singed int.
-    if (op) {
-      llvm::TypeSwitch<Operation *>(op)
-          .Case<arith::AddIOp, arith::SubIOp>([&](auto binOp) {
-            addToWorklist(binOp.getOperand(0));
-            addToWorklist(binOp.getOperand(1));
-          })
-          .Case<triton::SplatOp, arith::TruncIOp>(
-              [&](auto unary) { addToWorklist(unary.getOperand()); });
-    }
-
-    SmallVector<Value> results;
-    if (op)
-      results = op->getResults();
-    else
-      results.push_back(v);
-
-    for (auto result : results) {
-      if (valueSet.count(result))
-        continue;
-
-      valueSet.insert(result);
-
-      for (mlir::OpOperand &use : result.getUses()) {
-        llvm::TypeSwitch<Operation *>(use.getOwner())
-            .Case<triton::SplatOp, arith::TruncIOp,
-                  triton::amdgpu::ExtractSliceOp>(
-                [&](auto op) { addToWorklist(op.getResult()); })
-            .Case<arith::AddIOp, arith::MulIOp>(
-                [&](auto binOp) { addToWorklist(binOp.getResult()); });
-      }
-    }
-  }
-
-  LLVM_DEBUG({
-    DBGS() << "Values considered as signed int (begin)\n";
-    OpPrintingFlags flags;
-    flags.skipRegions(true);
-    for (auto v : valueSet) {
-      DBGS() << " - ";
-      v.print(llvm::dbgs(), flags);
-      llvm::dbgs() << "\n";
-    }
-    DBGS() << "Values considered as signed int (end)\n";
-  });
 }
 
 } // namespace
@@ -595,8 +429,6 @@ bool cmpIIsStaticallyTrue(const DataFlowSolver &solver, arith::CmpIOp cmpOp) {
 
 LogicalResult TritonIntegerRangeAnalysis::initialize(Operation *top) {
   signedIntValues.clear();
-  if (assumeNoArithOverflow)
-    collectValueOfSignedInt(top, signedIntValues);
   return Base::initialize(top);
 }
 
@@ -662,15 +494,7 @@ void TritonIntegerRangeAnalysis::defaultTransferFunc(
       resultsLattices[result.getResultNumber()];
   IntegerValueRange incomingRange_ = incomingRange;
 
-  // step 2: Some range value in MLIR lib is too conservative, update the
-  //  value-range before it is jointed to the lattice.
-  if (auto inferrable = dyn_cast<InferIntRangeInterface>(op)) {
-    auto res = rectifyInfferableRange(inferrable, srcLattices, incomingRange_);
-    if (res.has_value())
-      incomingRange_ = std::move(*res);
-  }
-
-  // step 3: If there is assumed value range, the assumed one take precedence.
+  // step 2: If there is assumed value range, the assumed one take precedence.
   // TODO: I think this is bit conservative, the better way is:
   //  final_range = (old_range ∪ incomingRange) ∩ assume_range
   if (auto iter = opResultAssumption.find(resultVal);
@@ -678,12 +502,12 @@ void TritonIntegerRangeAnalysis::defaultTransferFunc(
     const auto &range = iter->second;
     if (auto maybeRange = maybeGetAssumedRange(resultVal, op->getBlock())) {
       incomingRange_ =
-          IntegerValueRange(incomingRange.getValue().intersection(range));
+          IntegerValueRange(incomingRange_.getValue().intersection(range));
     }
   }
 
-  // step 4: Update the value range. Note that we are using `join` operation
-  //  which means `union`. Transfer funtion must be monotone! The resolver
+  // step 3: Update the value range. Note that we are using `join` operation
+  //  which means `union`. Transfer function must be monotone! The resolver
   //  would otherwise fall into infinite loop.
   ChangeResult changed = lattice->join(incomingRange_);
   LLVM_DEBUG({
@@ -696,118 +520,9 @@ void TritonIntegerRangeAnalysis::defaultTransferFunc(
                  << ", in value-range: " << incomingRange_ << "\n";
   });
 
-  // step 5: Add those ops that depends on this op to the worklist. The resolver
+  // step 4: Add those ops that depends on this op to the worklist. The resolver
   // will iterate all items in the worklist until it become empty.
   propagateIfChanged(lattice, changed);
-}
-
-std::optional<IntegerValueRange>
-TritonIntegerRangeAnalysis::rectifyInfferableRange(
-    InferIntRangeInterface rface,
-    ArrayRef<const dataflow::IntegerValueRangeLattice *> srcLattices,
-    const IntegerValueRange &range) {
-
-  auto op = rface.getOperation();
-
-  // step 1: rule out some operations we cannot handle
-  if (!llvm::isa<arith::AddIOp, arith::SubIOp, arith::MinSIOp, arith::MulIOp,
-                 arith::DivSIOp, arith::TruncIOp>(op) ||
-      range.isUninitialized()) {
-    return std::nullopt;
-  }
-
-  auto isPos = [](const ConstantIntRanges &range) {
-    // Return true iff in both unsigned and signed representation, the most
-    // siganificant bit is always 0.
-    return range.umax().isNonNegative() && range.smax().isNonNegative() &&
-           range.smin().isNonNegative();
-  };
-
-  // Not appliable to those bin-ops yielding unsigned int.
-  if (!signedIntValues.count(op->getResult(0)))
-    return std::nullopt;
-
-  // step 2: Do nothing if the value-range is already a non-negative range.
-  const ConstantIntRanges &resultRange = range.getValue();
-
-  if (isPos(resultRange))
-    return std::nullopt;
-
-  // step 3: special handling of arith::TruncIOp
-  if (llvm::isa<arith::TruncIOp>(op)) {
-    if (!srcLattices[0] || srcLattices[0]->getValue().isUninitialized())
-      return std::nullopt;
-
-    const ConstantIntRanges srcRange = srcLattices[0]->getValue().getValue();
-    if (!isPos(srcRange))
-      return std::nullopt;
-
-    // assume NSW
-    APInt umax = APInt::getSignedMaxValue(resultRange.umax().getBitWidth());
-    return ConstantIntRanges::fromUnsigned(resultRange.umin(), umax);
-  }
-
-  // step 4: rule out some messy situations
-  // If the MSB of umin is "1", bailout
-  if (!resultRange.umin().isNonNegative())
-    return std::nullopt;
-
-  // If the value-ranges of operands are somehow missing, we can do nothing
-  if (!srcLattices[0] || !srcLattices[1] ||
-      srcLattices[0]->getValue().isUninitialized() ||
-      srcLattices[1]->getValue().isUninitialized())
-    return std::nullopt;
-
-  auto opndRange0 = srcLattices[0]->getValue().getValue();
-  auto opndRange1 = srcLattices[1]->getValue().getValue();
-
-  // bail out if one of operands' is not non-negative
-  if (!isPos(opndRange0) || !isPos(opndRange1))
-    return std::nullopt;
-
-  APInt umax(resultRange.umax());
-  if (!umax.isNonNegative()) {
-    // Saturate umax to 0x7f...f
-    umax = APInt::getSignedMaxValue(umax.getBitWidth());
-  }
-
-  return ConstantIntRanges::fromUnsigned(resultRange.umin(), umax);
-}
-
-void TritonIntegerRangeAnalysis::visitYieldHelper(Operation *op, Value value) {
-  auto yieldOp = dyn_cast<scf::YieldOp>(op);
-  LDBG("visit yieldOp: " << yieldOp);
-
-  dataflow::IntegerValueRangeLattice *srcLattice = getLatticeElement(value);
-
-  for (auto iter : llvm::enumerate(yieldOp->getOperands())) {
-    if (iter.value() != value)
-      continue;
-
-    size_t idx = iter.index();
-    Operation *parentOp = yieldOp->getParentOp();
-
-    if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
-      // Get the corresponding scf.if result and its lattice
-      mlir::OpResult res = parentOp->getResult(idx);
-      dataflow::IntegerValueRangeLattice *resLattice = getLatticeElement(res);
-      auto changed = resLattice->join(*srcLattice);
-      propagateIfChanged(resLattice, changed);
-
-      LLVM_DEBUG({
-        OpPrintingFlags flags;
-        flags.skipRegions(true);
-        DBGS() << ((changed == ChangeResult::Change)
-                       ? ">yieldOp bring change: "
-                       : ">yieldOp bring no change:");
-        res.printAsOperand(llvm::dbgs(), flags);
-        llvm::dbgs() << ", resulting value-range: "
-                     << resLattice->getValue().getValue()
-                     << ", in value-range: "
-                     << srcLattice->getValue().getValue() << "\n";
-      });
-    }
-  }
 }
 
 LogicalResult TritonIntegerRangeAnalysis::visitOperation(
@@ -844,7 +559,7 @@ LogicalResult TritonIntegerRangeAnalysis::visitOperation(
   }
   assert(opndValueRanges.size() == operands.size() && "size disagree");
 
-  // step 3: call helper function inferring the value range. If assumed value-
+  // step 2: call helper function inferring the value range. If assumed value-
   // range is present, the transfer-function will intersect the assumed value-
   // value with the inferred value range.
   LogicalResult visitResult =
@@ -874,20 +589,6 @@ LogicalResult TritonIntegerRangeAnalysis::visitOperation(
       }
     });
     propagateIfChanged(lattice, changed);
-  }
-
-  // step 4: The dataflow framework does not understand SCF. It skip yieldOp
-  // as it has no result. To workaround this problem, we visit all yieldOp
-  // which depends on this operation.
-  for (int resIdx = 0, resEnd = op->getNumResults(); resIdx < resEnd;
-       ++resIdx) {
-    mlir::OpResult res = op->getResult(resIdx);
-
-    for (mlir::OpOperand &use : res.getUses()) {
-      mlir::Operation *depOp = use.getOwner();
-      if (auto yield = dyn_cast<scf::YieldOp>(depOp))
-        visitYieldHelper(yield, res);
-    }
   }
 
   return visitResult;
@@ -1045,6 +746,27 @@ void TritonIntegerRangeAnalysis::visitRegionSuccessors(
   assert(predecessors->allPredecessorsKnown() &&
          "unexpected unresolved region successors");
 
+  // Note: It does not seems to be quite obvious; this loop could update SCF
+  // operations' LHS. e.g. If the given "branch" argument is scf.if, and the
+  // scf.if construct looks like following:
+  //   x = scf.if cond
+  //    m = ... // op_m
+  //    yield m
+  //   else
+  //    n = ... // op_n
+  //    yield n
+  //
+  // This loop tries to update lattice(x) = join(lattice(m), lattice(n),
+  // provided lattice(m) and lattice(n) are initialized.
+  //
+  // Note that the state of lattice(m) and lattice(n) was updated in the
+  // "previous" round. In this "round", the scf.if is visitied right now, and
+  // it takes this moment to update its LHS.
+  //
+  // Alternatively, when we visit, say op_m, we notice its result is used by
+  // a yieldOp, get the yieldOp's corresponding receiver, in this case x, and
+  // update its state accordingly.
+  //
   for (Operation *op : predecessors->getKnownPredecessors()) {
     std::optional<OperandRange> operands;
     if (op == branch) {
