@@ -454,30 +454,54 @@ So this version must has a much higher freq. Need to confirm with agt.
 # Update the compiler with PaddedSharedLayout
 
 Commands:
+- base compiler branch: main@ee42f167023
+- compiler branch: [fav3_padded](https://github.com/ROCm/triton/tree/fav3_padded)
 - default, i.e. swizzle: `TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"`
 - PaddedSharedLayout: + `TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1`
 - disable vector-combine pass (noVC): + `DISABLE_LLVM_OPT="disable-vector-combine"`
-- customLLVM: insert iglp10 in the compute cluster
-  - LLVM branch: https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2
-- fixBasePtr refers to this commit: https://github.com/ROCm/triton/commit/5d8af4a6e2a70e7bcb17ea7c18367c36ad171bcb. More details can be found in https://github.com/ROCm/triton-internal/issues/1296
+- customLLVM: insert iglp10 in the compute cluster [like this](https://github.com/ROCm/triton/commit/073332797a0e3dca0c6affbf9582df32ddeab847) and use the llvm custom branch [TritonInterleaveAndRematRebase2](https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2)
+- `fixBasePtr` refers to this [commit](https://github.com/ROCm/triton/commit/066952855676c428be8b50984f1f52d1176af010). More details can be found in [issue#1296](https://github.com/ROCm/triton-internal/issues/1296)
+- `fixBarrier` refers to this [commit](https://github.com/ROCm/triton/commit/3169bec0db9dd2e187d77bb7b8d777b9f2b3fd38), which improves the placement of `s_xx` instructions
+  - We try to put all the `s_xxx` instructions inside the memory cluster so that
+    they don't take up issue slots from mfma instructions in the compute cluster.
+    - `s_barrier` divides compute and memory cluster. We try to put `s_setprio`,
+      `s_waitcnt lgkmcnt(0)` in the memory cluster.
+    - We explicitly wait for all ds_read to finish inside the memory cluster
+      (before the compute cluster). This way, we won't need `lgkmcnt(x)`
+      before some mfma.
+    - We added more `sched.barrier` to force the backend to respect our scheduling.
+- `fixBarrier2` refers to this [commit](8b8faf592378), which moves the last `s_barrier`
+  from the end of the loop to the beginning of the loop.
+  This ensures `s_barrier` is not followed by any `s_xxx` instructions.
+  Otherwise, we will have the DIDT problem documented in [issue#903](https://github.com/ROCm/triton-internal/issues/903).
+- `propagateNaN` refers to this [commit](c1ee05bb6e0), which enables
+  `propagate_nan` flag for `tl.maximum`. This will remove the first 2 self-max
+  in the reduction function.
+- `pkMul` refers to assembly hack in which we manualy pack the exposed
+  `v_mul` into `v_pk_mul` instructions.
+
+Performance:
+|                                   | tflops | reg usage | mfma efficiency |
+|-----------------------------------|--------|-----------|-----------------|
+| main swizzle                      | 1020   | 256 (2)   | 58.51%          |
+| main swizzle noVC                 | 1015   | 249       | 58.02%          |
+| main swizzle customLLVM           | 1029   | 256 (1)   | 60.52%          |
+| main swizzle customLLVM noVC      | 1038   | 245       | 62.82%          |
+| main padded                       | 1023   | 256 (2)   | 58.53%          |
+| main padded noVC                  | 1021   | 249       | 58.02%          |
+| main padded customLLVM            | 1024   | 256 (1)   | 60.51%          |
+| main padded customLLVM noVC       | 1036   | 245       | 62.82%          |
+| PR8398 padded customLLVM noVC     | 1039   | 249       | 62.79%          |
+| fixBasePtr padded customLLVM noVC | 1049   | 256       | 64.08%          |
+| fixBarrier padded customLLVM noVC | 1070   | 256       | 68.93%          |
+| fixBarrier2                       | 1099   | 256       | 75.73%          |
+| propagate NaN                     | 1102   | 256       | 76.33%          |
+| hack propagateNan + pkMul         | 1108   | 256       | 77.84%          |
 
 
-|                               | tflops | reg usage | mfma efficiency |
-|-------------------------------|--------|-----------|-----------------|
-| main swizzle                  | 1020   | 256 (2)   | 58.51%          |
-| main swizzle noVC             | 1015   | 249       | 58.02%          |
-| main swizzle customLLVM       | 1029   | 256 (1)   | 60.52%          |
-| main swizzle customLLVM noVC  | 1038   | 245       | 62.82%          |
-| main padded                   | 1023   | 256 (2)   | 58.53%          |
-| main padded noVC              | 1021   | 249       | 58.02%          |
-| main padded customLLVM        | 1024   | 256 (1)   | 60.51%          |
-| main padded customLLVM noVC   | 1036   | 245       | 62.82%          |
-| PR8398 padded customLLVM noVC | 1039   | 249       | 62.79%          |
-| fixBasePtr                    | 1049   | 256       | 64.08%          |
-| hack                          | 1107   |           | 71.7%           |
-|                               |        |           |                 |
-
-`AMD_INSERT_AMDGCN=/var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/MI350/MI355/IR/hack.s`
+```
+DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+```
 
 Command to collect trace
 ```
@@ -515,40 +539,34 @@ update the acc will be moved from cluster 0 to cluster 2.
 
 ## Room for improvement
 
-While LLVM team is rebasing the patch for mfma and valu interleaving, there are
-a few things we can improve
-- bank conflicts for K
-  - old one
-    ```
-    #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16], [64, 0], [0, 32], [0, 1], [0, 2], [0, 4], [0, 8]], block = []}>
-    ```
-  - new one
-    ```
-    #shared1 = #ttg.padded_shared<[512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 1], [64, 0], [0, 32], [0, 2], [0, 4], [0, 8], [0, 16]], block = []}>
-    ```
-  - The issue is fixed by [37a9e809315a4](https://github.com/AlexAUT/triton/commit/37a9e809315a45c18e5d0ba5c20f4c416d8aafa2).
-    The bank conflicts are gone. But perf is slightly worse compared to the new one above.
-- 1st compute cluster
-  - It starts with `lgkmcnt(0)`, which always takes 20 cycles?
-  - The above `lgkmcnt(0)` is always followed by a 12-cycle NONE?
-  - Then the 3rd instruction is mfma. The above two take 32 cycles, is it coincident?
-    - If I move the above `lgkmcnt(0)` into the memory cluster, the NONE part takes 16 cycles ??
-      This is better than 32 cycles, but why???
-  - 2 `s_mov` + 2 x `v_mov` ?
-  - `s_nop` is followed by `v_permlane32_swap`?
-  - Long stall for some of the early valu instructions
-- 4th mem cluster
-  - transition from 3rd compute cluster (helps)
-    - `v_exp` --> `setprio` --> `s_waitcnt` --> `barrier`.
-      We can try to move the 2 `s_xx` instruction after the barrer so that the
-      mfma in the compute cluster can start earlier.
-    - 6 `v_add` instruction at the end of the loop
-      - 216-219 are about `buffer_load` address update.
-        Now it's always updating the vgpr address. We should update the sgpr address.
-        ==> The pointer canonicalization pass can update the inc onto the base ptr.
-      - 206 and 207 are coming from ttgir. There are redundant `addptr` ops for
-        k and v addresses: one with linear layout, which is selected for asyncCopy
-        for paddedSharedLayout, the other with blocked. It seems the layout progagation
-        does not cross the boundary of the loop
-- mem cluster
-  - We should place lgkmcnt(0) at the end of memory cluster
+Now let's what is not hidden by mfma after `fixBarrier2`:
+- 1st compute cluster (108) theory (44)
+  - 1 x `s_barrier`
+  - 2 x `v_mov_b32_e32`
+    - one for row sum. At each iteration, we compute a new row sum and update
+      the old one onto the new one.
+      Unless we unroll the loop, otherwise we have to move them.
+    - The other one for row max.
+  - 2 x `s_mov_b32`
+  - 19 x `v_mul_f32_e32` at the end
+    - ==> these 19 `v_mul` should be combined
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)`
+- 1st memory cluster (32) theory (4)
+  - 1 x `s_barrier`
+  - 2 x `v_readfirstlane_b32`
+  - 5 x `v_add_u32_e32`
+- 2nd compute cluster (128) theory (120)
+  - 1 x `s_barrier`
+  - 2 x self-max ==> enable propagate_nan
+  - 1 x `s_nop` before `v_permlane32`
+  - 12 x `v_exp_f32_e32`
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)`
+- 2nd memory cluster (24) theory (4)
+  - 1 x `s_barrier`
+  - 3 x `v_add_u32_e32`
+  - 2 x `v_readfirstlane_b32`
+
+In total there are 292 cycles ==> mfma efficiency = 1024 / (1024 + 292) = 77.8%
+We got 75% on average of all waves, which matches the number from 1st wave.
+
+In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
