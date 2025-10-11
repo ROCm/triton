@@ -491,12 +491,12 @@ Performance:
 | main padded noVC                  | 1021   | 249       | 58.02%          |
 | main padded customLLVM            | 1024   | 256 (1)   | 60.51%          |
 | main padded customLLVM noVC       | 1036   | 245       | 62.82%          |
-| PR8398 padded customLLVM noVC     | 1039   | 249       | 62.79%          |
 | fixBasePtr padded customLLVM noVC | 1049   | 256       | 64.08%          |
 | fixBarrier padded customLLVM noVC | 1070   | 256       | 68.93%          |
 | fixBarrier2                       | 1099   | 256       | 75.73%          |
 | propagate NaN                     | 1102   | 256       | 76.33%          |
-| hack propagateNan + pkMul         | 1108   | 256       | 77.84%          |
+| hack pkMul                        | 1108   | 256       | 77.84%          |
+| hack pkMul m0                     | 1121   | 256       | 79.46%          |
 
 
 ```
@@ -570,3 +570,88 @@ In total there are 292 cycles ==> mfma efficiency = 1024 / (1024 + 292) = 77.8%
 We got 75% on average of all waves, which matches the number from 1st wave.
 
 In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
+
+
+ACV
+shared layout: padded[512:+32]
+==> (512+32) * sizeof(float16) = 1088
+```
+v_mov_b32_e32 v51, 0x2000            v51 = 8192
+v_lshl_or_b32 v51, v35, 10, v51      v51 = wid * 1024 + 8192
+v_lshrrev_b32_e32 v45, 4, v51        v45 = v51 / 16
+v_or_b32_e32 v200, v45, v51          v200 = wid*1024+8192 + wid*64 + 512 = wid * 1088 + 8704
+
+v35 = wave id
+s5 = 0
+v_mul_u32_u24_e32 v207, 0x410, v35
+v_mul_u32_u24_e32 v203, 0x440, v35    v203 = waveId * 1088
+
+loop: 
+s_add_i32 s2, s5, 1
+s_cmp_lt_i32 s2, 2
+s_cselect_b32 s27, s2, 0       s27 = LDS buffer id
+
+s_lshl_b32 s2, s5, 13          s2 = s5 * 8192
+s_lshl_b32 s5, s5, 14          s5 *= 16384
+s_add_i32 s5, s5, 0
+s_ashr_i32 s2, s2, 3           s2 /= 8
+s_add_i32 s2, s5, s2           s2 = s2 + s5
+v_add_u32_e32 v66, s2, v203
+v_readfirstlane_b32 s5, v66
+s_mov_b32 m0, s5
+buffer_load_dwordx4 v196, s[12:15], 0 offen lds
+
+s_mov_b32 s5, s27
+```
+
+s46-48 are free
+
+
+ACK
+```llvm
+// K shape: D x BN = 128 x 64
+// K tensor elements: 8192
+// K tensor shared layout: [512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [64, 0], [0, 32], [0, 16], [0, 1], [0, 2], [0, 4], [0, 8]]}
+// K tensor global layout: {register = [[1, 0], [2, 0], [4, 0], [0, 8]], lane = [[8, 0], [16, 0], [32, 0], [64, 0], [0, 32], [0, 16]], warp = [[0, 1], [0, 2], [0, 4]]}
+// (512 + 8) * sizeof(float16) = 1040 bytes
+%38 = tail call i32 @llvm.amdgcn.workitem.id.x()
+%39 = lshr i32 %38, 6   // %39 = waveId
+%40 = and i32 %39, 7    // %40 = waveId
+%211 = mul nuw nsw i32 %40, 1040  // %211 = waveId * 1040
+
+%210 = shl nuw nsw i32 %39, 10    // %210 = waveId * 1024
+%214 = or i32 %210, 8192          // %214 = waveId * 1024 + 8192
+%216 = lshr exact i32 %214, 6     // %216 = waveId * 16 + 128
+%217 = or disjoint i32 %216, %214 // %217 = waveId * 1040 + 8320
+
+loop:
+%1436 = add i32 %759, 1, // %759 = previous LDS buffer idx, %1436 = current LDS buffer idx
+%1437 = icmp slt i32 %1436, 2,
+%1438 = select i1 %1437, i32 %1436, i32 0,  // %1438 = current LDS buffer idx = 1 - %759
+%1439 = shl i32 %1438, 13,                  // %1439 = LDSBufIdx * 8192
+%1440 = getelementptr half, ptr addrspace(3) getelementptr (i8, ptr addrspace(3) @global_smem, i32 34752), i32 %1439,
+%1441 = ashr exact i32 %1439, 5,            // %1414 = LDSBufIdx * 8192 / 32 = LDSBufIdx * 256
+%1442 = getelementptr i8, ptr addrspace(3) %1440, i32 %1441,
+%1443 = tail call ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1(ptr addrspace(1) %1435, i16 0, i64 2147483646, i32 159744),
+%1444 = getelementptr inbounds nuw i8, ptr addrspace(3) %1442, i32 %211,
+tail call void @llvm.amdgcn.raw.ptr.buffer.load.lds(ptr addrspace(8) %1443, ptr addrspace(3) %1444, i32 16, i32 %213, i32 0, i32 0, i32 0),, !alias.scope !49
+%1445 = getelementptr inbounds nuw i8, ptr addrspace(3) %1442, i32 %217,
+tail call void @llvm.amdgcn.raw.ptr.buffer.load.lds(ptr addrspace(8) %1443, ptr addrspace(3) nonnull %1445, i32 16, i32 %219, i32 0, i32 0, i32 0) , !alias.scope !49
+```
+
+```asm
+v_or_b32_e32 v193, v52, v51
+v_mul_u32_u24_e32 v208, 0x410, v35
+
+loop:
+v_add_u32_e32 v98, s34, v208
+s_nop 0
+v_readfirstlane_b32 s2, v98
+v_add_u32_e32 v98, s34, v193
+s_mov_b32 m0, s2
+v_readfirstlane_b32 s2, v98
+buffer_load_dwordx4 v192, s[12:15], 0 offen lds
+s_mov_b32 m0, s2
+s_nop 0
+buffer_load_dwordx4 v195, s[12:15], 0 offen lds
+```
