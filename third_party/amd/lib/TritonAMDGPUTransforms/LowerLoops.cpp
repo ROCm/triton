@@ -1,5 +1,4 @@
 #include "TritonAMDGPUTransforms/Passes.h"
-#include "Utility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
@@ -40,11 +39,6 @@ struct AsyncCopyChainOps {
 
 using StreamOpVariant = std::variant<StreamCopyChainOps, AsyncCopyChainOps>;
 using LoadToStreamOpMap = llvm::MapVector<Operation *, StreamOpVariant>;
-
-bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
-                               ttg::SharedEncodingTrait sharedEnc,
-                               tt::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-                               const tt::AMD::TargetInfo &targetInfo);
 
 AsyncCopyChainOps createAsyncCopy(tt::LoadOp loadOp, Value alloc,
                                   Value extractIdx) {
@@ -133,29 +127,25 @@ ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue, unsigned *opIdx,
 // If all the transitive uses of the given value have are used by a convert to
 // the same dot operand encoding, return true and get the shared encoding that
 // needs to be used to be compatible with users' layouts.
-std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
-    Operation *loadOp, tt::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-    const tt::AMD::TargetInfo &targetInfo, bool useAsyncCopy) {
-  assert(loadOp);
-  Value loadedValue = loadOp->getResult(0);
-  llvm::SmallVector<ttg::SharedEncodingTrait> sharedEncs;
+std::optional<ttg::SwizzledSharedEncodingAttr>
+getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
+  llvm::SmallVector<ttg::SwizzledSharedEncodingAttr> sharedEncs;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
     if (user->getNumResults() != 1)
       return std::nullopt;
 
-    ttg::SharedEncodingTrait tempAttr;
+    ttg::SwizzledSharedEncodingAttr tempAttr;
     Value userResult = user->getResult(0);
     Type userResType = userResult.getType();
     if (auto memDesc = dyn_cast<ttg::MemDescType>(userResType)) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
-      tempAttr = cast<ttg::SharedEncodingTrait>(memDesc.getEncoding());
+      tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
       // If the immediate user is ttg::LocalAllocOp, likely it's created in
       // TritonAMDGPUOptimizeDotOperands. We should just respect it.
-      if (!isa<ttg::LocalAllocOp>(user) &&
-          !getSharedEncIfAllUsersAreDotEnc(user, axisInfoAnalysis, targetInfo,
-                                           useAsyncCopy)) {
+      if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value() &&
+          !isa<ttg::LocalAllocOp>(user)) {
         return std::nullopt;
       }
       LDBG("Deduced shared encoding candidate from memDesc: " << tempAttr);
@@ -186,22 +176,9 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
 
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
-        // Determine if we can use padded layouts and fallback to swizzled
-        // layouts if not
-        bool canUseAsyncCopy = false;
-        if (useAsyncCopy && isa<tt::LoadOp>(loadOp)) {
-          // We pass numBuffers=2 because we assume the schedule will not
-          // determine a single buffer (which does not work with AsyncCopy)
-          canUseAsyncCopy = canBeConvertedToAsyncLoad(
-              2, cast<tt::LoadOp>(loadOp), {}, axisInfoAnalysis, targetInfo);
-        }
-        tempAttr = composePaddedLayout(targetInfo, dotOpEnc, srcTy, sharedOrder,
-                                       canUseAsyncCopy);
-        if (!tempAttr) {
-          tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-              loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-              ctaLayout, bitWidth, /*needTrans=*/false);
-        }
+        tempAttr = ttg::SwizzledSharedEncodingAttr::get(
+            loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
+            ctaLayout, bitWidth, /*needTrans=*/false);
         LDBG("Deduced shared encoding candidate from dot layout: " << tempAttr);
         sharedEncs.push_back(tempAttr);
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
@@ -236,19 +213,12 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
     return std::nullopt;
   auto maxVecSharedEnc = sharedEncs.front();
 
-  // TODO add support for padded layouts. Right now they will use a separate
-  // allocation
-  for (auto sharedEnc : llvm::drop_begin(sharedEncs, 1)) {
-    auto maybeSwizzShared =
-        dyn_cast<ttg::SwizzledSharedEncodingAttr>(sharedEnc);
-    auto maybeSwizzMaxVec =
-        dyn_cast<ttg::SwizzledSharedEncodingAttr>(maxVecSharedEnc);
-
-    if (!equalSharedEncIgnoreVec(maybeSwizzShared, maybeSwizzMaxVec)) {
+  for (auto sharedEnc : sharedEncs) {
+    if (!equalSharedEncIgnoreVec(sharedEnc, maxVecSharedEnc)) {
       LDBG("Incompatible shared encodings");
       return std::nullopt;
     }
-    if (maybeSwizzShared.getVec() > maybeSwizzMaxVec.getVec()) {
+    if (sharedEnc.getVec() > maxVecSharedEnc.getVec()) {
       maxVecSharedEnc = sharedEnc;
     }
   }
@@ -259,7 +229,7 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
 }
 
 bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
-                               ttg::SharedEncodingTrait sharedEnc,
+                               Value alloc,
                                tt::ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                const tt::AMD::TargetInfo &targetInfo) {
   // If we have a single buffer we would require another barrier after the
@@ -269,34 +239,24 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   if (numBuffers <= 1)
     return false;
 
-  using tt::AMD::ISAFamily;
-  if (sharedEnc && llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
-                                      targetInfo.getISAFamily())) {
-    // Compute the final vecSize we can use for the combination of
-    // sourceEncoding and sharedEncoding. We can only use AsyncCopy if the
-    // target supports the requested or a smaller vecSize because we cannot
-    // stride when loading directly to lds on GFX9
-    auto srcTy = cast<RankedTensorType>(loadOp.getPtr().getType());
-    auto regLayout = triton::gpu::toLinearLayout(srcTy);
-    // It's the allocation so we trim the multibuffer dimension
-    auto srcShape = srcTy.getShape();
-    triton::LinearLayout sharedLayout;
-    auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc);
-    if (paddedEnc) {
-      sharedLayout = paddedEnc.getLinearComponent();
-    } else {
-      sharedLayout = triton::gpu::toLinearLayout(srcShape, sharedEnc);
-    }
-    auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+  // Compute the final vecSize we can use for the combination of sourceEncoding
+  // and sharedEncoding. We can only use AsyncCopy if the target supports the
+  // requested or a smaller vecSize because we cannot stride when loading
+  // directly to lds
+  auto srcTy = cast<RankedTensorType>(loadOp.getPtr().getType());
+  auto dstTy = cast<ttg::MemDescType>(alloc.getType());
+  auto regLayout = triton::gpu::toLinearLayout(srcTy);
+  // It's the allocation so we trim the multibuffer dimension
+  auto srcShape = dstTy.getShape().take_back(srcTy.getRank());
+  auto sharedLayout =
+      triton::gpu::toLinearLayout(srcShape, dstTy.getEncoding());
+  auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
 
-    unsigned elemBitWidth = tt::getPointeeBitWidth(srcTy);
-    unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
-    if (paddedEnc)
-      vecSize = std::min(vecSize, paddedEnc.getMinInterval());
+  unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
+  unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
 
-    if (fitToValidDirectToLdsVecSize(vecSize, elemBitWidth, targetInfo) == 0)
-      return false;
-  }
+  if (fitToValidDirectToLdsVecSize(vecSize, elemBitWidth, targetInfo) == 0)
+    return false;
 
   // Checks whether the global pointer's contiguity and mask alignment allows
   // for at least 32 bit wide loads
@@ -354,8 +314,8 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
 
     // Replace the old load with multi-buffered loads
     if (useAsyncCopy &&
-        canBeConvertedToAsyncLoad(numBuffers, loadOp, info.sharedEncoding,
-                                  axisInfoAnalysis, targetInfo)) {
+        canBeConvertedToAsyncLoad(numBuffers, loadOp, alloc, axisInfoAnalysis,
+                                  targetInfo)) {
       loadToStreamOp[loadOp] = createAsyncCopy(loadOp, alloc, extractIdx);
     } else {
       loadToStreamOp[loadOp] = createStreamCopy(loadOp, alloc, extractIdx);
@@ -750,9 +710,6 @@ void lowerLoop(scf::ForOp forOp,
   llvm::MapVector<Operation *, std::pair<int, Operation *>> loadOpToIndLevel =
       getIndirectLevel(axisInfoAnalysis, forOp, numStages);
 
-  auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
-  triton::AMD::TargetInfo targetInfo(arch ? arch->str() : "");
-
   LoadToInfoMap loadToInfo;
   for (const auto &[load, info] : loadOpToIndLevel) {
     auto [distance, use] = info;
@@ -762,9 +719,7 @@ void lowerLoop(scf::ForOp forOp,
     } else {
       LDBG("Deduce shared encoding for: " << *load);
       auto sharedEncoding =
-          getSharedEncIfAllUsersAreDotEnc(load, axisInfoAnalysis, targetInfo,
-                                          useAsyncCopy)
-              .value_or(nullptr);
+          getSharedEncIfAllUsersAreDotEnc(load->getResult(0)).value_or(nullptr);
       loadToInfo[load] = {sharedEncoding, distance, use};
       LDBG("Populate loadInfo with shared encoding: " << sharedEncoding);
     }
