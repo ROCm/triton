@@ -453,15 +453,25 @@ So this version must has a much higher freq. Need to confirm with agt.
 
 # Update the compiler with PaddedSharedLayout
 
-Commands:
+Commands from the current main
+```bash
+DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+```
 - base compiler branch: main@ee42f167023
-- compiler branch: [fav3_padded](https://github.com/ROCm/triton/tree/fav3_padded)
 - default, i.e. swizzle: `TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"`
 - PaddedSharedLayout: + `TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1`
 - disable vector-combine pass (noVC): + `DISABLE_LLVM_OPT="disable-vector-combine"`
-- customLLVM: insert iglp10 in the compute cluster [like this](https://github.com/ROCm/triton/commit/073332797a0e3dca0c6affbf9582df32ddeab847) and use the llvm custom branch [TritonInterleaveAndRematRebase2](https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2)
-- `fixBasePtr` refers to this [commit](https://github.com/ROCm/triton/commit/066952855676c428be8b50984f1f52d1176af010). More details can be found in [issue#1296](https://github.com/ROCm/triton-internal/issues/1296)
-- `fixBarrier` refers to this [commit](https://github.com/ROCm/triton/commit/3169bec0db9dd2e187d77bb7b8d777b9f2b3fd38), which improves the placement of `s_xx` instructions
+  - Note that we have to disable the vector-combine pass otherwise the `mul` instructions 
+    used update the acc will be moved from cluster 0 to cluster 2.
+- customLLVM: insert iglp10 in the compute cluster [like this](https://github.com/ROCm/triton/commit/073332797a0e3dca0c6affbf9582df32ddeab847) 
+  and use the llvm custom branch [TritonInterleaveAndRematRebase2](https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2)
+
+The following optimizations are newly developed for FAv3 and can be found
+in branch [fav3_padded](https://github.com/ROCm/triton/tree/fav3_padded)
+- `fixBasePtr` refers to this [commit](https://github.com/ROCm/triton/commit/066952855676c428be8b50984f1f52d1176af010). 
+  More details can be found in [issue#1296](https://github.com/ROCm/triton-internal/issues/1296)
+- `reduceIdle1` refers to this [commit](https://github.com/ROCm/triton/commit/3169bec0db9dd2e187d77bb7b8d777b9f2b3fd38), 
+  which improves the placement of `s_xx` instructions
   - We try to put all the `s_xxx` instructions inside the memory cluster so that
     they don't take up issue slots from mfma instructions in the compute cluster.
     - `s_barrier` divides compute and memory cluster. We try to put `s_setprio`,
@@ -470,38 +480,120 @@ Commands:
       (before the compute cluster). This way, we won't need `lgkmcnt(x)`
       before some mfma.
     - We added more `sched.barrier` to force the backend to respect our scheduling.
-- `fixBarrier2` refers to this [commit](8b8faf592378), which moves the last `s_barrier`
+- `reduceIdle2` refers to this [commit](8b8faf592378), which moves the last `s_barrier`
   from the end of the loop to the beginning of the loop.
   This ensures `s_barrier` is not followed by any `s_xxx` instructions.
   Otherwise, we will have the DIDT problem documented in [issue#903](https://github.com/ROCm/triton-internal/issues/903).
 - `propagateNaN` refers to this [commit](c1ee05bb6e0), which enables
   `propagate_nan` flag for `tl.maximum`. This will remove the first 2 self-max
-  in the reduction function.
+  in the reduction function and replace `v_max` with `v_maximum`.
+  ==> [#1173](https://github.com/ROCm/triton-internal/issues/1173)
+
+The following items come from manual assembly modification.
 - `pkMul` refers to assembly hack in which we manualy pack the exposed
-  `v_mul` into `v_pk_mul` instructions.
+  `v_mul` into `v_pk_mul` instructions. ==> [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262).
+- `readfirstlane` refers to assembly hack in which we hoist `v_readfirstlane` out of the loop.
+  ==> [issue#1309](https://github.com/ROCm/triton-internal/issues/1309).
 
 Performance:
-|                                   | tflops | reg usage | mfma efficiency |
-|-----------------------------------|--------|-----------|-----------------|
-| main swizzle                      | 1020   | 256 (2)   | 58.51%          |
-| main swizzle noVC                 | 1015   | 249       | 58.02%          |
-| main swizzle customLLVM           | 1029   | 256 (1)   | 60.52%          |
-| main swizzle customLLVM noVC      | 1038   | 245       | 62.82%          |
-| main padded                       | 1023   | 256 (2)   | 58.53%          |
-| main padded noVC                  | 1021   | 249       | 58.02%          |
-| main padded customLLVM            | 1024   | 256 (1)   | 60.51%          |
-| main padded customLLVM noVC       | 1036   | 245       | 62.82%          |
-| fixBasePtr padded customLLVM noVC | 1049   | 256       | 64.08%          |
-| fixBarrier padded customLLVM noVC | 1070   | 256       | 68.93%          |
-| fixBarrier2                       | 1099   | 256       | 75.73%          |
-| propagate NaN                     | 1102   | 256       | 76.33%          |
-| hack pkMul                        | 1108   | 256       | 77.84%          |
-| hack pkMul m0                     | 1121   | 256       | 79.46%          |
+|                              | tflops | reg usage | mfma efficiency | ticket                                                               |
+|------------------------------|--------|-----------|-----------------|----------------------------------------------------------------------|
+| main swizzle                 | 1020   | 256 (2)   | 58.51%          |                                                                      |
+| main swizzle noVC            | 1015   | 249       | 58.02%          |                                                                      |
+| main swizzle customLLVM      | 1029   | 256 (1)   | 60.52%          |                                                                      |
+| main swizzle customLLVM noVC | 1038   | 245       | 62.82%          |                                                                      |
+| main padded                  | 1023   | 256 (2)   | 58.53%          |                                                                      |
+| main padded noVC             | 1021   | 249       | 58.02%          |                                                                      |
+| main padded customLLVM       | 1024   | 256 (1)   | 60.51%          |                                                                      |
+| main padded customLLVM noVC  | 1036   | 245       | 62.82%          |                                                                      |
+| fixBasePtr                   | 1049   | 256       | 64.08%          | [#1296](https://github.com/ROCm/triton-internal/issues/1296)         |
+| reduceIdle1                  | 1070   | 256       | 68.93%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
+| reduceIdle2                  | 1099   | 256       | 75.73%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
+| propagateNaN                 | 1102   | 256       | 76.33%          | [#1173](https://github.com/ROCm/triton-internal/issues/1173)         |
+| hack pkMul                   | 1108   | 256       | 77.84%          | [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262) |
+| hack readfirstlane           | 1121   | 256       | 79.46%          | [#1309](https://github.com/ROCm/triton-internal/issues/1309)         |
 
 
-```
-DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
-```
+
+## Bottlenecks
+
+### After `propagateNaN`
+- 1st compute cluster (100)
+  - 1 x `s_barrier` --> 8
+  - 2 x `v_mov_b32_e32` --> 8
+    - one for row sum. At each iteration, we compute a new row sum and update
+      the old one onto the new one.
+      Unless we unroll the loop, otherwise we have to move them.
+    - The other one for row max.
+  - `v_permlane32_swap_b32_e32` takes 8 cycles --> 4
+  - 19 x `v_mul_f32_e32` at the end --> 19 * 4 = 76
+    - ==> these 19 `v_mul` should be combined
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)` --> 4
+- 1st memory cluster (36)
+  - 1 x `s_barrier` --> 8
+  - 2 x `v_readfirstlane_b32` --> 8
+  - 5 x `v_add_u32_e32` --> 20
+- 2nd compute cluster (116)
+  - 1 x `s_barrier` --> 8
+  - 1 x `s_nop` before `v_permlane32` --> 12
+  - 1 x `fma` exposed --> 4
+  - 11 x `v_exp_f32_e32` --> 88
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)` --> 4
+- 2nd memory cluster (28)
+  - 1 x `s_barrier` --> 8
+  - 3 x `v_add_u32_e32` --> 12
+  - 2 x `v_readfirstlane_b32` --> 8
+
+In total there are 280 cycles ==> mfma efficiency = 1024 / (1024 + 280) = 78.5%
+
+### After hack pkMul
+
+- exposed `v_mul` cycles drop 76 to 40
+
+mfma efficiency = 1024 / (1024 + 280 - 36) = 80.7%
+
+### After hack readfirstlane
+
+- remove 8 `v_xxx` instructions ==> save 32 cycles
+
+mfma efficiency = 1024 / (1024 + 280 - 36 - 32) = 82.8%
+
+- 1st compute cluster (60)
+  - 1 x `s_barrier` --> 8
+  - 2 x `v_mov_b32_e32` --> 8
+    - one for row sum. At each iteration, we compute a new row sum and update
+      the old one onto the new one.
+      Unless we unroll the loop, otherwise we have to move them.
+    - The other one for row max.
+  - 10 x `v_pk_mul` at the end --> 10 * 4 = 40
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)` --> 4
+- 1st memory cluster (20)
+  - 1 x `s_barrier` --> 8
+  - 3 x `v_add_u32_e32` --> 12
+- 2nd compute cluster (116)
+  - 1 x `s_barrier` --> 8
+  - 1 x `s_nop` before `v_permlane32` --> 12
+  - 1 x `fma` exposed --> 4
+  - 11 x `v_exp_f32_e32` --> 88
+  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)` --> 4
+- 2nd memory cluster (12)
+  - 1 x `s_barrier` --> 8
+  - 1 x `v_add_u32_e32` --> 4
+
+### What next?
+
+We can unroll the loop by a factor of 2 to further reduce valu instructions
+- 2 `v_mov` for row max and sum
+- 4 `v_add` for LDS addresses
+
+This saves 24 more cycles ==> mfma efficiency = 1024 / (1024 + 280 - 36 - 32 - 24) = 84.5%
+
+ASM kernel can further remove 2 `s_barrier`'s by writing asymmetric code for wave0-3 and 4-7.
+
+In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
+
+
+## Collect thread trace
 
 Command to collect trace
 ```
@@ -530,128 +622,4 @@ att.json:
 Command to calculate mfma efficiency
 ```
 ./process_json.py MI350/MI355/fixBasePtr_padded_customLLVM_noVC/ui_output_agent_25932_dispatch_30/
-```
-
-Note that we have to disable the vector-combine pass otherwise the `mul` instruction used
-update the acc will be moved from cluster 0 to cluster 2.
-
-
-
-## Room for improvement
-
-Now let's what is not hidden by mfma after `fixBarrier2`:
-- 1st compute cluster (108) theory (44)
-  - 1 x `s_barrier`
-  - 2 x `v_mov_b32_e32`
-    - one for row sum. At each iteration, we compute a new row sum and update
-      the old one onto the new one.
-      Unless we unroll the loop, otherwise we have to move them.
-    - The other one for row max.
-  - 2 x `s_mov_b32`
-  - 19 x `v_mul_f32_e32` at the end
-    - ==> these 19 `v_mul` should be combined
-  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)`
-- 1st memory cluster (32) theory (4)
-  - 1 x `s_barrier`
-  - 2 x `v_readfirstlane_b32`
-  - 5 x `v_add_u32_e32`
-- 2nd compute cluster (128) theory (120)
-  - 1 x `s_barrier`
-  - 2 x self-max ==> enable propagate_nan
-  - 1 x `s_nop` before `v_permlane32`
-  - 12 x `v_exp_f32_e32`
-  - 1 x `s_waitcnt vmcnt(4) lgkmcnt(0)`
-- 2nd memory cluster (24) theory (4)
-  - 1 x `s_barrier`
-  - 3 x `v_add_u32_e32`
-  - 2 x `v_readfirstlane_b32`
-
-In total there are 292 cycles ==> mfma efficiency = 1024 / (1024 + 292) = 77.8%
-We got 75% on average of all waves, which matches the number from 1st wave.
-
-In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
-
-
-ACV
-shared layout: padded[512:+32]
-==> (512+32) * sizeof(float16) = 1088
-```
-v_mov_b32_e32 v51, 0x2000            v51 = 8192
-v_lshl_or_b32 v51, v35, 10, v51      v51 = wid * 1024 + 8192
-v_lshrrev_b32_e32 v45, 4, v51        v45 = v51 / 16
-v_or_b32_e32 v200, v45, v51          v200 = wid*1024+8192 + wid*64 + 512 = wid * 1088 + 8704
-
-v35 = wave id
-s5 = 0
-v_mul_u32_u24_e32 v207, 0x410, v35
-v_mul_u32_u24_e32 v203, 0x440, v35    v203 = waveId * 1088
-
-loop: 
-s_add_i32 s2, s5, 1
-s_cmp_lt_i32 s2, 2
-s_cselect_b32 s27, s2, 0       s27 = LDS buffer id
-
-s_lshl_b32 s2, s5, 13          s2 = s5 * 8192
-s_lshl_b32 s5, s5, 14          s5 *= 16384
-s_add_i32 s5, s5, 0
-s_ashr_i32 s2, s2, 3           s2 /= 8
-s_add_i32 s2, s5, s2           s2 = s2 + s5
-v_add_u32_e32 v66, s2, v203
-v_readfirstlane_b32 s5, v66
-s_mov_b32 m0, s5
-buffer_load_dwordx4 v196, s[12:15], 0 offen lds
-
-s_mov_b32 s5, s27
-```
-
-s46-48 are free
-
-
-ACK
-```llvm
-// K shape: D x BN = 128 x 64
-// K tensor elements: 8192
-// K tensor shared layout: [512:+8] {offset = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [64, 0], [0, 32], [0, 16], [0, 1], [0, 2], [0, 4], [0, 8]]}
-// K tensor global layout: {register = [[1, 0], [2, 0], [4, 0], [0, 8]], lane = [[8, 0], [16, 0], [32, 0], [64, 0], [0, 32], [0, 16]], warp = [[0, 1], [0, 2], [0, 4]]}
-// (512 + 8) * sizeof(float16) = 1040 bytes
-%38 = tail call i32 @llvm.amdgcn.workitem.id.x()
-%39 = lshr i32 %38, 6   // %39 = waveId
-%40 = and i32 %39, 7    // %40 = waveId
-%211 = mul nuw nsw i32 %40, 1040  // %211 = waveId * 1040
-
-%210 = shl nuw nsw i32 %39, 10    // %210 = waveId * 1024
-%214 = or i32 %210, 8192          // %214 = waveId * 1024 + 8192
-%216 = lshr exact i32 %214, 6     // %216 = waveId * 16 + 128
-%217 = or disjoint i32 %216, %214 // %217 = waveId * 1040 + 8320
-
-loop:
-%1436 = add i32 %759, 1, // %759 = previous LDS buffer idx, %1436 = current LDS buffer idx
-%1437 = icmp slt i32 %1436, 2,
-%1438 = select i1 %1437, i32 %1436, i32 0,  // %1438 = current LDS buffer idx = 1 - %759
-%1439 = shl i32 %1438, 13,                  // %1439 = LDSBufIdx * 8192
-%1440 = getelementptr half, ptr addrspace(3) getelementptr (i8, ptr addrspace(3) @global_smem, i32 34752), i32 %1439,
-%1441 = ashr exact i32 %1439, 5,            // %1414 = LDSBufIdx * 8192 / 32 = LDSBufIdx * 256
-%1442 = getelementptr i8, ptr addrspace(3) %1440, i32 %1441,
-%1443 = tail call ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1(ptr addrspace(1) %1435, i16 0, i64 2147483646, i32 159744),
-%1444 = getelementptr inbounds nuw i8, ptr addrspace(3) %1442, i32 %211,
-tail call void @llvm.amdgcn.raw.ptr.buffer.load.lds(ptr addrspace(8) %1443, ptr addrspace(3) %1444, i32 16, i32 %213, i32 0, i32 0, i32 0),, !alias.scope !49
-%1445 = getelementptr inbounds nuw i8, ptr addrspace(3) %1442, i32 %217,
-tail call void @llvm.amdgcn.raw.ptr.buffer.load.lds(ptr addrspace(8) %1443, ptr addrspace(3) nonnull %1445, i32 16, i32 %219, i32 0, i32 0, i32 0) , !alias.scope !49
-```
-
-```asm
-v_or_b32_e32 v193, v52, v51
-v_mul_u32_u24_e32 v208, 0x410, v35
-
-loop:
-v_add_u32_e32 v98, s34, v208
-s_nop 0
-v_readfirstlane_b32 s2, v98
-v_add_u32_e32 v98, s34, v193
-s_mov_b32 m0, s2
-v_readfirstlane_b32 s2, v98
-buffer_load_dwordx4 v192, s[12:15], 0 offen lds
-s_mov_b32 m0, s2
-s_nop 0
-buffer_load_dwordx4 v195, s[12:15], 0 offen lds
 ```
