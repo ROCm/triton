@@ -361,10 +361,11 @@ class HIPBackend(BaseBackend):
             fns[0].add_fn_target_feature("+xnack")
             fns[0].add_fn_asan_attr()
 
-        # Hint the compiler that we'd like the firmware to set the kernel arguments
-        # to user SGPRs so that the kernel does not need to s_load its arguments
-        # from memory.
-        amd.set_all_fn_arg_inreg(fns[0])
+        if knobs.amd.use_kernarg_preload:
+            # Hint the compiler that we'd like the firmware to set the kernel arguments
+            # to user SGPRs so that the kernel does not need to s_load its arguments
+            # from memory.
+            amd.set_all_fn_arg_inreg(fns[0])
 
         if knobs.compilation.enable_asan:
             default_libdir = Path(__file__).parent / 'lib'
