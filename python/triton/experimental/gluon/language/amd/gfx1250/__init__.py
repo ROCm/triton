@@ -4,8 +4,9 @@ from triton.experimental.gluon.language import _core as ttgl
 from .._layouts import AMDWMMALayout
 from ..cdna3 import buffer_load, buffer_store
 from . import tdm
+from . import async_copy
 
-__all__ = ["tdm", "wmma", "wmma_scaled", "buffer_load", "buffer_store"]
+__all__ = ["async_copy", "tdm", "wmma", "wmma_scaled", "buffer_load", "buffer_store"]
 
 
 @builtin
