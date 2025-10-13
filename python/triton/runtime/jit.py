@@ -735,17 +735,17 @@ class JITFunction(JITCallable, KernelInterface[T]):
 
             # CAP FLOW CHANGES
             fn_orig_name = self._fn_name
-            self._update_fn_name(constexprs, bound_args, options)
-
-            if "TRITON_SAVETEMPS_AUX_TARGET" in os.environ:
-                # compile the kernel
-                aux_src = self.ASTSource(self, signature, constexprs, attrs)
-                aux_target = self.get_aux_target()
-                aux_options_dict = options.__dict__.copy()
-                aux_options_dict['arch'] = os.getenv('TRITON_SAVETEMPS_AUX_TARGET')
-                aux_kernel = self.compile(aux_src, target=aux_target, options=aux_options_dict)
-                print("aux target shared size: ", aux_kernel.metadata.shared)
-                self._save_temps(aux_kernel, aux_target)
+            if "TRITON_ENABLE_CAP_FLOW" in os.environ:
+                self._update_fn_name(constexprs, bound_args, options)
+                if "TRITON_SAVETEMPS_AUX_TARGET" in os.environ:
+                    # compile the kernel
+                    aux_src = self.ASTSource(self, signature, constexprs, attrs)
+                    aux_target = self.get_aux_target()
+                    aux_options_dict = options.__dict__.copy()
+                    aux_options_dict['arch'] = os.getenv('TRITON_SAVETEMPS_AUX_TARGET')
+                    aux_kernel = self.compile(aux_src, target=aux_target, options=aux_options_dict)
+                    print("aux target shared size: ", aux_kernel.metadata.shared)
+                    self._save_temps(aux_kernel, aux_target)
 
             # compile the kernel
             src = self.ASTSource(self, signature, constexprs, attrs)
