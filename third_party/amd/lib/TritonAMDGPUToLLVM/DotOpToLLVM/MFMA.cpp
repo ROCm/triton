@@ -233,9 +233,11 @@ struct DotTiling {
   int64_t getTileSizeI() const { return tileSizeInner; }
 
   int64_t getNumTilesB() const { return numTilesB; }
+  int64_t getNumTilesM() const { return numTilesM; }
+  int64_t getNumTilesN() const { return numTilesN; }
+  int64_t getNumTilesK() const { return numTilesK; }
   int64_t getNumTilesO() const { return numTilesOuter; }
   int64_t getNumTilesI() const { return numTilesInner; }
-  int64_t getNumTilesK() const { return numTilesK; }
 
   int64_t getTileStartM(int tileIdxOuter, int tileIdxInner) const {
     if (outerTileN) {
@@ -256,60 +258,82 @@ struct DotTiling {
   }
 
   struct DotCoord{
-    DotTiling *dotTiling;
+    const DotTiling *dotTiling;
+    // No need to modify these.
     int b;
     int m;
     int n;
     int k;
-    const int bIdx = 0;
-    const int mIdx = 1;
-    const int nIdx = 2;
-    const int kIdx = 3;
-    const int bTileIdx = 0;
-    const int mTileIdx = 1;
-    const int nTileIdx = 2;
-    const int kTileIdx = 3;
+    // Specify order of loops here.
+    const int bTileIdx = 7;
+    const int kTileIdx = 6;
+    const int mTileIdx = 5;
+    const int nTileIdx = 4;
+    const int bIdx = 3;
+    const int mIdx = 2;
+    const int nIdx = 1;
+    const int kIdx = 0;
 
+    // TODO(dtanner) needs to match outer/inner.
+    // Modify this to customize order of loops.
     // 0 = inner-most loops, 7 = outer most loop
-    std::array<int, 8> indices{{kIdx, nIdx, mIdx, bIdx, nTileIdx, mTileIdx, kTileIdx, bTileIdx}};
+    //std::array<int, 8> indices{{kIdx, nIdx, mIdx, bIdx, nTileIdx, mTileIdx, kTileIdx, bTileIdx}};
+    std::array<int, 8> indices{{0,0,0,0,0,0,0,0}};
+
     std::array<int, 8> max_indices;
 
-    std::array<int, 4> tileOrder{{bIdx, kIdx, mIdx, nIdx}}; // B, K, M, N
-    std::array<int, 4> elemOrder{{bIdx, kIdx, mIdx, nIdx}}; // b, m, n, k
-    std::array<int, 4> elemId;
-    std::array<int, 4> tileId;
-    std::array<int, 4> tileSize;
+    //std::array<int, 4> tileOrder{{bIdx, kIdx, mIdx, nIdx}}; // B, K, M, N
+    //std::array<int, 4> elemOrder{{bIdx, kIdx, mIdx, nIdx}}; // b, m, n, k
+    //std::array<int, 4> elemId;
+    //std::array<int, 4> tileId;
+    //std::array<int, 4> tileSize;
 
-    int outer;
-    int inner;
+    //int outer;
+    //int inner;
     /*
       Determine how serial dot maps to b, m, n, k.
     */
-    DotCoord(DotTiling *dotTiling, size_t i) : dotTiling(dotTiling) {
-      tileSize[bIdx] = dotTiling->getTileSizeB();
-      tileSize[mIdx] = dotTiling->getTileSizeM();
-      tileSize[nIdx] = dotTiling->getTileSizeN();
-      tileSize[kIdx] = dotTiling->getTileSizeK();
+    DotCoord(const DotTiling *dotTiling, size_t i = 0) : dotTiling(dotTiling),
+        b(0), m(0), n(0), k(0) {
 
+      // Eventually we compare indices[x] >= max_indices[x],
+      // so we need indices[0] to represent k, and max_indices[0] to represent max k
+      // kIds = 3
+      // indices[kIdx] == 0
+#if 0
+      // Num elements = tile size.
+      max_indices[indices[bIdx]] = dotTiling->getTileSizeB();
+      max_indices[indices[mIdx]] = dotTiling->getTileSizeM();
+      max_indices[indices[nIdx]] = dotTiling->getTileSizeN();
+      max_indices[indices[kIdx]] = dotTiling->getTileSizeK();
+      // NumTiles.
+      max_indices[indices[bTileIdx]] = dotTiling->getNumTilesB();
+      max_indices[indices[mTileIdx]] = dotTiling->getNumTilesM();
+      max_indices[indices[nTileIdx]] = dotTiling->getNumTilesN();
+      max_indices[indices[kTileIdx]] = dotTiling->getNumTilesK();
+#else
+      // Num elements = tile size.
       max_indices[bIdx] = dotTiling->getTileSizeB();
       max_indices[mIdx] = dotTiling->getTileSizeM();
       max_indices[nIdx] = dotTiling->getTileSizeN();
       max_indices[kIdx] = dotTiling->getTileSizeK();
+      // NumTiles.
       max_indices[bTileIdx] = dotTiling->getNumTilesB();
       max_indices[mTileIdx] = dotTiling->getNumTilesM();
       max_indices[nTileIdx] = dotTiling->getNumTilesN();
       max_indices[kTileIdx] = dotTiling->getNumTilesK();
+#endif
 
-      /*
-       tileB, tileO, tileI, tileK;
-       b, o, i, k;
-      */
-      b = i;
-      m = i;
-      n = i;
-      k = i;
+      // Update state to i
+      for (int iter = 0; iter < i; ++iter) {
+        next();
+      }
     }
+
+    // Once each loop level reaches max, reset it and move to next loop level.
     void next(int idx) {
+      if (idx >= indices.size())
+        return;
       indices[idx]++;
       if (indices[idx] >= max_indices[idx]) {
         indices[idx] = 0;
@@ -317,30 +341,29 @@ struct DotTiling {
       }
     }
 
+    // Start by incrementing the 0th index, i.e. inner-most loop.
     void next() {
       next(0);
     }
 
-
-
-
-    bool operator++() const {
-      k++;
-      if (k > dotTiling.getTileSizeK()) {
-        k = 0;
-
-      }
+    void operator++() {
+      next();
     };
 
     bool operator==(const DotCoord& other) const {
       return b == other.b && m == other.m && n == other.n && k == other.k;
     };
 
-    int getB() const { return elemId[bIdx] + tileId[bIdx] * tileSize[bIdx]; }
-    int getM() const { return elemId[mIdx] + tileId[mIdx] * tileSize[mIdx]; }
-    int getN() const { return elemId[nIdx] + tileId[nIdx] * tileSize[nIdx]; }
-    int getK() const { return elemId[kIdx] + tileId[kIdx] * tileSize[kIdx]; }
+    //int getB() const { return elemId[bIdx] + tileId[bIdx] * tileSize[bIdx]; }
+    //int getM() const { return elemId[mIdx] + tileId[mIdx] * tileSize[mIdx]; }
+    //int getN() const { return elemId[nIdx] + tileId[nIdx] * tileSize[nIdx]; }
+    //int getK() const { return elemId[kIdx] + tileId[kIdx] * tileSize[kIdx]; }
 
+    // Each value combines id within tile + tile offset.
+    int getB() const { return indices[bIdx] + indices[bTileIdx] * max_indices[bIdx]; }
+    int getM() const { return indices[mIdx] + indices[mTileIdx] * max_indices[mIdx]; }
+    int getN() const { return indices[nIdx] + indices[nTileIdx] * max_indices[nIdx]; }
+    int getK() const { return indices[kIdx] + indices[kTileIdx] * max_indices[kIdx]; }
   };
 
   /*
@@ -350,10 +373,10 @@ struct DotTiling {
   private:
     DotCoord dc;
     size_t index;
-    DotTiling *dotTiling;
+    // DotTiling *dotTiling;
   public:
     // iterator() : index(0), dc(0) {}
-    iterator(size_t i) : index(i), dc(i) {}
+    iterator(const DotTiling *dotTiling, size_t i) : index(i), dc(dotTiling, i) {}
     // iterator(const DotCoord &dc, size_t i) : dc(dc), index(i) {}
 
     DotCoord operator*() const {
@@ -362,7 +385,7 @@ struct DotTiling {
 
     iterator& operator++() {
       ++index;
-      dc = DotCoord(this, index);
+      //dc = DotCoord(this, index);
       dc.next();
       return *this;
     }
@@ -380,14 +403,15 @@ struct DotTiling {
     bool operator!=(const iterator& other) const {
       return !(*this == other);
     }
+    size_t getIndex() const { return index; }
   }; // iterator
 
   iterator begin() const {
-    return iterator(0);
+    return iterator(this, 0);
   }
 
   iterator end() const {
-    return iterator(numRepB * numRepM * numRepN * numRepK);
+    return iterator(this, numRepB * numRepM * numRepN * numRepK);
   }
 };
 
@@ -710,10 +734,11 @@ struct DotOpMFMAConversionHelper {
 
     for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
       DotTiling::DotCoord dc = *iter;
-      llvm::outs() << "b=" << dc.b
-        << ", m=" << dc.m
-        << ", n=" << dc.n
-        << ", k=" << dc.k << "\n";
+      llvm::outs() << "[" << iter.getIndex() << "]"
+        << ": b=" << dc.getB()
+        << ", m=" << dc.getM()
+        << ", n=" << dc.getN()
+        << ", k=" << dc.getK() << "\n";
     }
 
 
