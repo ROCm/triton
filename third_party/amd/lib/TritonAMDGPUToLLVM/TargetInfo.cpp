@@ -68,7 +68,20 @@ llvm::AMDGPU::GPUKind TargetInfo::getGPUKind() const {
   return llvm::AMDGPU::parseArchAMDGCN(arch);
 }
 
-int TargetInfo::getWarpSize() const { return isCDNA(getISAFamily()) ? 64 : 32; }
+int TargetInfo::getWarpSize() const {
+  switch (getISAFamily()) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+  case ISAFamily::CDNA4:
+    return 64;
+  case ISAFamily::GFX1250:
+    return 32;
+  default:
+    break;
+  }
+  return 32;
+}
 
 int TargetInfo::getSharedMemorySize() const {
   int kbytes = (getISAFamily() == ISAFamily::GFX1250
