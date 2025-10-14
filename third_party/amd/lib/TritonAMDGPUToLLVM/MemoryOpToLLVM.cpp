@@ -1,20 +1,16 @@
 #include "AsyncUtility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
-#include "TargetInfo.h"
-#include "TritonAMDGPUToLLVM/TargetUtils.h"
-#include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-#include "llvm/TargetParser/TargetParser.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/LinearLayout.h"
 
-using ::mlir::LLVM::AMD::isUsedByDotScaledOp;
-using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
-using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
 
 namespace {
@@ -38,118 +34,75 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     MemDescType srcTy = op.getSrc().getType();
     RankedTensorType dstTy = op.getType();
-    Attribute srcLayout = srcTy.getEncoding();
-    Attribute dstLayout = dstTy.getEncoding();
+    auto typeConverter = this->getTypeConverter();
+    auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
+    unsigned bitwidth = llvmElemTy.getIntOrFloatBitWidth();
+    bool isGFX1250 = targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250;
+    // lanes are divided in 4 groups that participate together in the shuffle
+    unsigned numLanesInShuffleGroup = targetInfo.getWarpSize() / 4;
+    unsigned instBitWidth = isGFX1250 && bitwidth == 16 ? 128 : 64;
+    unsigned needContigReg = instBitWidth / bitwidth;
 
-    if (isPackedLoad || canUseTransLoad(op, srcTy, dstTy)) {
-      return lowerSharedToDotOperandTransLL(op, adaptor,
-                                            this->getTypeConverter(), rewriter);
+    if (!canUseTransLoad(op, srcTy, dstTy, bitwidth, needContigReg,
+                         numLanesInShuffleGroup)) {
+      return failure();
     }
-    return failure();
+
+    return lowerSharedToDotOperandTransLL(op, needContigReg, instBitWidth,
+                                          numLanesInShuffleGroup, adaptor,
+                                          typeConverter, rewriter);
   }
 
 private:
-  bool checkLayoutProperties(MemDescType srcTy, RankedTensorType dstTy) const {
-    // Verify the layout properties required for using the ds_read_tr
-    // instruction. This instruction is used to load non-k contiguous tensors
-    // from shared memory into a dot layout with an MFMA layout parent.
-    auto dotEnc = llvm::dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    if (!dotEnc) {
-      return false;
-    }
+  bool checkLayoutProperties(MemDescType srcTy, RankedTensorType dstTy,
+                             unsigned needContigReg,
+                             unsigned needContigLane) const {
+    auto srcOrder = triton::gpu::getOrder(srcTy);
+    auto dstOrder = triton::gpu::getOrder(dstTy);
 
-    auto mfmaEnc =
-        llvm::dyn_cast_or_null<AMDMfmaEncodingAttr>(dotEnc.getParent());
-    auto wmmaEnc =
-        llvm::dyn_cast_or_null<AMDWmmaEncodingAttr>(dotEnc.getParent());
-    if ((!wmmaEnc) && (!mfmaEnc)) {
-      return false;
-    }
-
-    if (mfmaEnc && !mfmaEnc.hasUnitTilesPerWarp()) {
-      return false;
-    }
-
-    int rank = dstTy.getRank();
-    const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-
-    auto swizzledEnc =
-        dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(srcTy.getEncoding());
-    auto paddedEnc =
-        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
-    if (!swizzledEnc && !paddedEnc)
+    // Check that the contiguity of srcTy and dstTy don't match
+    // this is because ds_read_tr will reshuffle the data to
+    // the opposite contiguity
+    if (dstOrder[0] == srcOrder[0])
       return false;
 
-    bool out = kDim != (swizzledEnc ? swizzledEnc.getOrder()[0]
-                                    : paddedEnc.getOrder()[0]);
-    return out;
+    auto dstLL = triton::gpu::toLinearLayout(dstTy);
+    SmallVector<StringAttr> outDimNames(dstLL.getOutDimNames());
+    std::swap(outDimNames[0], outDimNames[1]);
+    auto dstTrLL = dstLL.transposeOuts(outDimNames);
+
+    // Check the main requirements for the ds_read_tr instruction: contiguity
+    // of reg/lane. This is because ds_read_tr works on a block of 16 lanes
+    // with each holding 64 bits of data. Each lane will load 64 bits of
+    // contiguous data and then share it among the lane dimension.
+    // This means that there needs to be a check that each lane owns
+    // 64 bit of contig data and that the communicating lanes are contiguous.
+    // In order to do this, we use ll.getNumConsecutiveInOut() which
+    // can get the contiguity of the first component of the first
+    // dimension.
+    // Since the data might be dim0 or dim1 contiguous we need both the
+    // dstLL and the dstTrLL: one to check the register dimension
+    // contiguity and the other to check the lane dimension one.
+    bool dim1Contig = dstOrder[0] == 1;
+    auto dstLLDim0Contig = dim1Contig ? dstTrLL : dstLL;
+    auto dstLLDim1Contig = dim1Contig ? dstLL : dstTrLL;
+    int contigRegisters = dstLLDim0Contig.getNumConsecutiveInOut();
+
+    assert(dstLLDim0Contig.getBases().begin()->first == "register");
+    SmallVector<StringAttr> subLayoutInDims(
+        llvm::drop_begin(dstLLDim0Contig.getInDimNames()));
+    SmallVector<StringAttr> subLayoutOutDims(dstLLDim0Contig.getOutDimNames());
+    auto dstLLOnlyLaneWarp =
+        dstLLDim1Contig.sublayout(subLayoutInDims, subLayoutOutDims);
+    int contigLanes = dstLLOnlyLaneWarp.getNumConsecutiveInOut();
+
+    // Check that the tile size used by ds_read_tr (KxM/N = 4x16 for 16-bit
+    // elements) is contiguous both in terms of registers dimension and in
+    // terms of lane dimension. If that is the case then we can use ds_read_tr
+    return contigRegisters >= needContigReg && contigLanes >= needContigLane;
   }
 
-  // bool checkPerformanceProperties(MemDescType srcTy,
-  //                                 RankedTensorType dstTy) const {
-  //   // The transposed load lowering logic assumes that double-rate MFMA (
-  //   // mfma32x32x16 and mfma16x16x32) instructions are used whenever
-  //   possible.
-  //   // This code verifies whether double-rate MFMA instructions are being
-  //   used
-  //   // and falls back to the default path if they are not. (Note: The
-  //   lowering
-  //   // logic for double-rate MFMA is the same as for single-rate (mfma32x32x8
-  //   // and mfma16x16x16) with kpack=2). This check should be removed once
-  //   // double-rate MFMA support is fully implemented in the compiler, leaving
-  //   // only an assertion. Currently, single-rate configurations with kpack=1
-  //   are
-  //   // still in use, so in such cases, we revert to the default lowering
-  //   logic
-  //   // without LDS transpose read instructions.
-  //   auto dotEnc =
-  //   llvm::dyn_cast_or_null<DotOperandEncodingAttr>(dstTy.getEncoding()); if
-  //   (!dotEnc) {
-  //     return false;
-  //   }
-
-  //   auto wmmaEnc =
-  //   llvm::dyn_cast_or_null<AMDWmmaEncodingAttr>(dotEnc.getParent()); auto
-  //   mfmaEnc =
-  //   llvm::dyn_cast_or_null<AMDMfmaEncodingAttr>(dotEnc.getParent()); int32_t
-  //   mDim = -1; if (wmmaEnc) {
-  //     return true;
-  //     //mDim = wmmaEnc.getMNKDimPerInstr()[0];
-  //   } else if (mfmaEnc) {
-  //     mDim = mfmaEnc.getMDim();
-  //   } else {
-  //     return false;
-  //   }
-  //   assert((mDim == 32 || mDim == 16) && "Invalid MFMA or WMMA instruction
-  //   dimension");
-
-  //   int rank = dstTy.getRank();
-  //   auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
-  //                       .getIntOrFloatBitWidth();
-  //   int32_t kWidth = dotEnc.getKWidth();
-
-  //   const auto shape = dstTy.getShape();
-  //   const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-  //   const bool isLargeTile = shape[kDim] >= largeTileThreshold;
-
-  //   const int kWidthLargeTile = 8 * kFactor;
-  //   const int kWidthSmallTile = 4 * kFactor;
-  //   // For largeTile, i.e. double rated mfma is an option, it's accepted to
-  //   // have kWidth set for both double and single rated mfma
-  //   // For smallTile, it's only accepted to have kWidth set to single rate
-  //   // mfma. Smaller kWidth is not allowed to use transposed lds load.
-  //   return (isLargeTile &&
-  //           llvm::is_contained({kWidthLargeTile, kWidthSmallTile}, kWidth))
-  //           ||
-  //          (kWidth == kWidthSmallTile);
-  // }
-
-  bool checkCurrentLimitation(Operation *localLoad,
-                              RankedTensorType dstTy) const {
-
-    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
-                        .getIntOrFloatBitWidth();
-
+  bool checkCurrentLimitation(unsigned bitwidth) const {
     // FP4 is represented as i8 and, when packed along K, can be
     // transposed using ds_read_tr8 which doesn't change packing.
     if (bitwidth != 16 && bitwidth != 8) {
@@ -160,44 +113,29 @@ private:
   }
 
   bool canUseTransLoad(Operation *localLoad, MemDescType srcTy,
-                       RankedTensorType dstTy) const {
-    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
-                        .getIntOrFloatBitWidth();
-    // 1. Check GPU arch properties.
+                       RankedTensorType dstTy, unsigned bitwidth,
+                       unsigned needContigReg, unsigned needContigLane) const {
+    // Packed loads need to always map to ds_read_tr
+    if constexpr (isPackedLoad) {
+      return true;
+    }
+
     if (!targetInfo.canUseLDSTransLoad(bitwidth)) {
       return false;
     }
 
-    // 2. Check layout properties.
-    if (!checkLayoutProperties(srcTy, dstTy)) {
+    if (!checkCurrentLimitation(bitwidth)) {
       return false;
     }
 
-    // 3. Check current limitations.
-    if (!checkCurrentLimitation(localLoad, dstTy)) {
-      return false;
-    }
-
-    // 4. Check kWidth
-    // if (!checkKWidth(srcTy, dstTy)) {
-    //   return false;
-    // }
-
-    // 4. Check current limitations.
-    // if (bitwidth != 16) {
-    //   return false;
-    // }
-
-    // We cannot use transpose linear layouts for wmma mx data types, because
-    // the layouts don't match
-    if (isUsedByDotScaledOp(localLoad)) {
+    if (!checkLayoutProperties(srcTy, dstTy, needContigReg, needContigLane)) {
       return false;
     }
 
     return true;
   }
 
-  Value transLoadGfx1250(ConversionPatternRewriter &rewriter, Location loc,
+  Value transLoadGfx1250(RewriterBase &rewriter, Location loc,
                          unsigned bitwidth, Type vecTy, Value vecAddr) const {
 
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -216,99 +154,116 @@ private:
     return l;
   }
 
-  LogicalResult
-  lowerSharedToDotOperandTransLL(LocalLoadOpType op, OpAdaptor adaptor,
-                                 const LLVMTypeConverter *typeConverter,
-                                 ConversionPatternRewriter &rewriter) const {
+  LogicalResult lowerSharedToDotOperandTransLL(
+      LocalLoadOpType op, unsigned needContigReg, unsigned instBitWidth,
+      unsigned numLanesInShuffleGroup, OpAdaptor adaptor,
+      const LLVMTypeConverter *typeConverter,
+      ConversionPatternRewriter &rewriter) const {
     auto ctx = rewriter.getContext();
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto dstTy = cast<RankedTensorType>(op.getType());
     auto srcTy = cast<MemDescType>(op.getSrc().getType());
-    auto dotEnc = cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    auto shape = isPackedLoad ? srcTy.getShape() : dstTy.getShape();
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
-    auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
-    auto ldsTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, llBitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
-    SmallVector<Value> outVals;
-    SmallVector<Value> elemsI32;
+
+    auto dstLL =
+        triton::gpu::toLinearLayout(srcTy.getShape(), dstTy.getEncoding());
+
     mlir::Type retTy = dstTy;
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
-    bool valid = emitTransferBetweenRegistersAndShared(
-        ldsTransLayout, srcTy, llvmElemTy,
-        /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
-        laneId, warpId, [&](VectorType vecTy, Value vecAddr) {
-          if (targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250) {
-            auto vecVal =
-                transLoadGfx1250(rewriter, loc, bitwidth, vecTy, vecAddr);
-            for (int v = 0; v < vecTy.getNumElements(); v++) {
-              outVals.push_back(
-                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
-            }
-          } else if constexpr (isPackedLoad) {
-            assert(bitwidth == 8);
-            auto numElems = vecTy.getNumElements();
-            auto numElemsI32 = (numElems * bitwidth / 32);
-            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
-            auto dsReadOp =
-                rewriter.create<ROCDL::ds_read_tr4_b64>(loc, i32VecTy, vecAddr);
-            auto res = b.bitcast(dsReadOp.getResult(), vecTy);
-            Value vecVal = res.getResult();
-            for (int v = 0; v < vecTy.getNumElements(); v++) {
-              outVals.push_back(
-                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
-            }
-          } else if (bitwidth == 16) {
-            auto dsReadOp =
-                rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
-            if constexpr (!isPackedLoad) {
-              if (targetInfo.requiresAliasInfoForAsyncOps()) {
-                AMD::addLocalLoadNoAliasScope(op, dsReadOp);
-              }
-            }
-            Value vecVal = dsReadOp.getResult();
-            for (int v = 0; v < vecTy.getNumElements(); v++) {
-              outVals.push_back(
-                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
-            }
-          } else {
-            // pack elements in i32 vectors
-            auto numElems = vecTy.getNumElements();
-            auto numElemsI32 = (numElems * bitwidth / 32);
-            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
+    auto affineOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
+    auto maskSpanAffineOffset = smemObj.getMaskSpanOffsets(srcTy);
+    auto calcPaddedOffset = [&](Value smemOffset) {
+      TritonLLVMOpBuilder b(loc, rewriter);
+      auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
+      if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+              srcTy.getEncoding())) {
+        // Apply the offset needed for padding.
+        Value padOffset = emitPadding(loc, rewriter, paddedLayout, bitwidth,
+                                      smemOffset, /*offsetInBytes=*/true);
+        smemOffset = b.add(smemOffset, padOffset);
+      }
+      return smemOffset;
+    };
 
-            auto dsReadOp =
-                rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
-            if constexpr (!isPackedLoad) {
-              if (targetInfo.requiresAliasInfoForAsyncOps()) {
-                AMD::addLocalLoadNoAliasScope(op, dsReadOp);
-              }
-            }
-            Value vecVal = dsReadOp.getResult();
-            for (auto i = 0; i < numElemsI32; ++i) {
-              elemsI32.push_back(
-                  b.extract_element(i32_ty, vecVal, b.i32_val(i)));
-            }
-          }
-        });
+    auto shape = srcTy.getShape();
+    // FP4 are packed into i8 so the real bitwidth is different
+    auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
 
-    // unpack i32 vectors and cast to native type
-    if (bitwidth != 16) {
-      auto numElemsPerVec = 32 / bitwidth;
-      auto vecTy = vec_ty(llvmElemTy, numElemsPerVec);
-      for (int v = 0; v < static_cast<int>(elemsI32.size()); ++v) {
-        auto vec = b.bitcast(elemsI32[v], vecTy);
-        for (int i = 0; i < numElemsPerVec; ++i)
-          outVals.push_back(b.extract_element(llvmElemTy, vec, b.i32_val(i)));
+    auto ldsTransLayout = triton::gpu::chooseDsReadB64Tr16Layout(
+        dstTy.getEncoding(), shape, llBitwidth, instBitWidth,
+        numLanesInShuffleGroup);
+    auto paddedEnc =
+        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
+    LinearLayout cvt = LinearLayout::empty();
+    if (paddedEnc) {
+      const auto &sharedLL = paddedEnc.getLinearComponent();
+      cvt = ldsTransLayout.invertAndCompose(sharedLL);
+    } else {
+      auto sharedLL = triton::gpu::toLinearLayout(srcTy);
+      cvt = ldsTransLayout.invertAndCompose(sharedLL);
+    }
+
+    // Check that we will be able to vectorize the load.
+    // Need to have exactly needContigReg, otherwise we can't use ds_read_tr
+    auto [elemsPerVec, permutation] =
+        largestVectorisation(ctx, cvt, bitwidth, needContigReg);
+
+    if (paddedEnc)
+      elemsPerVec = std::min<int>(elemsPerVec, paddedEnc.getMinInterval());
+
+    if (elemsPerVec != needContigReg)
+      return failure();
+
+    cvt = cvt.sublayout(
+        {str_attr("register"), str_attr("lane"), str_attr("warp")},
+        {str_attr("offset")});
+    auto lowerInst = [&](RewriterBase &rewriter, Location loc,
+                         ArrayRef<Value> inVals, Value vecAddr, int idx,
+                         VectorType vTy) {
+      if (targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250) {
+        SmallVector<Value> loadedVals;
+        auto vecVal = transLoadGfx1250(rewriter, loc, bitwidth, vTy, vecAddr);
+        for (int v = 0; v < vTy.getNumElements(); v++) {
+          loadedVals.push_back(
+              b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+        }
+        return loadedVals;
+      }
+      Value dsReadTr;
+      if (bitwidth == 16) {
+        dsReadTr = rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vTy, vecAddr);
+      } else {
+        assert(bitwidth == 8);
+        auto numElems = vTy.getNumElements();
+        auto numElemsI32 = (numElems * bitwidth / 32);
+        auto ty = VectorType::get(numElemsI32, i32_ty);
+        if (isPackedLoad) {
+          dsReadTr = rewriter.create<ROCDL::ds_read_tr4_b64>(loc, ty, vecAddr);
+        } else {
+          dsReadTr = rewriter.create<ROCDL::ds_read_tr8_b64>(loc, ty, vecAddr);
+        }
+      }
+      AMD::addLocalLoadNoAliasScope(
+          op, cast<LLVM::AliasAnalysisOpInterface>(dsReadTr.getDefiningOp()));
+      Value vecVal = b.bitcast(dsReadTr, vTy);
+      SmallVector<Value> loadedVals;
+      for (int v = 0; v < vTy.getNumElements(); v++) {
+        loadedVals.push_back(
+            b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
       }
 
-      retTy = LLVM::LLVMStructType::getLiteral(
-          ctx, SmallVector<Type>(outVals.size(), llvmElemTy));
-    }
-    assert(valid && "Failed to emit LDS transpose load operations");
+      return loadedVals;
+    };
+
+    SmallVector<Value> outVals = lowerLdSt(
+        loc, rewriter.getContext(), cvt, {}, // Input for store, output for load
+        llvmElemTy, smemObj.getBase(), calcPaddedOffset, affineOffset,
+        maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo,
+        needContigReg, lowerInst);
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, retTy);
     rewriter.replaceOp(op, result);
     return success();
@@ -361,11 +316,11 @@ void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
 
   patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
       typeConverter, targetInfo, transBenefit);
-  /*
-  patterns.add<
-      TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
-      typeConverter, targetInfo, benefit);
-  */
+  if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA4) {
+    patterns.add<TransLocalLoadOpConversion<
+        triton::amdgpu::LocalLoadPackedTransposedOp>>(typeConverter, targetInfo,
+                                                      benefit);
+  }
   patterns.add<LocalBarrierOpConversion>(typeConverter, targetInfo,
                                          barrierBenefit);
 }
