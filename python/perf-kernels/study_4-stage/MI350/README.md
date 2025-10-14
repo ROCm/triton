@@ -455,11 +455,10 @@ So this version must has a much higher freq. Need to confirm with agt.
 
 Commands from the current main
 ```bash
-DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+DISABLE_LLVM_OPT="disable-vector-combine"  TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
 ```
 - base compiler branch: main@ee42f167023
-- default, i.e. swizzle: `TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"`
-- PaddedSharedLayout: + `TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1`
+- default, i.e. paddedSharedLayout: `TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"`
 - disable vector-combine pass (noVC): + `DISABLE_LLVM_OPT="disable-vector-combine"`
   - Note that we have to disable the vector-combine pass otherwise the `mul` instructions 
     used update the acc will be moved from cluster 0 to cluster 2.
@@ -492,27 +491,31 @@ in branch [fav3_padded](https://github.com/ROCm/triton/tree/fav3_padded)
 The following items come from manual assembly modification.
 - `pkMul` refers to assembly hack in which we manualy pack the exposed
   `v_mul` into `v_pk_mul` instructions. ==> [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262).
+  - We hacked the compiler.py to process the amdgcn file to achieve the above ([commit](2dc24453d7a467))
 - `readfirstlane` refers to assembly hack in which we hoist `v_readfirstlane` out of the loop.
   ==> [issue#1309](https://github.com/ROCm/triton-internal/issues/1309).
 
 Performance:
-|                              | tflops | reg usage | mfma efficiency | ticket                                                               |
-|------------------------------|--------|-----------|-----------------|----------------------------------------------------------------------|
-| main swizzle                 | 1020   | 256 (2)   | 58.51%          |                                                                      |
-| main swizzle noVC            | 1015   | 249       | 58.02%          |                                                                      |
-| main swizzle customLLVM      | 1029   | 256 (1)   | 60.52%          |                                                                      |
-| main swizzle customLLVM noVC | 1038   | 245       | 62.82%          |                                                                      |
-| main padded                  | 1023   | 256 (2)   | 58.53%          |                                                                      |
-| main padded noVC             | 1021   | 249       | 58.02%          |                                                                      |
-| main padded customLLVM       | 1024   | 256 (1)   | 60.51%          |                                                                      |
-| main padded customLLVM noVC  | 1036   | 245       | 62.82%          |                                                                      |
-| fixBasePtr                   | 1049   | 256       | 64.08%          | [#1296](https://github.com/ROCm/triton-internal/issues/1296)         |
-| reduceIdle1                  | 1070   | 256       | 68.93%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
-| reduceIdle2                  | 1099   | 256       | 75.73%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
-| propagateNaN                 | 1102   | 256       | 76.33%          | [#1173](https://github.com/ROCm/triton-internal/issues/1173)         |
-| hack pkMul                   | 1108   | 256       | 77.84%          | [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262) |
-| hack readfirstlane           | 1121   | 256       | 79.46%          | [#1309](https://github.com/ROCm/triton-internal/issues/1309)         |
+|                             | tflops | reg usage | mfma efficiency | ticket                                                               |
+|-----------------------------|--------|-----------|-----------------|----------------------------------------------------------------------|
+| episode 1                   | 1038   | 249       | 61.67%          |                                                                      |
+| main padded                 | 1023   | 256 (2)   | 58.53%          |                                                                      |
+| main padded noVC            | 1021   | 249       | 58.02%          |                                                                      |
+| main padded customLLVM      | 1024   | 256 (1)   | 60.51%          |                                                                      |
+| main padded customLLVM noVC | 1036   | 245       | 62.82%          |                                                                      |
+| fixBasePtr                  | 1049   | 256       | 64.08%          | [#1296](https://github.com/ROCm/triton-internal/issues/1296)         |
+| reduceIdle1                 | 1070   | 256       | 68.93%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
+| reduceIdle2                 | 1099   | 256       | 75.73%          | [#1308](https://github.com/ROCm/triton-internal/issues/1308)         |
+| propagateNaN                | 1102   | 256       | 76.33%          | [#1173](https://github.com/ROCm/triton-internal/issues/1173)         |
+| hack pkMul                  | 1108   | 256       | 77.84%          | [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262) |
+| hack readfirstlane          | 1121   | 256       | 79.46%          | [#1309](https://github.com/ROCm/triton-internal/issues/1309)         |
 
+LLVM side improvements:
+|                           | tflops | reg usage | mfma efficiency |
+|---------------------------|--------|-----------|-----------------|
+| propagateNaN - customLLVM | 1060   | 256       | 65.89%          |
+| propagateNaN              | 1102   | 256       | 76.33%          |
+| hack pkMul                | 1108   | 256       | 77.62%          |
 
 
 ## Bottlenecks
@@ -597,7 +600,7 @@ In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
 
 Command to collect trace
 ```
-DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_PADDED_SHARED_LAYOUT=1 TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att.json -d /var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/MI350/MI355/fixBasePtr_padded_customLLVM_noVC -- python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SCALARIZE_PACKED_FOPS=1 ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att.json -d /var/lib/jenkins/AMD-triton/python/perf-kernels/study_4-stage/MI350/MI355/att_output/fixBasePtr_padded_customLLVM_noVC -- python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
 ```
 
 att.json:
