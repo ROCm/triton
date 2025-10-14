@@ -551,9 +551,10 @@ In total there are 280 cycles ==> mfma efficiency = 1024 / (1024 + 280) = 78.5%
 
 ### After hack pkMul
 
-- exposed `v_mul` cycles drop 76 to 40
+- exposed `v_mul` cycles drop 76 to 52
+  - The 1st `v_pk_mul` takes 16 cycles
 
-mfma efficiency = 1024 / (1024 + 280 - 36) = 80.7%
+mfma efficiency = 1024 / (1024 + 280 - 24) = 80%
 
 ### After hack readfirstlane
 
@@ -594,6 +595,14 @@ This saves 24 more cycles ==> mfma efficiency = 1024 / (1024 + 280 - 36 - 32 - 2
 ASM kernel can further remove 2 `s_barrier`'s by writing asymmetric code for wave0-3 and 4-7.
 
 In theory, the best mfma efficiency is 1024 / (1024 + 172) = 85.6%
+
+### Unexpected instruction cycles
+
+- `v_permlane32_swap` needs 8 cycles.
+  - If there needs to be a `s_nop` right before `v_permlane`,
+    then the `s_nop` also takes 8 cycles.
+- `v_pk_mul` takes 16 cycles is issued alone.
+  - If issuing a chain of `v_pk_mul`, on the first one takes 16 cycles.
 
 
 ## Collect thread trace
