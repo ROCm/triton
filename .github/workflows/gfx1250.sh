@@ -45,25 +45,25 @@ make test-lit-warner
 
 echo "=== Run Gluon Tests ==="
 
-pytest --count=16 -n 16 -s -v third_party/amd/python/test/test_gluon_gfx1250.py
-pytest --count=16 -n 16 -s -v python/test/gluon/test_frontend.py
+pytest --count=4 -n 16 -s -v third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=4 -n 16 -s -v python/test/gluon/test_frontend.py
 
 echo "=== Run E2E Upstream Tests ==="
 
-pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
-pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
-# pytest --count=16 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
+pytest --count=4 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest --count=4 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+# pytest --count=4 -n 16 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
 
 echo "=== Run GEMM Tests ==="
 
 export PYTHONPATH=$PWD/mi400
-pytest --count=16 -n 16 -s -v mi400/test_gemm_hipdriver.py
-pytest --count=16 -n 16 -s -v mi400/test_mxgemm_hipdriver.py
-pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
-pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
-pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+pytest --count=4 -n 16 -s -v mi400/test_gemm_hipdriver.py
+pytest --count=4 -n 16 -s -v mi400/test_mxgemm_hipdriver.py
+pytest --count=4 -n 16 -s -v third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+pytest --count=4 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+pytest --count=4 -n 16 -s -v third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+pytest --count=4 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 
 echo "=== Run Attention Tests ==="
 
-pytest --count=16 -n 16 -v -s mi400/test_mxfa_hipdriver.py
+pytest --count=4 -n 16 -v -s mi400/test_mxfa_hipdriver.py

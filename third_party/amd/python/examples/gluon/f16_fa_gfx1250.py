@@ -2,12 +2,12 @@
 This file implements a BSHD Flash Attention and tests against torch reference.
 """
 
-# Enabling FFM
+# ruff: noqa: E402
 import hip
 
 hip.hip.hipInit(0)
+# Needed for internal dev flow for now; will remove later
 
-# Import ML libs
 import torch
 from triton.experimental import gluon
 import triton.experimental.gluon.language as gl

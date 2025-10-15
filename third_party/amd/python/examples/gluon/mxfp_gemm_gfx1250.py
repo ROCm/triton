@@ -2,6 +2,7 @@
 import hip
 
 hip.hip.hipInit(0)
+# Needed for internal dev flow for now; will remove later
 
 import torch
 import pytest
