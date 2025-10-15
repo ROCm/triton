@@ -59,10 +59,10 @@ echo "=== Run GEMM Tests ==="
 export PYTHONPATH=$PWD/mi400
 pytest --count=16 -n 16 -s -v mi400/test_gemm_hipdriver.py
 pytest --count=16 -n 16 -s -v mi400/test_mxgemm_hipdriver.py
-pytest --count=16 -n 16 -s -v mi400/perf_f16_gemm_gluon.py
-pytest --count=16 -n 16 -s -v mi400/perf_mxfp_gemm_gluon.py
-pytest --count=16 -n 16 -s -v mi400/perf_f16_fa_gluon.py
-pytest --count=16 -n 16 -s -v mi400/perf_mxfp_fa_gluon.py
+pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+pytest --count=16 -n 16 -s -v third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 
 echo "=== Run Attention Tests ==="
 
