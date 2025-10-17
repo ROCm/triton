@@ -26,8 +26,8 @@ def generate_configs():
                     # python3: /home/dtanner/repos/gfx_triton/third_party/amd/lib/TritonAMDGPUToLLVM/DotOpToLLVM/WMMA.cpp:233: mlir::Value mlir::triton::AMD::{anonymous}::generateScaledWMMAIntrinsic(mlir::ConversionPatternRewriter&, mlir::Location, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Type, mlir::Type, mlir::Type, int): Assertion `scaleKWidth == 2 ||     scaleKWidth == 4 || scaleKWidth == 8' failed.
                     if dtypeA == 'float4' and BK < K:
                         continue
-                    # Similar assertion as above.
-                    if dtypeA == 'float4' and BK < 128:
+                    # Temporarily skip for small block K
+                    if BK < 128:
                         continue
                     configs.append({
                         "M": M, "N": N, "K": K, "BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK, "NUM_WARPS": 4, "NUM_CTAS":
