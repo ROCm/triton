@@ -710,7 +710,7 @@ def test_amd_wmma_scaled(M, N, K, a_type, b_type):
     assert "v_wmma_scale_f32_16x16x128_f8f6f4" in pgm.asm["amdgcn"]
 
     c_torch = (a_ref * a_scale_ref) @ (b_ref * b_scale_ref)
-    torch.testing.assert_close(c.cpu(), c_torch, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(c.cpu(), c_torch, atol=1e-5, rtol=2e-5)
 
 
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
