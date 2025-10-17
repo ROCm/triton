@@ -19,7 +19,6 @@ TRITON :: TritonGPU/amd/accelerate-amd-matmul-wmma-gen2.mlir
 TRITON :: TritonGPU/amd/amd-coalesce-async-copy.mlir
 TRITON :: TritonGPU/amd/amd-pipeline-chained-dots.mlir
 TRITON :: TritonGPU/amd/amd-schedule-hint.mlir
-TRITON :: TritonGPU/amd/amd-update-async-wait-count.mlir
 TRITON :: TritonGPU/coalesce.mlir
 TRITON :: TritonGPU/combine.mlir
 TRITON :: TritonGPU/loop-pipeline-hip.mlir
