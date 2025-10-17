@@ -885,9 +885,8 @@ def test_amd_wmma_scaled_tdm(M, N, K, mxfp_type, hasScale):
 @gluon.jit
 def tensor_async_copy_kernel(a_ptr, b_ptr, M, N,  #
                              BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr,
-                             USE_TDM: ttgl.constexpr):
+                             USE_TDM: ttgl.constexpr, BLOCKED_LAYOUT: ttgl.constexpr):
     SHARED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [BLOCK_M, BLOCK_N], [1, 0])
-    BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
 
     pid = ttgl.program_id(axis=0)
     num_pid_m = ttgl.cdiv(M, BLOCK_M)
@@ -934,16 +933,19 @@ def tensor_async_copy_kernel(a_ptr, b_ptr, M, N,  #
 def test_compile_async_tensor_copy(BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE):
     signature = {
         "a_ptr": "*fp16", "b_ptr": "*fp16", "M": "i32", "N": "i32",  #
-        "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "NUM_BUFFERS": "constexpr", "USE_TDM": "constexpr"
+        "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "NUM_BUFFERS": "constexpr", "USE_TDM": "constexpr",
+        "BLOCKED_LAYOUT": "constexpr"
     }
     # AsyncCopy requires >= 32 bits per lane so we have to pass divisibility for arguments used in pointer arithmetic
     attrs = []
     if ASYNC_LOAD_TYPE == "ASYNC_COPY":
         attrs = {k: [["tt.divisibility", 16]] for k in [(x, ) for x in range(4)]}
+    BLOCKED_LAYOUT = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
     k = triton.compile(
         gluon._runtime.GluonASTSource(
             fn=tensor_async_copy_kernel, signature=signature, attrs=attrs, constexprs={
-                "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "NUM_BUFFERS": NUM_BUFFERS, "USE_TDM": ASYNC_LOAD_TYPE == "TDM"
+                "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "NUM_BUFFERS": NUM_BUFFERS, "USE_TDM": ASYNC_LOAD_TYPE == "TDM",
+                "BLOCKED_LAYOUT": BLOCKED_LAYOUT
             }), target=GPUTarget("hip", 'gfx1250', 32))
 
     if ASYNC_LOAD_TYPE == "TDM":
@@ -956,11 +958,12 @@ def test_compile_async_tensor_copy(BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYP
         assert re.search(pattern, amdgcn)
 
 
-@pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64), (1, 512), (256, 2)])
 @pytest.mark.parametrize("NUM_BUFFERS", [1, 2])
+@pytest.mark.parametrize("NUM_WARPS", [4, 8])
 @pytest.mark.parametrize("M,N", [(1024, 1024), (1008, 1008), (1000, 1000)])
 @pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["ASYNC_COPY", "TDM"])
-def test_runtime_async_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE):
+def test_runtime_async_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE, NUM_WARPS):
     if ASYNC_LOAD_TYPE == "ASYNC_COPY" and any([x % 16 != 0 for x in [M, N]]):
         pytest.skip("AsyncCopy tests need divisibility==16 to get vectorization information")
 
@@ -972,8 +975,11 @@ def test_runtime_async_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LO
     b_device = b.cuda()
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N * NUM_BUFFERS), 1)
     use_tdm = ASYNC_LOAD_TYPE == "TDM"
+
+    blocked_layout = ttgl.BlockedLayout([1, 8], [4, 8], [NUM_WARPS, 1], [1, 0])
+
     tensor_async_copy_kernel[grid](a_device, b_device, M, N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, NUM_BUFFERS=NUM_BUFFERS,
-                                   USE_TDM=use_tdm)
+                                   USE_TDM=use_tdm, BLOCKED_LAYOUT=blocked_layout, num_warps=NUM_WARPS)
 
     b_triton = b_device.cpu()
     assert torch.equal(b_triton, a)
