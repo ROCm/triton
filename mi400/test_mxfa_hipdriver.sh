@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ROCPLAY_PATH=$(realpath ../../rocplaycap/rocplaycap-src-4.5.0)
+ROCPLAY_PATH=$(realpath ../../rocplay/rocplaycap-src-4.*)
 ROCCAP_BIN=${ROCPLAY_PATH}/bin/roccap
 ROCCAP_OPTIONS="capture --loglevel trace"
 

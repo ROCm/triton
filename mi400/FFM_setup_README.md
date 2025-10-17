@@ -127,7 +127,7 @@ RUN apt-get update && \
 RUN wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.1-24.04-1_all.deb
 RUN apt-get install ./amdgpu-install-internal_7.1-24.04-1_all.deb
 RUN amdgpu-repo --amdgpu-build=2219470 --rocm-build=compute-rocm-npi-mi450/605
-RUN apt -y install rocm-llvm rocm-llvm-dev rocm-device-libs rocprofiler-register comgr rocm-hip-runtime-dev rocblas rocblas-dev hipblas-common-dev hipblaslt hipblaslt-dev hipblas
+RUN apt -y install rocm-llvm rocm-llvm-dev rocm-device-libs hsa-amd-aqlprofile rocprofiler-register comgr rocm-hip-runtime-dev rocblas rocblas-dev hipblas-common-dev hipblaslt hipblaslt-dev hipblas
 
 RUN wget --no-check-certificate https://confluence.amd.com/download/attachments/1035169166/AMD_CA.crt
 
@@ -232,10 +232,13 @@ export HSA_MODEL_NUM_THREADS=$(nproc)
 
 ## Sanity Check: Run simple.cpp test
 
-Copied from [here](https://amd.atlassian.net/wiki/spaces/GFXAM/pages/721063271/FFM+Jitcu+Package+-+ROCR+in+WSL) (Build and Run Simple.cpp section)
+<details>
+<summary>Toy Problem: Source files</summary>
+<br>
 
-simple.cpp: (you can also get the latest from [here](https://amd.atlassian.net/wiki/download/attachments/721063271/simple.cpp?version=1&modificationDate=1738883082143&cacheVersion=1&api=v2)).
 ```cpp
+// simple.cpp
+
 #define __HIP_PLATFORM_AMD__
 #define __HIP_CLANG_ONLY__
 #include <hip/hip_runtime.h>
@@ -276,19 +279,30 @@ int main() {
 }
 ```
 
-```bash
-cd /workspaces/jitcu_docker
+```Makefile
+# Makefile
+CC=amdclang
+TARGET_ARCH=gfx1250
+ROCM_PATH=/opt/rocm
 
-mkdir simple_hip
-cd simple_hip
-touch simple.cpp # copy & paste the content here
+all:
+        $(CC) -g -O1 -x hip --offload-arch=$(TARGET_ARCH) --rocm-path=$(ROCM_PATH) -rpath $(ROCM_PATH)/lib -lstdc++ simple.cpp -I$(ROCM_PATH)/include
 
-# Copy simple.cpp into this folder.  Link to the source file for simple.cpp above
-amdclang -g -O1 -x hip --offload-arch=$TARGET_ARCH --rocm-path=$ROCM_PATH -rpath $ROCM_PATH/lib -lstdc++ simple.cpp -I$ROCM_PATH/include
-
-#Run
-./a.out
+clean:
+        rm -rf ./a.out ./roc_capture*
 ```
+</details>
+
+
+Copy files from `Toy Problem` (see above) and execute the following steps:
+
+```bash
+$ cd <work> && mkdir toy && cd toy
+# copy files from above
+$ make
+$ ./a.out
+```
+
 If the tests works, you should see a line of "100"'s, and then a second line with "110"'s, followed by the word "passed"
 
 If it doesn't work, check:
@@ -383,7 +397,64 @@ pip3 uninstall -y pytorch-triton-rocm
 
 ### Install Rocplay to capture CAP files
 
+You can all `Rocplay` versions under [this URL address](https://atlartifactory.amd.com:8443/artifactory/HW-RocPlayCap-REL/). You can find `pre-release` and `release` versions there.
+
+```bash
+$ cd <work>
+$ mkdir rocplaycap && cd rocplaycap
+$ VERSION="4.5.1"
+$ TYPE="pre-releases"
+$ wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/${TYPE}/rocplaycap-${VERSION}/rocplaycap-src-${VERSION}.tar.gz
+$ tar -xvf ./rocplaycap-src-${VERSION}.tar.gz
+$ cd rocplaycap-src-${VERSION}
+$ mkdir cmake-build-debug && cd cmake-build-debug
+$ CMAKE_BUILD_TYPE=debug CMAKE_DEBUG_TRACE=1 cmake .. -DCMAKE_BUILD_TYPE=Debug \
+-DCMAKE_PREFIX_PATH=/opt/rocm/ \
+-DHSA_ROOT_DIR:PATH=/opt/rocm/hsa/
+$ make all && make install
+```
+
+Make sure that you have the `hsa-amd-aqlprofile` package installed (see `Dockerfile` above). After installation, you can find executables under `<work>/rocplaycap/rocplaycap-src-${VERSION}/bin`. You can adjust your `PATH` env. variable to the aforementioned folder. For example,
+
+```bash
+export PATH=$(realpath ./rocplay/rocplaycap-src-4.*/bin):${PATH}
+```
+
+Test your rocplay installation using the `Toy Problem` (see above).
+
+```bash
+$ cd <work>/toy
+$ make
+$ roccap capture --loglevel trace ./a.out
+```
+
+You will see `roc_capture_a.out.cap` generated in the directory where you launched the toy program. Usually you need to deliver cap files (like this one) to the AM team. Replay the cap file, to make sure that it is valid:
+
+```bash
+$ roccap play ./roc_capture_a.out.cap
+...
+[... INFO] Trace completed successfully.
+```
+
 You can find the installation details [there](https://amd.atlassian.net/wiki/spaces/~avulisha/pages/1068105750/Duplicate+of+Replaying+AQL+traces+captured+on+FFM+on+top+of+AM#Compiling-Rocplaycap-4.5.0). [Here](https://github.amd.com/GFX-IP-Arch/triton/blob/shared/gfx1250-dev-sept/mi400/test_mxfa_hipdriver.sh) you can find an example how to generate CAP files for Triton.
+
+###### Validation testing with Rocplay
+
+Use `--autogold` option while recording the traces.
+
+```bash
+$ cd <work>/toy
+$ make
+$ roccap capture --loglevel trace --autogold ./a.out
+```
+
+Now you need to replay traces as you did it before:
+
+```bash
+$ roccap play ./roc_capture_a.out.cap
+```
+
+Note, `aqlplay_goldchecks.json` gets generated together with a bunch of `*.bin.lz4` files.
 
 
 ### Compiler Explorer Setup
