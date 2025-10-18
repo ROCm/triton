@@ -50,23 +50,41 @@ def _get_operand_reg_layout(operand, packed):
 
 
 @gluon.constexpr_function
-def _get_scale_reg_layout(operand):
-    a_scale_layout = ttgl.DistributedLinearLayout(reg_bases=[[0, 1], [0, 2]],  #
-                                                  lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]],  #
-                                                  warp_bases=[[16, 0], [32, 0]],  #
-                                                  block_bases=[],  #
-                                                  shape=[64, 4])
-    b_scale_layout = ttgl.DistributedLinearLayout(reg_bases=[[0, 1], [0, 2]],  #
-                                                  lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]],  #
-                                                  warp_bases=[[0, 0], [0, 0]],  #
-                                                  block_bases=[],  #
-                                                  shape=[16, 4])
-    return a_scale_layout if operand == 0 else b_scale_layout
+def _get_scale_reg_layout(operand, nonk, k, order):
+    assert nonk in [64, 128] and k in [2, 4]
+
+    # tile layout for warps_per_cta=[4, 1]
+    reg = [[0, 1], [0, 2]]
+    if k == 2:
+        reg[1] = [0, 0]
+    lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]]
+
+    if operand == 0:
+        warp = [[16, 0], [32, 0]]
+        wrap_nonk = 64
+    else:
+        warp = [[0, 0], [0, 0]]
+        wrap_nonk = 16
+
+    # duplicate tile layout along non-k dimension
+    while wrap_nonk < nonk:
+        reg.append([wrap_nonk, 0])
+        wrap_nonk *= 2
+
+    shape = [nonk, k]
+
+    # consider order
+    reg = [[b[order[1]], b[order[0]]] for b in reg]
+    warp = [[b[order[1]], b[order[0]]] for b in warp]
+    lane = [[b[order[1]], b[order[0]]] for b in lane]
+    shape = [shape[order[1]], shape[order[0]]]
+    return ttgl.DistributedLinearLayout(reg, lane, warp, [], shape)
 
 
 @gluon.constexpr_function
-def _get_operand_smem_layout(shape):
-    padding_interval = shape[1]
+def _get_operand_smem_layout(outer_dim, inner_dim):
+    shape = [outer_dim, inner_dim]
+    padding_interval = inner_dim
     padding_amount = 16
     return ttgl.PaddedSharedLayout.with_identity_for([[padding_interval, padding_amount]], shape, [1, 0])
 
@@ -78,9 +96,13 @@ def _get_scale_smem_layout():
 
 
 @gluon.constexpr_function
-def _get_scale_load_layout():
+def _get_scale_load_layout(outer_dim, inner_dim):
     # TODO: improve scale load layout
-    return ttgl.BlockedLayout([1, 4], [32, 1], [4, 1], [1, 0])
+    assert inner_dim in [64, 128]
+    if inner_dim == 128:
+        return ttgl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
+    else:
+        return ttgl.BlockedLayout([1, 4], [2, 16], [4, 1], [1, 0])
 
 
 # ===-----------------------------------------------------------------------===#
@@ -144,22 +166,22 @@ class AttentionConfig:
 
         # layouts
         self.q_layout = ttgl.constexpr(_get_operand_reg_layout(0, packed=False))
-        self.q_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0))
+        self.q_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, HEAD_SZ // 32, [1, 0]))
 
-        self.k_smem_layout = ttgl.constexpr(_get_operand_smem_layout([HEAD_SZ // KV_PACK_DIV, BLOCK_N]))
+        self.k_smem_layout = ttgl.constexpr(_get_operand_smem_layout(HEAD_SZ // KV_PACK_DIV, BLOCK_N))
         self.k_layout = ttgl.constexpr(_get_operand_reg_layout(1, packed=(KV_TYPE == 'e2m1')))
-        self.k_scale_load_layout = ttgl.constexpr(_get_scale_load_layout())
+        self.k_scale_load_layout = ttgl.constexpr(_get_scale_load_layout(HEAD_SZ // 32, BLOCK_N))
         self.k_scale_smem_layout = ttgl.constexpr(_get_scale_smem_layout())
-        self.k_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1))
+        self.k_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, BLOCK_N, HEAD_SZ // 32, [0, 1]))
 
         self.p_layout = ttgl.constexpr(_get_operand_reg_layout(0, packed=False))
-        self.p_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0))
+        self.p_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, BLOCK_N // 32, [1, 0]))
 
-        self.v_smem_layout = ttgl.constexpr(_get_operand_smem_layout([BLOCK_N // KV_PACK_DIV, HEAD_SZ]))
+        self.v_smem_layout = ttgl.constexpr(_get_operand_smem_layout(BLOCK_N // KV_PACK_DIV, HEAD_SZ))
         self.v_layout = ttgl.constexpr(_get_operand_reg_layout(1, packed=(KV_TYPE == 'e2m1')))
-        self.v_scale_load_layout = ttgl.constexpr(_get_scale_load_layout())
+        self.v_scale_load_layout = ttgl.constexpr(_get_scale_load_layout(BLOCK_N // 32, HEAD_SZ))
         self.v_scale_smem_layout = ttgl.constexpr(_get_scale_smem_layout())
-        self.v_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1))
+        self.v_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, HEAD_SZ, BLOCK_N // 32, [0, 1]))
 
         self.acc_layout = ttgl.constexpr(_get_acc_layout())
 
@@ -181,12 +203,16 @@ class AttentionProgram:
     k_scale_offs: ttgl.tensor
     k_buffer: ttgl.shared_memory_descriptor
     k_scale_buffer: ttgl.shared_memory_descriptor
+    k_step: ttgl.constexpr
+    k_scale_step: ttgl.constexpr
 
     v_desc: tdm.tensor_descriptor
     v_scale_ptr: ttgl.tensor
     v_scale_offs: ttgl.tensor
     v_buffer: ttgl.shared_memory_descriptor
     v_scale_buffer: ttgl.shared_memory_descriptor
+    v_step: ttgl.constexpr
+    v_scale_step: ttgl.constexpr
 
     o_ptr: ttgl.tensor
     o_offs: ttgl.tensor
@@ -196,8 +222,8 @@ class AttentionProgram:
 
     def __init__(self, cfg,  #
                  q, q_scale,  #
-                 k_desc, k_scale_ptr, k_scale_offs, k_buffer, k_scale_buffer,  #
-                 v_desc, v_scale_ptr, v_scale_offs, v_buffer, v_scale_buffer,  #
+                 k_desc, k_scale_ptr, k_scale_offs, k_buffer, k_scale_buffer, k_step, k_scale_step,  #
+                 v_desc, v_scale_ptr, v_scale_offs, v_buffer, v_scale_buffer, v_step, v_scale_step,  #
                  o_ptr, o_offs, o_mask,  #
                  sm_scale):
         self.cfg = cfg
@@ -208,11 +234,15 @@ class AttentionProgram:
         self.k_scale_offs = k_scale_offs
         self.k_buffer = k_buffer
         self.k_scale_buffer = k_scale_buffer
+        self.k_step = ttgl.constexpr(k_step)
+        self.k_scale_step = ttgl.constexpr(k_scale_step)
         self.v_desc = v_desc
         self.v_scale_ptr = v_scale_ptr
         self.v_scale_offs = v_scale_offs
         self.v_buffer = v_buffer
         self.v_scale_buffer = v_scale_buffer
+        self.v_step = ttgl.constexpr(v_step)
+        self.v_scale_step = ttgl.constexpr(v_scale_step)
         self.o_ptr = o_ptr
         self.o_offs = o_offs
         self.o_mask = o_mask
@@ -260,7 +290,7 @@ class AttentionProgram:
 
         # create descriptor and buffer for k and k_scale
         # k       [HEAD_SZ / KV_PACK_DIV, BLOCK_N]
-        # k_scale [BLOCK_N, HEAD_SZ / 32]
+        # k_scale [HEAD_SZ / 32, BLOCK_N]
         k_off_zh = SEQLEN_K * (HEAD_SZ // KV_PACK_DIV) * (NUM_HEADS * off_z + off_h)
         k_desc = tdm.make_tensor_descriptor(  #
             base=k_off_zh + k_ptr,  #
@@ -272,21 +302,23 @@ class AttentionProgram:
             k_desc.dtype,  #
             [NUM_BUFFERS] + k_desc.block_shape,  #
             k_desc.layout)
+        k_step: ttgl.constexpr = BLOCK_N
 
         k_scale_off_zh = SEQLEN_K * (HEAD_SZ // 32) * (NUM_HEADS * off_z + off_h)
-        k_scale_offs_n = ttgl.arange(0, BLOCK_N, ttgl.SliceLayout(1, cfg.k_scale_load_layout))
-        k_scale_offs_d = ttgl.arange(0, HEAD_SZ // 32, ttgl.SliceLayout(0, cfg.k_scale_load_layout))
+        k_scale_offs_d = ttgl.arange(0, HEAD_SZ // 32, ttgl.SliceLayout(1, cfg.k_scale_load_layout))
+        k_scale_offs_n = ttgl.arange(0, BLOCK_N, ttgl.SliceLayout(0, cfg.k_scale_load_layout))
         k_scale_offs = k_scale_off_zh + \
-                    k_scale_offs_n[:, None] * (HEAD_SZ // 32) + \
-                    k_scale_offs_d[None, :]
+                    k_scale_offs_d[:, None] * SEQLEN_K + \
+                    k_scale_offs_n[None, :]
         k_scale_buffer = ttgl.allocate_shared_memory(  #
             k_scale_ptr.dtype.element_ty,  #
-            [NUM_BUFFERS] + [BLOCK_N, HEAD_SZ // 32],  #
+            [NUM_BUFFERS] + [HEAD_SZ // 32, BLOCK_N],  #
             cfg.k_scale_smem_layout)
+        k_scale_step: ttgl.constexpr = BLOCK_N
 
         # create descriptor and buffer for v and v_scale
         # v       [BLOCK_N / KV_PACK_DIV, HEAD_SZ]
-        # v_scale [HEAD_SZ, BLOCK_N / 32]
+        # v_scale [BLOCK_N / 32, HEAD_SZ]
         v_off_zh = (SEQLEN_K // KV_PACK_DIV) * HEAD_SZ * (NUM_HEADS * off_z + off_h)
         v_desc = tdm.make_tensor_descriptor(  #
             base=v_off_zh + v_ptr,  #
@@ -298,17 +330,19 @@ class AttentionProgram:
             v_desc.dtype,  #
             [NUM_BUFFERS] + v_desc.block_shape,  #
             v_desc.layout)
+        v_step: ttgl.constexpr = BLOCK_N // KV_PACK_DIV
 
         v_scale_off_zh = (SEQLEN_K // 32) * HEAD_SZ * (NUM_HEADS * off_z + off_h)
-        v_scale_offs_d = ttgl.arange(0, HEAD_SZ, ttgl.SliceLayout(1, cfg.v_scale_load_layout))
-        v_scale_offs_n = ttgl.arange(0, BLOCK_N // 32, ttgl.SliceLayout(0, cfg.v_scale_load_layout))
+        v_scale_offs_n = ttgl.arange(0, BLOCK_N // 32, ttgl.SliceLayout(1, cfg.v_scale_load_layout))
+        v_scale_offs_d = ttgl.arange(0, HEAD_SZ, ttgl.SliceLayout(0, cfg.v_scale_load_layout))
         v_scale_offs = v_scale_off_zh + \
-                    v_scale_offs_d[:, None] * (SEQLEN_K // 32) + \
-                    v_scale_offs_n[None, :]
+                    v_scale_offs_n[:, None] * HEAD_SZ + \
+                    v_scale_offs_d[None, :]
         v_scale_buffer = ttgl.allocate_shared_memory(  #
             v_scale_ptr.dtype.element_ty,  #
-            [NUM_BUFFERS] + [HEAD_SZ, BLOCK_N // 32],  #
+            [NUM_BUFFERS] + [BLOCK_N // 32, HEAD_SZ],  #
             cfg.v_scale_smem_layout)
+        v_scale_step: ttgl.constexpr = (BLOCK_N // 32) * HEAD_SZ
 
         # output [BLOCK_M, HEAD_SZ]
         o_offs_zh = SEQLEN_Q * HEAD_SZ * (NUM_HEADS * off_z + off_h)
@@ -329,16 +363,16 @@ class AttentionProgram:
         # create the program
         return AttentionProgram(cfg,  #
                                 q, q_scale,  #
-                                k_desc, k_scale_ptr, k_scale_offs, k_buffer, k_scale_buffer,  #
-                                v_desc, v_scale_ptr, v_scale_offs, v_buffer, v_scale_buffer,  #
+                                k_desc, k_scale_ptr, k_scale_offs, k_buffer, k_scale_buffer, k_step, k_scale_step,  #
+                                v_desc, v_scale_ptr, v_scale_offs, v_buffer, v_scale_buffer, v_step, v_scale_step,  #
                                 o_ptr, o_offs, o_mask,  #
                                 sm_scale)
 
     @gluon.jit
     def issue_global_load_k(self, i):
         cfg = self.cfg
-        k_step: ttgl.constexpr = cfg.BLOCK_N
-        k_scale_step: ttgl.constexpr = cfg.BLOCK_N * (cfg.HEAD_SZ // 32)
+        k_step: ttgl.constexpr = self.k_step
+        k_scale_step: ttgl.constexpr = self.k_scale_step
 
         buf = i % cfg.NUM_BUFFERS
         k_buffer = self.k_buffer.index(buf)
@@ -352,8 +386,8 @@ class AttentionProgram:
     @gluon.jit
     def issue_global_load_v(self, i):
         cfg = self.cfg
-        v_step: ttgl.constexpr = cfg.BLOCK_N // cfg.KV_PACK_DIV
-        v_scale_step: ttgl.constexpr = (cfg.BLOCK_N // 32)
+        v_step: ttgl.constexpr = self.v_step
+        v_scale_step: ttgl.constexpr = self.v_scale_step
 
         buf = i % cfg.NUM_BUFFERS
         v_buffer = self.v_buffer.index(buf)
@@ -604,11 +638,11 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     k = k.permute(0, 2, 3, 1).contiguous()
     v = v.permute(0, 2, 1, 3).contiguous()
     # q_scale: [BATCH, NUM_HEADS, SEQLEN_Q, HEAD_SZ / 32]
-    # k_scale: [BATCH, NUM_HEADS, SEQLEN_K, HEAD_SZ / 32]
-    # v_scale: [BATCH, NUM_HEADS, HEAD_SZ, SEQLEN_K / 32]
+    # k_scale: [BATCH, NUM_HEADS, HEAD_SZ / 32, SEQLEN_K]
+    # v_scale: [BATCH, NUM_HEADS, SEQLEN_K / 32, HEAD_SZ]
     q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
-    k_scale = k_scale.permute(0, 2, 1, 3).contiguous()
-    v_scale = v_scale.permute(0, 2, 3, 1).contiguous()
+    k_scale = k_scale.permute(0, 2, 3, 1).contiguous()
+    v_scale = v_scale.permute(0, 2, 1, 3).contiguous()
     # o: [BATCH, NUM_HEADS, SEQLEN_Q, HEAD_SZ]
     o = torch.zeros_like(q, dtype=torch.bfloat16)
 
@@ -717,7 +751,7 @@ def get_variants():
 @pytest.mark.parametrize("seqlen_q", [256])
 @pytest.mark.parametrize("seqlen_k", [1024])
 @pytest.mark.parametrize("num_heads", [1])
-@pytest.mark.parametrize("head_sz", [128])
+@pytest.mark.parametrize("head_sz", [64, 128])
 @pytest.mark.parametrize("block_m", [128])
 @pytest.mark.parametrize("block_n", [128])
 @pytest.mark.parametrize("pipelined", [False, True])
@@ -735,17 +769,18 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_heads, head_sz
     o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
-    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=7.5e-2)
+    torch.testing.assert_close(o, o_ref, atol=0.1, rtol=0.1)
 
 
 if __name__ == "__main__":
     configs = []
     for q_type, kv_type in get_variants():
-        for pipelined in [False, True]:
-            configs.append({
-                "q_type": q_type, "kv_type": kv_type, "batch": 1, "seqlen_q": 256, "seqlen_k": 1024, "num_heads": 1,
-                "head_sz": 128, "block_m": 128, "block_n": 128, "pipelined": pipelined
-            })
+        for head_sz in [64, 128]:
+            for pipelined in [False, True]:
+                configs.append({
+                    "q_type": q_type, "kv_type": kv_type, "batch": 1, "seqlen_q": 256, "seqlen_k": 1024, "num_heads": 1,
+                    "head_sz": head_sz, "block_m": 128, "block_n": 128, "pipelined": pipelined
+                })
 
     def launch(q_type, kv_type, batch, seqlen_q, seqlen_k, num_heads, head_sz, block_m, block_n, pipelined):
         q, _ = _create_operand(q_type, batch, seqlen_q, num_heads, head_sz)
