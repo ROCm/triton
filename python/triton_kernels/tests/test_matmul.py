@@ -45,7 +45,7 @@ def init_routing_data(m, n_expts_tot, n_expts_act, do_gather, do_scatter, device
     dispatch_indx = sparse_logits.mask_metadata.col_sorted_indx
     combine_indx = sparse_logits.mask_metadata.row_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(sparse_logits.mask_metadata.col_sum, dispatch_indx.shape[0])
-    routing_data = RoutingData(None, ragged_batch_metadata.batch_sizes, n_expts_tot, n_expts_act, ragged_batch_metadata)
+    routing_data = RoutingData(None, ragged_batch_metadata.slice_sizes, n_expts_tot, n_expts_act, ragged_batch_metadata)
     gather_idx = GatherIndx(combine_indx, dispatch_indx) if do_gather else None
     scatter_idx =  ScatterIndx(dispatch_indx, combine_indx) if do_scatter else None
     return m, routing_data, gather_idx, scatter_idx
@@ -235,6 +235,7 @@ class Case:
             # mx types:
             Case(16, 256, 256, "plain", "bfloat16", "mxfloat4_e2m1", 1, 1),
             Case(16, 256, 256, "plain", "bfloat16", "mxfloat4_e2m1", 1, 1, hbm_swizzling=True),
+            Case(16, 256, 256, "plain", "bfloat16", "mxfloat4_e2m1", 1, 1, hbm_swizzling=True, epilogue_subtile=4),
             Case(16, 256, 256, "ragged", "bfloat16", "mxfloat4_e2m1", 1, 1),
             Case(16, 256, 256, "ragged", "bfloat16", "mxfloat4_e2m1", 1, 1, hbm_swizzling=True),
             Case(1000, 700, 700, "batched", "bfloat16", "mxfloat4_e2m1", 8, 2),
@@ -321,7 +322,7 @@ def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, inner_expt_o
     if is_cuda():
         if "float8" in weight_dtype_str and torch.cuda.get_device_capability()[0] < 9:
             pytest.skip("Float8 not tested on A100")
-        if "float16" in act_dtype_str and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] >= 10:
+        if act_dtype_str == "float16" and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] >= 10:
             pytest.skip("float16 x mx not supported with cuda capability >= 10")
         if weight_dtype_str.startswith("mx"):
             if "float8" in act_dtype_str and torch.cuda.get_device_capability()[0] < 10:

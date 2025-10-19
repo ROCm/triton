@@ -50,7 +50,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     %1 = ttg.local_load %arg0 : !ttg.memdesc<128x64xi8, #shared, #smem, mutable> -> tensor<128x64xi8, #ttg.dot_op<{opIdx = 0, parent = #mma_b8_2x, kWidth = 16}>>
     %2 = ttg.local_load %arg1 : !ttg.memdesc<64x128xi8, #shared1, #smem, mutable> -> tensor<64x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma_b8, kWidth = 8}>>
     // CHECK-NOT: ds.load.tr8.b64
-
     %ptr1 = tt.splat %arg2 : !tt.ptr<i8> -> tensor<128x64x!tt.ptr<i8>, #ttg.dot_op<{opIdx = 0, parent = #mma_b8_2x, kWidth = 16}>>
     %ptr2 = tt.splat %arg2 : !tt.ptr<i8> -> tensor<64x128x!tt.ptr<i8>, #ttg.dot_op<{opIdx = 1, parent = #mma_b8, kWidth = 8}>>
     tt.store %ptr1, %1 : tensor<128x64x!tt.ptr<i8>, #ttg.dot_op<{opIdx = 0, parent = #mma_b8_2x, kWidth = 16}>>
@@ -85,7 +84,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
 
   //  CHECK-LABEL: ds_transpose_ll_complex
   tt.func @ds_transpose_ll_complex(%arg0: !ttg.memdesc<64x16xbf16, #shared, #smem>, %arg1: !tt.ptr<bf16>) {
-    // CHECK-NOT: ds.load.tr16.b128
+    // CHECK-COUNT-8: llvm.call_intrinsic "llvm.amdgcn.ds.load.tr16.b128"(%{{.*}}) : (!llvm.ptr<3>) -> vector<8xbf16>
     %a1 = ttg.local_load %arg0 : !ttg.memdesc<64x16xbf16, #shared, #smem> -> tensor<64x16xbf16, #linear_ds_tr>
 
     %ptr1 = tt.splat %arg1 : !tt.ptr<bf16> -> tensor<64x16x!tt.ptr<bf16>, #linear_ds_tr>
@@ -97,7 +96,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   tt.func @ds_transpose_ll_invalid(%arg0: !ttg.memdesc<64x16xbf16, #shared, #smem>, %arg1: !tt.ptr<bf16>) {
     %a1 = ttg.local_load %arg0 : !ttg.memdesc<64x16xbf16, #shared, #smem> -> tensor<64x16xbf16, #linear_ds_tr_tile_invalid>
     // CHECK-NOT: ds.load.tr16.b128
-
     %ptr1 = tt.splat %arg1 : !tt.ptr<bf16> -> tensor<64x16x!tt.ptr<bf16>, #linear_ds_tr_tile_invalid>
     tt.store %ptr1, %a1 : tensor<64x16x!tt.ptr<bf16>, #linear_ds_tr_tile_invalid>
     tt.return

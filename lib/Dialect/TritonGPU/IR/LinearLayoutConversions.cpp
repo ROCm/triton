@@ -480,19 +480,22 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   return combineCtaCgaWithShape(tileLayout, getCTALayout(), shape);
 }
 
-LinearLayout chooseLLDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
-                                       int32_t elemBitWidth,
-                                       unsigned instBitWidth,
-                                       unsigned numLanesInShuffleGroup) {
+std::optional<LinearLayout>
+chooseLLDsReadTrLayout(Attribute enc, ArrayRef<int64_t> shape,
+                       int32_t elemBitWidth, unsigned instBitWidth,
+                       unsigned numLanesInShuffleGroup) {
   using BaseTy = std::vector<std::vector<int32_t>>;
-  // This function will derive the layout for the ds_read_b64_tr instruction
+  // This function will derive the layout for the ds_read_tr instruction
   // based on the input layout (LL/DotLayout/...)
-  // The ds_read_b64_tr works on 64 bits per lane and in groups of 16 lanes.
+  // The ds_read_tr instruction works on instBitWidth per lane and in groups of
+  // numLanesInShuffleGroup lanes.
 
-  // Using M-continuous 16-bit input tensor A as an example. Each lane will
-  // load 4 consecutive elements (64-bit in total) along M. There are 4
-  // consecutive lanes in total along M. Then the loaded elements are exchanged
-  // withthin the MxK=16x4 "base unit".
+  // In this example we look at ds_read_b64_tr (instBitWidth = 64) and
+  // numLanesInShuffleGroup = 16 with 64 lanes per warp. Using M-continuous
+  // 16-bit input tensor A as an example. Each lane will load 4 consecutive
+  // elements (64-bit in total) along M. There are 4 consecutive lanes in total
+  // along M. Then the loaded elements are exchanged within the MxK=16x4 "base
+  // unit".
   //        K0  K1  K2  K3
   //      +---+---+---+---+
   //  M0  |   |   |   |   |       M0, K[0-3]:  T0
@@ -537,26 +540,40 @@ LinearLayout chooseLLDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
 
   auto ctx = enc.getContext();
   assert(elemBitWidth == 8 || elemBitWidth == 16);
-  // Get how many reg bases the ds_read_tr tile spans
+  // Get how many reg bases and tile bases the ds_read_tr tile spans
   unsigned numRegBases = llvm::Log2_32(instBitWidth / elemBitWidth);
-  // 4 lane bases describe 16 lanes.
   unsigned numLaneBases = llvm::Log2_32(numLanesInShuffleGroup);
 
   auto ldsTransLayout = triton::gpu::toLinearLayout(shape, enc);
   auto bases = ldsTransLayout.getBases();
   auto kRegister = S("register");
   auto kLane = S("lane");
+
+  // Make sure that we have enough register bases to rotate, otherwise we
+  // can't return a valid ds_read_tr layout
+  if (ldsTransLayout.getInDimSizeLog2(kRegister) < numRegBases) {
+    return std::nullopt;
+  }
+  // We should always have enough lanes
+  assert(ldsTransLayout.getInDimSizeLog2(kLane) >= numLaneBases);
   rotatePrefixes(bases[kRegister], numRegBases, bases[kLane], numLaneBases);
   // Scale types double the elements for a total of 16 vgpr (still only 16
   // elements contiguous). Need to adjust the lane basis to reflect that
-  if (elemBitWidth == 8 && numLanesInShuffleGroup == 8)
-    std::swap(bases[kLane][2], bases[kLane][3]);
+  if (elemBitWidth == 8 && numLanesInShuffleGroup == 8) {
+    assert(ldsTransLayout.getInDimSizeLog2(kLane) >= (numLaneBases + 1));
+    std::swap(bases[kLane][numLaneBases - 1], bases[kLane][numLaneBases]);
+  }
+
   return LinearLayout(bases, ldsTransLayout.getOutDims(), false);
 }
 
-LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
-                                        ArrayRef<int64_t> shape,
-                                        int32_t elemBitWidth) {
+std::optional<LinearLayout>
+chooseDotDsReadTrLayout(DotOperandEncodingAttr dotMfmaLayout,
+                        ArrayRef<int64_t> shape, int32_t elemBitWidth,
+                        unsigned instBitWidth,
+                        unsigned numLanesInShuffleGroup) {
+  if (instBitWidth != 64 || numLanesInShuffleGroup != 16)
+    return std::nullopt;
   auto mfmaLayout = llvm::cast<AMDMfmaEncodingAttr>(dotMfmaLayout.getParent());
   auto mDim = mfmaLayout.getInstrShape()[0];
   assert(mDim == 16 || mDim == 32);
@@ -1127,7 +1144,7 @@ LinearLayout tensorMemoryToLinearLayout(ArrayRef<int64_t> shape,
   // addressable blocks If the zero is in any other row/col (i.e. within a given
   // warp-addressable tmem space) it means it is not defined
 
-  // We model packed layouts as having the rows/cols dimensions of bitwidth=16
+  // We model packed layouts as having the rows/cols dimensions of bitWidth=16
   // This means that a layout with unpacked=True is the same as one with
   // unpacked=False
   assert(shape.size() == 2);
@@ -1409,6 +1426,20 @@ LinearLayout chooseShemLayoutForRegToRegConversion(
       {{kOffset, totalOffsets}, {kIteration, totalIters}, {kBlock, 1}});
 }
 
+std::optional<LinearLayout>
+chooseDsReadTrLayout(Attribute enc, ArrayRef<int64_t> shape,
+                     int32_t elemBitWidth, unsigned instBitWidth,
+                     unsigned numLanesInShuffleGroup) {
+  if (elemBitWidth == 4) {
+    auto dot = cast<DotOperandEncodingAttr>(enc);
+    return chooseDotDsReadTrLayout(dot, shape, elemBitWidth, instBitWidth,
+                                   numLanesInShuffleGroup);
+  } else {
+    return chooseLLDsReadTrLayout(enc, shape, elemBitWidth, instBitWidth,
+                                  numLanesInShuffleGroup);
+  }
+}
+
 LinearLayout chooseScaledWmmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          ArrayRef<unsigned> warpsPerCTA,
                                          ArrayRef<int64_t> dotOperandShape) {
@@ -1535,19 +1566,6 @@ LinearLayout chooseDotDsReadTrLayoutWmma(DotOperandEncodingAttr dotWmmaLayout,
       combineCtaCgaWithShape(ctaLayout, getCTALayout(dotWmmaLayout), shape);
 
   return ll;
-}
-
-LinearLayout chooseDsReadB64Tr16Layout(Attribute enc, ArrayRef<int64_t> shape,
-                                       int32_t elemBitWidth,
-                                       unsigned instBitWidth,
-                                       unsigned numLanesInShuffleGroup) {
-  if (elemBitWidth == 4) {
-    auto dot = cast<DotOperandEncodingAttr>(enc);
-    return chooseDotDsReadB64TrLayout(dot, shape, elemBitWidth);
-  } else {
-    return chooseLLDsReadB64TrLayout(enc, shape, elemBitWidth, instBitWidth,
-                                     numLanesInShuffleGroup);
-  }
 }
 
 LinearLayout
