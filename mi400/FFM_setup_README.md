@@ -133,7 +133,7 @@ RUN wget --no-check-certificate https://confluence.amd.com/download/attachments/
 
 RUN pip config set global.break-system-packages true
 
-RUN apt-get remove -y python3-distro && pip install einops requests Jinja2
+RUN apt-get remove -y python3-distro && pip install conan einops requests Jinja2
 
 RUN echo "export PATH=~/.local/bin:/opt/rocm/bin:$PATH" >> ~/.bashrc
 RUN echo "export NODE_EXTRA_CA_CERTS=~/AMD_CA.crt" >> ~/.bashrc
@@ -206,6 +206,8 @@ export USERNAME
 export PASSWORD
 
 git clone https://github.amd.com/GFX-Modeling/ffm_scripts.git ffm_scripts
+
+conan profile detect
 
 # you can use "-v latest" to use the latest jitcu package instead of v8
 python3 ffm_scripts/get_jitcu_package.py -u -b Release -r -a mi450 -v latest -U $USERNAME -P $PASSWORD
