@@ -1253,17 +1253,14 @@ public:
 
     ScaleDotElemType aElemType = dotOp.getAElemType();
     ScaleDotElemType bElemType = dotOp.getBElemType();
-    // TODO: Add more supported types
     auto supportsTypes = [](ScaleDotElemType elemType) {
       return elemType == ScaleDotElemType::E2M1 ||
-             elemType == ScaleDotElemType::E2M3 ||
-             elemType == ScaleDotElemType::E3M2 ||
              elemType == ScaleDotElemType::E4M3 ||
              elemType == ScaleDotElemType::E5M2;
     };
 
     if (!supportsTypes(aElemType) || !supportsTypes(bElemType)) {
-      return rewriter.notifyMatchFailure(dotOp, "NYI: mxfp6");
+      return rewriter.notifyMatchFailure(dotOp, "Not supported yet mxfp type");
     }
 
     MLIRContext *ctx = dotOp.getContext();
