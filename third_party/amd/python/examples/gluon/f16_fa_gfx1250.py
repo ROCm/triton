@@ -11,7 +11,236 @@ hip.hip.hipInit(0)
 import torch
 from triton.experimental import gluon
 import triton.experimental.gluon.language as gl
+from triton.language.core import _aggregate as aggregate
 import pytest
+
+
+@aggregate
+class AttentionConfig:
+    SEQLEN_Q: gl.constexpr
+    SEQLEN_K: gl.constexpr
+    HEAD_SZ: gl.constexpr
+    BLOCK_M: gl.constexpr
+    BLOCK_N: gl.constexpr
+    NUM_BUFFERS: gl.constexpr
+
+    qk_layout: gl.constexpr
+    pv_layout: gl.constexpr
+
+    q_smem_layout: gl.constexpr
+    k_smem_layout: gl.constexpr
+    v_smem_layout: gl.constexpr
+
+    q_layout: gl.constexpr
+    k_layout: gl.constexpr
+    v_layout: gl.constexpr
+    p_layout: gl.constexpr
+
+    def __init__(self, SEQLEN_Q, SEQLEN_K, HEAD_SZ, BLOCK_M, BLOCK_N, NUM_BUFFERS):
+
+        # constants
+        self.SEQLEN_Q = gl.constexpr(SEQLEN_Q)
+        self.SEQLEN_K = gl.constexpr(SEQLEN_K)
+        self.HEAD_SZ = gl.constexpr(HEAD_SZ)
+        self.BLOCK_M = gl.constexpr(BLOCK_M)
+        self.BLOCK_N = gl.constexpr(BLOCK_N)
+        self.NUM_BUFFERS = gl.constexpr(NUM_BUFFERS)
+
+        # operator layouts
+        self.qk_layout = gl.constexpr(
+            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2], instr_shape=[16, 16, 32]))
+        self.pv_layout = gl.constexpr(
+            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2], instr_shape=[16, 16, 32]))
+
+        # tensor layouts
+        self.q_smem_layout = gl.constexpr(gl.BlockedLayout([1, 8], [256 // HEAD_SZ, HEAD_SZ // 8], [4, 1], [1, 0]))
+        # TODO: Properly compute padding value to minimize bank conflicts.
+        self.k_smem_layout = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for([[HEAD_SZ, 8]], [BLOCK_N, HEAD_SZ], [1, 0]))
+        self.v_smem_layout = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for([[HEAD_SZ, 8]], [BLOCK_N, HEAD_SZ], [1, 0]))
+
+        self.q_layout = gl.constexpr(gl.DotOperandLayout(0, self.qk_layout, 8))
+        self.k_layout = gl.constexpr(gl.DotOperandLayout(1, self.qk_layout, 8))
+        self.v_layout = gl.constexpr(gl.DotOperandLayout(1, self.pv_layout, 8))
+        self.p_layout = gl.constexpr(gl.DotOperandLayout(0, self.pv_layout, 8))
+
+
+@aggregate
+class AttentionProgram:
+    cfg: AttentionConfig
+
+    q: gl.tensor
+
+    k_desc: gl.amd.gfx1250.tdm.tensor_descriptor
+    k_buffer: gl.shared_memory_descriptor
+
+    v_desc: gl.amd.gfx1250.tdm.tensor_descriptor
+    v_buffer: gl.shared_memory_descriptor
+
+    o_ptr: gl.tensor
+    o_offs: gl.tensor
+    o_mask: gl.tensor
+
+    sm_scale: gl.constexpr
+    rcp_ln2: gl.constexpr
+
+    def __init__(self, cfg,  #
+                 q,  #
+                 k_desc, k_buffer,  #
+                 v_desc, v_buffer,  #
+                 o_ptr, o_offs, o_mask,  #
+                 sm_scale):
+
+        self.cfg = cfg
+        self.q = q
+
+        self.k_desc = k_desc
+        self.k_buffer = k_buffer
+        self.v_desc = v_desc
+        self.v_buffer = v_buffer
+
+        self.o_ptr = o_ptr
+        self.o_offs = o_offs
+        self.o_mask = o_mask
+
+        self.sm_scale = gl.constexpr(sm_scale)
+        self.rcp_ln2 = gl.constexpr(1.4426950408889634)
+
+    @gluon.jit
+    def initialize(cfg,  #
+                   q_ptr, k_ptr, v_ptr, o_ptr,  #
+                   stride_qz, stride_qh, stride_qm, stride_qk,  #
+                   stride_kz, stride_kh, stride_kn, stride_kk,  #
+                   stride_vz, stride_vh, stride_vn, stride_vk,  #
+                   stride_oz, stride_oh, stride_om, stride_on,  #
+                   sm_scale: gl.constexpr):
+        SEQLEN_K: gl.constexpr = cfg.SEQLEN_K
+        SEQLEN_Q: gl.constexpr = cfg.SEQLEN_Q
+        HEAD_SZ: gl.constexpr = cfg.HEAD_SZ
+        BLOCK_M: gl.constexpr = cfg.BLOCK_M
+        BLOCK_N: gl.constexpr = cfg.BLOCK_N
+
+        # workgroup offsets
+        off_z = gl.program_id(0)
+        off_q_head = gl.program_id(1)
+        off_k_head = off_q_head
+        off_m = gl.program_id(2) * BLOCK_M
+
+        # q [BLOCK_M, HEAD_SZ]
+        q_offs = (stride_qz * off_z + stride_qh * off_q_head + stride_qm *
+                  (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_smem_layout)))[:, None] + stride_qk *
+                  (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, cfg.q_smem_layout)))[None, :])
+
+        # k [HEAD_SZ, BLOCK_N]
+        k_desc = gl.amd.gfx1250.tdm.make_tensor_descriptor(  #
+            base=k_ptr + stride_kz * off_z + stride_kh * off_k_head,  #
+            shape=(SEQLEN_K, HEAD_SZ),  #
+            strides=(stride_kn, stride_kk),  #
+            block_shape=(BLOCK_N, HEAD_SZ),  #
+            layout=cfg.k_smem_layout)
+        k_buffer = gl.allocate_shared_memory(k_desc.dtype, shape=[2] + k_desc.block_shape, layout=k_desc.layout)
+
+        # v [BLOCK_N, BLOCK_DMODEL]
+        v_desc = gl.amd.gfx1250.tdm.make_tensor_descriptor(  #
+            base=v_ptr + stride_vz * off_z + stride_vh * off_k_head,  #
+            shape=(SEQLEN_K, HEAD_SZ),  #
+            strides=(stride_vn, stride_vk),  #
+            block_shape=(BLOCK_N, HEAD_SZ),  #
+            layout=cfg.v_smem_layout)
+        v_buffer = gl.allocate_shared_memory(v_desc.dtype, shape=[2] + v_desc.block_shape, layout=v_desc.layout)
+
+        q_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_smem_layout)))[:, None] < SEQLEN_Q
+        q = gl.amd.gfx1250.buffer_load(q_ptr, q_offs, mask=q_mask)
+        q = gl.convert_layout(q, cfg.q_layout)
+
+        o_offs = (stride_oz * off_z + stride_oh * off_q_head + stride_om *
+                  (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.pv_layout)))[:, None] + stride_on *
+                  (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, cfg.pv_layout)))[None, :])
+
+        o_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.pv_layout)))[:, None] < SEQLEN_Q
+
+        # create the program
+        return AttentionProgram(cfg, q,  #
+                                k_desc, k_buffer,  #
+                                v_desc, v_buffer,  #
+                                o_ptr, o_offs, o_mask,  #
+                                sm_scale)
+
+    @gluon.jit
+    def tdm_shared_load_k(self, buffer_id, wait_count):
+        gl.amd.gfx1250.tdm.async_wait(wait_count)
+        return self.k_buffer.index(buffer_id).permute([1, 0]).load(layout=self.cfg.k_layout)
+
+    @gluon.jit
+    def tdm_shared_load_v(self, buffer_id, wait_count):
+        gl.amd.gfx1250.tdm.async_wait(wait_count)
+        return self.v_buffer.index(buffer_id).load(layout=self.cfg.v_layout)
+
+    @gluon.jit
+    def tdm_load_global_to_lds(self, tensor_desc, offset, indexed_buffer):
+        gl.amd.gfx1250.tdm.async_load(tensor_desc, offset, indexed_buffer)
+
+    @gluon.jit
+    def tdm_load_global_to_lds_k(self, offset, buffer_index):
+        gl.amd.gfx1250.tdm.async_load(self.k_desc, offset, self.k_buffer.index(buffer_index))
+
+    @gluon.jit
+    def tdm_load_global_to_lds_v(self, offset, buffer_index):
+        gl.amd.gfx1250.tdm.async_load(self.v_desc, offset, self.v_buffer.index(buffer_index))
+
+    @gluon.jit
+    def compute_qk(self, k, cur_seq):
+        qk = gl.zeros([self.cfg.BLOCK_M, self.cfg.BLOCK_N], dtype=gl.float32, layout=self.cfg.qk_layout)
+        qk = gl.amd.gfx1250.wmma(self.q, k, qk)
+        # Handle/pad unaligned M and K2 ids for QK.
+        qk_mask = (
+            cur_seq +
+            gl.arange(0, self.cfg.BLOCK_N, layout=gl.SliceLayout(0, self.cfg.qk_layout)))[None, :] < self.cfg.SEQLEN_K
+        qk = gl.where(qk_mask, qk, float("-inf"))
+        return qk
+
+    @gluon.jit
+    def softmax_part0(self, qk, m_i):
+        # get max scores so far
+        m_ij = gl.maximum(m_i, gl.max(qk, 1))
+        m_ij_scaled = m_ij * self.sm_scale * self.rcp_ln2
+
+        # scale and subtract max
+        q_shifted = qk * self.sm_scale * self.rcp_ln2 - m_ij_scaled[:, None]
+
+        # Compute scaled QK and softmax probabilities
+        p = gl.exp2(q_shifted)
+
+        # alpha is an adjustment factor for acc and li as we loop and find new maxes
+        # store the diff in maxes to adjust acc and li as we discover new maxes
+        m_diff_scaled = m_i * self.sm_scale * self.rcp_ln2 - m_ij_scaled
+        alpha = gl.exp2(m_diff_scaled)
+
+        return p, alpha, m_ij
+
+    @gluon.jit
+    def compute_pv(self, p, v, acc):
+        p = gl.convert_layout(p, self.cfg.p_layout)
+        return gl.amd.gfx1250.wmma(p, v, acc)
+
+    @gluon.jit
+    def softmax_part1(self, p, l_i, acc, alpha):
+        # update l_ij before applying dropout
+        l_ij = gl.sum(p, 1)
+
+        # update output accumulator
+        updated_acc = acc * alpha[:, None]
+        updated_p = p.to(gl.bfloat16, fp_downcast_rounding="rtz")
+
+        # Update l_i
+        updated_l_i = l_i * alpha + l_ij
+        return updated_p, updated_l_i, updated_acc
+
+    @gluon.jit
+    def store_output(self, out):
+        casted_out = out.to(self.o_ptr.dtype.element_ty)
+        gl.amd.gfx1250.buffer_store(casted_out, self.o_ptr, self.o_offs, mask=self.o_mask)
 
 
 @gluon.jit
@@ -27,132 +256,219 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
                     BLOCK_N: gl.constexpr,  #
                     HEAD_SZ: gl.constexpr,  #
                     ):
-    # This layout sets vector<8xf16> along fastest dim/head_sz and infer thread distribution needed to fit.
-    BLOCK_LAYOUT: gl.constexpr = gl.BlockedLayout([1, 8], [256 // HEAD_SZ, HEAD_SZ // 8], [4, 1], [1, 0])
-    K_TRANSPOSE_LAYOUT: gl.constexpr = gl.BlockedLayout([8, 1], [HEAD_SZ // 8, 256 // HEAD_SZ], [1, 4], [0, 1])
-    WMMA_QK_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2],
-                                                        instr_shape=[16, 16, 32])
-    WMMA_PV_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2],
-                                                        instr_shape=[16, 16, 32])
 
-    seqlen_q = SEQLEN_Q
-    seqlen_k = SEQLEN_K
+    NUM_BUFFERS: gl.constexpr = 1
+    cfg = AttentionConfig(SEQLEN_Q, SEQLEN_K, HEAD_SZ, BLOCK_M, BLOCK_N, NUM_BUFFERS)
+    pgm = AttentionProgram.initialize(  #
+        cfg, q_ptr, k_ptr, v_ptr, out_ptr,  #
+        stride_qz, stride_qh, stride_qm, stride_qk,  #
+        stride_kz, stride_kh, stride_kn, stride_kk,  #
+        stride_vz, stride_vh, stride_vn, stride_vk,  #
+        stride_oz, stride_oh, stride_om, stride_on,  #
+        SM_SCALE)
 
-    # workgroup offsets using delinearization
-    off_z = gl.program_id(0)
-    off_q_head = gl.program_id(1)
-    off_k_head = off_q_head
-    off_m = gl.program_id(2) * BLOCK_M
-    n_blocks_n = (seqlen_k + BLOCK_N - 1) // BLOCK_N
+    m_i = gl.full([BLOCK_M], float("-inf"), dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
+    l_i = gl.full([BLOCK_M], 1.0, dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
+    acc = gl.zeros([BLOCK_M, HEAD_SZ], dtype=gl.float32, layout=cfg.pv_layout)
 
-    # q [BLOCK_M, HEAD_SZ]
-    q_offs = (stride_qz * off_z + stride_qh * off_q_head + stride_qm *
-              (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, BLOCK_LAYOUT)))[:, None] + stride_qk *
-              (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, BLOCK_LAYOUT)))[None, :])
-
-    # k [HEAD_SZ, BLOCK_N]
-    k_offs = (stride_kz * off_z + stride_kh * off_k_head +
-              stride_kk * gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(1, K_TRANSPOSE_LAYOUT))[:, None] +
-              stride_kn * gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, K_TRANSPOSE_LAYOUT))[None, :])
-
-    # v [BLOCK_N, BLOCK_DMODEL]
-    v_offs = (stride_vz * off_z + stride_vh * off_k_head +
-              stride_vn * gl.arange(0, BLOCK_N, layout=gl.SliceLayout(1, BLOCK_LAYOUT))[:, None] +
-              stride_vk * gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, BLOCK_LAYOUT))[None, :])
-
-    m_i = gl.full([BLOCK_M], float(-1e6), dtype=gl.float32, layout=gl.SliceLayout(1, WMMA_PV_LAYOUT))
-    l_i = gl.full([BLOCK_M], 1.0, dtype=gl.float32, layout=gl.SliceLayout(1, WMMA_PV_LAYOUT))
-    acc = gl.zeros([BLOCK_M, HEAD_SZ], dtype=gl.float32, layout=WMMA_PV_LAYOUT)
-
-    q_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, BLOCK_LAYOUT)))[:, None] < seqlen_q
-    q = gl.amd.gfx1250.buffer_load(q_ptr, q_offs, mask=q_mask)
-    q = gl.convert_layout(q, gl.DotOperandLayout(0, WMMA_QK_LAYOUT, 8))
-
+    n_blocks_n = (SEQLEN_K + BLOCK_N - 1) // BLOCK_N
     block_min = 0
     block_max = n_blocks_n * BLOCK_N
-
-    RCP_LN2: gl.constexpr = 1.4426950408889634
-
     for block_id in range(block_min, block_max, BLOCK_N):
-        k_mask = (block_id + gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, K_TRANSPOSE_LAYOUT)))[None, :] < seqlen_k
-        k = gl.amd.gfx1250.buffer_load(k_ptr, k_offs, mask=k_mask)
-        k = gl.convert_layout(k, gl.DotOperandLayout(1, WMMA_QK_LAYOUT, 8))
+        pgm.tdm_load_global_to_lds_k([block_id, 0], buffer_index=0)
+        k = pgm.tdm_shared_load_k(0, wait_count=0)
 
-        qk = gl.zeros([BLOCK_M, BLOCK_N], dtype=gl.float32, layout=WMMA_QK_LAYOUT)
-        qk = gl.amd.gfx1250.wmma(q, k, qk)
+        qk = pgm.compute_qk(k, block_id)
 
-        # Handle/pad unaligned M and K2 ids.
-        qk_mask = (block_id + gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, WMMA_QK_LAYOUT)))[None, :] < seqlen_k
-        qk = gl.where(qk_mask, qk, -1.0e6)
+        p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+        p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
 
-        # get max scores so far
-        m_ij = gl.maximum(m_i, gl.max(qk, 1))
-        m_ij_scaled = m_ij * SM_SCALE * RCP_LN2
+        pgm.tdm_load_global_to_lds_v([block_id, 0], 0)
+        v = pgm.tdm_shared_load_v(0, wait_count=0)
 
-        # scale and subtract max
-        q_shifted = qk * SM_SCALE * RCP_LN2 - m_ij_scaled[:, None]
-
-        # Compute scaled QK and softmax probabilities
-        p = gl.exp2(q_shifted)
-
-        # update l_ij before applying dropout
-        l_ij = gl.sum(p, 1)
-
-        # update output accumulator
-        # alpha is an adjustment factor for acc and li as we loop and find new maxes
-        # store the diff in maxes to adjust acc and li as we discover new maxes
-        m_diff_scaled = m_i * SM_SCALE * RCP_LN2 - m_ij_scaled
-        alpha = gl.exp2(m_diff_scaled)
-        acc = acc * alpha[:, None]
-
-        v_mask = (block_id + gl.arange(0, BLOCK_N, layout=gl.SliceLayout(1, BLOCK_LAYOUT)))[:, None] < seqlen_k
-        v = gl.amd.gfx1250.buffer_load(v_ptr, v_offs, mask=v_mask)
-        v = gl.convert_layout(v, gl.DotOperandLayout(1, WMMA_PV_LAYOUT, 8))
-
-        l_i = l_i * alpha + l_ij
-        m_i = m_ij
-
-        p = p.to(gl.bfloat16, fp_downcast_rounding="rtz")
-        p = gl.convert_layout(p, gl.DotOperandLayout(0, WMMA_PV_LAYOUT, 8))
-        acc = gl.amd.gfx1250.wmma(p, v, acc)
-
-        k_ptr += BLOCK_N * stride_kn
-        v_ptr += BLOCK_N * stride_vn
+        acc = pgm.compute_pv(p, v, acc)
 
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
+    pgm.store_output(acc)
 
-    out_offs = (stride_oz * off_z + stride_oh * off_q_head + stride_om *
-                (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, WMMA_PV_LAYOUT)))[:, None] + stride_on *
-                (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, WMMA_PV_LAYOUT)))[None, :])
 
-    op = acc.to(out_ptr.dtype.element_ty)
+@gluon.jit
+def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
+                              stride_qz, stride_qh, stride_qm, stride_qk,  #
+                              stride_kz, stride_kh, stride_kn, stride_kk,  #
+                              stride_vz, stride_vh, stride_vn, stride_vk,  #
+                              stride_oz, stride_oh, stride_om, stride_on,  #
+                              SM_SCALE: gl.constexpr,  #
+                              SEQLEN_Q: gl.constexpr,  #
+                              SEQLEN_K: gl.constexpr,  #
+                              BLOCK_M: gl.constexpr,  #
+                              BLOCK_N: gl.constexpr,  #
+                              HEAD_SZ: gl.constexpr,  #
+                              ):
+    NUM_BUFFERS: gl.constexpr = 2
+    cfg = AttentionConfig(SEQLEN_Q, SEQLEN_K, HEAD_SZ, BLOCK_M, BLOCK_N, NUM_BUFFERS)
+    pgm = AttentionProgram.initialize(  #
+        cfg, q_ptr, k_ptr, v_ptr, out_ptr,  #
+        stride_qz, stride_qh, stride_qm, stride_qk,  #
+        stride_kz, stride_kh, stride_kn, stride_kk,  #
+        stride_vz, stride_vh, stride_vn, stride_vk,  #
+        stride_oz, stride_oh, stride_om, stride_on,  #
+        SM_SCALE)
 
-    out_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, WMMA_PV_LAYOUT)))[:, None] < seqlen_q
-    gl.amd.gfx1250.buffer_store(op, out_ptr, out_offs, mask=out_mask)
+    ITERS_IN_PROLOGUE_EPILOGUE: gl.constexpr = 3
+    n_blocks_n = max((SEQLEN_K + BLOCK_N - 1) // BLOCK_N - ITERS_IN_PROLOGUE_EPILOGUE, 1)
+
+    m_i = gl.full([BLOCK_M], float("-inf"), dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
+    l_i = gl.full([BLOCK_M], 1.0, dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
+    acc = gl.zeros([BLOCK_M, HEAD_SZ], dtype=gl.float32, layout=cfg.pv_layout)
+
+    block_min = 0
+    block_max = n_blocks_n * BLOCK_N
+    """
+    Prologue:
+    t = i           t = i+1          t = i+2
+    [GLDS_K]
+    [LR_K, GLDS_V], [GLDS_K]
+    [QK, SM0],      [LR_K, GLDS_V],  [GLDS_K]
+    """
+    # GLDS_K_t0, GLDS_K_t1, GLDS_V_t0
+    pgm.tdm_load_global_to_lds_k([0, 0], buffer_index=0)
+    pgm.tdm_load_global_to_lds_k([BLOCK_N, 0], buffer_index=1)
+    pgm.tdm_load_global_to_lds_v([0, 0], buffer_index=0)
+
+    # LR_K_t0
+    k = pgm.tdm_shared_load_k(0, wait_count=2)
+
+    # QK_t0
+    qk = pgm.compute_qk(k, 0)
+
+    # SM0_t0
+    p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+
+    # GLDS_V_t1, GLDS_K_t2
+    pgm.tdm_load_global_to_lds_v([BLOCK_N, 0], buffer_index=1)
+    pgm.tdm_load_global_to_lds_k([2 * BLOCK_N, 0], buffer_index=0)
+
+    # LR_K_t1
+    k = pgm.tdm_shared_load_k(1, wait_count=3)
+
+    iter_id = 0
+    for block_id in range(block_min, block_max, BLOCK_N):
+        """
+        Steady State:
+        t = i              t = i+1         t = i+2         t = i+3
+        [SM1, LR_V, PV],   [QK, SM0],    [LR_K, GLDS_V]     [GLDS_K]
+        """
+        # TODO: Unroll this loop with unroll_factor=2 to save computation wrt iter_id and
+        #       arithmetic computation for rotating registers.
+        t_1 = block_id + BLOCK_N
+        t_2 = block_id + 2 * BLOCK_N
+        t_3 = block_id + 3 * BLOCK_N
+
+        # QK, SM1, LR_V
+        qk = pgm.compute_qk(k, t_1)
+
+        p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
+
+        v = pgm.tdm_shared_load_v(iter_id % NUM_BUFFERS, wait_count=2)
+
+        # GLDS_K
+        pgm.tdm_load_global_to_lds_k([t_3, 0], (iter_id + 1) % NUM_BUFFERS)
+
+        # PV, SM0, LR_K
+        acc = pgm.compute_pv(p, v, acc)
+
+        p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+
+        k = pgm.tdm_shared_load_k(iter_id % NUM_BUFFERS, wait_count=2)
+
+        # GLDS_V
+        pgm.tdm_load_global_to_lds_v([t_2, 0], iter_id % NUM_BUFFERS)
+        iter_id += 1
+    """
+    Epilogue:
+    t = i+1              t = i+2              t = i+3
+    [SM1, LR_V, PV],    [QK, SM0],          [LR_K, GLDS_V]
+                        [SM1, LR_V, PV],    [QK, SM0]
+                                            [SM1, LR_V, PV]
+    """
+    epilogue_offset = (iter_id - 1) * BLOCK_N
+    t_2 = epilogue_offset + 2 * BLOCK_N
+    t_3 = epilogue_offset + 3 * BLOCK_N
+    # SM1_t1, LR_V_t1, PV_t1
+    p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
+
+    v = pgm.tdm_shared_load_v(iter_id % NUM_BUFFERS, wait_count=2)
+
+    acc = pgm.compute_pv(p, v, acc)
+
+    # QK_t2, SM0_t2
+    qk = pgm.compute_qk(k, t_2)
+    p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+
+    # LR_K_t3, GLDS_V_t3
+    k = pgm.tdm_shared_load_k(iter_id % NUM_BUFFERS, wait_count=1)
+
+    pgm.tdm_load_global_to_lds_v([t_3, 0], iter_id % NUM_BUFFERS)
+
+    # QK_t3, SM1_t2, LR_V_t2
+    qk = pgm.compute_qk(k, t_3)
+
+    p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
+
+    v = pgm.tdm_shared_load_v((iter_id + 1) % NUM_BUFFERS, wait_count=1)
+
+    # PV_t_2, SM0_t_3, SM1_t_3, LR_V_t3
+    acc = pgm.compute_pv(p, v, acc)
+
+    p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+    p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
+
+    v = pgm.tdm_shared_load_v(iter_id % NUM_BUFFERS, wait_count=0)
+
+    # PV_t_3
+    acc = pgm.compute_pv(p, v, acc)
+
+    # Post loop scaling and output
+
+    l_recip = 1 / l_i[:, None]
+    acc = acc * l_recip
+    pgm.store_output(acc)
 
 
 def generate_configs():
     base_configs = [
+        # Tests for pipelined attention fwd kernel
         pytest.param({
             "BATCH": 8, "SEQLEN_Q": 512, "SEQLEN_K": 512, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 128, "BLOCK_M":
-            128, "BLOCK_N": 32
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 64,
-            "BLOCK_M": 128, "BLOCK_N": 32
+            "BLOCK_M": 128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 1, "SEQLEN_Q": 3, "SEQLEN_K": 32, "NUM_Q_HEADS": 4, "NUM_K_HEADS": 4, "HEAD_SZ": 128, "BLOCK_M":
-            128, "BLOCK_N": 32
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 4, "SEQLEN_Q": 1, "SEQLEN_K": 100, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 32, "BLOCK_M":
-            128, "BLOCK_N": 32
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 1, "SEQLEN_Q": 1, "SEQLEN_K": 30, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 32, "BLOCK_M":
-            128, "BLOCK_N": 32
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
+        }),
+
+        # Tests for non-pipelined attention fwd kernel
+        pytest.param({
+            "BATCH": 8, "SEQLEN_Q": 512, "SEQLEN_K": 512, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 128, "BLOCK_M":
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_kernel
+        }),
+        pytest.param({
+            "BATCH": 1, "SEQLEN_Q": 1, "SEQLEN_K": 30, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 32, "BLOCK_M":
+            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_kernel
         }),
     ]
     return base_configs
@@ -168,6 +484,7 @@ def test_attention(config):
     HEAD_SZ = config["HEAD_SZ"]
     BLOCK_M = config["BLOCK_M"]
     BLOCK_N = config["BLOCK_N"]
+    attn_fn = config["ATTN_FN"]
 
     dtype = torch.bfloat16
     torch.random.manual_seed(0)
@@ -190,7 +507,7 @@ def test_attention(config):
         ((SEQLEN_Q + BLOCK_M - 1) // BLOCK_M),
     )
 
-    attn_fwd_kernel[grid](
+    attn_fn[grid](
         q,
         k,
         v,
@@ -229,6 +546,6 @@ def test_attention(config):
 if __name__ == "__main__":
     config = {
         "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 64, "BLOCK_M":
-        32, "BLOCK_N": 32
+        32, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
     }
     test_attention(config)
