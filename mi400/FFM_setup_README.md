@@ -205,7 +205,7 @@ echo
 export USERNAME
 export PASSWORD
 
-git clone https://github.amd.com/GFX-Modeling/ffm_scripts.git ffm_scripts
+git clone git@github.amd.com:GFX-Modeling/ffm_scripts.git
 
 conan profile detect
 
