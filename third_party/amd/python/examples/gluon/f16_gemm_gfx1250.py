@@ -1,8 +1,10 @@
 # ruff: noqa: E402
-import hip
+import os
 
-hip.hip.hipInit(0)
-# Needed for internal dev flow for now; will remove later
+if 'FFM_PATH' in os.environ:
+    # Needed for internal dev flow for now; will remove later
+    import hip
+    hip.hip.hipInit(0)
 
 import pytest
 import torch
@@ -11,6 +13,7 @@ import triton
 from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
+import argparse
 
 
 @aggregate
@@ -533,19 +536,17 @@ def test_runtime_gemm_tdm_pipelined_single_warp_schedule(BLOCK_M, BLOCK_N, NUM_B
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-warps", type=int, choices=[4, 8], required=True, help='num warps')
+    args = parser.parse_args()
+
     M, N, K = 256, 256, 1024
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
     NUM_BUFFERS = 2
-    NUM_WARPS = 4
+    NUM_WARPS = args.num_warps
     TRANSPOSE_B = True
     PERSISTENT = True
     PREFETCH = False
-    print(
-        f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {TRANSPOSE_B=}, {PERSISTENT=}, {PREFETCH=}, {NUM_WARPS=}"
-    )
-    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, M, N, K,
-                                    NUM_WARPS)
-    NUM_WARPS = 8
     print(
         f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {TRANSPOSE_B=}, {PERSISTENT=}, {PREFETCH=}, {NUM_WARPS=}"
     )
