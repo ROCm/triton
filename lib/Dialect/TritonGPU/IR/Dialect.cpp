@@ -1357,14 +1357,6 @@ LogicalResult AMDWmmaEncodingAttr::verify(
   if (!(version >= 1 && version <= 3))
     return emitError() << "WMMA version must be in the [1, 3] range";
 
-  // Transposed layout is needed for bypassing LDS between multiple dots.
-  // Version 1 tt.dot results and tt.dot operand layouts are different,
-  // therefore we test and support transposed only for version 2/3.
-  if (version != 2 && version != 3 && isTransposed) {
-    return emitError()
-           << "Transposed WMMA is supported only for version 2 and 3";
-  }
-
   auto shape = SmallVector<unsigned>(instrShape);
   auto validShapesV1 = std::vector<llvm::SmallVector<unsigned>>{{16, 16, 16}};
   if (version == 1 && !llvm::is_contained(validShapesV1, shape))
@@ -1382,7 +1374,6 @@ LogicalResult AMDWmmaEncodingAttr::verify(
 
   return success();
 }
-
 //===----------------------------------------------------------------------===//
 // Sliced Encoding
 //===----------------------------------------------------------------------===//
@@ -2420,43 +2411,43 @@ NvidiaMmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 SmallVector<int64_t>
 NvidiaMmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> shape, int bitwidth,
                                         int kWidth, int opIdx) const {
-  // assert(
-  //     kWidth >= 32 / bitwidth &&
-  //     "kWidth must be >= 32 / bitwidth for this function to be
-  //     well-defined");
-  // auto rank = shape.size();
-  // // Broadcast long K
-  // auto warpsPerCTA = getWarpsPerCTA();
-  // auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
-  // warpsPerCTA[kDim] = 1;
+  assert(kWidth >= std::max(32 / bitwidth, 1) &&
+         "kWidth must be >= max(32 / bitwidth, 1) for this function to be "
+         "well-defined");
+  auto rank = shape.size();
+  // Broadcast long K
+  auto warpsPerCTA = to_vector(getWarpsPerCTA());
+  auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
+  warpsPerCTA[kDim] = 1;
 
-  // SmallVector<int> tileSize;
-  // if (rank == 3) {
-  //   tileSize.push_back(1);
-  // }
-  // if (opIdx == 0) {
-  //   // m x k
-  //   tileSize.push_back(16);
-  //   tileSize.push_back(4 * 64 / bitwidth);
-  // } else {
-  //   // k x n
-  //   // Hopper path never uses the n value, since this method is only invoked
-  //   // for in-RF (dotOpEnc) operands, but WGMMA only supports in A to be in
-  //   RF
-  //   // so it's fine if the n is incorrect here
-  //   tileSize.push_back(4 * 64 / bitwidth);
-  //   tileSize.push_back(8);
-  // }
+  SmallVector<int> tileSize;
+  if (rank == 3) {
+    tileSize.push_back(1);
+  }
+  // warpSizeK * (warpRepK * VecBitWidth)
+  auto tileBitWidthK = (isAmpere() && bitwidth == 64) ? (4 * 256) : (4 * 64);
+  if (opIdx == 0) {
+    // m x k
+    tileSize.push_back(16);
+    tileSize.push_back(tileBitWidthK / bitwidth);
+  } else {
+    // k x n
+    // Hopper path never uses the n value, since this method is only invoked
+    // for in-RF (dotOpEnc) operands, but WGMMA only supports in A to be in RF
+    // so it's fine if the n is incorrect here
+    tileSize.push_back(tileBitWidthK / bitwidth);
+    tileSize.push_back(8);
+  }
 
-  // SmallVector<int64_t> numRep;
-  // // Lezcano: This is odd. Why do we always return a vector of size 3?
-  // if (rank != 3) {
-  //   numRep.push_back(1);
-  // }
-  // for (auto [s, size, warp] : llvm::zip(shape, tileSize, warpsPerCTA)) {
-  //   numRep.push_back(std::max<int64_t>(1, s / (size * warp)));
-  // }
-  return {};
+  SmallVector<int64_t> numRep;
+  // Lezcano: This is odd. Why do we always return a vector of size 3?
+  if (rank != 3) {
+    numRep.push_back(1);
+  }
+  for (auto [s, size, warp] : llvm::zip(shape, tileSize, warpsPerCTA)) {
+    numRep.push_back(std::max<int64_t>(1, s / (size * warp)));
+  }
+  return numRep;
 }
 
 //===----------------------------------------------------------------------===//

@@ -38,10 +38,10 @@ export CCACHE_COMPRESS="true"
 LLVM_LIBRARY_DIR=/data/build/amd-mlir-9f0b4533535f-debug-install LLVM_SYSPATH=/data/build/amd-mlir-9f0b4533535f-debug-install \
     pip3 install --no-build-isolation .
 
-export TRITON_HIP_USE_ASYNC_COPY=1
+echo "=== Run Lit Tests ==="
+make test-lit
 
-echo "=== Run LIT Tests ==="
-make test-lit-warner
+export TRITON_HIP_USE_ASYNC_COPY=1
 
 echo "=== Run Gluon Tests ==="
 

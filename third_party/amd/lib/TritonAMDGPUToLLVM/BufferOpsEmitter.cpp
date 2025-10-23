@@ -122,6 +122,7 @@ BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
       ValueRange{
           commonArgs[0], // Buffer descriptor
           dst,           // LDS base ptr
+          byteWidth,     // Instr size
           commonArgs[1], // Buffer offset
           b.i32_val(0),  // LDS offset
           commonArgs[2], // Instruction offset

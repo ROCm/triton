@@ -18,8 +18,7 @@ set(TRITON_TEST_DEPENDS
 )
 
 set(FILECHECK_PATH "${LLVM_LIBRARY_DIR}/../bin/FileCheck")
-set(LIT_JSON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lit-results.json")
-set(LIT_ARGS "-Dfilecheck=${FILECHECK_PATH} -o ${LIT_JSON_PATH}")
+set(LIT_ARGS "-Dfilecheck=${FILECHECK_PATH}")
 
 add_lit_testsuite(check-triton-lit-tests "Running the triton regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}

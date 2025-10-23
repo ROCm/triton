@@ -1997,7 +1997,6 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
 
     // Drop the result AsyncToken
     rewriter.replaceOp(op, b.i32_val(0));
-    rewriter.eraseOp(op);
 
     return success();
   }

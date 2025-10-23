@@ -25,12 +25,6 @@ triton-opt:
 test-lit:
 	ninja -C $(BUILD_DIR) check-triton-lit-tests
 
-
-.PHONY: test-lit-warner
-test-lit-warner:
-	ninja -C $(BUILD_DIR) check-triton-lit-tests || true
-	python3 .ci/check_lit_failures.py --lit-json "test/lit-results.json" --expected .ci/failing-lit-tests.txt
-
 .PHONY: test-cpp
 test-cpp:
 	ninja -C $(BUILD_DIR) check-triton-unit-tests

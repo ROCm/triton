@@ -1531,7 +1531,7 @@ public:
     auto CTALayout = ttg::getCTALayout(oldRetEncoding);
     // Use transposed wmma layout to enable larger vectorization for global
     // store instructions.
-    bool isTransposed = (wmmaVersion == 2 || wmmaVersion == 3);
+    bool isTransposed = true;
     wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed,
                                             warpsPerTile, CTALayout,
                                             {mDim, nDim, kDim});

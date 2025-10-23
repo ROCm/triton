@@ -678,7 +678,7 @@ bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
     return llvm::is_contained({32, /*16, 8*/}, bitWidth);
   case ISAFamily::CDNA4:
     // Disable 8, 16, 96 bits because they get extended to 32/128 bit.
-    return llvm::is_contained({128, 64, /*96, */ 32, /*16, 8*/}, bitWidth);
+    return llvm::is_contained({128, /*96, */ 32, /*16, 8*/}, bitWidth);
   case ISAFamily::GFX1250:
     // Disable 8, 16,bits because they get extended to 32 bit and therefore
     // overwrite. 96 is not a pow2 and generally not useful in Triton
