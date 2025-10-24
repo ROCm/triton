@@ -84,7 +84,6 @@ static inline int32_t getMfmaF8F6F4MatrixFormat(Type t) {
   this allows a smoother transition from one dot to another in terms
   of register pressure.
 
-  
   Args:
    - numRepM,N,K - total numReps for M, N or K.
    - tileSizeM,N,K - how many reps belong to a tile.
@@ -639,6 +638,18 @@ struct DotOpMFMAConversionHelper {
     Value loadedB = adaptor.getB();
     Value loadedC = adaptor.getC();
 
+    Operation *llOpA = loadedA.getDefiningOp();
+    Operation *llOpB = loadedB.getDefiningOp();
+
+    mlir::Block *blockOpA = llOpA->getBlock();
+    mlir::Block *blockOpB = llOpB->getBlock();
+    mlir::Block *blockDot = op->getBlock();
+    bool loadInLoopAM = blockOpA == blockDot;
+    bool loadInLoopBN = blockOpB == blockDot;
+    llvm::outs() << "blockDot=" << blockDot << "\n";
+    llvm::outs() << "blockA=" << blockOpA << ", loadInLoop=" << loadInLoopAM << "\n";
+    llvm::outs() << "blockB=" << blockOpB << ", loadInLoop=" << loadInLoopBN << "\n";
+
     auto numRepM = repA[1];
     auto numRepN = repB[2];
     auto numRepK = repA[2];
@@ -686,42 +697,43 @@ struct DotOpMFMAConversionHelper {
 
     ///////////////////////////////////////////////////////////////////////////
     // DotTile preparation
-    // TODO(dtanner) are these actually loaded from lds in BB?
-    // If one is loaded into register before BB (e.g. FA), then that should be outer.
-    // Also, if one edge is already in vgprs, then we don't need 2D tile, it can just be
-    // rows, cols because loading any one operand enable entire row/col for FA.
+
     size_t bitsAM = mDim * numRepM * aTensorTy.getElementType().getIntOrFloatBitWidth();
-    llvm::outs() << "mDim=" << mDim
+
+    bitsAM *= loadInLoopAM ? 1 : 0;
+    llvm::outs()
+      << ", mDim=" << mDim
       << ", numRepM=" << numRepM
       << ", typeBits=" << aTensorTy.getElementType().getIntOrFloatBitWidth()
       << " -> bitsAM=" << bitsAM << "\n";
 
+
     size_t bitsBN = nDim * numRepN * bTensorTy.getElementType().getIntOrFloatBitWidth();
-    llvm::outs() << "nDim=" << nDim
+    bitsBN *= loadInLoopBN ? 1 : 0;
+    llvm::outs()
+      << ", nDim=" << nDim
       << ", numRepN=" << numRepN
       << ", typeBits=" << bTensorTy.getElementType().getIntOrFloatBitWidth()
       << " -> bitsBN=" << bitsBN << "\n";
 
-    int tileSizeB = 1; // TODO(dtanner) should this be numRepB?
-    // Outer tile should be larger one.
-    // TODO(dtanner) this is working for same data type; verify for mixed mxfp8 * mxfp4.
-    bool outerTileN = bitsBN > bitsAM;
 
-    // TODO(dtanner) tileSize may be based on (a) number of mfmas which takes same cycles as LDS latency
-    // or (b) specified by the user; it can be narrowed to powers of 1.
-    int64_t tileSize = 2;
+    int tileSizeB = 1; // one batch at a time.
+    // Outer tile should be larger one.
+    bool outerTileN = bitsBN > bitsAM;
+    // When tiling, the ideal is that the tile size
+    // tileSize=1 means row/column only, no tiling; still choose M vs N as outer loop.
+    // This is appropriate when 1 operand is loaded in loop and one is pre-loaded outside of loop.
+    // tileSize=2,4 means tiling; still choose M vs N as outer loop.
+    // This is appropriate with both (gemm) or neither (epilogue) operands are loaded inside the loop.
+    int64_t tileSize = (loadInLoopAM == loadInLoopBN) ? 2 : 1;
     int64_t tileSizeM = std::min(tileSize, numRepM);
     int64_t tileSizeN = std::min(tileSize, numRepN);
     // TODO(dtanner) verify the minute details of kWidth/kBase.
-    // What we really want are the FMAs served by a single ds_read_b128.
-    int64_t tileSizeK =  kWidth/kBase;
+    // What we really want are the FMAs along K served by a single ds_read_b*.
+    int64_t tileSizeK = kWidth/kBase;
     //llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
-
     DotTiling dotTiling(numRepB, numRepM, numRepN, numVecInKBase, tileSizeB, tileSizeM, tileSizeN, tileSizeK, outerTileN);
     ///////////////////////////////////////////////////////////////////////////
-
-    llvm::outs() << "dotTiling.getNumTilesK()=" << dotTiling.getNumTilesK() << "\n";
-    //llvm::outs() << "dotTiling.getTileSizeK()=" << dotTiling.getTileSizeK() << "\n";
 
     for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
       DotTiling::DotCoord dc = *iter;
@@ -732,9 +744,10 @@ struct DotOpMFMAConversionHelper {
         << ", k=" << dc.getK() << "\n";
     }
 
-
-
+    Value acc;
     // Iterate over tiles.
+#define MULTI_LOOP 0
+#if MULTI_LOOP
     for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
     for (int tileIdxO = 0; tileIdxO < dotTiling.getNumTilesO(); ++tileIdxO) { // outer is larger
     for (int tileIdxI = 0; tileIdxI < dotTiling.getNumTilesI(); ++tileIdxI) { // inner is smaller
@@ -746,28 +759,27 @@ struct DotOpMFMAConversionHelper {
     for (int b = 0; b < numRepB; ++b) {
       for (int m = tileStartM; m < tileStartM + dotTiling.getTileSizeM(); ++m) {
         for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
-          Value acc = tb.undef(vecTy);
-
-          for (int v = 0; v < elemsPerVec; ++v) {
-            int linearIdx = linearize({b, m, n, v}, fcStrides);
-            Value c = fc[linearIdx];
-            //llvm::outs() << "fc[" << linearIdx << "]: " << c << "\n";
-            acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
-          }
-
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
-            /*llvm::outs() << "tiK=" << tileIdxK
-              << ", tiO=" << tileIdxO
-              << ", tiI=" << tileIdxI
-              << ", b=" << b
-              << ", m=" << m
-              << ", n=" << n
-              << ", k=" << k << "\n";*/
-              llvm::outs() << "[loop]"
-                  << ": b=" << b
-                  << ", m=" << m
-                  << ", n=" << n
-                  << ", k=" << k << "\n";
+#else
+    for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
+      DotTiling::DotCoord dc = *iter;
+      int b = dc.getB();
+      int m = dc.getM();
+      int n = dc.getN();
+      int k = dc.getK();
+#endif
+            acc = tb.undef(vecTy);
+            for (int v = 0; v < elemsPerVec; ++v) {
+              int linearIdx = linearize({b, m, n, v}, fcStrides);
+              Value c = fc[linearIdx];
+              acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
+            }
+
+            llvm::outs() << "[loop]"
+                << ": b=" << b
+                << ", m=" << m
+                << ", n=" << n
+                << ", k=" << k << "\n";
             Value op1 = operandA[{b, m, k}];
             Value op2 = operandB[{b, n, k}];
             int cbsz = 0;
@@ -796,17 +808,19 @@ struct DotOpMFMAConversionHelper {
             if (!firstMfma)
               firstMfma = acc;
             
-          } // k
-
-          adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
+            adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
+          } // k
+#if MULTI_LOOP
+          //adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
+          //                      kDimInstrSize, kDimOperandSize, elemsPerVec);
         } // n
       } // m
     } // b
     } // tile Inner
     } // tile Outer
     } // tile K
-
+#endif
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
     // to the first mfma leaving the first mfma staying at the low priority. In
