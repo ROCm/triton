@@ -464,6 +464,8 @@ DISABLE_LLVM_OPT="disable-vector-combine"  TRITON_HIP_USE_ASYNC_COPY=1 AMDGCN_SC
     used update the acc will be moved from cluster 0 to cluster 2.
 - customLLVM: insert iglp10 in the compute cluster [like this](https://github.com/ROCm/triton/commit/073332797a0e3dca0c6affbf9582df32ddeab847) 
   and use the llvm custom branch [TritonInterleaveAndRematRebase2](https://github.com/kerbowa/llvm-project/tree/TritonInterleaveAndRematRebase2)
+  - version1: f5bfe928d1fc27ee
+  - version2: 7988aac08017b253
 
 The following optimizations are newly developed for FAv3 and can be found
 in branch [fav3_padded](https://github.com/ROCm/triton/tree/fav3_padded)
@@ -494,6 +496,13 @@ The following items come from manual assembly modification.
   - We hacked the compiler.py to process the amdgcn file to achieve the above ([commit](2dc24453d7a467))
 - `readfirstlane` refers to assembly hack in which we hoist `v_readfirstlane` out of the loop.
   ==> [issue#1309](https://github.com/ROCm/triton-internal/issues/1309).
+  
+With customLLVM version2
+- command:
+  ```
+  DISABLE_LLVM_OPT="disable-vector-combine" TRITON_HIP_USE_ASYNC_COPY=1 python3 fa/flash-attention.py -d 128 -hq 64 -b 1 -sq 16384 -causal 0 -layout "bshd"
+  ```
+- No need for `AMDGCN_SCALARIZE_PACKED_FOPS=1`
 
 Performance:
 |                             | tflops | reg usage | mfma efficiency | ticket                                                               |
@@ -509,6 +518,7 @@ Performance:
 | propagateNaN                | 1102   | 256       | 76.33%          | [#1173](https://github.com/ROCm/triton-internal/issues/1173)         |
 | hack pkMul                  | 1108   | 256       | 77.84%          | [SWDEV-530262](https://ontrack-internal.amd.com/browse/SWDEV-530262) |
 | hack readfirstlane          | 1121   | 256       | 79.46%          | [#1309](https://github.com/ROCm/triton-internal/issues/1309)         |
+| customLLVM V2               | 1156   | 252       | 77.66%          |                                                                      |
 
 LLVM side improvements:
 |                           | tflops | reg usage | mfma efficiency |
