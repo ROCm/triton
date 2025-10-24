@@ -405,7 +405,7 @@ You can all `Rocplay` versions under [this URL address](https://atlartifactory.a
 $ cd <work>
 $ mkdir rocplaycap && cd rocplaycap
 $ VERSION="4.5.1"
-$ TYPE="pre-releases"
+$ TYPE="releases"
 $ wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/${TYPE}/rocplaycap-${VERSION}/rocplaycap-src-${VERSION}.tar.gz
 $ tar -xvf ./rocplaycap-src-${VERSION}.tar.gz
 $ cd rocplaycap-src-${VERSION}
@@ -433,6 +433,9 @@ $ roccap capture --loglevel trace ./a.out
 You will see `roc_capture_a.out.cap` generated in the directory where you launched the toy program. Usually you need to deliver cap files (like this one) to the AM team. Replay the cap file, to make sure that it is valid:
 
 ```bash
+export HSA_KMT_MODEL_GPUVM_BASE=0x200000000
+export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
+
 $ roccap play ./roc_capture_a.out.cap
 ...
 [... INFO] Trace completed successfully.
