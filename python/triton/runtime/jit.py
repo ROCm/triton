@@ -679,7 +679,7 @@ class JITFunction(JITCallable, KernelInterface[T]):
             if "." or "-" in strval:
                 strval = strval.replace(".", "p")
                 strval = strval.replace("-", "neg")
-            spchars = re.compile("[-@!#$%^&*()<>?/|\\{}~:.]")
+            spchars = re.compile("[-@!#$%^&*<>?/|\\{}~:.]")
 
             if spchars.search(strkey):
                 raise ValueError(f"constrexpr param {strkey} has a special character")

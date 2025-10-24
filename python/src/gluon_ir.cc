@@ -229,6 +229,7 @@ py::object layoutToGluon(Attribute layout) {
                                  amdWmma.getIsTransposed(),
                                  toStdVector(amdWmma.getWarpsPerCTA()),
                                  toStdVector(amdWmma.getInstrShape()),
+                                 toStdVector(amdWmma.getTilesPerWarp()),
                                  toStdVector(ctaLayout.getCTAsPerCGA()),
                                  toStdVector(ctaLayout.getCTASplitNum()),
                                  toStdVector(ctaLayout.getCTAOrder()));
@@ -375,6 +376,7 @@ void init_gluon_ir(py::module &&m) {
       .def("get_amd_wmma_layout",
            [](GluonOpBuilder &self, unsigned version, bool transposed,
               std::vector<unsigned> &warpsPerCta,
+              std::vector<unsigned> &tilesPerWarp,
               std::vector<unsigned> &ctasPerCga,
               std::vector<unsigned> &ctaSplitNum,
               std::vector<unsigned> &ctaOrder,
@@ -382,8 +384,9 @@ void init_gluon_ir(py::module &&m) {
              auto ctx = self.getContext();
              auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
                  ctx, ctasPerCga, ctaSplitNum, ctaOrder);
-             return ttg::AMDWmmaEncodingAttr::get(
-                 ctx, version, transposed, warpsPerCta, ctaLayout, instrShape);
+             return ttg::AMDWmmaEncodingAttr::get(ctx, version, transposed,
+                                                  warpsPerCta, tilesPerWarp,
+                                                  ctaLayout, instrShape);
            })
       .def("get_padded_shared_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &intervals,
