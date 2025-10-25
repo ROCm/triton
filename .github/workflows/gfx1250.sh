@@ -39,31 +39,29 @@ LLVM_LIBRARY_DIR=/data/build/amd-mlir-9f0b4533535f-debug-install LLVM_SYSPATH=/d
     pip3 install --no-build-isolation .
 
 echo "=== Run Lit Tests ==="
+
 make test-lit
 
 export TRITON_HIP_USE_ASYNC_COPY=1
 
-echo "=== Run Gluon Tests ==="
+echo "=== Run Gluon Unit Tests ==="
 
-pytest --count=1 -n 32 -s -v third_party/amd/python/test/test_gluon_gfx1250.py
-pytest --count=1 -n 32 -s -v python/test/gluon/test_frontend.py
+pytest --count=1 -n 32 third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=1 -n 16 python/test/gluon/test_frontend.py
+
+echo "=== Run Gluon GEMM/Attention Tests ==="
+
+pytest --count=1 -n 16 third_party/amd/python/examples/gluon/*
 
 echo "=== Run E2E Upstream Tests ==="
 
-pytest --count=1 -n 32 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
-pytest --count=1 -n 32 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_upcast
-# pytest --count=1 -n 32 -s -v python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
+pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+# pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
 
-echo "=== Run GEMM Tests ==="
+echo "=== Run Triton GEMM/Attention Tests ==="
 
-export PYTHONPATH=$PWD/mi400
-pytest --count=1 -n 32 -s -v mi400/test_gemm_hipdriver.py
-pytest --count=1 -n 32 -s -v mi400/test_mxgemm_hipdriver.py
-pytest --count=1 -n 32 -s -v third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-pytest --count=1 -n 32 -s -v third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
-pytest --count=1 -n 32 -s -v third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
-pytest --count=1 -n 32 -s -v third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
-
-echo "=== Run Attention Tests ==="
-
-pytest --count=1 -n 32 -v -s mi400/test_mxfa_hipdriver.py
+PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 \
+    mi400/test_gemm_hipdriver.py \
+    mi400/test_mxgemm_hipdriver.py \
+    mi400/test_mxfa_hipdriver.py
