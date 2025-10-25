@@ -36,6 +36,7 @@ class AttentionConfig:
     v_layout: gl.constexpr
     p_layout: gl.constexpr
 
+    @gluon.constexpr_function
     def __init__(self, SEQLEN_Q, SEQLEN_K, HEAD_SZ, BLOCK_M, BLOCK_N, NUM_BUFFERS):
 
         # constants
@@ -85,6 +86,7 @@ class AttentionProgram:
     sm_scale: gl.constexpr
     rcp_ln2: gl.constexpr
 
+    @gluon.constexpr_function
     def __init__(self, cfg,  #
                  q,  #
                  k_desc, k_buffer,  #

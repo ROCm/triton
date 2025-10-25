@@ -467,17 +467,17 @@ def test_warp_specialize():
     # CHECK-NEXT:    [[A:%.*]] = tt.make_range {end = 1 : i32, start = 0 : i32}
     # CHECK-NEXT:    [[B:%.*]] = tt.make_range {end = 2 : i32, start = 0 : i32}
     # CHECK-NEXT:    [[C:%.*]] = tt.make_range {end = 4 : i32, start = 0 : i32}
-    # CHECK-NEXT:    [[OUTS:%.*]]:3 = ttg.warp_specialize([[A]], [[B]], [[C]]) {{.*}}requestedRegisters = array<i32: 24, 48>
+    # CHECK-NEXT:    [[OUTS:%.*]]:3 = ttg.warp_specialize([[A]], [[B]], [[C]], [[A]], [[B]], [[C]]) {{.*}}requestedRegisters = array<i32: 24, 48>
     # CHECK-NEXT:    default {
     # CHECK-NEXT:      [[RESULTS:%.*]]:3 = tt.call @{{.*}}warp_specialize_default{{.*}}cconstexpr_42{{.*}}([[A]], [[B]], [[C]])
     # CHECK-NEXT:      warp_yield [[RESULTS]]#0, [[RESULTS]]#1, [[RESULTS]]#2
     # CHECK-NEXT:    }
-    # CHECK-NEXT:    partition0(%arg0: tensor<1xi32, [[BLOCKED]]>, %arg1: tensor<2xi32, [[BLOCKED]]>, %arg2: tensor<4xi32, [[BLOCKED]]>) num_warps(4) {
+    # CHECK-NEXT:    partition0(%arg0: tensor<1xi32, [[BLOCKED]]>, %arg1: tensor<2xi32, [[BLOCKED]]>, %arg2: tensor<4xi32, [[BLOCKED]]>, %arg3: tensor<1xi32, [[BLOCKED]]>, %arg4: tensor<2xi32, [[BLOCKED]]>, %arg5: tensor<4xi32, [[BLOCKED]]>) num_warps(4) {
     # CHECK-NEXT:      call @{{.*}}warp_specialize_worker0{{.*}}cconstexpr_42{{.*}}(%arg0, %arg1, %arg2)
     # CHECK-NEXT:      warp_return
     # CHECK-NEXT:    }
-    # CHECK-NEXT:    partition1(%arg0: tensor<1xi32, [[BLOCKED]]>, %arg1: tensor<2xi32, [[BLOCKED]]>, %arg2: tensor<4xi32, [[BLOCKED]]>) num_warps(4) {
-    # CHECK-NEXT:      call @{{.*}}warp_specialize_worker1{{.*}}cconstexpr_42{{.*}}(%arg0, %arg1, %arg2)
+    # CHECK-NEXT:    partition1(%arg0: tensor<1xi32, [[BLOCKED]]>, %arg1: tensor<2xi32, [[BLOCKED]]>, %arg2: tensor<4xi32, [[BLOCKED]]>, %arg3: tensor<1xi32, [[BLOCKED]]>, %arg4: tensor<2xi32, [[BLOCKED]]>, %arg5: tensor<4xi32, [[BLOCKED]]>) num_warps(4) {
+    # CHECK-NEXT:      call @{{.*}}warp_specialize_worker1{{.*}}cconstexpr_42{{.*}}(%arg3, %arg4, %arg5)
     # CHECK-NEXT:      warp_return
     # CHECK-NEXT:    }
     # CHECK-NEXT:    call @{{.*}}anchor{{.*}}([[OUTS]]#0)
@@ -488,14 +488,20 @@ def test_warp_specialize():
     c = ttgl.arange(0, 4, layout=layout)
     pair = Pair(a, b)
     e: ttgl.constexpr = 42
-    a, b = ttgl.warp_specialize((pair, c, e), warp_specialize_default, (pair, c, e),
-                                [warp_specialize_worker0, warp_specialize_worker1], [4, 4], [24, 48])
+    a, b = ttgl.warp_specialize([
+        (warp_specialize_default, (pair, c, e)),
+        (warp_specialize_worker0, (pair, c, e)),
+        (warp_specialize_worker1, (pair, c, e)),
+    ], [4, 4], [24, 48])
     anchor(a)
     anchor(b)
 
     # CHECK: ttg.warp_specialize([[A]], [[B]], [[C]])
     # CHECK: (tensor<1xi32, [[BLOCKED]]>, tensor<2xi32, [[BLOCKED]]>, tensor<4xi32, [[BLOCKED]]>) -> ()
-    ttgl.warp_specialize((pair, c, e), warp_specialize_worker0, (pair, c, e), [warp_specialize_worker1], [4], [48])
+    ttgl.warp_specialize([
+        (warp_specialize_worker0, (pair, c, e)),
+        (warp_specialize_worker1, (pair, c, e)),
+    ], [4], [48])
 
 
 @gluon.jit
@@ -536,7 +542,11 @@ def test_num_warps_caller_context():
     # CHECK: func private @{{.*}}ws_test_worker1{{.*}}_NW1() attributes {noinline = false, "ttg.num-warps" = 1 : i32}
     # CHECK: func private @{{.*}}ws_body{{.*}}_NW1"() attributes {noinline = false, "ttg.num-warps" = 1 : i32}
     # CHECK: func private @{{.*}}anchor{{.*}}_NW1(%arg0: tensor<128xi32, [[BLOCKED_NW1]]>) attributes {noinline = false, "ttg.num-warps" = 1 : i32}
-    ttgl.warp_specialize((), ws_test_default, (), [ws_test_worker0, ws_test_worker1], [2, 1], [80, 80])
+    ttgl.warp_specialize([
+        (ws_test_default, ()),
+        (ws_test_worker0, ()),
+        (ws_test_worker1, ()),
+    ], [2, 1], [80, 80])
 
 
 @gluon.jit
@@ -2296,11 +2306,10 @@ def buffer_load_store_kernel(x, y):
     ttgl.amd.cdna4.buffer_store(stored_value=a, ptr=y, offsets=offsets, mask=mask, cache='.cs')
 
 
-@pytest.mark.parametrize("target", [HIP_TARGET_CDNA3, HIP_TARGET_CDNA4])
-def test_buffer_load_store(target):
+def test_buffer_load_store():
     x = MockTensor(ttgl.float32)
     y = MockTensor(ttgl.float32)
-    module = run_parser(buffer_load_store_kernel, *make_args(x, y), target=target)
+    module = run_parser(buffer_load_store_kernel, *make_args(x, y), target=HIP_TARGET_CDNA3)
 
     expecttest.assert_expected_inline(
         anonymize_ir(module.str_nodebug()), """\
@@ -2345,11 +2354,10 @@ def buffer_load_store_with_broadcast_kernel(x, y):
     ttgl.amd.cdna3.buffer_store(stored_value=a, ptr=y, offsets=offsets, mask=mask, cache='.cs')
 
 
-@pytest.mark.parametrize("target", [HIP_TARGET_CDNA3, HIP_TARGET_CDNA4])
-def test_buffer_load_store_with_broadcast(target):
+def test_buffer_load_store_with_broadcast():
     x = MockTensor(ttgl.float16)
     y = MockTensor(ttgl.float16)
-    module = run_parser(buffer_load_store_with_broadcast_kernel, *make_args(x, y), target=target)
+    module = run_parser(buffer_load_store_with_broadcast_kernel, *make_args(x, y), target=HIP_TARGET_CDNA3)
 
     expecttest.assert_expected_inline(
         anonymize_ir(module.str_nodebug()), """\
@@ -3011,8 +3019,12 @@ def test_get_num_warps():
     # CHECK: tt.func private @{{.*}}print_num_warps{{.*}}NW8
     # CHECK-NEXT arith.constant 8 : i32
     print_num_warps()
-    ttgl.warp_specialize((), print_num_warps, (), [print_num_warps, print_num_warps, print_num_warps], [1, 2, 8],
-                         [24, 24, 24])
+    ttgl.warp_specialize([
+        (print_num_warps, ()),
+        (print_num_warps, ()),
+        (print_num_warps, ()),
+        (print_num_warps, ()),
+    ], [1, 2, 8], [24, 24, 24])
 
 
 def test_mismatch_shape_and_layout_rank():
@@ -3148,6 +3160,97 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %c2_i32 = arith.constant 2 : i32
     amdgpu.async_tdm_copy_local_to_global %0[%c0_i32, %c2_i32] from %1 : !ttg.memdesc<16x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<tensor<16x64xf16, #shared>>
     %2 = amdgpu.async_tdm_wait  {num = 0 : i32}
+    tt.return
+  }
+}
+""")
+
+
+@pytest.mark.parametrize("target", [BLACKWELL_TARGET, HOPPER_TARGET])
+def test_nv_tma_descriptor_load_kernel(target):
+
+    @gluon.jit
+    def nv_tma_descriptor_load_kernel(input_ptr):
+        XBLOCK: ttgl.constexpr = 128
+        smem_layout: ttgl.constexpr = ttgl.NVMMASharedLayout(swizzle_byte_width=128, element_bitwidth=32, rank=2)
+        input_desc = tma.make_tensor_descriptor(
+            input_ptr,
+            shape=[XBLOCK, XBLOCK],
+            strides=[XBLOCK, 1],
+            block_shape=[XBLOCK, XBLOCK],
+            layout=smem_layout,
+        )
+        smem = ttgl.allocate_shared_memory(ttgl.float32, [XBLOCK, XBLOCK], smem_layout)
+        bar = ttgl.allocate_shared_memory(ttgl.int64, [1], mbarrier.MBarrierLayout())
+        mbarrier.init(bar, count=1)
+        mbarrier.expect(bar, XBLOCK * XBLOCK * ttgl.float32.primitive_bitwidth // 8)
+        tma.async_copy_global_to_shared(input_desc, [0, 0], bar, smem)
+
+    ptr = MockTensor(ttgl.float32)
+    module = run_parser(nv_tma_descriptor_load_kernel, *make_args(ptr), target)
+    expecttest.assert_expected_inline(
+        anonymize_ir(module.str_nodebug()), """\
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 32}>
+#shared1 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @nv_tma_descriptor_load_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c128_i32 = arith.constant 128 : i32
+    %c128_i32_0 = arith.constant 128 : i32
+    %c128_i64 = arith.constant 128 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %0 = tt.make_tensor_descriptor %arg0, [%c128_i32, %c128_i32_0], [%c128_i64, %c1_i64] : <f32>, <tensor<128x128xf32, #shared>>
+    %1 = ttg.local_alloc : () -> !ttg.memdesc<128x128xf32, #shared, #smem, mutable>
+    %2 = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared1, #smem, mutable>
+    ttng.init_barrier %2, 1 : !ttg.memdesc<1xi64, #shared1, #smem, mutable>
+    %true = arith.constant true
+    ttng.barrier_expect %2, 65536, %true : !ttg.memdesc<1xi64, #shared1, #smem, mutable>
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %true_2 = arith.constant true
+    ttng.async_tma_copy_global_to_local %0[%c0_i32, %c0_i32_1] %1, %2, %true_2 : !tt.tensordesc<tensor<128x128xf32, #shared>>, !ttg.memdesc<1xi64, #shared1, #smem, mutable> -> !ttg.memdesc<128x128xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+""")
+
+
+@pytest.mark.parametrize("target", [BLACKWELL_TARGET, HOPPER_TARGET])
+def test_nv_tma_descriptor_store_kernel(target):
+
+    @gluon.jit
+    def nv_tma_descriptor_store_kernel(input_ptr):
+        XBLOCK: ttgl.constexpr = 128
+        smem_layout: ttgl.constexpr = ttgl.NVMMASharedLayout(swizzle_byte_width=128, element_bitwidth=32, rank=2)
+        input_desc = tma.make_tensor_descriptor(
+            input_ptr,
+            shape=[XBLOCK, XBLOCK],
+            strides=[XBLOCK, 1],
+            block_shape=[XBLOCK, XBLOCK],
+            layout=smem_layout,
+        )
+        smem = ttgl.allocate_shared_memory(ttgl.float32, [XBLOCK, XBLOCK], smem_layout)
+        tma.async_copy_shared_to_global(input_desc, [0, 0], smem)
+        tma.store_wait(0)
+
+    ptr = MockTensor(ttgl.float32)
+    module = run_parser(nv_tma_descriptor_store_kernel, *make_args(ptr), target)
+    expecttest.assert_expected_inline(
+        anonymize_ir(module.str_nodebug()), """\
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 32}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @nv_tma_descriptor_store_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c128_i32 = arith.constant 128 : i32
+    %c128_i32_0 = arith.constant 128 : i32
+    %c128_i64 = arith.constant 128 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %0 = tt.make_tensor_descriptor %arg0, [%c128_i32, %c128_i32_0], [%c128_i64, %c1_i64] : <f32>, <tensor<128x128xf32, #shared>>
+    %1 = ttg.local_alloc : () -> !ttg.memdesc<128x128xf32, #shared, #smem, mutable>
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    ttng.async_tma_copy_local_to_global %0[%c0_i32, %c0_i32_1] %1 : !tt.tensordesc<tensor<128x128xf32, #shared>>, !ttg.memdesc<128x128xf32, #shared, #smem, mutable>
+    ttng.async_tma_store_wait {pendings = 0 : i32}
     tt.return
   }
 }

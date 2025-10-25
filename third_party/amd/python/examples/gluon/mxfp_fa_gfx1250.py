@@ -145,6 +145,7 @@ class AttentionConfig:
 
     acc_layout: ttgl.constexpr
 
+    @gluon.constexpr_function
     def __init__(self, Q_TYPE, P_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
                  NUM_BUFFERS):
         assert Q_TYPE in ['e5m2', 'e4m3']
@@ -223,6 +224,7 @@ class AttentionProgram:
 
     sm_scale: ttgl.constexpr
 
+    @gluon.constexpr_function
     def __init__(self, cfg,  #
                  q, q_scale,  #
                  k_desc, k_scale_ptr, k_scale_offs, k_buffer, k_scale_buffer, k_step, k_scale_step,  #

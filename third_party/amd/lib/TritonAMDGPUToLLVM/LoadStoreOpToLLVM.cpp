@@ -337,14 +337,14 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     if (!requiresSrcPtrSwizzling &&
         !LLVM::AMD::canCoalesceWriteIntoSharedMemory(
             rewriter, srcToSharedLayout, threadsPerWarp, vectorSize)) {
-      LDBG(op << " does not write coalesced into LDS and is not swizzled");
+      LDBG(*op << " does not write coalesced into LDS and is not swizzled");
       return failure();
     }
 
     if (requiresSrcPtrSwizzling &&
         !LLVM::AMD::doesSwizzleInsideWarp(rewriter, srcToSharedLayout,
                                           threadsPerWarp)) {
-      LDBG(op << " does swizzle across warp boundaries");
+      LDBG(*op << " does swizzle across warp boundaries");
       return failure();
     }
     return success();
@@ -532,8 +532,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       }
       return smemOffset;
     };
-
-    // We pass laneId==0 because GFX9 requires a scalar base pointer into LDS
+    // If we do not support scattering (GFX9) the address should be the start
+    // address (scalar) of the warp
     laneId = targetInfo.supportsDirectToLDSScattering() ? laneId : b.i32_val(0);
     lowerLdSt(loc, ctx, cvt, loadVals, resElemTy, smemObj.getBase(),
               calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
@@ -551,7 +551,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     Type ptrTy = shmemAddr.getType();
     Value ldsAddr = shmemAddr;
     // When scattering is unsupported, shmemAddr is the warp base address.
-    // Use shmemAddr + (lane_id + swizzleOffset) to compute each lane's address.
+    // Use shmemAddr + lane_id [+ swizzleOffset] to compute each lane's address.
     if (!targetInfo.supportsDirectToLDSScattering()) {
       ldsAddr = b.gep(ptrTy, vecTy, shmemAddr, laneId);
       if (requiresSrcPtrSwizzling)
@@ -881,7 +881,7 @@ struct BufferLoadToLocalOpConversion
       Value cond =
           hasOther ? b.and_(threadPred, maybeSwizzledMaskElem) : threadPred;
 
-      auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, threadPred);
+      auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
 
       auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
           vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
@@ -1092,6 +1092,33 @@ struct AsyncCopyGlobalToLocalOpConversion
         rewriter.getI32IntegerAttr(0));
     rewriter.replaceOp(op, zero);
     return success();
+  }
+
+  void emitAsyncLoad(RewriterBase &rewriter, Location loc,
+                     AMD::TargetInfo targetInfo, int vecBits, Value srcPtr,
+                     Value shmemAddr, triton::CacheModifier cacheMod) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    int32_t cacheModifiers =
+        mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+            cacheMod, /*isLoad=*/true, targetInfo);
+
+    if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
+                           targetInfo.getISAFamily())) {
+      auto globalLoadLdsOp = rewriter.create<ROCDL::GlobalLoadLDSOp>(
+          loc, srcPtr, shmemAddr, vecBits / 8,
+          /*offset=*/0, cacheModifiers, nullptr, nullptr, nullptr);
+      if (targetInfo.requiresAliasInfoForAsyncOps())
+        AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
+    } else if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
+      if (cacheMod != triton::CacheModifier::NONE) {
+        emitRemark(loc) << "cache modifiers not yet implemented on gfx1250";
+      }
+      std::string intrinsic =
+          "llvm.amdgcn.global.load.async.to.lds.b" + std::to_string(vecBits);
+      auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
+          rewriter, loc, intrinsic, {},
+          {srcPtr, shmemAddr, b.i32_val(0), b.i32_val(cacheModifiers)});
+    }
   }
 };
 
@@ -1954,46 +1981,45 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
   LogicalResult
   matchAndRewrite(AsyncWaitOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+
     switch (targetInfo.getISAFamily()) {
     case ISAFamily::CDNA1:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
-    case ISAFamily::CDNA4:
-    case ISAFamily::GFX1250:
+    case ISAFamily::CDNA4: {
+      // global.load.lds uses vmcnt to synchronize
+      // The rocdl op stores all available counters in a single int32 value (v).
+      // The vmcnt (6 bits) is split into a lower 3:0 and higher 5:4 parts.
+      // The lower part is stored in bits 3:0 of v and the higher part in bits
+      // 15:14. We have to set all other bits in v to 1 to signal we are not
+      // interested in those.
+
+      // Clamp vmcnt to 6bits; a lower vmcnt will produce a conservative wait
+      unsigned vmCnt = std::min(63u, op.getNum());
+
+      // Extract low and high bits and combine while setting all other bits to 1
+      unsigned lowBits = vmCnt & 0xF;
+      unsigned highBits = vmCnt >> 4 << 14;
+      unsigned otherCnts = ~0xC00F; // C00F has bits 15:14 and 3:0 set
+      unsigned waitValue = lowBits | highBits | otherCnts;
+
+      rewriter.create<ROCDL::SWaitcntOp>(loc, waitValue);
       break;
+    }
+    case ISAFamily::GFX1250: {
+      // Clamp asyncCnt to 6bits(hw imit); lower means conservative
+      unsigned asyncCnt = std::min(63u, op.getNum());
+      LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
+                                      "llvm.amdgcn.s.wait.asynccnt", {},
+                                      {b.i16_val(asyncCnt)});
+      break;
+    }
     default:
       return rewriter.notifyMatchFailure(
           op, "Only supported on CDNA target architecture");
     }
-
-    auto loc = op->getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
-      LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
-                                      "llvm.amdgcn.s.wait.asynccnt", {},
-                                      {b.i16_val(op.getNum())});
-
-      rewriter.eraseOp(op);
-      return success();
-    }
-
-    // global.load.lds uses vmcnt to synchronize
-    // The rocdl op stores all available counters in a single int32 value (v).
-    // The vmcnt (6 bits) is split into a lower 3:0 and higher 5:4 parts.
-    // The lower part is stored in bits 3:0 of v and the higher part in bits
-    // 15:14. We have to set all other bits in v to 1 to signal we are not
-    // interested in those.
-
-    // Clamp vmcnt to 6bits; a lower vmcnt will produce a conservative wait
-    unsigned vmCnt = std::min(63u, op.getNum());
-
-    // Extract low and high bits and combine while setting all other bits to 1
-    unsigned lowBits = vmCnt & 0xF;
-    unsigned highBits = vmCnt >> 4 << 14;
-    unsigned otherCnts = ~0xC00F; // C00F has bits 15:14 and 3:0 set
-    unsigned waitValue = lowBits | highBits | otherCnts;
-
-    rewriter.create<ROCDL::SWaitcntOp>(loc, waitValue);
 
     // Drop the result AsyncToken
     rewriter.replaceOp(op, b.i32_val(0));

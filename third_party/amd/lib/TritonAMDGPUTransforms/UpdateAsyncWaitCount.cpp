@@ -58,8 +58,8 @@ int getNumberOfLoadInstructions(RankedTensorType srcTy,
 // [token] -> ttg.async_commit_group -> [token] -> ttg.async_wait. So here we
 // scan the operands of ttg.async_commit_group to count the number of issued
 // async load intrinsics.
-int getNumberOfLoadInstructionsForOp(Operation *op,
-                                     bool emitRemarkOnNonAsyncOp) {
+int getNumOfAsyncLoadInstructionsForOp(Operation *op,
+                                       bool emitRemarkOnNonAsyncOp) {
   if (isa<ttg::AsyncCommitGroupOp>(op)) {
     int count = 0;
     for (auto token : op->getOperands()) {
@@ -151,12 +151,13 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
     getOperation()->walk(
         [&](ttg::AsyncWaitOp waitOp) { waitOps.push_back(waitOp); });
 
+    // Note: AsyncWaits should ignore TDM ops; different HW counter
     for (auto waitOp : waitOps) {
       IRRewriter builder(waitOp->getContext());
       updateWaitCount(
           waitOp,
           [&](Operation *op) {
-            return getNumberOfLoadInstructionsForOp(op, !supportsAsyncLoads);
+            return getNumOfAsyncLoadInstructionsForOp(op, !supportsAsyncLoads);
           },
           builder);
     }
