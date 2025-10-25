@@ -645,6 +645,7 @@ def test_amd_wmma_scaled(M, N, K, a_type, b_type):
 
             return ttgl.DistributedLinearLayout(scale_reg, scale_lane, scale_warp, [], scale_shape)
 
+        @gluon.constexpr_function
         def __init__(self, a_type, b_type, scale_nonk, scale_k):
             self.load_a = ttgl.constexpr(ttgl.BlockedLayout([1, 16], [8, 4], [4, 1], [1, 0]))
             self.load_b = ttgl.constexpr(ttgl.BlockedLayout([1, 16], [16, 2], [4, 1], [1, 0]))
