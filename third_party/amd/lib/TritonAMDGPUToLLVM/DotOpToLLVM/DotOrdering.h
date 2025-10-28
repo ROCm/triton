@@ -1,10 +1,9 @@
+#include <memory>
 
-/*
-  4D coordinate within loop.
-*/
-class DotCoord {
+// 4D coordinate within loop.
+struct DotCoord {
   public:
-  DotCoord(int b, int m, int n, int k) :
+  DotCoord(int b = -1, int m = -1, int n = -1, int k = -1) :
       b(b), m(m), n(n), k(k) {
   }
 
@@ -20,7 +19,6 @@ class DotCoord {
   int getN() const { return n; }
   int getK() const { return k; }
 
-  private:
   int b;
   int m;
   int n;
@@ -29,32 +27,35 @@ class DotCoord {
 
 /*
   Abstract Parent Class
-  DotOrdering children will carry state for iterator
-  but first/last are determined by DotCoord only.
+  DotOrdering children must contain
+   - Strategy for iterating over b,m,n,k iterations.
+   - State for iterator.
+  DotOrdering children must specify
+   - getFirst() state given to iterator::begin().
+   - getLast() state given to iterator::end().
+   - next() called by iterator++ to advance state of child.
+   - getDotCoord() returns DotCoord from child.
 */
 class DotOrdering {
-
-  // Children will define these.
-  // Child class with state reflecting beginning and ending.
-  virtual std::unique_ptr<DotOrdering> getFirst() const = 0;
-  virtual std::unique_ptr<DotOrdering> getLast() const = 0;
-  virtual void next() const = 0;
-  virtual DotCoord get() const = 0;
+public:
+  virtual std::shared_ptr<DotOrdering> getFirst() const = 0;
+  virtual std::shared_ptr<DotOrdering> getLast() const = 0;
+  virtual void next() = 0;
+  virtual DotCoord getDotCoord() const = 0;
 
   class iterator {
   private:
-    DotOrdering *dotOrdering; // stores state
-    // DotCoord dc;
+    std::shared_ptr<DotOrdering> dotOrdering;
 
   public:
-    iterator(DotOrdering *dO) : dotOrdering(dO) {}
+    iterator(std::shared_ptr<DotOrdering>dO) : dotOrdering(dO) {}
 
     DotCoord operator*() const {
-      return dotOrdering->get();
+      return dotOrdering.get()->getDotCoord();
     }
 
     iterator& operator++() {
-      dotOrdering->next();
+      dotOrdering.get()->next();
       return *this;
     }
 
@@ -66,7 +67,7 @@ class DotOrdering {
 
     // Iterators are same if 4D coord is same.
     bool operator==(const iterator& other) const {
-      return dotOrdering->get() == other.dotOrdering->get();
+      return dotOrdering.get()->getDotCoord() == other.dotOrdering.get()->getDotCoord();
     }
 
     bool operator!=(const iterator& other) const {
@@ -85,8 +86,64 @@ class DotOrdering {
 
 }; // DotOrdering
 
+
 /*
-  DotTiling is used for controlling the order in which FMAs are
+  Default ordering.
+*/
+class DotOrderingBMNK : public DotOrdering {
+public:
+  // When constructed here, the state doesn't matter (only within iterator).
+  DotOrderingBMNK(int numRepB, int numRepM, int numRepN, int numRepK,
+                  int b = -1, int m = -1, int n = -1, int k = -1) :
+                  numReps(numRepB, numRepM, numRepN, numRepK),
+                  iter(b, m, n, k) {}
+
+  /*
+    Specify from abstract parent class.
+    Copy tiling parameters, and override coord state.
+  */
+  std::shared_ptr<DotOrdering> getFirst() const {
+    std::shared_ptr<DotOrdering> first = std::make_shared<DotOrderingBMNK>(
+        numReps.b, numReps.m, numReps.n, numReps.k, 0, 0, 0, 0);
+    return first;
+  }
+
+  std::shared_ptr<DotOrdering> getLast() const {
+    std::shared_ptr<DotOrdering> last = std::make_shared<DotOrderingBMNK>(
+        numReps.b, numReps.m, numReps.n, numReps.k,
+        numReps.b, 0, 0, 0);
+    return last;
+  }
+
+  void next() {
+    // Loop order in B, M, N, K; start with inner-most.
+    iter.k++;
+    if (iter.k >= numReps.k) {
+      iter.k = 0;
+      iter.n++;
+    }
+    if (iter.n >= numReps.n) {
+      iter.n = 0;
+      iter.m++;
+    }
+    if (iter.m >= numReps.m) {
+      iter.m = 0;
+      iter.b++;
+    }
+  }
+
+  DotCoord getDotCoord() const {
+    return iter;
+  }
+
+  private:
+  DotCoord numReps;
+  DotCoord iter;
+}; // DotOrderingBMNK
+
+
+/*
+  DotOrderingTiled is used for controlling the order in which FMAs are
   emitted to minimize lifetimes of A, B operands in registers.
   Doing so helps backend compilers minimize register pressure
   and hide latency.
@@ -187,30 +244,19 @@ class DotOrdering {
     Peak live opds (to prefetch by 8 FMAs): 9
 */
 
-struct LoopIndices {
-  // Tile indices.
-  int bT;
-  int kT;
-  int mT;
-  int nT;
-  // Element indices.
-  int b;
-  int m;
-  int n;
-  int k;
-};
+
+
+
 
 /*
-  DotTiling is both a strategy/ordering
+  DotOrderingTiled is both a
   and state for the iterator.
 */
-class DotTiling : DotOrdering {
+class DotOrderingTiled : public DotOrdering {
   public:
   // numRep* must be evenly divisible by tileSize*
 
-  DotTiling (const DotTiling& other) = default;
-
-  explicit DotTiling(
+  explicit DotOrderingTiled(
     int64_t numRepB,
     int64_t numRepM,
     int64_t numRepN,
@@ -219,7 +265,8 @@ class DotTiling : DotOrdering {
     int64_t tileSizeM,
     int64_t tileSizeN,
     int64_t tileSizeK,
-    bool outerTileN)
+    bool outerTileN,
+    size_t index = -1)
       : numRepB(numRepB),
         numRepM(numRepM),
         numRepN(numRepN),
@@ -228,31 +275,44 @@ class DotTiling : DotOrdering {
         tileSizeM(std::min(tileSizeM, numRepM)),
         tileSizeN(std::min(tileSizeN, numRepN)),
         tileSizeK(std::min(tileSizeK, numRepK)),
-        outerTileN(outerTileN),
         numTilesB(numRepB / tileSizeB),
         numTilesM(numRepM / tileSizeM),
         numTilesN(numRepN / tileSizeN),
         numTilesK(numRepK / tileSizeK),
-        tileSizeOuter(outerTileN ? tileSizeN : tileSizeM),
-        tileSizeInner(outerTileN ? tileSizeM : tileSizeN),
-        numTilesOuter(outerTileN ? numTilesN : numTilesM),
-        numTilesInner(outerTileN ? numTilesM : numTilesN),
-        dotTilingCoord(this, 0) {
+        outerTileN(outerTileN),
+        tiledCoord(this, index) {
     // Num mfmas must evenly divide into tiles.
     if (numTilesB * tileSizeB != numRepB) {
-      llvm::errs() << "ERROR: DotTiling not valid with numRepB=" << numRepB << ", and tileSizeB=" << tileSizeB << "\n";
+      llvm::errs() << "ERROR: DotOrderingTiled not valid with numRepB=" << numRepB << ", and tileSizeB=" << tileSizeB << "\n";
     }
     if (numTilesM * tileSizeM != numRepM) {
-      llvm::errs() << "ERROR: DotTiling not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM << "\n";
+      llvm::errs() << "ERROR: DotOrderingTiled not valid with numRepM=" << numRepM << ", and tileSizeM=" << tileSizeM << "\n";
     }
     if (numTilesN * tileSizeN != numRepN) {
-      llvm::errs() << "ERROR: DotTiling not valid with numRepN=" << numRepN << ", and tileSizeN=" << tileSizeN << "\n";
+      llvm::errs() << "ERROR: DotOrderingTiled not valid with numRepN=" << numRepN << ", and tileSizeN=" << tileSizeN << "\n";
     }
     if (numTilesK * tileSizeK != numRepK) {
-      llvm::errs() << "ERROR: DotTiling not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK << "\n";
+      llvm::errs() << "ERROR: DotOrderingTiled not valid with numRepK=" << numRepK << ", and tileSizeK=" << tileSizeK << "\n";
     }
   }
-  
+
+  DotOrderingTiled(const DotOrderingTiled& other, size_t index = -1)
+    : numRepB(other.numRepB),
+      numRepM(other.numRepM),
+      numRepN(other.numRepN),
+      numRepK(other.numRepK),
+      tileSizeB(other.tileSizeB),
+      tileSizeM(other.tileSizeM),
+      tileSizeN(other.tileSizeN),
+      tileSizeK(other.tileSizeK),
+      numTilesB(other.numTilesB),
+      numTilesM(other.numTilesM),
+      numTilesN(other.numTilesN),
+      numTilesK(other.numTilesK),
+      outerTileN(other.outerTileN),
+      tiledCoord(this, index) {}
+
+/*
   int64_t getTileSizeB() const { return tileSizeB; }
   int64_t getTileSizeM() const { return tileSizeM; }
   int64_t getTileSizeN() const { return tileSizeN; }
@@ -284,9 +344,25 @@ class DotTiling : DotOrdering {
   int64_t getTileStartK(int tileIdxK) const {
     return tileIdxK * tileSizeK;
   }
+*/
 
-  LoopIndices getLoopIndices() const {
-    LoopIndices loopIdx;
+  // Stores the order over which the 8D tiling space will be iterated.
+  struct TiledLoopIndices {
+    // Tile indices.
+    int bT;
+    int kT;
+    int mT;
+    int nT;
+    // Element indices.
+    int b;
+    int m;
+    int n;
+    int k;
+  };
+
+  // Custom ordering of 8D tiled loops.
+  TiledLoopIndices getTiledLoopIndices() const {
+    TiledLoopIndices loopIdx;
     // Outer-most loop.
     loopIdx.bT = 7;
     loopIdx.kT = 6;
@@ -301,38 +377,44 @@ class DotTiling : DotOrdering {
     return loopIdx;
   }
 
+  // returns num iterations for each loop.
   std::array<int, 8> getLoopNumIter() const {
-    LoopIndices loopIdx = getLoopIndices();
+    TiledLoopIndices loopIdx = getTiledLoopIndices();
     std::array<int, 8> max_indices;
-    max_indices[loopIdx.b] = getTileSizeB();
-    max_indices[loopIdx.m] = getTileSizeM();
-    max_indices[loopIdx.n] = getTileSizeN();
-    max_indices[loopIdx.k] = getTileSizeK();
+    max_indices[loopIdx.b] = tileSizeB;
+    max_indices[loopIdx.m] = tileSizeM;
+    max_indices[loopIdx.n] = tileSizeN;
+    max_indices[loopIdx.k] = tileSizeK;
     // NumTiles.
-    max_indices[loopIdx.bT] = getNumTilesB();
-    max_indices[loopIdx.mT] = getNumTilesM();
-    max_indices[loopIdx.nT] = getNumTilesN();
-    max_indices[loopIdx.kT] = getNumTilesK();
+    max_indices[loopIdx.bT] = numTilesB;
+    max_indices[loopIdx.mT] = numTilesM;
+    max_indices[loopIdx.nT] = numTilesN;
+    max_indices[loopIdx.kT] = numTilesK;
     return max_indices;
   }
-
+  
   /*
     8D coordinate within tile space.
+    Also implements next() and getDotCoord() for iterating.
   */
-  struct DotTilingCoord {
+  struct TiledCoord {
 
-    const LoopIndices loopIdx;
+    const TiledLoopIndices loopIdx;
     // Max iterations of each loop, i.e. tile size, and num tiles.
     const std::array<int, 8> max_indices;
-
+    // Index of each loop.
     std::array<int, 8> indices;
 
-    DotTilingCoord(const DotTiling *dotTiling, size_t i = 0) :
-        loopIdx(dotTiling->getLoopIndices()),
-        max_indices(dotTiling->getLoopNumIter()),
-        indices{{0,0,0,0,0,0,0,0}} {
+    TiledCoord(const DotOrderingTiled *dotOrderingTiled = nullptr, size_t i = 0) :
+        loopIdx(dotOrderingTiled->getTiledLoopIndices()),
+        max_indices(dotOrderingTiled->getLoopNumIter()),
+        indices{{0,0,0,0,0,0,0,0}} {}
 
-    }
+    TiledCoord(const TiledCoord& other) :
+        loopIdx(other.loopIdx),
+        max_indices(other.max_indices),
+        indices(other.indices)
+    {}
 
     // Once each loop level reaches max, reset it and move to next loop level.
     void next(int idx) {
@@ -357,40 +439,39 @@ class DotTiling : DotOrdering {
     int getK() const { return indices[loopIdx.k] + indices[loopIdx.kT] * max_indices[loopIdx.k]; }
 
     // Convert TileCoord(8D) to DotCoord(4D)
-    DotCoord get() const {
+    DotCoord getDotCoord() const {
       return DotCoord(getB(), getM(), getN(), getK());
     }
-  }; // DotTilingCoord
+  }; // TiledCoord
 
   /*
     Specify from abstract parent class.
     Copy tiling parameters, and override coord state.
   */
-  DotOrdering *getFirst() const {
-    std::unique_ptr<DotOrdering> first = std::make_unique<DotTiling>(this);
-    first.dotTilingCoord = DotTilingCoord(this, 0);
-    return first;
+  std::shared_ptr<DotOrdering> getFirst() const {
+    std::shared_ptr<DotOrderingTiled> child = std::make_shared<DotOrderingTiled>(*this, 0); // copy
+    // child.get()->tiledCoord = TiledCoord(child.get(), 0);
+    std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
+    return parent;
   }
 
-  DotOrdering *getLast() const {
-    std::unique_ptr<DotOrdering> last = std::make_unique<DotTiling>(this);
-    last.dotTilingCoord = DotTilingCoord(this, numRepB*numRepM*numRepN*numRepK);
-    return first;
+  std::shared_ptr<DotOrdering> getLast() const {
+    std::shared_ptr<DotOrderingTiled> child = std::make_shared<DotOrderingTiled>(*this, numRepB*numRepM*numRepN*numRepK); // copy
+    // child.get()->tiledCoord = TiledCoord(child.get(), numRepB*numRepM*numRepN*numRepK);
+    std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
+    return parent;
   }
   
   void next() {
-    tileCoord.next();
+    tiledCoord.next();
   }
 
-  DotCoord get() const {
-    return dotTilingCoord.get();
+  DotCoord getDotCoord() const {
+    return tiledCoord.getDotCoord();
   }
 
-  /*
-    DotTiling state.
-  */
   private:
-  // Constant tiling strategy.
+  // Tiling strategy.
   const int64_t numRepB;
   const int64_t numRepM;
   const int64_t numRepN;
@@ -399,21 +480,16 @@ class DotTiling : DotOrdering {
   const int64_t tileSizeM;
   const int64_t tileSizeN;
   const int64_t tileSizeK;
-  const bool outerTileN;
-
   const int64_t numTilesB;
   const int64_t numTilesM;
   const int64_t numTilesN;
   const int64_t numTilesK;
-  const int64_t tileSizeOuter;
-  const int64_t tileSizeInner;
-  const int64_t numTilesOuter;
-  const int64_t numTilesInner;
+  const bool outerTileN;
 
   // State for iterator.
-  DotTilingCoord dotTilingCoord;
+  TiledCoord tiledCoord;
 
-}; // DotTiling
+}; // DotOrderingTiled
 
 /*
 

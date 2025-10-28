@@ -388,12 +388,21 @@ struct DotOpMFMAConversionHelper {
     // What we really want are the FMAs along K served by a single ds_read_b*.
     int64_t tileSizeK = kWidth/kBase;
     //llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
-    DotTiling dotTiling(numRepB, numRepM, numRepN, numVecInKBase, tileSizeB, tileSizeM, tileSizeN, tileSizeK, outerTileN);
+    //DotTiling dotTiling(numRepB, numRepM, numRepN, numVecInKBase, tileSizeB, tileSizeM, tileSizeN, tileSizeK, outerTileN);
     ///////////////////////////////////////////////////////////////////////////
 
-    for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
-      DotTiling::DotCoord dc = *iter;
-      llvm::outs() << "[" << iter.getIndex() << "]"
+    std::unique_ptr<DotOrdering> dotOrder;
+    if (true) {
+      dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepM, numVecInKBase);
+    } else {
+      dotOrder = std::make_unique<DotOrderingTiled>(numRepB, numRepM, numRepN, numVecInKBase,
+                                                 tileSizeB, tileSizeM, tileSizeN, tileSizeK,
+                                                 outerTileN);
+    }
+
+    for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
+      DotCoord dc = *iter;
+      llvm::outs()
         << ": b=" << dc.getB()
         << ", m=" << dc.getM()
         << ", n=" << dc.getN()
@@ -417,8 +426,8 @@ struct DotOpMFMAConversionHelper {
         for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
 #else
-    for (DotTiling::iterator iter = dotTiling.begin(); iter != dotTiling.end(); ++iter) {
-      DotTiling::DotCoord dc = *iter;
+    for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
+      DotCoord dc = *iter;
       int b = dc.getB();
       int m = dc.getM();
       int n = dc.getN();
