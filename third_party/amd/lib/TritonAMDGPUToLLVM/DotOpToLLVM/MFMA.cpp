@@ -394,7 +394,7 @@ struct DotOpMFMAConversionHelper {
     std::unique_ptr<DotOrdering> dotOrder;
     if (true) {
       llvm::outs() << "making DotOrderingBMNK\n";
-      dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepM, numVecInKBase);
+      dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepN, numVecInKBase);
     } else {
       llvm::outs() << "making DotOrderingTiled\n";
       dotOrder = std::make_unique<DotOrderingTiled>(numRepB, numRepM, numRepN, numVecInKBase,
