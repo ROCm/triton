@@ -29,10 +29,6 @@ def generate_configs():
                         if dtypeA == 'float4' and BK < K:
                             continue
 
-                        # Temporarily skip for small block K
-                        if BK < 128:
-                            continue
-
                         # skip block sizes too small for preshuffling
                         if scale_preshuffle and (BM < 128 or BN < 128 or BK < 128):
                             continue
@@ -45,51 +41,18 @@ def generate_configs():
     return configs
 
 
-def deduce_scale_layout(k, k_dim, preshuffle):
-    if not preshuffle:
-        if k_dim == 0:
-            warp_bases = [[0, 0], [16, 0]]
-        else:
-            assert k_dim == 1
-            warp_bases = [[16, 0], [0, 0]]
-
-        return gl.DistributedLinearLayout(reg_bases=[[0, 1], [0, 2]],  #
-                                          lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 0]],  #
-                                          warp_bases=warp_bases,  #
-                                          block_bases=[],  #
-                                          shape=[32, 4])
-    else:
-        # In case of scale preshuffling, we need to manually point out the replications along K dim
-        reg_bases = [[0, 1], [0, 2]]
-        if k > 128:
-            reg_bases += [[0, int(x * 512)] for x in range(1, k // 128)]
-        reg_bases.append([0, 8])
-
-        if k_dim == 0:
-            warp_bases = [[0, 0], [0, 4]]
-        else:
-            assert k_dim == 1
-            warp_bases = [[0, 4], [0, 0]]
-
-        return gl.DistributedLinearLayout(reg_bases=reg_bases,  #
-                                          lane_bases=[[0, 16], [0, 32], [0, 64], [0, 128], [0, 256]],  #
-                                          warp_bases=warp_bases,  #
-                                          block_bases=[],  #
-                                          shape=[1, int(512 * (k // 128))])
-
-
 @gluon.jit
 def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, stride_am, stride_ak, stride_bk,
                                 stride_bn, stride_cm, stride_cn, stride_scale, DTYPE_A: gl.constexpr,
                                 DTYPE_B: gl.constexpr, SCALE_BLOCK: gl.constexpr, BLOCK_M: gl.constexpr,
                                 BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr, GROUP_SIZE_M: gl.constexpr,
-                                TRANSPOSE_B: gl.constexpr, NUM_BUFFERS: gl.constexpr, SCALE_PRESHUFFLE: gl.constexpr,
-                                A_SCALE_LINEAR_LAYOUT: gl.constexpr, B_SCALE_LINEAR_LAYOUT: gl.constexpr):
+                                TRANSPOSE_B: gl.constexpr, NUM_BUFFERS: gl.constexpr, SCALE_PRESHUFFLE: gl.constexpr):
     DIV_FACTOR_A: gl.constexpr = 2 if DTYPE_A == "e2m1" else 1
     DIV_FACTOR_B: gl.constexpr = 2 if DTYPE_B == "e2m1" else 1
     BLOCK_K_SCALE: gl.constexpr = BLOCK_K // SCALE_BLOCK
     BLOCK_K_PACKED_A: gl.constexpr = BLOCK_K // DIV_FACTOR_A
     BLOCK_K_PACKED_B: gl.constexpr = BLOCK_K // DIV_FACTOR_B
+    SCALE_KWIDTH: gl.constexpr = 4 if BLOCK_K_SCALE >= 4 else BLOCK_K_SCALE
 
     if SCALE_PRESHUFFLE:
         tiles_per_warp: gl.constexpr = [2, 2]
@@ -113,6 +76,9 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
     DOT_LAYOUT_B: gl.constexpr = gl.DotOperandLayout(operand_index=1,
                                                      parent=WMMA_LAYOUT_PACKED if DTYPE_B == "e2m1" else WMMA_LAYOUT,
                                                      k_width=16)
+
+    A_SCALE_LINEAR_LAYOUT: gl.constexpr = gl.amd.gfx1250.get_wmma_scale_layout(DOT_LAYOUT_A, [BLOCK_M, BLOCK_K_SCALE])
+    B_SCALE_LINEAR_LAYOUT: gl.constexpr = gl.amd.gfx1250.get_wmma_scale_layout(DOT_LAYOUT_B, [BLOCK_N, BLOCK_K_SCALE])
 
     PAD_INTERVAL_A: gl.constexpr = 256 if BLOCK_K_PACKED_A <= 256 else BLOCK_K_PACKED_A
     PAD_INTERVAL_B: gl.constexpr = 256 if BLOCK_K_PACKED_B <= 256 else BLOCK_K_PACKED_B
@@ -212,13 +178,17 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
             b = b_buffer.index(wmma_idx % NUM_BUFFERS).permute([1, 0]).load(layout=DOT_LAYOUT_B)
         else:
             b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=DOT_LAYOUT_B)
-        scale_a = a_scale_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=A_SCALE_LINEAR_LAYOUT)
-        scale_b = b_scale_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=B_SCALE_LINEAR_LAYOUT)
+        a_scale_buffer_slice = a_scale_buffer.index(wmma_idx % NUM_BUFFERS)
+        b_scale_buffer_slice = b_scale_buffer.index(wmma_idx % NUM_BUFFERS)
         if SCALE_PRESHUFFLE:
-            scale_a = scale_a.reshape(BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // 4, 32, 4,
-                                      4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K_SCALE)
-            scale_b = scale_b.reshape(BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // 4, 32, 4,
-                                      4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K_SCALE)
+            a_scale_buffer_slice = a_scale_buffer_slice.reshape(
+                (BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // SCALE_KWIDTH, 32, 4, SCALE_KWIDTH)).permute(
+                    (0, 3, 2, 1, 4)).reshape((BLOCK_M, BLOCK_K_SCALE))
+            b_scale_buffer_slice = b_scale_buffer_slice.reshape(
+                (BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // SCALE_KWIDTH, 32, 4, SCALE_KWIDTH)).permute(
+                    (0, 3, 2, 1, 4)).reshape((BLOCK_N, BLOCK_K_SCALE))
+        scale_a = a_scale_buffer_slice.load(layout=A_SCALE_LINEAR_LAYOUT)
+        scale_b = b_scale_buffer_slice.load(layout=B_SCALE_LINEAR_LAYOUT)
 
         accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator)
         wmma_idx += 1
@@ -231,13 +201,17 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
             b = b_buffer.index(wmma_idx % NUM_BUFFERS).permute([1, 0]).load(layout=DOT_LAYOUT_B)
         else:
             b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=DOT_LAYOUT_B)
-        scale_a = a_scale_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=A_SCALE_LINEAR_LAYOUT)
-        scale_b = b_scale_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=B_SCALE_LINEAR_LAYOUT)
+        a_scale_buffer_slice = a_scale_buffer.index(wmma_idx % NUM_BUFFERS)
+        b_scale_buffer_slice = b_scale_buffer.index(wmma_idx % NUM_BUFFERS)
         if SCALE_PRESHUFFLE:
-            scale_a = scale_a.reshape(BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // 4, 32, 4,
-                                      4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K_SCALE)
-            scale_b = scale_b.reshape(BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // 4, 32, 4,
-                                      4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K_SCALE)
+            a_scale_buffer_slice = a_scale_buffer_slice.reshape(
+                (BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // SCALE_KWIDTH, 32, 4, SCALE_KWIDTH)).permute(
+                    (0, 3, 2, 1, 4)).reshape((BLOCK_M, BLOCK_K_SCALE))
+            b_scale_buffer_slice = b_scale_buffer_slice.reshape(
+                (BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // SCALE_KWIDTH, 32, 4, SCALE_KWIDTH)).permute(
+                    (0, 3, 2, 1, 4)).reshape((BLOCK_N, BLOCK_K_SCALE))
+        scale_a = a_scale_buffer_slice.load(layout=A_SCALE_LINEAR_LAYOUT)
+        scale_b = b_scale_buffer_slice.load(layout=B_SCALE_LINEAR_LAYOUT)
         accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator)
         wmma_idx += 1
 
@@ -302,6 +276,10 @@ def run(config):
     a_scale = a_scale.data
     b_scale = b_scale.data
 
+    if SCALE_PRESHUFFLE:
+        a_scale = pack_scale(a_scale)
+        b_scale = pack_scale(b_scale)
+
     # mxfp4 input needs packed along the k dim, i.e., two mxfp4 are packed in one uint8
     if dtype_a in ['float4', 'float6_e2m3', 'float6_e3m2']:
         a = a.to_packed_tensor(dim=1)
@@ -316,9 +294,6 @@ def run(config):
         b_d = b.data.contiguous().cuda()
     a_scale_d = a_scale.cuda()
     b_scale_d = b_scale.cuda()
-
-    a_scale_layout = deduce_scale_layout(blockSizeK, 0, SCALE_PRESHUFFLE)
-    b_scale_layout = deduce_scale_layout(blockSizeK, 1, SCALE_PRESHUFFLE)
 
     stride_am, stride_ak = a_d.stride(0), a_d.stride(1)
     stride_bk = b_d.stride(1) if TRANSPOSE_B else b_d.stride(0)
@@ -335,8 +310,8 @@ def run(config):
     mxgemm_tdm_pipelined_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk,
                                       stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
                                       dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
-                                      group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, a_scale_layout,
-                                      b_scale_layout, num_warps=numWarps, num_ctas=numCtas)
+                                      group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, num_warps=numWarps,
+                                      num_ctas=numCtas)
 
     torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-5, atol=1e-8)
     print('✅Pass')
@@ -345,9 +320,10 @@ def run(config):
 def pack_scale(x):
     NON_K, K_SCALE = x.shape
     num_chunk_m = NON_K // 128
-    num_chunk_k = K_SCALE // 4
+    SCALE_KWIDTH = 4 if K_SCALE >= 4 else K_SCALE
+    num_chunk_k = K_SCALE // SCALE_KWIDTH
 
-    x = x.view(num_chunk_m, 4, 32, num_chunk_k, 4)
+    x = x.view(num_chunk_m, 4, 32, num_chunk_k, SCALE_KWIDTH)
     x = x.permute(0, 3, 2, 1, 4).contiguous()
     return x.view(NON_K // 128, K_SCALE * 128)
 
@@ -405,9 +381,6 @@ def test_runtime_mxgemm_tdm_pipelined(config):
     a_scale_d = a_scale.cuda()
     b_scale_d = b_scale.cuda()
 
-    a_scale_layout = deduce_scale_layout(blockSizeK, 0, SCALE_PRESHUFFLE)
-    b_scale_layout = deduce_scale_layout(blockSizeK, 1, SCALE_PRESHUFFLE)
-
     stride_am, stride_ak = a_d.stride(0), a_d.stride(1)
     if TRANSPOSE_B:
         stride_bk, stride_bn = b_d.stride(1), b_d.stride(0)
@@ -425,8 +398,8 @@ def test_runtime_mxgemm_tdm_pipelined(config):
     k = mxgemm_tdm_pipelined_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk,
                                           stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
                                           dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
-                                          group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, a_scale_layout,
-                                          b_scale_layout, num_warps=numWarps, num_ctas=numCtas)
+                                          group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, num_warps=numWarps,
+                                          num_ctas=numCtas)
 
     if TRANSPOSE_B:
         assert 'ds_load_u8' not in k.asm['amdgcn']
