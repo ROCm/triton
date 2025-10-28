@@ -67,7 +67,9 @@ public:
 
     // Iterators are same if 4D coord is same.
     bool operator==(const iterator& other) const {
-      return dotOrdering.get()->getDotCoord() == other.dotOrdering.get()->getDotCoord();
+      bool equals = dotOrdering.get()->getDotCoord() == other.dotOrdering.get()->getDotCoord();
+      llvm::outs() << "iter==" << (equals ? "True" : "False") << "\n";
+      return equals;
     }
 
     bool operator!=(const iterator& other) const {
@@ -96,39 +98,46 @@ public:
   DotOrderingBMNK(int numRepB, int numRepM, int numRepN, int numRepK,
                   int b = -1, int m = -1, int n = -1, int k = -1) :
                   numReps(numRepB, numRepM, numRepN, numRepK),
-                  iter(b, m, n, k) {}
+                  iter(b, m, n, k) {
+    llvm::outs() << numReps.b << numReps.m << numReps.n << numReps.k << iter.b << iter.m << iter.n << iter.k << "\n";
+  }
 
   /*
     Specify from abstract parent class.
     Copy tiling parameters, and override coord state.
   */
   std::shared_ptr<DotOrdering> getFirst() const {
-    std::shared_ptr<DotOrdering> first = std::make_shared<DotOrderingBMNK>(
+    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
         numReps.b, numReps.m, numReps.n, numReps.k, 0, 0, 0, 0);
-    return first;
+    return ptr;
   }
 
   std::shared_ptr<DotOrdering> getLast() const {
-    std::shared_ptr<DotOrdering> last = std::make_shared<DotOrderingBMNK>(
+    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
         numReps.b, numReps.m, numReps.n, numReps.k,
         numReps.b, 0, 0, 0);
-    return last;
+    return ptr;
   }
 
   void next() {
     // Loop order in B, M, N, K; start with inner-most.
     iter.k++;
+    llvm::outs() << "k=" << iter.k << "\n";
     if (iter.k >= numReps.k) {
       iter.k = 0;
       iter.n++;
+      llvm::outs() << "n=" << iter.n << "\n";
     }
     if (iter.n >= numReps.n) {
       iter.n = 0;
       iter.m++;
+      llvm::outs() << "m=" << iter.m << "\n";
+
     }
     if (iter.m >= numReps.m) {
       iter.m = 0;
       iter.b++;
+      llvm::outs() << "b=" << iter.b << "\n";
     }
   }
 
@@ -249,7 +258,7 @@ public:
 
 
 /*
-  DotOrderingTiled is both a
+  DotOrderingTiled is both the strategy
   and state for the iterator.
 */
 class DotOrderingTiled : public DotOrdering {
@@ -449,17 +458,17 @@ class DotOrderingTiled : public DotOrdering {
     Copy tiling parameters, and override coord state.
   */
   std::shared_ptr<DotOrdering> getFirst() const {
-    std::shared_ptr<DotOrderingTiled> child = std::make_shared<DotOrderingTiled>(*this, 0); // copy
+    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingTiled>(*this, 0); // copy
     // child.get()->tiledCoord = TiledCoord(child.get(), 0);
-    std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
-    return parent;
+    // std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
+    return ptr;
   }
 
   std::shared_ptr<DotOrdering> getLast() const {
-    std::shared_ptr<DotOrderingTiled> child = std::make_shared<DotOrderingTiled>(*this, numRepB*numRepM*numRepN*numRepK); // copy
+    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingTiled>(*this, numRepB*numRepM*numRepN*numRepK); // copy
     // child.get()->tiledCoord = TiledCoord(child.get(), numRepB*numRepM*numRepN*numRepK);
-    std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
-    return parent;
+    // std::shared_ptr<DotOrdering> parent = std::static_pointer_cast<DotOrdering>(child);
+    return ptr;
   }
   
   void next() {
@@ -491,13 +500,3 @@ class DotOrderingTiled : public DotOrdering {
 
 }; // DotOrderingTiled
 
-/*
-
-
-Create DotOrdering object
-iterate over DotOrdering::iterator
-each iterator return DotCoord()
-
-
-
-*/

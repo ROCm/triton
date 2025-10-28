@@ -393,8 +393,10 @@ struct DotOpMFMAConversionHelper {
 
     std::unique_ptr<DotOrdering> dotOrder;
     if (true) {
+      llvm::outs() << "making DotOrderingBMNK\n";
       dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepM, numVecInKBase);
     } else {
+      llvm::outs() << "making DotOrderingTiled\n";
       dotOrder = std::make_unique<DotOrderingTiled>(numRepB, numRepM, numRepN, numVecInKBase,
                                                  tileSizeB, tileSizeM, tileSizeN, tileSizeK,
                                                  outerTileN);
@@ -426,6 +428,11 @@ struct DotOpMFMAConversionHelper {
         for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
 #else
+  DotCoord dcb = (*dotOrder.get()->begin());
+  llvm::outs() << "dcb: " << dcb.getB() << dcb.getM() << dcb.getN() << dcb.getK() << "\n";
+  DotCoord dce = (*dotOrder.get()->end());
+  llvm::outs() << "dce: " << dce.getB() << dce.getM() << dce.getN() << dce.getK() << "\n";
+
     for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
       DotCoord dc = *iter;
       int b = dc.getB();
@@ -433,6 +440,11 @@ struct DotOpMFMAConversionHelper {
       int n = dc.getN();
       int k = dc.getK();
 #endif
+            llvm::outs() << "[loop]"
+                << ": b=" << b
+                << ", m=" << m
+                << ", n=" << n
+                << ", k=" << k << "\n";
             acc = tb.undef(vecTy);
             for (int v = 0; v < elemsPerVec; ++v) {
               int linearIdx = linearize({b, m, n, v}, fcStrides);
@@ -440,11 +452,6 @@ struct DotOpMFMAConversionHelper {
               acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
             }
 
-            llvm::outs() << "[loop]"
-                << ": b=" << b
-                << ", m=" << m
-                << ", n=" << n
-                << ", k=" << k << "\n";
             Value op1 = operandA[{b, m, k}];
             Value op2 = operandB[{b, n, k}];
             int cbsz = 0;
@@ -475,6 +482,7 @@ struct DotOpMFMAConversionHelper {
             
             adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
+            llvm::outs() << "End of Loop" << "\n";
           } // k
 #if MULTI_LOOP
           //adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
@@ -486,6 +494,7 @@ struct DotOpMFMAConversionHelper {
     } // tile Outer
     } // tile K
 #endif
+    llvm::outs() << "After Dot Loop\n";
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
     // to the first mfma leaving the first mfma staying at the low priority. In
