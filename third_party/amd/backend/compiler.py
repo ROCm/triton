@@ -430,7 +430,8 @@ class HIPBackend(BaseBackend):
             if hint == 'iterative-ilp-scheduler':
                 flags.append(('amdgpu-sched-strategy', 'iterative-ilp'))
         features = '-real-true16' if 'gfx11' in options.arch else ''
-        amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion, False)
+        amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
+                                       False)
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
