@@ -112,9 +112,10 @@ def _get_scale_load_layout(outer_dim, inner_dim):
 
 @aggregate
 class AttentionConfig:
-    Q_TYPE: ttgl.constexpr
-    P_TYPE: ttgl.constexpr
-    KV_TYPE: ttgl.constexpr
+    Q_TYPE: ttgl.constexpr  # the data type for Q, either 'e5m2' or 'e4m3'
+    P_TYPE: ttgl.constexpr  # the data type for P; we always assume P_TYPE == Q_TYPE
+    P_SCALING: ttgl.constexpr  # whether to use per-block scaling for P; if False, use an uniform scale of 1.0
+    KV_TYPE: ttgl.constexpr  # the data type for K and V, either 'e5m2', 'e4m3' or 'e2m1'
     SEQLEN_Q: ttgl.constexpr
     SEQLEN_K: ttgl.constexpr
     NUM_Q_HEADS: ttgl.constexpr
@@ -146,8 +147,8 @@ class AttentionConfig:
     acc_layout: ttgl.constexpr
 
     @gluon.constexpr_function
-    def __init__(self, Q_TYPE, P_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 NUM_BUFFERS):
+    def __init__(self, Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ,
+                 BLOCK_M, BLOCK_N, NUM_BUFFERS):
         assert Q_TYPE in ['e5m2', 'e4m3']
         assert P_TYPE == Q_TYPE
         assert KV_TYPE in ['e5m2', 'e4m3', 'e2m1']
@@ -155,6 +156,7 @@ class AttentionConfig:
         # constants
         self.Q_TYPE = ttgl.constexpr(Q_TYPE)
         self.P_TYPE = ttgl.constexpr(P_TYPE)
+        self.P_SCALING = ttgl.constexpr(P_SCALING)
         self.KV_TYPE = ttgl.constexpr(KV_TYPE)
         self.SEQLEN_Q = ttgl.constexpr(SEQLEN_Q)
         self.SEQLEN_K = ttgl.constexpr(SEQLEN_K)
@@ -443,11 +445,8 @@ class AttentionProgram:
         return qk
 
     @gluon.jit
-    def compute_pv(self, i, p, v, v_scale, acc):
+    def compute_pv(self, i, p, p_scale, v, v_scale, acc):
         cfg = self.cfg
-
-        p, p_scale = self._downcast_to_mxfp(p, cfg.P_TYPE, [cfg.BLOCK_M, cfg.BLOCK_N // 32], cfg.p_scale_layout)
-        p = ttgl.convert_layout(p, cfg.p_layout)
 
         acc = wmma_scaled(p, p_scale, cfg.P_TYPE, v, v_scale, cfg.KV_TYPE, acc)
         return acc
@@ -457,19 +456,34 @@ class AttentionProgram:
         sm_scale: ttgl.constexpr = self.sm_scale
 
         m_ij = ttgl.maximum(m_i, ttgl.max(qk, 1))
+
         m_ij_scaled = m_ij * sm_scale
         qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
         p = ttgl.exp2(qk_shifted)
+
         m_diff = m_i * sm_scale - m_ij_scaled
-        return p, m_diff, m_ij
+        alpha = ttgl.exp2(m_diff)
+
+        return p, alpha, m_ij
 
     @gluon.jit
-    def softmax1(self, i, p, m_diff, acc, l_i):
-        alpha = ttgl.exp2(m_diff)
+    def softmax1(self, i, p, alpha, acc, l_i):
+        cfg = self.cfg
+
         l_ij = ttgl.sum(p, 1)
         acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
-        return acc, l_i
+
+        if cfg.P_SCALING:
+            p, p_scale = self._downcast_fp32_to_mxfp8(p, cfg.P_TYPE, [cfg.BLOCK_M, cfg.BLOCK_N])
+            p = ttgl.convert_layout(p, cfg.p_layout)
+            p_scale = ttgl.convert_layout(p_scale, cfg.p_scale_layout)
+        else:
+            p = self._downcast_fp32_to_fp8(p, cfg.P_TYPE)
+            p = ttgl.convert_layout(p, cfg.p_layout)
+            p_scale = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N // 32], 0x7F, ttgl.uint8, cfg.p_scale_layout)
+
+        return p, p_scale, acc, l_i
 
     @gluon.jit
     def store_output(self, acc):
@@ -482,14 +496,40 @@ class AttentionProgram:
         cp.async_wait(count)
 
     @gluon.jit
-    def _downcast_to_mxfp(self, x, dtype: ttgl.constexpr, shape: ttgl.constexpr, layout: ttgl.constexpr):
-        # TODO: support better downcast with scale
-        if dtype == 'e4m3':
-            value = x.to(ttgl.float8e4nv)
+    def _downcast_fp32_to_mxfp8(self, x, x_format: ttgl.constexpr, shape: ttgl.constexpr):
+        block_size: ttgl.constexpr = 32
+        outer_dim: ttgl.constexpr = shape[0]
+        inner_dim: ttgl.constexpr = shape[1]
+
+        ttgl.static_assert(x_format == 'e4m3' or x_format == 'e5m2')
+        dtype: ttgl.constexpr = ttgl.float8e4nv if x_format == 'e4m3' else ttgl.float8e5
+        fp8_max: ttgl.constexpr = 57344.0 if dtype == 'e5m2' else 448.0
+
+        ttgl.static_assert(x.dtype == ttgl.float32)
+        x = ttgl.reshape(x, [outer_dim, inner_dim // block_size, block_size])
+        x_abs = ttgl.abs(x)
+        x_max = ttgl.max(x_abs, axis=2)
+
+        dequant_scale = x_max / fp8_max
+        dequant_scale = (dequant_scale.to(ttgl.uint32, bitcast=True) + 0x007FFFFF) & 0x7F800000
+
+        dequant_scale_fp32 = dequant_scale.to(ttgl.float32, bitcast=True)
+        quant_scale = ttgl.where(dequant_scale_fp32 == 0.0, 0, 1.0 / dequant_scale_fp32)
+
+        x = x * quant_scale[:, :, None]
+        x = ttgl.reshape(x, [outer_dim, inner_dim])
+        x = x.to(dtype)
+
+        dequant_scale = (dequant_scale >> 23).to(ttgl.uint8)
+        return x, dequant_scale
+
+    @gluon.jit
+    def _downcast_fp32_to_fp8(self, x, x_format: ttgl.constexpr):
+        if x_format == 'e4m3':
+            return x.to(ttgl.float8e4nv)
         else:
-            value = x.to(ttgl.float8e5)
-        scale = ttgl.full(shape, 0x7F, ttgl.int8, layout)
-        return value, scale
+            assert x_format == 'e5m2'
+            return x.to(ttgl.float8e5)
 
 
 # ===-----------------------------------------------------------------------===#
@@ -514,8 +554,10 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
     end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
 
     # init program
+    P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
+    P_SCALING: ttgl.constexpr = True
     cfg = AttentionConfig(  #
-        Q_TYPE, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
+        Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
     pgm = AttentionProgram.initialize(  #
         cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
 
@@ -528,14 +570,13 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
         pgm.issue_global_load_k(i)
         k, k_scale = pgm.shared_load_k(i, wait_count=0)
         p = pgm.compute_qk(i, k, k_scale)
-        p, m, m_i = pgm.softmax0(i, p, m_i)
-        acc, l_i = pgm.softmax1(i, p, m, acc, l_i)
+        p, alpha, m_i = pgm.softmax0(i, p, m_i)
+        p, p_scale, acc, l_i = pgm.softmax1(i, p, alpha, acc, l_i)
         pgm.issue_global_load_v(i)
         v, v_scale = pgm.shared_load_v(i, wait_count=0)
-        acc = pgm.compute_pv(i, p, v, v_scale, acc)
+        acc = pgm.compute_pv(i, p, p_scale, v, v_scale, acc)
 
-    l_recip = 1 / l_i[:, None]
-    acc = acc * l_recip
+    acc = acc / l_i[:, None]
     pgm.store_output(acc)
 
 
@@ -556,8 +597,10 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
     end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
 
     # init program
+    P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
+    P_SCALING: ttgl.constexpr = True
     cfg = AttentionConfig(  #
-        Q_TYPE, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
+        Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
     pgm = AttentionProgram.initialize(  #
         cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
 
@@ -580,7 +623,7 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
 
     pgm.issue_global_load_k(2)
 
-    p0, m0, m_i = pgm.softmax0(0, p0, m_i)
+    p0, alpha0, m_i = pgm.softmax0(0, p0, m_i)
     k1, k1_scale = pgm.shared_load_k(1, wait_count=2)
 
     pgm.issue_global_load_v(1)
@@ -588,46 +631,45 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
     # pipeline loop (0 to end-4)
     for i in range(0, end - 2, 2):
         p1 = pgm.compute_qk(i + 1, k1, k1_scale)
-        acc, l_i = pgm.softmax1(i, p0, m0, acc, l_i)
+        p0, p0_scale, acc, l_i = pgm.softmax1(i, p0, alpha0, acc, l_i)
         v0, v0_scale = pgm.shared_load_v(i, wait_count=2)
 
         pgm.issue_global_load_k(i + 3)
 
-        acc = pgm.compute_pv(i, p0, v0, v0_scale, acc)
-        p1, m1, m_i = pgm.softmax0(i + 1, p1, m_i)
+        acc = pgm.compute_pv(i, p0, p0_scale, v0, v0_scale, acc)
+        p1, alpha1, m_i = pgm.softmax0(i + 1, p1, m_i)
         k0, k0_scale = pgm.shared_load_k(i + 2, wait_count=2)
 
         pgm.issue_global_load_v(i + 2)
 
         p0 = pgm.compute_qk(i + 2, k0, k0_scale)
-        acc, l_i = pgm.softmax1(i + 1, p1, m1, acc, l_i)
+        p1, p1_scale, acc, l_i = pgm.softmax1(i + 1, p1, alpha1, acc, l_i)
         v1, v1_scale = pgm.shared_load_v(i + 1, wait_count=2)
 
         if i + 4 < end:
             pgm.issue_global_load_k(i + 4)
 
-        acc = pgm.compute_pv(i + 1, p1, v1, v1_scale, acc)
-        p0, m0, m_i = pgm.softmax0(i + 2, p0, m_i)
+        acc = pgm.compute_pv(i + 1, p1, p1_scale, v1, v1_scale, acc)
+        p0, alpha0, m_i = pgm.softmax0(i + 2, p0, m_i)
         k1, k1_scale = pgm.shared_load_k(i + 3, wait_count=2)
 
         pgm.issue_global_load_v(i + 3)
 
     # pipeline epilogue (end-2)
     p1 = pgm.compute_qk(end - 1, k1, k1_scale)
-    acc, l_i = pgm.softmax1(end - 2, p0, m0, acc, l_i)
+    p0, p0_scale, acc, l_i = pgm.softmax1(end - 2, p0, alpha0, acc, l_i)
     v0, v0_scale = pgm.shared_load_v(end - 2, wait_count=1)
 
-    acc = pgm.compute_pv(end - 2, p0, v0, v0_scale, acc)
-    p1, m1, m_i = pgm.softmax0(end - 1, p1, m_i)
+    acc = pgm.compute_pv(end - 2, p0, p0_scale, v0, v0_scale, acc)
+    p1, alpha1, m_i = pgm.softmax0(end - 1, p1, m_i)
 
-    acc, l_i = pgm.softmax1(end - 1, p1, m1, acc, l_i)
+    p1, p1_scale, acc, l_i = pgm.softmax1(end - 1, p1, alpha1, acc, l_i)
     v1, v1_scale = pgm.shared_load_v(end - 1, wait_count=0)
 
-    acc = pgm.compute_pv(end - 1, p1, v1, v1_scale, acc)
+    acc = pgm.compute_pv(end - 1, p1, p1_scale, v1, v1_scale, acc)
 
     # write output
-    l_recip = 1 / l_i[:, None]
-    acc = acc * l_recip
+    acc = acc / l_i[:, None]
     pgm.store_output(acc)
 
 
@@ -791,14 +833,25 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
 
 
 if __name__ == "__main__":
-    configs = [{
-        "q_type": q_type, "kv_type": kv_type, "batch": 1, "seqlen_q": 256, "seqlen_k": 1024, "num_q_heads": num_q_heads,
-        "num_k_heads": num_k_heads, "head_sz": head_sz, "block_m": 128, "block_n": 128, "pipelined": pipelined
-    }
-               for q_type, kv_type in get_variants()
-               for head_sz in [64, 128]
-               for pipelined in [False, True]
-               for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]]
+    configs = [  #
+        {
+            "q_type": q_type,
+            "kv_type": kv_type,
+            "batch": 1,
+            "seqlen_q": 256,
+            "seqlen_k": 1024,
+            "num_q_heads": num_q_heads,
+            "num_k_heads": num_k_heads,
+            "head_sz": head_sz,
+            "block_m": 128,
+            "block_n": 128,
+            "pipelined": pipelined,
+        }
+        for q_type, kv_type in get_variants()
+        for head_sz in [64, 128]
+        for pipelined in [False, True]
+        for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]
+    ]
 
     def launch(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
                pipelined):
