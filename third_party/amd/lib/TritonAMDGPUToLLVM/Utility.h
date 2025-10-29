@@ -153,8 +153,8 @@ upcast8xMxfp4_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
   }
   SmallVector<Value, 4> results;
   for (int srcSelIndex : llvm::seq(4))
-    results.push_back(rewriter.create<ConvertOp>(loc, resType, packedVec,
-                                                 scaleF32, srcSelIndex));
+    results.push_back(ConvertOp::create(rewriter, loc, resType, packedVec,
+                                        scaleF32, srcSelIndex));
   return results;
 }
 
@@ -183,12 +183,12 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
     scaleF32 = b.bitcast(b.shl(b.zext(i32_ty, scale), b.i32_val(23)), f32_ty);
   }
   SmallVector<Value, 2> results;
-  results.push_back(rewriter.create<ConvertOp>(loc, resType, packedVec,
-                                               scaleF32,
-                                               /*srcLoHiSel=*/false));
-  results.push_back(rewriter.create<ConvertOp>(loc, resType, packedVec,
-                                               scaleF32,
-                                               /*srcLoHiSel=*/true));
+  results.push_back(ConvertOp::create(rewriter, loc, resType, packedVec,
+                                      scaleF32,
+                                      /*srcLoHiSel=*/false));
+  results.push_back(ConvertOp::create(rewriter, loc, resType, packedVec,
+                                      scaleF32,
+                                      /*srcLoHiSel=*/true));
   return results;
 }
 

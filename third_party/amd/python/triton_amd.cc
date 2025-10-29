@@ -413,7 +413,7 @@ void init_triton_amd(py::module &&m) {
 
         llvm::Triple triple(amdTargetTriple);
         const llvm::Target *target =
-            llvm::TargetRegistry::lookupTarget(triple.normalize(), error);
+            llvm::TargetRegistry::lookupTarget(triple, error);
         if (!target)
           throw std::runtime_error("target lookup error: " + error);
 
@@ -472,7 +472,7 @@ void init_triton_amd(py::module &&m) {
     std::string error;
     llvm::Triple triple(amdTargetTriple);
     const llvm::Target *target =
-        llvm::TargetRegistry::lookupTarget(triple.normalize(), error);
+        llvm::TargetRegistry::lookupTarget(triple, error);
     if (!target)
       throw std::runtime_error("target lookup error: " + error);
     std::unique_ptr<llvm::MCSubtargetInfo> sti(
