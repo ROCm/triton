@@ -355,6 +355,7 @@ struct DotOpMFMAConversionHelper {
     std::unique_ptr<DotOrdering> dotOrder;
 
     std::string dotOrderingType = mlir::triton::tools::getStrEnv("TRITON_DOT_ORDERING");
+    bool addSchedBar = false;
     llvm::outs() << "dotOrderingType: " << dotOrderingType << "\n";
 
     if (dotOrderingType == "Tiled") {
@@ -393,6 +394,7 @@ struct DotOpMFMAConversionHelper {
       dotOrder = std::make_unique<DotOrderingTiled>(numRepB, numRepM, numRepN, numVecInKBase,
                                                  tileSizeB, tileSizeM, tileSizeN, tileSizeK,
                                                  outerTileN);
+      addSchedBar = true;
     } else {
       llvm::outs() << "making DotOrderingBMNK\n";
       dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepN, numVecInKBase);
@@ -443,6 +445,11 @@ struct DotOpMFMAConversionHelper {
               std::swap(op1, op2);
 
             acc = generateMFMAOp(intrinsicName, op1, op2, acc, cbsz, abid);
+
+            if (addSchedBar) {
+              int mfmaMask = 2038;
+              ROCDL::SchedBarrier::create(rewriter, loc, mfmaMask);
+            }
 
             if (!firstMfma)
               firstMfma = acc;
