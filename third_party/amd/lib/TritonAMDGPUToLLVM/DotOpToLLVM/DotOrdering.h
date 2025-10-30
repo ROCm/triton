@@ -1,5 +1,19 @@
 #include <memory>
-#include "mlir/Support/LogicalResult.h"
+
+/*
+  DotOrdering abstracts the nested b,m,n,k loops for lowering
+  a dot to MFMA/WMMA operations with single loop.
+  The single flat loop allows for different orderings;
+  the purpose for different orderings is to optimize
+  FMA orderings which may optimize register-reuse.
+
+  Supported orderings are:
+  - DotOrderingBMNK - this is the original 4 nested loops.
+  - DotOrderingTiles - this represents 8 nested loops which
+      iterates over tiles for outer loops and within the tiles
+      for the inner loops.
+*/
+  
 
 // 4D coordinate within loop.
 struct DotCoord {
@@ -27,20 +41,34 @@ struct DotCoord {
 };
 
 /*
-  Abstract Parent Class
-  DotOrdering children must contain
-   - Strategy for iterating over b,m,n,k iterations.
-   - State for iterator.
-  DotOrdering children must specify
-   - getFirst() state given to iterator::begin().
-   - getLast() state given to iterator::end().
-   - next() called by iterator++ to advance state of child.
-   - getDotCoord() returns DotCoord from child.
+  DotOrdering is an abstract base class for iterating over nested loops.
+  It is meant to be used in the following manner:
+
+  # Usage of DotOrdering class for lowering Dots to MFMA / WMMA.
+
+  while(!order.isDone()) {
+    order.getDotCoord();
+    // use the DotCoord
+    order.next();
+  }
+
+  DotCoord is the 4D bmnk coordinate of the FMA.
+  next() moves to the next DotCoord.
+  isDone() must be called after next() and before getDotCoord()
+    to verify that there is a next DotCoord to be gotten.
+
+  # How to create derrived classes of orderings.
+
+  DotOrdering derrived classes must implement
+   - getDotCoord() returns DotCoord represented by the current state of ordering.
+   - next() advance to the next DotCoord; next() must eventually call setDone()
+       to ensure getDotCoord() isn't called again().
 */
 class DotOrdering {
 public:
 
-  // Returns whether fma while loop is done.
+  // Returns whether getDotCoord() can be correctly called;
+  // false means there are no more FMAs to create.
   bool isDone() {
     return done;
   }
@@ -52,25 +80,28 @@ public:
   virtual void next() = 0;
   
   protected:
-  // first dotCoord is always valid, i.e. at least 1 fma.  
-  DotOrdering() : done(false) {
-    llvm::outs() << "DotOrdering()\n";
-  }
+
+  DotOrdering() : done(false) {}
     
-  // Declare that no more valid fmas/iterations.
+  // Declare that no more valid FMAs.
   void setDone() {
-    llvm::outs() << "setDone()\n";
     done = true;
   }
 
   private:
+
+  // done starts as false and it set to true once all FMAs are done.
   bool done;
 
 }; // DotOrdering
 
 
 /*
-  Default ordering.
+  DefaultOrderingBMNK represents the default behavior of 4 nested loops.
+  for (numRepB)
+    for (numRepM)
+      for (numRepN)
+        for (numRepK)
 */
 class DotOrderingBMNK : public DotOrdering {
 public:
@@ -82,47 +113,23 @@ public:
     llvm::outs() << numReps.b << numReps.m << numReps.n << numReps.k << iter.b << iter.m << iter.n << iter.k << "\n";
   }
 
-  /*
-    Specify from abstract parent class.
-    Copy tiling parameters, and override coord state.
-  */
-  //std::shared_ptr<DotOrdering> getFirst() const {
-  //  std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
-  //      numReps.b, numReps.m, numReps.n, numReps.k,
-  //      0, 0, 0, 0);
-  //  return ptr;
-  //}
-
-  //std::shared_ptr<DotOrdering> getLast() const {
-  //  std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
-  //      numReps.b, numReps.m, numReps.n, numReps.k,
-  //      numReps.b, 0, 0, 0);
-  //  return ptr;
-  //}
   // increment the state of the ordering to the next DotCoord.
-  // returns true if after incrementing to the next DotCoord produces a valid DotCoord.
-  // returns false if DotCoord cannot be called after next();
   void next() {
     // Loop order in B, M, N, K; start with inner-most.
     iter.k++;
-    llvm::outs() << "k=" << iter.k << "\n";
     if (iter.k >= numReps.k) {
       iter.k = 0;
       iter.n++;
-      llvm::outs() << "n=" << iter.n << "\n";
     }
     if (iter.n >= numReps.n) {
       iter.n = 0;
       iter.m++;
-      llvm::outs() << "m=" << iter.m << "\n";
     }
     if (iter.m >= numReps.m) {
       iter.m = 0;
       iter.b++;
-      llvm::outs() << "b=" << iter.b << "\n";
     }
     if (iter.b >= numReps.b) {
-      // Done iterating.
       setDone();
     }
   }
@@ -130,22 +137,6 @@ public:
   DotCoord getDotCoord() const {
     return iter;
   }
-
-  //bool operator==(const DotOrdering& other) const {
-  //  const DotOrderingBMNK* derivedOther = dynamic_cast<const DotOrderingBMNK*>(&other);
-  //  if (!derivedOther) {
-  //      return false;
-  //  }
-
-  //  bool equals = getDotCoord() == derivedOther->getDotCoord();
-  //  llvm::outs() << "DotOrderingBMNK==" << (equals ? "True" : "False") << "\n";
-  //  return equals;
-  //}
-
-  //bool DotOrdering::operator==(const iterator& other) const {
-    
-  //}
-
 
   private:
   DotCoord numReps;
@@ -254,19 +245,8 @@ public:
     Loads needed for first 8 FMAs: 6
     Peak live opds (to prefetch by 8 FMAs): 9
 */
-
-
-
-
-
-/*
-  DotOrderingTiled is both the strategy
-  and state for the iterator.
-*/
 class DotOrderingTiled : public DotOrdering {
   public:
-  // numRep* must be evenly divisible by tileSize*
-
   explicit DotOrderingTiled(
     int64_t numRepB,
     int64_t numRepM,
@@ -318,7 +298,7 @@ class DotOrderingTiled : public DotOrdering {
     int kT;
     int mT;
     int nT;
-    // Element indices.
+    // FMA indices within tile.
     int b;
     int m;
     int n;
@@ -370,34 +350,19 @@ class DotOrderingTiled : public DotOrdering {
   }
   
   /*
-    8D coordinate within tile space.
+    TileCoord stores a 8D coordinate within tile space.
     Also implements next() and getDotCoord() for iterating.
   */
   struct TiledCoord {
-
-    const TiledLoopIndices loopIdx;
-    // Max iterations of each loop, i.e. tile size, and num tiles.
-    const std::array<int, 8> max_indices;
-    // Index of each loop.
-    std::array<int, 8> indices;
-    // done==true when iterated past last index.
-    bool currentIsValid;
-
     TiledCoord(const TiledLoopIndices& loopIndices, const std::array<int, 8>& maxIndices) :
         loopIdx(loopIndices),
         max_indices(maxIndices),
-        indices{{0,0,0,0,0,0,0,0}}, currentIsValid(true) {
-
-          llvm::outs() << "max_indices: ";
-          for (int i = 0; i < 8; i++) llvm::outs() << max_indices[i] << ", ";
-          llvm::outs() << "\n";
-        }
+        indices{{0,0,0,0,0,0,0,0}}, done(false) {}
 
     // Once each loop level reaches max, reset it and move to next loop level.
     void next(int idx) {
       if (idx >= indices.size()) {
-        // Done iterating.
-        currentIsValid = false;
+        done = true;
         return;
       }
       indices[idx]++;
@@ -408,16 +373,11 @@ class DotOrderingTiled : public DotOrdering {
     }
 
     // Start by incrementing the 0th index, i.e. inner-most loop.
+    // Returns whether next produced a valid coordinate.
     bool next() {
-      if (!currentIsValid) return currentIsValid;
+      if (done) return done;
       next(0);
-      llvm::outs() << "next: " << getB() << ", " << getM() << ", " << getN() << ", " << getK() << "\n";
-      llvm::outs() << "next: ";
-      for (int i = 0; i < 8; i++) {
-        llvm::outs() << indices[i] << ", ";
-      }
-      llvm::outs() << "\n";
-      return currentIsValid;
+      return !done;
     }
 
     // Each value combines (element idx within tile) + (tile idx)*(tile size).
@@ -428,15 +388,23 @@ class DotOrderingTiled : public DotOrdering {
 
     // Convert TileCoord(8D) to DotCoord(4D)
     DotCoord getDotCoord() const {
-      llvm::outs() << "getDotCoord: " << getB() << ", " << getM() << ", " << getN() << ", " << getK() << "\n";
       return DotCoord(getB(), getM(), getN(), getK());
     }
 
+    // Order of the 8 nested loops.
+    const TiledLoopIndices loopIdx;
+    // Max iterations of each loop, i.e. tile size, and num tiles.
+    const std::array<int, 8> max_indices;
+    // Index of each loop.
+    std::array<int, 8> indices;
+    // done=true when no more FMAs to generate.
+    bool done;
   }; // TiledCoord
 
   
   void next() {
     if (!tiledCoord.next()) {
+      // Propagate tileCoord triggering done to DotOrderingTiles being done.
       setDone();
     }
   }

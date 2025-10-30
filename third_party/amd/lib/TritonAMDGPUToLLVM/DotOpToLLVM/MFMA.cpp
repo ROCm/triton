@@ -28,6 +28,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "DotOrdering.h"
 
 using namespace mlir;
@@ -351,102 +352,66 @@ struct DotOpMFMAConversionHelper {
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
 
-    ///////////////////////////////////////////////////////////////////////////
-    // DotTile preparation
-
-    size_t bitsAM = mDim * numRepM * aTensorTy.getElementType().getIntOrFloatBitWidth();
-
-    bitsAM *= loadInLoopAM ? 1 : 0;
-    llvm::outs()
-      << ", mDim=" << mDim
-      << ", numRepM=" << numRepM
-      << ", typeBits=" << aTensorTy.getElementType().getIntOrFloatBitWidth()
-      << " -> bitsAM=" << bitsAM << "\n";
-
-
-    size_t bitsBN = nDim * numRepN * bTensorTy.getElementType().getIntOrFloatBitWidth();
-    bitsBN *= loadInLoopBN ? 1 : 0;
-    llvm::outs()
-      << ", nDim=" << nDim
-      << ", numRepN=" << numRepN
-      << ", typeBits=" << bTensorTy.getElementType().getIntOrFloatBitWidth()
-      << " -> bitsBN=" << bitsBN << "\n";
-
-
-    int tileSizeB = 1; // one batch at a time.
-    // Outer tile should be larger one.
-    bool outerTileN = bitsBN > bitsAM;
-    // When tiling, the ideal is that the tile size
-    // tileSize=1 means row/column only, no tiling; still choose M vs N as outer loop.
-    // This is appropriate when 1 operand is loaded in loop and one is pre-loaded outside of loop.
-    // tileSize=2,4 means tiling; still choose M vs N as outer loop.
-    // This is appropriate with both (gemm) or neither (epilogue) operands are loaded inside the loop.
-    int64_t tileSize = (loadInLoopAM == loadInLoopBN) ? 2 : 1;
-    int64_t tileSizeM = std::min(tileSize, numRepM);
-    int64_t tileSizeN = std::min(tileSize, numRepN);
-    // TODO(dtanner) verify the minute details of kWidth/kBase.
-    // What we really want are the FMAs along K served by a single ds_read_b*.
-    int64_t tileSizeK = kWidth/kBase;
-    //llvm::outs() << "tileSizeK=" << tileSizeK << "\n";
-    //DotTiling dotTiling(numRepB, numRepM, numRepN, numVecInKBase, tileSizeB, tileSizeM, tileSizeN, tileSizeK, outerTileN);
-    ///////////////////////////////////////////////////////////////////////////
-
     std::unique_ptr<DotOrdering> dotOrder;
-    if (false) {
-      llvm::outs() << "making DotOrderingBMNK\n";
-      dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepN, numVecInKBase);
-    } else {
+
+    std::string dotOrderingType = mlir::triton::tools::getStrEnv("TRITON_DOT_ORDERING");
+    llvm::outs() << "dotOrderingType: " << dotOrderingType << "\n";
+
+    if (dotOrderingType == "Tiled") {
       llvm::outs() << "making DotOrderingTiled\n";
+
+      size_t bitsAM = mDim * numRepM * aTensorTy.getElementType().getIntOrFloatBitWidth();
+      bitsAM *= loadInLoopAM ? 1 : 0;
+      llvm::outs()
+        << ", mDim=" << mDim
+        << ", numRepM=" << numRepM
+        << ", typeBits=" << aTensorTy.getElementType().getIntOrFloatBitWidth()
+        << " -> bitsAM=" << bitsAM << "\n";
+
+      size_t bitsBN = nDim * numRepN * bTensorTy.getElementType().getIntOrFloatBitWidth();
+      bitsBN *= loadInLoopBN ? 1 : 0;
+      llvm::outs()
+        << ", nDim=" << nDim
+        << ", numRepN=" << numRepN
+        << ", typeBits=" << bTensorTy.getElementType().getIntOrFloatBitWidth()
+        << " -> bitsBN=" << bitsBN << "\n";
+
+      int tileSizeB = 1; // one batch at a time.
+      // Outer tile should be larger one.
+      bool outerTileN = bitsBN > bitsAM;
+      // When tiling, the ideal is that the tile size
+      // tileSize=1 means row/column only, no tiling; still choose M vs N as outer loop.
+      // This is appropriate when 1 operand is loaded in loop and one is pre-loaded outside of loop.
+      // tileSize=2,4 means tiling; still choose M vs N as outer loop.
+      // This is appropriate with both (gemm) or neither (epilogue) operands are loaded inside the loop.
+      int64_t tileSize = (loadInLoopAM == loadInLoopBN) ? 2 : 1;
+      int64_t tileSizeM = std::min(tileSize, numRepM);
+      int64_t tileSizeN = std::min(tileSize, numRepN);
+      // TODO(dtanner) verify the minute details of kWidth/kBase.
+      // What we really want are the FMAs along K served by a single ds_read_b*.
+      int64_t tileSizeK = kWidth/kBase;
       dotOrder = std::make_unique<DotOrderingTiled>(numRepB, numRepM, numRepN, numVecInKBase,
                                                  tileSizeB, tileSizeM, tileSizeN, tileSizeK,
                                                  outerTileN);
+    } else {
+      llvm::outs() << "making DotOrderingBMNK\n";
+      dotOrder = std::make_unique<DotOrderingBMNK>(numRepB, numRepM, numRepN, numVecInKBase);
     }
-
-    //for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
-    //  DotCoord dc = *iter;
-    //  llvm::outs()
-    //    << ": b=" << dc.getB()
-    //    << ", m=" << dc.getM()
-    //    << ", n=" << dc.getN()
-    //    << ", k=" << dc.getK() << "\n";
-    //}
 
     Value acc;
     // Iterate over tiles.
-#define MULTI_LOOP 0
-#if MULTI_LOOP
-    for (int tileIdxK = 0; tileIdxK < dotTiling.getNumTilesK(); ++tileIdxK) {
-    for (int tileIdxO = 0; tileIdxO < dotTiling.getNumTilesO(); ++tileIdxO) { // outer is larger
-    for (int tileIdxI = 0; tileIdxI < dotTiling.getNumTilesI(); ++tileIdxI) { // inner is smaller
-      const int tileStartM = dotTiling.getTileStartM(tileIdxO, tileIdxI);
-      const int tileStartN = dotTiling.getTileStartN(tileIdxO, tileIdxI);
-      const int tileStartK = dotTiling.getTileStartK(tileIdxK);
 
-    // Iterate within tile.
-    for (int b = 0; b < numRepB; ++b) {
-      for (int m = tileStartM; m < tileStartM + dotTiling.getTileSizeM(); ++m) {
-        for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
-          for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
-#else
-  //DotCoord dcb = (*dotOrder.get()->begin());
-  //llvm::outs() << "dcb: " << dcb.getB() << dcb.getM() << dcb.getN() << dcb.getK() << "\n";
-  //DotCoord dce = (*dotOrder.get()->end());
-  //llvm::outs() << "dce: " << dce.getB() << dce.getM() << dce.getN() << dce.getK() << "\n";
-
-  while (!dotOrder.get()->isDone()) {
-    llvm::outs() << "A\n";
+    while (!dotOrder.get()->isDone()) {
       const DotCoord dc = dotOrder.get()->getDotCoord();
-          llvm::outs() << "B\n";
       int b = dc.getB();
       int m = dc.getM();
       int n = dc.getN();
       int k = dc.getK();
-#endif
-            llvm::outs() << "[loop]"
-                << ": b=" << b
-                << ", m=" << m
-                << ", n=" << n
-                << ", k=" << k << "\n";
+      llvm::outs() << "[loop]"
+          << ": b=" << b
+          << ", m=" << m
+          << ", n=" << n
+          << ", k=" << k << "\n";
             acc = tb.undef(vecTy);
             for (int v = 0; v < elemsPerVec; ++v) {
               int linearIdx = linearize({b, m, n, v}, fcStrides);
@@ -485,18 +450,7 @@ struct DotOpMFMAConversionHelper {
             adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
             dotOrder.get()->next();
-          } // k
-#if MULTI_LOOP
-          //adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-          //                      kDimInstrSize, kDimOperandSize, elemsPerVec);
-        } // n
-      } // m
-    } // b
-    } // tile Inner
-    } // tile Outer
-    } // tile K
-#endif
-    llvm::outs() << "After Dot Loop\n";
+    } // k
     // Originally, setprio (high) is set to the high-level dot op. After dot is
     // being lowered to the series of mfma operations, it should be moved next
     // to the first mfma leaving the first mfma staying at the low priority. In
