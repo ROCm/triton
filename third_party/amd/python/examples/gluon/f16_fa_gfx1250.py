@@ -27,7 +27,6 @@ class AttentionConfig:
     qk_layout: gl.constexpr
     pv_layout: gl.constexpr
 
-    q_smem_layout: gl.constexpr
     k_smem_layout: gl.constexpr
     v_smem_layout: gl.constexpr
 
@@ -49,17 +48,15 @@ class AttentionConfig:
 
         # operator layouts
         self.qk_layout = gl.constexpr(
-            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2], instr_shape=[16, 16, 32]))
+            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[4, 1], instr_shape=[16, 16, 32]))
         self.pv_layout = gl.constexpr(
-            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[2, 2], instr_shape=[16, 16, 32]))
+            gl.amd.AMDWMMALayout(3, transposed=True, warps_per_cta=[4, 1], instr_shape=[16, 16, 32]))
 
         # tensor layouts
-        self.q_smem_layout = gl.constexpr(gl.BlockedLayout([1, 8], [256 // HEAD_SZ, HEAD_SZ // 8], [4, 1], [1, 0]))
-        # TODO: Properly compute padding value to minimize bank conflicts.
         self.k_smem_layout = gl.constexpr(
             gl.PaddedSharedLayout.with_identity_for([[HEAD_SZ, 8]], [BLOCK_N, HEAD_SZ], [1, 0]))
         self.v_smem_layout = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for([[HEAD_SZ, 8]], [BLOCK_N, HEAD_SZ], [1, 0]))
+            gl.PaddedSharedLayout.with_identity_for([[HEAD_SZ, 16]], [BLOCK_N, HEAD_SZ], [1, 0]))
 
         self.q_layout = gl.constexpr(gl.DotOperandLayout(0, self.qk_layout, 8))
         self.k_layout = gl.constexpr(gl.DotOperandLayout(1, self.qk_layout, 8))
@@ -131,8 +128,8 @@ class AttentionProgram:
 
         # q [BLOCK_M, HEAD_SZ]
         q_offs = (stride_qz * off_z + stride_qh * off_q_head + stride_qm *
-                  (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_smem_layout)))[:, None] + stride_qk *
-                  (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, cfg.q_smem_layout)))[None, :])
+                  (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_layout)))[:, None] + stride_qk *
+                  (gl.arange(0, HEAD_SZ, layout=gl.SliceLayout(0, cfg.q_layout)))[None, :])
 
         # k [HEAD_SZ, BLOCK_N]
         k_desc = gl.amd.gfx1250.tdm.make_tensor_descriptor(  #
@@ -152,9 +149,8 @@ class AttentionProgram:
             layout=cfg.v_smem_layout)
         v_buffer = gl.allocate_shared_memory(v_desc.dtype, shape=[2] + v_desc.block_shape, layout=v_desc.layout)
 
-        q_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_smem_layout)))[:, None] < SEQLEN_Q
+        q_mask = (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.q_layout)))[:, None] < SEQLEN_Q
         q = gl.amd.gfx1250.buffer_load(q_ptr, q_offs, mask=q_mask)
-        q = gl.convert_layout(q, cfg.q_layout)
 
         o_offs = (stride_oz * off_z + stride_oh * off_q_head + stride_om *
                   (off_m + gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, cfg.pv_layout)))[:, None] + stride_on *
@@ -180,15 +176,11 @@ class AttentionProgram:
         return self.v_buffer.index(buffer_id).load(layout=self.cfg.v_layout)
 
     @gluon.jit
-    def tdm_load_global_to_lds(self, tensor_desc, offset, indexed_buffer):
-        gl.amd.gfx1250.tdm.async_load(tensor_desc, offset, indexed_buffer)
-
-    @gluon.jit
-    def tdm_load_global_to_lds_k(self, offset, buffer_index):
+    def tdm_load_global_to_shared_k(self, offset, buffer_index):
         gl.amd.gfx1250.tdm.async_load(self.k_desc, offset, self.k_buffer.index(buffer_index))
 
     @gluon.jit
-    def tdm_load_global_to_lds_v(self, offset, buffer_index):
+    def tdm_load_global_to_shared_v(self, offset, buffer_index):
         gl.amd.gfx1250.tdm.async_load(self.v_desc, offset, self.v_buffer.index(buffer_index))
 
     @gluon.jit
@@ -200,6 +192,12 @@ class AttentionProgram:
             cur_seq +
             gl.arange(0, self.cfg.BLOCK_N, layout=gl.SliceLayout(0, self.cfg.qk_layout)))[None, :] < self.cfg.SEQLEN_K
         qk = gl.where(qk_mask, qk, float("-inf"))
+        return qk
+
+    @gluon.jit
+    def compute_qk_no_mask(self, k):
+        qk = gl.zeros([self.cfg.BLOCK_M, self.cfg.BLOCK_N], dtype=gl.float32, layout=self.cfg.qk_layout)
+        qk = gl.amd.gfx1250.wmma(self.q, k, qk)
         return qk
 
     @gluon.jit
@@ -277,7 +275,7 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     block_min = 0
     block_max = n_blocks_n * BLOCK_N
     for block_id in range(block_min, block_max, BLOCK_N):
-        pgm.tdm_load_global_to_lds_k([block_id, 0], buffer_index=0)
+        pgm.tdm_load_global_to_shared_k([block_id, 0], buffer_index=0)
         k = pgm.tdm_shared_load_k(0, wait_count=0)
 
         qk = pgm.compute_qk(k, block_id)
@@ -285,7 +283,7 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
         p, alpha, m_i = pgm.softmax_part0(qk, m_i)
         p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
 
-        pgm.tdm_load_global_to_lds_v([block_id, 0], 0)
+        pgm.tdm_load_global_to_shared_v([block_id, 0], 0)
         v = pgm.tdm_shared_load_v(0, wait_count=0)
 
         acc = pgm.compute_pv(p, v, acc)
@@ -321,6 +319,13 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     ITERS_IN_PROLOGUE_EPILOGUE: gl.constexpr = 3
     n_blocks_n = max((SEQLEN_K + BLOCK_N - 1) // BLOCK_N - ITERS_IN_PROLOGUE_EPILOGUE, 1)
 
+    # Since QK from the final iteration is already peeled into the epilogue,
+    # we only need to handle case where SEQLEN_K < ITERS_IN_PROLOGUE_EPILOGUE * BLOCK_N.
+    has_remainder: gl.constexpr = SEQLEN_K < (ITERS_IN_PROLOGUE_EPILOGUE) * BLOCK_N
+    REMAINDER_PEELED_ITERS = 1
+    if has_remainder:
+        n_blocks_n = n_blocks_n - REMAINDER_PEELED_ITERS
+
     m_i = gl.full([BLOCK_M], float("-inf"), dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
     l_i = gl.full([BLOCK_M], 1.0, dtype=gl.float32, layout=gl.SliceLayout(1, cfg.pv_layout))
     acc = gl.zeros([BLOCK_M, HEAD_SZ], dtype=gl.float32, layout=cfg.pv_layout)
@@ -335,9 +340,9 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     [QK, SM0],      [LR_K, GLDS_V],  [GLDS_K]
     """
     # GLDS_K_t0, GLDS_K_t1, GLDS_V_t0
-    pgm.tdm_load_global_to_lds_k([0, 0], buffer_index=0)
-    pgm.tdm_load_global_to_lds_k([BLOCK_N, 0], buffer_index=1)
-    pgm.tdm_load_global_to_lds_v([0, 0], buffer_index=0)
+    pgm.tdm_load_global_to_shared_k([0, 0], buffer_index=0)
+    pgm.tdm_load_global_to_shared_k([BLOCK_N, 0], buffer_index=1)
+    pgm.tdm_load_global_to_shared_v([0, 0], buffer_index=0)
 
     # LR_K_t0
     k = pgm.tdm_shared_load_k(0, wait_count=2)
@@ -349,8 +354,8 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     p, alpha, m_i = pgm.softmax_part0(qk, m_i)
 
     # GLDS_V_t1, GLDS_K_t2
-    pgm.tdm_load_global_to_lds_v([BLOCK_N, 0], buffer_index=1)
-    pgm.tdm_load_global_to_lds_k([2 * BLOCK_N, 0], buffer_index=0)
+    pgm.tdm_load_global_to_shared_v([BLOCK_N, 0], buffer_index=1)
+    pgm.tdm_load_global_to_shared_k([2 * BLOCK_N, 0], buffer_index=0)
 
     # LR_K_t1
     k = pgm.tdm_shared_load_k(1, wait_count=3)
@@ -358,7 +363,7 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     iter_id = 0
     for block_id in range(block_min, block_max, BLOCK_N):
         """
-        Steady State:
+        Steady State (Hot Loop - No Masking):
         t = i              t = i+1         t = i+2         t = i+3
         [SM1, LR_V, PV],   [QK, SM0],    [LR_K, GLDS_V]     [GLDS_K]
         """
@@ -368,15 +373,15 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
         t_2 = block_id + 2 * BLOCK_N
         t_3 = block_id + 3 * BLOCK_N
 
-        # QK, SM1, LR_V
-        qk = pgm.compute_qk(k, t_1)
+        # QK, SM1, LR_V (no mask needed - all blocks in hot loop are full)
+        qk = pgm.compute_qk_no_mask(k)
 
         p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
 
         v = pgm.tdm_shared_load_v(iter_id % NUM_BUFFERS, wait_count=2)
 
         # GLDS_K
-        pgm.tdm_load_global_to_lds_k([t_3, 0], (iter_id + 1) % NUM_BUFFERS)
+        pgm.tdm_load_global_to_shared_k([t_3, 0], (iter_id + 1) % NUM_BUFFERS)
 
         # PV, SM0, LR_K
         acc = pgm.compute_pv(p, v, acc)
@@ -386,7 +391,35 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
         k = pgm.tdm_shared_load_k(iter_id % NUM_BUFFERS, wait_count=2)
 
         # GLDS_V
-        pgm.tdm_load_global_to_lds_v([t_2, 0], iter_id % NUM_BUFFERS)
+        pgm.tdm_load_global_to_shared_v([t_2, 0], iter_id % NUM_BUFFERS)
+        iter_id += 1
+    """
+    Final iteration of steady state that requires masking.(if masking is required)
+    """
+    if has_remainder:
+        t_1 = iter_id * BLOCK_N + BLOCK_N
+        t_2 = iter_id * BLOCK_N + 2 * BLOCK_N
+        t_3 = iter_id * BLOCK_N + 3 * BLOCK_N
+
+        # Process the remainder block with masking
+        qk = pgm.compute_qk(k, t_1)
+
+        p, l_i, acc = pgm.softmax_part1(p, l_i, acc, alpha)
+
+        v = pgm.tdm_shared_load_v(iter_id % NUM_BUFFERS, wait_count=2)
+
+        # GLDS_K
+        pgm.tdm_load_global_to_shared_k([t_3, 0], (iter_id + 1) % NUM_BUFFERS)
+
+        # PV, SM0, LR_K
+        acc = pgm.compute_pv(p, v, acc)
+
+        p, alpha, m_i = pgm.softmax_part0(qk, m_i)
+
+        k = pgm.tdm_shared_load_k(iter_id % NUM_BUFFERS, wait_count=2)
+
+        # GLDS_V
+        pgm.tdm_load_global_to_shared_v([t_2, 0], iter_id % NUM_BUFFERS)
         iter_id += 1
     """
     Epilogue:
@@ -412,7 +445,7 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr, out_ptr,  #
     # LR_K_t3, GLDS_V_t3
     k = pgm.tdm_shared_load_k(iter_id % NUM_BUFFERS, wait_count=1)
 
-    pgm.tdm_load_global_to_lds_v([t_3, 0], iter_id % NUM_BUFFERS)
+    pgm.tdm_load_global_to_shared_v([t_3, 0], iter_id % NUM_BUFFERS)
 
     # QK_t3, SM1_t2, LR_V_t2
     qk = pgm.compute_qk(k, t_3)
@@ -444,11 +477,15 @@ def generate_configs():
         # Tests for pipelined attention fwd kernel
         pytest.param({
             "BATCH": 8, "SEQLEN_Q": 512, "SEQLEN_K": 512, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 128, "BLOCK_M":
-            128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
+            128, "BLOCK_N": 64, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 64,
-            "BLOCK_M": 128, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
+            "BLOCK_M": 128, "BLOCK_N": 128, "ATTN_FN": attn_fwd_pipelined_kernel
+        }),
+        pytest.param({
+            "BATCH": 4, "SEQLEN_Q": 2000, "SEQLEN_K": 2000, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 64,
+            "BLOCK_M": 128, "BLOCK_N": 128, "ATTN_FN": attn_fwd_pipelined_kernel
         }),
         pytest.param({
             "BATCH": 1, "SEQLEN_Q": 3, "SEQLEN_K": 32, "NUM_Q_HEADS": 4, "NUM_K_HEADS": 4, "HEAD_SZ": 128, "BLOCK_M":
@@ -547,7 +584,7 @@ def test_attention(config):
 
 if __name__ == "__main__":
     config = {
-        "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 64, "BLOCK_M":
-        32, "BLOCK_N": 32, "ATTN_FN": attn_fwd_pipelined_kernel
+        "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 128, "BLOCK_M":
+        128, "BLOCK_N": 128, "ATTN_FN": attn_fwd_pipelined_kernel
     }
     test_attention(config)
