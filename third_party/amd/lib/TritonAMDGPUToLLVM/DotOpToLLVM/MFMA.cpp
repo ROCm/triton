@@ -402,14 +402,14 @@ struct DotOpMFMAConversionHelper {
                                                  outerTileN);
     }
 
-    for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
-      DotCoord dc = *iter;
-      llvm::outs()
-        << ": b=" << dc.getB()
-        << ", m=" << dc.getM()
-        << ", n=" << dc.getN()
-        << ", k=" << dc.getK() << "\n";
-    }
+    //for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
+    //  DotCoord dc = *iter;
+    //  llvm::outs()
+    //    << ": b=" << dc.getB()
+    //    << ", m=" << dc.getM()
+    //    << ", n=" << dc.getN()
+    //    << ", k=" << dc.getK() << "\n";
+    //}
 
     Value acc;
     // Iterate over tiles.
@@ -428,13 +428,15 @@ struct DotOpMFMAConversionHelper {
         for (int n = tileStartN; n < tileStartN + dotTiling.getTileSizeN(); ++n) {
           for (int k = tileStartK; k < tileStartK + dotTiling.getTileSizeK(); ++k) {
 #else
-  DotCoord dcb = (*dotOrder.get()->begin());
-  llvm::outs() << "dcb: " << dcb.getB() << dcb.getM() << dcb.getN() << dcb.getK() << "\n";
-  DotCoord dce = (*dotOrder.get()->end());
-  llvm::outs() << "dce: " << dce.getB() << dce.getM() << dce.getN() << dce.getK() << "\n";
+  //DotCoord dcb = (*dotOrder.get()->begin());
+  //llvm::outs() << "dcb: " << dcb.getB() << dcb.getM() << dcb.getN() << dcb.getK() << "\n";
+  //DotCoord dce = (*dotOrder.get()->end());
+  //llvm::outs() << "dce: " << dce.getB() << dce.getM() << dce.getN() << dce.getK() << "\n";
 
-    for (DotOrdering::iterator iter = dotOrder.get()->begin(); iter != dotOrder.get()->end(); ++iter) {
-      DotCoord dc = *iter;
+  while (!dotOrder.get()->isDone()) {
+    llvm::outs() << "A\n";
+      const DotCoord dc = dotOrder.get()->getDotCoord();
+          llvm::outs() << "B\n";
       int b = dc.getB();
       int m = dc.getM();
       int n = dc.getN();
@@ -482,7 +484,7 @@ struct DotOpMFMAConversionHelper {
             
             adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
-            llvm::outs() << "End of Loop" << "\n";
+            dotOrder.get()->next();
           } // k
 #if MULTI_LOOP
           //adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,

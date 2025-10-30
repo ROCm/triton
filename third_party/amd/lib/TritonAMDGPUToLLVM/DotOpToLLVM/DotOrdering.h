@@ -1,4 +1,5 @@
 #include <memory>
+#include "mlir/Support/LogicalResult.h"
 
 // 4D coordinate within loop.
 struct DotCoord {
@@ -38,63 +39,32 @@ struct DotCoord {
 */
 class DotOrdering {
 public:
-  virtual std::shared_ptr<DotOrdering> getFirst() const = 0;
-  virtual std::shared_ptr<DotOrdering> getLast() const = 0;
-  virtual void next() = 0;
+
+  // Returns whether fma while loop is done.
+  bool isDone() {
+    return done;
+  }
+
+  // Returns current DotCoord.
   virtual DotCoord getDotCoord() const = 0;
-  // Iterators are equal if container is equal.
-  virtual bool operator==(const DotOrdering& other) const = 0;
 
-  class iterator {
+  // Advance to next coord; eventually calls setDone().
+  virtual void next() = 0;
+  
+  protected:
+  // first dotCoord is always valid, i.e. at least 1 fma.  
+  DotOrdering() : done(false) {
+    llvm::outs() << "DotOrdering()\n";
+  }
+    
+  // Declare that no more valid fmas/iterations.
+  void setDone() {
+    llvm::outs() << "setDone()\n";
+    done = true;
+  }
+
   private:
-    std::shared_ptr<DotOrdering> dotOrdering;
-
-  public:
-    iterator(std::shared_ptr<DotOrdering>dO) : dotOrdering(dO) {}
-
-    DotCoord operator*() const {
-      return dotOrdering.get()->getDotCoord();
-    }
-
-    iterator& operator++() {
-      dotOrdering.get()->next();
-      return *this;
-    }
-
-    iterator operator++(int) {
-      iterator tmp = *this;
-      ++(*this);
-      return tmp;
-    }
-
-    // Iterators are same if 4D coord is same.
-    //bool operator==(const iterator& other) const {
-    //  bool equals = dotOrdering.get()->getDotCoord() == other.dotOrdering.get()->getDotCoord();
-    //  llvm::outs() << "iter==" << (equals ? "True" : "False") << "\n";
-    //  return equals;
-    //}
-    //bool operator==(const iterator& other) const {
-    //  bool equals = *dotOrdering.get() == *other.dotOrdering.get();
-    //  llvm::outs() << "iterator==" << (equals ? "True" : "False") << "\n";
-    //  return equals;
-    //}
-
-    // Iterators are same if 4D coord is same.
-    virtual bool operator==(const iterator& other) const = 0;
-
-    bool operator!=(const iterator& other) const {
-      return !(*this == other);
-    }
-
-  }; // iterator
-
-  iterator begin() const {
-    return iterator(this->getFirst());
-  }
-
-  iterator end() const {
-    return iterator(this->getLast());
-  }
+  bool done;
 
 }; // DotOrdering
 
@@ -105,10 +75,10 @@ public:
 class DotOrderingBMNK : public DotOrdering {
 public:
   // When constructed here, the state doesn't matter (only within iterator).
-  DotOrderingBMNK(int numRepB, int numRepM, int numRepN, int numRepK,
-                  int b = -1, int m = -1, int n = -1, int k = -1) :
+  DotOrderingBMNK(int numRepB, int numRepM, int numRepN, int numRepK) :
+                  DotOrdering(),
                   numReps(numRepB, numRepM, numRepN, numRepK),
-                  iter(b, m, n, k) {
+                  iter(0, 0, 0, 0) {
     llvm::outs() << numReps.b << numReps.m << numReps.n << numReps.k << iter.b << iter.m << iter.n << iter.k << "\n";
   }
 
@@ -116,20 +86,22 @@ public:
     Specify from abstract parent class.
     Copy tiling parameters, and override coord state.
   */
-  std::shared_ptr<DotOrdering> getFirst() const {
-    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
-        numReps.b, numReps.m, numReps.n, numReps.k,
-        0, 0, 0, 0);
-    return ptr;
-  }
+  //std::shared_ptr<DotOrdering> getFirst() const {
+  //  std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
+  //      numReps.b, numReps.m, numReps.n, numReps.k,
+  //      0, 0, 0, 0);
+  //  return ptr;
+  //}
 
-  std::shared_ptr<DotOrdering> getLast() const {
-    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
-        numReps.b, numReps.m, numReps.n, numReps.k,
-        numReps.b, 0, 0, 0);
-    return ptr;
-  }
-
+  //std::shared_ptr<DotOrdering> getLast() const {
+  //  std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingBMNK>(
+  //      numReps.b, numReps.m, numReps.n, numReps.k,
+  //      numReps.b, 0, 0, 0);
+  //  return ptr;
+  //}
+  // increment the state of the ordering to the next DotCoord.
+  // returns true if after incrementing to the next DotCoord produces a valid DotCoord.
+  // returns false if DotCoord cannot be called after next();
   void next() {
     // Loop order in B, M, N, K; start with inner-most.
     iter.k++;
@@ -149,26 +121,30 @@ public:
       iter.b++;
       llvm::outs() << "b=" << iter.b << "\n";
     }
+    if (iter.b >= numReps.b) {
+      // Done iterating.
+      setDone();
+    }
   }
 
   DotCoord getDotCoord() const {
     return iter;
   }
 
-  bool operator==(const DotOrdering& other) const {
-    const DotOrderingBMNK* derivedOther = dynamic_cast<const DotOrderingBMNK*>(&other);
-    if (!derivedOther) {
-        return false;
-    }
+  //bool operator==(const DotOrdering& other) const {
+  //  const DotOrderingBMNK* derivedOther = dynamic_cast<const DotOrderingBMNK*>(&other);
+  //  if (!derivedOther) {
+  //      return false;
+  //  }
 
-    bool equals = getDotCoord() == derivedOther->getDotCoord();
-    llvm::outs() << "DotOrderingBMNK==" << (equals ? "True" : "False") << "\n";
-    return equals;
-  }
+  //  bool equals = getDotCoord() == derivedOther->getDotCoord();
+  //  llvm::outs() << "DotOrderingBMNK==" << (equals ? "True" : "False") << "\n";
+  //  return equals;
+  //}
 
-  bool DotOrdering::operator==(const iterator& other) const {
+  //bool DotOrdering::operator==(const iterator& other) const {
     
-  }
+  //}
 
 
   private:
@@ -300,9 +276,9 @@ class DotOrderingTiled : public DotOrdering {
     int64_t tileSizeM,
     int64_t tileSizeN,
     int64_t tileSizeK,
-    bool outerTileN,
-    size_t index = -1)
-      : numRepB(numRepB),
+    bool outerTileN)
+      : DotOrdering(),
+        numRepB(numRepB),
         numRepM(numRepM),
         numRepN(numRepN),
         numRepK(numRepK),
@@ -315,7 +291,8 @@ class DotOrderingTiled : public DotOrdering {
         numTilesN(numRepN / tileSizeN),
         numTilesK(numRepK / tileSizeK),
         outerTileN(outerTileN),
-        tiledCoord(this, index) {
+        tiledCoord(getTiledLoopIndices(), getLoopNumIter())
+    {
     // Num mfmas must evenly divide into tiles.
     if (numTilesB * tileSizeB != numRepB) {
       llvm::errs() << "ERROR: DotOrderingTiled not valid with numRepB=" << numRepB << ", and tileSizeB=" << tileSizeB << "\n";
@@ -331,28 +308,8 @@ class DotOrderingTiled : public DotOrdering {
     }
     llvm::outs() << "DotOrderingTiled: " << numRepB << numRepM << numRepN << numRepK << ", "
         << tileSizeB << tileSizeM << tileSizeN << tileSizeK << ", "
-        << numTilesB << numTilesM << numTilesN << numTilesK << ", " << index << "\n";
+        << numTilesB << numTilesM << numTilesN << numTilesK << "\n";
   }
-
-  DotOrderingTiled(const DotOrderingTiled& other, size_t index = -1)
-    : numRepB(other.numRepB),
-      numRepM(other.numRepM),
-      numRepN(other.numRepN),
-      numRepK(other.numRepK),
-      tileSizeB(other.tileSizeB),
-      tileSizeM(other.tileSizeM),
-      tileSizeN(other.tileSizeN),
-      tileSizeK(other.tileSizeK),
-      numTilesB(other.numTilesB),
-      numTilesM(other.numTilesM),
-      numTilesN(other.numTilesN),
-      numTilesK(other.numTilesK),
-      outerTileN(other.outerTileN),
-      tiledCoord(this, index) {
-    llvm::outs() << "DotOrderingTiled (cc): " << numRepB << numRepM << numRepN << numRepK << ", "
-        << tileSizeB << tileSizeM << tileSizeN << tileSizeK << ", "
-        << numTilesB << numTilesM << numTilesN << numTilesK << ", " << index << "\n";
-      }
 
   // Stores the order over which the 8D tiling space will be iterated.
   struct TiledLoopIndices {
@@ -424,29 +381,23 @@ class DotOrderingTiled : public DotOrdering {
     // Index of each loop.
     std::array<int, 8> indices;
     // done==true when iterated past last index.
-    bool done;
+    bool currentIsValid;
 
-    TiledCoord(const DotOrderingTiled *dotOrderingTiled = nullptr, size_t index = -1) :
-        loopIdx(dotOrderingTiled->getTiledLoopIndices()),
-        max_indices(dotOrderingTiled->getLoopNumIter()),
-        indices{{0,0,0,0,0,0,0,0}}, done(false) {
-      assert(index >= 0);
-      // Advance indices for serial index.
-      for (auto i = 0; i < index; i++) {
-        next();
-      }
-    }
+    TiledCoord(const TiledLoopIndices& loopIndices, const std::array<int, 8>& maxIndices) :
+        loopIdx(loopIndices),
+        max_indices(maxIndices),
+        indices{{0,0,0,0,0,0,0,0}}, currentIsValid(true) {
 
-    TiledCoord(const TiledCoord& other) :
-        loopIdx(other.loopIdx),
-        max_indices(other.max_indices),
-        indices(other.indices)
-    {}
+          llvm::outs() << "max_indices: ";
+          for (int i = 0; i < 8; i++) llvm::outs() << max_indices[i] << ", ";
+          llvm::outs() << "\n";
+        }
 
     // Once each loop level reaches max, reset it and move to next loop level.
     void next(int idx) {
       if (idx >= indices.size()) {
-        done = true;
+        // Done iterating.
+        currentIsValid = false;
         return;
       }
       indices[idx]++;
@@ -457,7 +408,8 @@ class DotOrderingTiled : public DotOrdering {
     }
 
     // Start by incrementing the 0th index, i.e. inner-most loop.
-    void next() {
+    bool next() {
+      if (!currentIsValid) return currentIsValid;
       next(0);
       llvm::outs() << "next: " << getB() << ", " << getM() << ", " << getN() << ", " << getK() << "\n";
       llvm::outs() << "next: ";
@@ -465,6 +417,7 @@ class DotOrderingTiled : public DotOrdering {
         llvm::outs() << indices[i] << ", ";
       }
       llvm::outs() << "\n";
+      return currentIsValid;
     }
 
     // Each value combines (element idx within tile) + (tile idx)*(tile size).
@@ -479,48 +432,17 @@ class DotOrderingTiled : public DotOrdering {
       return DotCoord(getB(), getM(), getN(), getK());
     }
 
-    bool operator==(const TiledCoord& other) const {
-      return (loopIdx == other.loopIdx) && (max_indices == other.max_indices)
-          && ( (done && other.done) || (indices == other.indices) );
-    }
   }; // TiledCoord
 
-  /*
-    Specify from abstract parent class.
-    Copy tiling parameters, and override coord state.
-  */
-  std::shared_ptr<DotOrdering> getFirst() const {
-    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingTiled>(*this, 0); // copy
-    return ptr;
-  }
-
-  std::shared_ptr<DotOrdering> getLast() const {
-    std::shared_ptr<DotOrdering> ptr = std::make_shared<DotOrderingTiled>(*this, numRepB*numRepM*numRepN*numRepK); // copy
-    return ptr;
-  }
   
   void next() {
-    tiledCoord.next();
+    if (!tiledCoord.next()) {
+      setDone();
+    }
   }
 
   DotCoord getDotCoord() const {
     return tiledCoord.getDotCoord();
-  }
-
-  bool operator==(const DotOrdering& other) const {
-
-    const DotOrderingTiled* derivedOther = dynamic_cast<const DotOrderingTiled*>(&other);
-    if (!derivedOther) {
-        return false;
-    }
-
-    bool equals = tiledCoord == derivedOther->tiledCoord;
-    llvm::outs() << "DotOrderingTiled==" << (equals ? "True" : "False") << "\n";
-    return equals;
-  }
-
-  TiledCoord getTiledCoord() const {
-    return tiledCoord;
   }
 
   private:
@@ -543,11 +465,3 @@ class DotOrderingTiled : public DotOrdering {
   TiledCoord tiledCoord;
 
 }; // DotOrderingTiled
-
-bool operator==(const DotOrderingBMNK& lhs, const DotOrderingBMNK& rhs) {
-    return lhs.getDotCoord() == rhs.getDotCoord();
-}
-
-bool operator==(const DotOrderingTiled& lhs, const DotOrderingTiled& rhs) {
-    return lhs.getTiledCoord() == rhs.getTiledCoord();
-}
