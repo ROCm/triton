@@ -86,7 +86,7 @@
     \coordinate (CTA TL) at ($(TL)+(\ctaCoordW*\CTASizeW*\elem, -\ctaCoordH*\CTASizeH*\elem)$);
     %% Draw a detailed view of wave0 in each CTA
     \foreach \tileId in {0,...,\maxTileId}{
-      \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwM)}
+      \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwN)}
       \pgfmathsetmacro{\tileCoordW}{mod(\tileId,\tpwN)}
       \coordinate (block TL) at ($(CTA TL)+(\tileCoordW*\mfmaNonKDim*\elem, -\tileCoordH*\mfmaNonKDim*\elem)$);
       \drawBlockMFMALayoutLarge{\mfmaTrans}{\mfmaNonKDim}{0}
@@ -97,7 +97,7 @@
       \pgfmathsetmacro{\waveCoordW}{mod(\waveId,\warpsPerCTAW)}
       \coordinate (block TL) at ($(CTA TL)+(\waveCoordW*\mfmaNonKDim*\elem*\tpwN, -\waveCoordH*\mfmaNonKDim*\elem*\tpwM)$);
       \foreach \tileId in {0,...,\maxTileId}{
-        \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwM)}
+        \pgfmathsetmacro{\tileCoordH}{int(\tileId/\tpwN)}
         \pgfmathsetmacro{\tileCoordW}{mod(\tileId,\tpwN)}
         %% Inside the loop, only draw a rectangle
         \draw [ultra thin] ($(block TL)+(\tileCoordW*\mfmaNonKDim*\elem, -\tileCoordH*\mfmaNonKDim*\elem)$) rectangle ++(\mfmaNonKDim*\elem, -\mfmaNonKDim*\elem)
