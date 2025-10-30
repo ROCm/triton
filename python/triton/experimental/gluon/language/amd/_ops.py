@@ -65,7 +65,7 @@ def _mma_scaled(a, a_scale, a_format, b, b_scale, b_format, acc, scale_fn, seman
             assert math.prod(scale_shape) == scale.numel.value, "Incompatible scale shape"
             return scale
 
-        scale_layout = scale_fn(operand.type.layout, scale_shape, semantic)
+        scale_layout = scale_fn(operand.type.layout, scale_shape)
         scale_value = _unwrap_if_constexpr(scale)
         scale_value = 0x7F if scale_value is None else scale_value
         return semantic.full(scale_shape, scale_value, ttgl.uint8, scale_layout)
