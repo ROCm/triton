@@ -17,12 +17,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pre-commit:
     name: Format
-    runs-on: self-hosted
+    runs-on: ['self-hosted', 'cdna']
     steps:
       - name: Checkout
         uses: actions/checkout@v4

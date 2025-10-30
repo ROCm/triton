@@ -17,12 +17,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gfx1250:
     name: gfx1250
-    runs-on: self-hosted
+    runs-on: ['self-hosted', 'cdna']
     env:
       RUNNER_PROJECT_ROOT: "/data/actions-runner/_work/triton/triton"
 
