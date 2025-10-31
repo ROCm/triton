@@ -1961,18 +1961,20 @@ def amd_async_copy_global_to_shared(ptr):
     offsets = y_offset[:, None] * 16 + x_offset[None, :]
 
     # test default parameters
-    gfx1250_async_copy.async_copy_global_to_shared(smem, ptr + offsets)
+    gfx1250_async_copy.global_to_shared(smem, ptr + offsets)
 
     # test mask
     mask = (y_offset < 64)[:, None]
-    gfx1250_async_copy.async_copy_global_to_shared(smem, ptr + offsets, mask)
+    gfx1250_async_copy.global_to_shared(smem, ptr + offsets, mask)
 
     # Test other with scalar
-    gfx1250_async_copy.async_copy_global_to_shared(smem, ptr + offsets, mask, other=0.0)
+    gfx1250_async_copy.global_to_shared(smem, ptr + offsets, mask, other=0.0)
 
     # Test other with tensor
     other = ttgl.full([128, 16], 0.0, ptr.dtype.element_ty, layout=blocked)
-    gfx1250_async_copy.async_copy_global_to_shared(smem, ptr + offsets, mask, other)
+    gfx1250_async_copy.global_to_shared(smem, ptr + offsets, mask, other)
+
+    gfx1250_async_copy.commit_group()
 
 
 @pytest.mark.parametrize("target", [HIP_TARGET_GFX1250])
@@ -2022,6 +2024,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %25 = tt.addptr %24, %8 : tensor<128x16x!tt.ptr<f16>, #blocked>, tensor<128x16xi32, #blocked>
     %26 = tt.broadcast %13 : tensor<128x1xi1, #blocked> -> tensor<128x16xi1, #blocked>
     %27 = ttg.async_copy_global_to_local %25, %0 mask %26 other %cst_4 : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
+    %28 = ttg.async_commit_group
     tt.return
   }
 }
@@ -2029,17 +2032,17 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 
 @gluon.jit
-def amd_gfx1250_async_wait():
-    gfx1250_async_copy.async_wait(1)
+def amd_gfx1250_async_wait_group():
+    gfx1250_async_copy.wait_group(1)
 
 
 @pytest.mark.parametrize("target", [HIP_TARGET_GFX1250])
 def test_amd_gfx1250_async_wait(target):
-    mod = run_parser(amd_gfx1250_async_wait, target=target)
+    mod = run_parser(amd_gfx1250_async_wait_group, target=target)
     expecttest.assert_expected_inline(
         anonymize_ir(mod.str_nodebug()), """\
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
-  tt.func public @amd_gfx1250_async_wait() attributes {noinline = false} {
+  tt.func public @amd_gfx1250_async_wait_group() attributes {noinline = false} {
     %0 = ttg.async_wait {num = 1 : i32}
     tt.return
   }

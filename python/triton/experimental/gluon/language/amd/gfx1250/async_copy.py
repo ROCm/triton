@@ -3,13 +3,14 @@ from ..._semantic import _check
 from triton.experimental.gluon.language._layouts import DistributedLayout
 
 __all__ = [
-    "async_copy_global_to_shared",
-    "async_wait",
+    "global_to_shared",
+    "commit_group",
+    "wait_group",
 ]
 
 
 @builtin
-def async_copy_global_to_shared(smem, pointer, mask=None, other=None, cache_modifier="", _semantic=None):
+def global_to_shared(smem, pointer, mask=None, other=None, cache_modifier="", _semantic=None):
     """
     Asynchronously copy elements from global memory to shared memory. Requires manual syncronization via async_wait before accessing the loaded data.
 
@@ -44,13 +45,22 @@ def async_copy_global_to_shared(smem, pointer, mask=None, other=None, cache_modi
 
 
 @builtin
-def async_wait(num_outstanding=0, _semantic=None):
+def commit_group(_semantic=None):
     """
-    Wait for outstanding async memory operations. It will block until the number of outstanding async memory operations is less than
-    or equal to `num_outstanding`.
+    Commit the current asynchronous copy group, which includes all async copy operations since the last commit group or the start of the kernel.
+    Note this does not include TDM operations.
+    """
+    _semantic.builder.create_async_commit_group()
+
+
+@builtin
+def wait_group(num_outstanding=0, _semantic=None):
+    """
+    Wait for outstanding async commit groups. It will block until the number of
+    outstanding async commit groups is less than or equal to `num_outstanding`.
 
     Args:
-        num_outstanding (int): The number of outstanding operations to wait for in actual hardware instructions. Defaults to 0.
+        num_outstanding (int): The number of outstanding async commit groups to wait for. Defaults to 0.
     """
     num_outstanding = _unwrap_if_constexpr(num_outstanding)
     _semantic.builder.create_async_wait_group(num_outstanding)

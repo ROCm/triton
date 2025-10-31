@@ -388,7 +388,7 @@ class AttentionProgram:
         tdm.async_load(self.k_desc, [0, i * k_step], k_buffer)
 
         k_scale_ptrs = (self.k_scale_ptr + i * k_scale_step) + self.k_scale_offs
-        cp.async_copy_global_to_shared(k_scale_buffer, k_scale_ptrs)
+        cp.global_to_shared(k_scale_buffer, k_scale_ptrs)
 
     @gluon.jit
     def issue_global_load_v(self, i):
@@ -403,7 +403,7 @@ class AttentionProgram:
         tdm.async_load(self.v_desc, [i * v_step, 0], v_buffer)
 
         v_scale_ptrs = (self.v_scale_ptr + i * v_scale_step) + self.v_scale_offs
-        cp.async_copy_global_to_shared(v_scale_buffer, v_scale_ptrs)
+        cp.global_to_shared(v_scale_buffer, v_scale_ptrs)
 
     @gluon.jit
     def shared_load_k(self, i, wait_count):
@@ -488,7 +488,7 @@ class AttentionProgram:
     @gluon.jit
     def _async_wait(self, count):
         tdm.async_wait(count)
-        cp.async_wait(count)
+        cp.wait_group(count)
 
     @gluon.jit
     def _downcast_fp32_to_mxfp8(self, x, x_format: ttgl.constexpr, shape: ttgl.constexpr):

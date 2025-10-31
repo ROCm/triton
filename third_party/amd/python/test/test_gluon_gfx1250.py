@@ -236,11 +236,6 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     offs_bn = (pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))) % N
     b_ptrs = b_ptr + offs_bk[:, None] * stride_bk + offs_bn[None, :] * stride_bn
 
-    # TODO(alex) implement better async copy waitcnt mechanism
-    async_copy_insts_for_a: ttgl.constexpr = BLOCK_M // 4 // 4  # / 4 rows per load / 4 warps
-    async_copy_insts_for_b: ttgl.constexpr = BLOCK_K // 4 // 4  # / 4 rows per load / 4 warps
-    async_copy_insts_per_iter: ttgl.constexpr = async_copy_insts_for_a + async_copy_insts_for_b
-
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
@@ -256,12 +251,13 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                                             b_buffer.index(load_idx % NUM_BUFFERS))
         else:
             mask_a = offs_ak[None, :] < K - load_idx * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(a_buffer.index(load_idx % NUM_BUFFERS), a_ptrs,
-                                                                    mask_a, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(a_buffer.index(load_idx % NUM_BUFFERS), a_ptrs, mask_a,
+                                                         other=0.0)
 
             mask_b = offs_bk[:, None] < K - load_idx * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(b_buffer.index(load_idx % NUM_BUFFERS), b_ptrs,
-                                                                    mask_b, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(b_buffer.index(load_idx % NUM_BUFFERS), b_ptrs, mask_b,
+                                                         other=0.0)
+            ttgl.amd.gfx1250.async_copy.commit_group()
 
         load_idx += 1
         a_ptrs += BLOCK_K * stride_ak
@@ -275,12 +271,13 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                                             b_buffer.index(load_idx % NUM_BUFFERS))
         else:
             mask_a = offs_ak[None, :] < K - load_idx * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(a_buffer.index(load_idx % NUM_BUFFERS), a_ptrs,
-                                                                    mask_a, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(a_buffer.index(load_idx % NUM_BUFFERS), a_ptrs, mask_a,
+                                                         other=0.0)
 
             mask_b = offs_bk[:, None] < K - load_idx * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(b_buffer.index(load_idx % NUM_BUFFERS), b_ptrs,
-                                                                    mask_b, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(b_buffer.index(load_idx % NUM_BUFFERS), b_ptrs, mask_b,
+                                                         other=0.0)
+            ttgl.amd.gfx1250.async_copy.commit_group()
 
         load_idx += 1
         a_ptrs += BLOCK_K * stride_ak
@@ -289,7 +286,7 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         if USE_TDM:
             ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 1) * 2)
         else:
-            ttgl.amd.gfx1250.async_copy.async_wait((NUM_BUFFERS - 1) * (async_copy_insts_per_iter))
+            ttgl.amd.gfx1250.async_copy.wait_group((NUM_BUFFERS - 1))
 
         a = a_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_A)
         b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
@@ -300,7 +297,7 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         if USE_TDM:
             ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2 - i) * 2)
         else:
-            ttgl.amd.gfx1250.async_copy.async_wait((NUM_BUFFERS - 2 - i) * async_copy_insts_per_iter)
+            ttgl.amd.gfx1250.async_copy.wait_group((NUM_BUFFERS - 2 - i))
 
         a = a_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_A)
         b = b_buffer.index(wmma_idx % NUM_BUFFERS).load(layout=OPERAND_LAYOUT_B)
@@ -447,13 +444,14 @@ def gemm_async_kernel(a_ptr, b_ptr, c_ptr,  #
             ttgl.amd.gfx1250.tdm.async_wait(0)
         else:
             mask_a = offs_ak[None, :] < K - k * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(a_buffer, a_ptrs, mask_a, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(a_buffer, a_ptrs, mask_a, other=0.0)
 
             mask_b = offs_bk[:, None] < K - k * BLOCK_K
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(b_buffer, b_ptrs, mask_b, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(b_buffer, b_ptrs, mask_b, other=0.0)
+            ttgl.amd.gfx1250.async_copy.commit_group()
             a_ptrs += BLOCK_K * stride_ak
             b_ptrs += BLOCK_K * stride_bk
-            ttgl.amd.gfx1250.async_copy.async_wait(0)
+            ttgl.amd.gfx1250.async_copy.wait_group(0)
 
         a = a_buffer.load(layout=BLOCKED_LAYOUT)
         b = b_buffer.load(layout=BLOCKED_LAYOUT)
@@ -919,12 +917,13 @@ def tensor_async_copy_kernel(a_ptr, b_ptr, M, N,  #
             a_ptrs = a_ptr + offs_am[:, None] * N + offs_an[None, :]
             mask_a = (offs_am[:, None] < M) & (offs_an[None, :] < N)
             a_buffer_subview = a_buffer.index(i)
-            ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(a_buffer_subview, a_ptrs, mask_a, other=0.0)
+            ttgl.amd.gfx1250.async_copy.global_to_shared(a_buffer_subview, a_ptrs, mask_a, other=0.0)
+            ttgl.amd.gfx1250.async_copy.commit_group()
 
     if USE_TDM:
         ttgl.amd.gfx1250.tdm.async_wait(0)
     else:
-        ttgl.amd.gfx1250.async_copy.async_wait(0)
+        ttgl.amd.gfx1250.async_copy.wait_group(0)
 
     for i in ttgl.static_range(0, NUM_BUFFERS):
         idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
@@ -1251,8 +1250,8 @@ def async_load_and_write_back_kernel(a_ptr, out_ptr, M, N, BLOCK_M: ttgl.constex
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
     buffer = ttgl.allocate_shared_memory(a_ptr.type.element_ty, [BLOCK_M, BLOCK_N], shared_layout)
-    ttgl.amd.gfx1250.async_copy.async_copy_global_to_shared(buffer, a_ptrs)
-    ttgl.amd.gfx1250.async_copy.async_wait(0)
+    ttgl.amd.gfx1250.async_copy.global_to_shared(buffer, a_ptrs)
+    ttgl.amd.gfx1250.async_copy.wait_group(0)
 
     res = buffer.load(BLOCKED_LAYOUT)
 
