@@ -635,7 +635,8 @@ void CTAPlanner::insertCasts(Operation *op,
     auto operandTy = operand.getType();
     if (triton::isTensorOrTensorPointerType(operandTy)) {
       operandTy = replaceLayout(operandTy, newOperandLayouts[i]);
-      auto cast = markBackward(builder.create<CastOp>(loc, operandTy, operand));
+      auto cast =
+          markBackward(CastOp::create(builder, loc, operandTy, operand));
       op->setOperand(i, cast.getResult(0));
       queue.push(cast);
     }
@@ -648,7 +649,7 @@ void CTAPlanner::insertCasts(Operation *op,
     if (triton::isTensorOrTensorPointerType(resultTy)) {
       resultTy = replaceLayout(resultTy, newResultLayouts[i]);
       auto cast =
-          markForward(builder.create<CastOp>(loc, result.getType(), result));
+          markForward(CastOp::create(builder, loc, result.getType(), result));
       result.setType(resultTy);
       result.replaceAllUsesExcept(cast.getResult(0), cast.getOperation());
       queue.push(cast);
@@ -670,8 +671,8 @@ void CTAPlanner::eliminateAdjacentCasts(CastOp cast0, CastOp cast1) {
     eraseCastOpsFromQueue({cast1, cast0});
   } else {
     OpBuilder builder(cast1.getOperation());
-    auto cvt = builder.create<ttg::ConvertLayoutOp>(cast1.getLoc(),
-                                                    output.getType(), input);
+    auto cvt = ttg::ConvertLayoutOp::create(builder, cast1.getLoc(),
+                                            output.getType(), input);
     output.replaceAllUsesWith(cvt.getResult());
     eraseCastOpsFromQueue({cast1, cast0});
   }
@@ -919,7 +920,7 @@ bool CTAPlanner::processIfOp(scf::IfOp ifOp, int index, const Type &newType) {
   Value result = ifOp.getResult(index);
   builder.setInsertionPointAfter(ifOp.getOperation());
   auto newCast =
-      markForward(builder.create<CastOp>(loc, result.getType(), result));
+      markForward(CastOp::create(builder, loc, result.getType(), result));
   result.setType(newType);
   result.replaceAllUsesExcept(newCast.getResult(0), newCast.getOperation());
   queue.push(newCast);
@@ -928,7 +929,7 @@ bool CTAPlanner::processIfOp(scf::IfOp ifOp, int index, const Type &newType) {
   for (scf::YieldOp yield : {ifOp.thenYield(), ifOp.elseYield()}) {
     Value yieldSrc = yield.getOperand(index);
     builder.setInsertionPoint(yield.getOperation());
-    newCast = markBackward(builder.create<CastOp>(loc, newType, yieldSrc));
+    newCast = markBackward(CastOp::create(builder, loc, newType, yieldSrc));
     yield->setOperand(index, newCast.getResult(0));
     queue.push(newCast);
   }
@@ -957,14 +958,14 @@ bool CTAPlanner::processForOp(scf::ForOp forOp, int index,
       forOp->getOpOperand(index + forOp.getNumControlOperands());
   builder.setInsertionPoint(forOp.getOperation());
   auto newCast =
-      markBackward(builder.create<CastOp>(loc, newType, operand.get()));
+      markBackward(CastOp::create(builder, loc, newType, operand.get()));
   operand.set(newCast.getResult(0));
   queue.push(newCast);
 
   // Insert forward cast after block arg
   Value arg = body->getArgument(index + forOp.getNumInductionVars());
   builder.setInsertionPointToStart(body);
-  newCast = markForward(builder.create<CastOp>(loc, arg.getType(), arg));
+  newCast = markForward(CastOp::create(builder, loc, arg.getType(), arg));
   arg.setType(newType);
   arg.replaceAllUsesExcept(newCast.getResult(0), newCast.getOperation());
   queue.push(newCast);
@@ -972,14 +973,14 @@ bool CTAPlanner::processForOp(scf::ForOp forOp, int index,
   // Insert backward cast before yield
   Value yieldSrc = yield.getOperand(index);
   builder.setInsertionPoint(yield.getOperation());
-  newCast = markBackward(builder.create<CastOp>(loc, newType, yieldSrc));
+  newCast = markBackward(CastOp::create(builder, loc, newType, yieldSrc));
   yield->setOperand(index, newCast.getResult(0));
   queue.push(newCast);
 
   // Insert forward cast after forOp
   Value result = forOp.getResult(index);
   builder.setInsertionPointAfter(forOp.getOperation());
-  newCast = markForward(builder.create<CastOp>(loc, result.getType(), result));
+  newCast = markForward(CastOp::create(builder, loc, result.getType(), result));
   result.setType(newType);
   result.replaceAllUsesExcept(newCast.getResult(0), newCast.getOperation());
   queue.push(newCast);
@@ -1046,7 +1047,8 @@ bool CTAPlanner::processOpFallback(Operation *op) {
     Value operand = op->getOperand(i);
     auto operandTy = operand.getType();
     if (triton::isTensorOrTensorPointerType(operandTy)) {
-      auto cast = markBackward(builder.create<CastOp>(loc, operandTy, operand));
+      auto cast =
+          markBackward(CastOp::create(builder, loc, operandTy, operand));
       op->setOperand(i, cast.getResult(0));
       queue.push(cast);
     }
@@ -1057,7 +1059,7 @@ bool CTAPlanner::processOpFallback(Operation *op) {
     Value result = op->getResult(i);
     auto resultTy = result.getType();
     if (triton::isTensorOrTensorPointerType(resultTy)) {
-      auto cast = markForward(builder.create<CastOp>(loc, resultTy, result));
+      auto cast = markForward(CastOp::create(builder, loc, resultTy, result));
       result.replaceAllUsesExcept(cast.getResult(0), cast.getOperation());
       queue.push(cast);
     }
@@ -1078,9 +1080,9 @@ bool CTAPlanner::processMultiUsersBackward(Value input, CastOp cast) {
         return false;
       builder.setInsertionPoint(operand.getOwner());
       brotherCast = markBackward(
-          builder.create<CastOp>(loc, cast.getResult(0).getType(), input));
-      auto newCast = markForward(builder.create<CastOp>(
-          loc, input.getType(), brotherCast.getResult(0)));
+          CastOp::create(builder, loc, cast.getResult(0).getType(), input));
+      auto newCast = markForward(CastOp::create(builder, loc, input.getType(),
+                                                brotherCast.getResult(0)));
       operand.set(newCast.getResult(0));
       queue.push(brotherCast);
       queue.push(newCast);
@@ -1113,7 +1115,7 @@ bool CTAPlanner::processMultiUsersBackward(Value input, CastOp cast) {
       builder.setInsertionPointToStart(
           llvm::cast<BlockArgument>(newInput).getOwner());
     }
-    auto newCast = markBackward(builder.create<CastOp>(loc, type, newInput));
+    auto newCast = markBackward(CastOp::create(builder, loc, type, newInput));
     queue.push(newCast);
     auto newResult = newCast.getResult(0);
     for (CastOp &brotherCast : casts) {
@@ -1132,8 +1134,8 @@ bool CTAPlanner::processMultiUsersForward(Value castResult, CastOp cast) {
   builder.setInsertionPointAfter(cast.getOperation());
 
   while (!castResult.use_empty()) {
-    auto newCast =
-        markForward(builder.create<CastOp>(loc, castResult.getType(), castSrc));
+    auto newCast = markForward(
+        CastOp::create(builder, loc, castResult.getType(), castSrc));
     castResult.use_begin()->set(newCast.getResult(0));
     queue.push(newCast);
   }

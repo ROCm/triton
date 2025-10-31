@@ -968,14 +968,14 @@ Value createConstantI64(Location loc, OpBuilder &rewriter, int64_t v) {
 
 Value createConstantI128(Location loc, OpBuilder &rewriter, int64_t v) {
   auto i64ty = rewriter.getIntegerType(128);
-  return rewriter.create<LLVM::ConstantOp>(loc, i64ty,
-                                           IntegerAttr::get(i64ty, v));
+  return LLVM::ConstantOp::create(rewriter, loc, i64ty,
+                                  IntegerAttr::get(i64ty, v));
 }
 
 Value createConstantI256(Location loc, OpBuilder &rewriter, int64_t v) {
   auto i64ty = rewriter.getIntegerType(256);
-  return rewriter.create<LLVM::ConstantOp>(loc, i64ty,
-                                           IntegerAttr::get(i64ty, v));
+  return LLVM::ConstantOp::create(rewriter, loc, i64ty,
+                                  IntegerAttr::get(i64ty, v));
 }
 
 Value createConstantF16(Location loc, OpBuilder &rewriter, float v) {

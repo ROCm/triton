@@ -960,8 +960,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       return;
     }
 
-    auto globalLoadLdsOp = rewriter.create<ROCDL::GlobalLoadLDSOp>(
-        loc, /*globalPtr=*/srcPtr, /*ldsPtr=*/addr, /*size=*/vecBytes,
+    auto globalLoadLdsOp = ROCDL::GlobalLoadLDSOp::create(
+        rewriter, loc, /*globalPtr=*/srcPtr, /*ldsPtr=*/addr, /*size=*/vecBytes,
         /*offset=*/0, /*aux=*/cacheModifiers, /*alias_scopes=*/nullptr,
         /*noalias_scopes=*/nullptr, /*tbaa=*/nullptr);
     if (targetInfo.requiresAliasInfoForAsyncOps())
@@ -2164,18 +2164,18 @@ struct TDMGlobalPrefetchConversion
             rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
         Block *prefetchBlock = rewriter.createBlock(afterPrefetch);
         rewriter.setInsertionPointToEnd(currentBlock);
-        rewriter.create<LLVM::CondBrOp>(loc, cond, prefetchBlock,
-                                        afterPrefetch);
+        LLVM::CondBrOp::create(rewriter, loc, cond, prefetchBlock,
+                               afterPrefetch);
         rewriter.setInsertionPointToStart(prefetchBlock);
         Type elemPtrTy1 = ptr_ty(rewriter.getContext(), 1);
         auto addr = b.gep(elemPtrTy1, i8_ty, basePtr, linearOffset);
-        Value scope = rewriter.create<LLVM::ConstantOp>(
-            op.getLoc(), IntegerType::get(op.getContext(), 32),
+        Value scope = LLVM::ConstantOp::create(
+            rewriter, op.getLoc(), IntegerType::get(op.getContext(), 32),
             rewriter.getI32IntegerAttr(8));
         auto p = LLVM::createLLVMIntrinsicCallOp(
             rewriter, loc, "llvm.amdgcn.global.prefetch", {}, {addr, scope});
 
-        rewriter.create<LLVM::BrOp>(loc, afterPrefetch);
+        LLVM::BrOp::create(rewriter, loc, afterPrefetch);
         rewriter.setInsertionPointToStart(afterPrefetch);
       }
     }

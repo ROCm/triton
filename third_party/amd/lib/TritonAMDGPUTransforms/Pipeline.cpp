@@ -35,14 +35,14 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
   } else if (auto copyOp =
                  dyn_cast<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op)) {
     rewriter.setInsertionPoint(copyOp);
-    Value mask = rewriter.create<arith::AndIOp>(copyOp->getLoc(),
-                                                copyOp.getPred(), pred);
+    Value mask = arith::AndIOp::create(rewriter, copyOp->getLoc(),
+                                       copyOp.getPred(), pred);
     copyOp.getPredMutable().assign(mask);
     return op;
   } else if (auto copyOp = dyn_cast<triton::amdgpu::GlobalTDMPrefetchOp>(op)) {
     rewriter.setInsertionPoint(copyOp);
-    Value mask = rewriter.create<arith::AndIOp>(copyOp->getLoc(),
-                                                copyOp.getPred(), pred);
+    Value mask = arith::AndIOp::create(rewriter, copyOp->getLoc(),
+                                       copyOp.getPred(), pred);
     copyOp.getPredMutable().assign(mask);
     return op;
   } else if (auto waitOp = dyn_cast<triton::amdgpu::AsyncTDMWait>(op)) {

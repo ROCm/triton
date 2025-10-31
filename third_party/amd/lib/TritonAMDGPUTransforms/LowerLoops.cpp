@@ -54,7 +54,7 @@ TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
   OpBuilder builder(loadOp);
   Location loc = loadOp.getLoc();
 
-  Value pred = builder.create<arith::ConstantIntOp>(loc, 1, 1);
+  Value pred = arith::ConstantIntOp::create(builder, loc, 1, 1);
 
   // Extract local subview from shared allocation
   auto viewLoad = triton::createSingleBufferView(builder, alloc, extractIdx)
@@ -62,16 +62,16 @@ TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
 
   triton::amdgpu::GlobalTDMPrefetchOp prefetchOp;
   if (globalPrefetch > 0)
-    prefetchOp = builder.create<triton::amdgpu::GlobalTDMPrefetchOp>(
-        loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
+    prefetchOp = triton::amdgpu::GlobalTDMPrefetchOp::create(
+        builder, loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
 
-  auto copyOp = builder.create<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(
-      loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
+  auto copyOp = triton::amdgpu::AsyncTDMCopyGlobalToLocalOp::create(
+      builder, loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
 
   auto commitOp =
-      builder.create<ttg::AsyncCommitGroupOp>(loc, copyOp->getResult(0));
-  auto waitOp = builder.create<triton::amdgpu::AsyncTDMWait>(
-      loc, commitOp->getResult(0), 0);
+      ttg::AsyncCommitGroupOp::create(builder, loc, copyOp->getResult(0));
+  auto waitOp = triton::amdgpu::AsyncTDMWait::create(builder, loc,
+                                                     commitOp->getResult(0), 0);
 
   auto maybeSharedLoad = tt::replaceUsesWithLocalLoad(
       builder, loadOp->getResult(0), viewLoad, waitOp);
