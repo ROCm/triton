@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 # This script is meant to be used by the CI bots so paths in the below
 # are quite specific to the docker and file organizations within.
@@ -48,8 +48,8 @@ pytest --count=1 -n 16 third_party/amd/python/examples/gluon/*
 
 echo "=== Run E2E Upstream Tests ==="
 
-#pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
-#pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_upcast
+pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_upcast
 # pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
 
 echo "=== Run Triton GEMM/Attention Tests ==="

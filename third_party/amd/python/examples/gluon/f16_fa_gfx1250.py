@@ -5,8 +5,8 @@ This file implements a BSHD Flash Attention and tests against torch reference.
 # ruff: noqa: E402
 import hip
 
-hip.hip.hipInit(0)
 # Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import torch
 from triton.experimental import gluon

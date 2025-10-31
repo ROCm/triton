@@ -38,11 +38,11 @@ jobs:
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
-            -v /data/ci/actions-runner/_work/triton:/code \
+            -v /data/ci/actions-runner/_work/triton/triton:/code \
             -v /data/ci/llvm/9f0b4533-debug:/llvm \
             -v /data/ci/ffm/rocm-ffmlite-mi450-f1d5d1bf-rel-20251023:/ffm \
             -v /data/ci/triton-cache:/home/mirror/.triton \
             -v /data/ci/ccache:/home/mirror/.ccache \
-            -w /code/triton \
+            -w /code \
             --entrypoint bash \
-            ci/gfx1250-env -lc "./.github/workflows/gfx1250.sh"
+            ci/gfx1250-env -lc "/code/.github/workflows/gfx1250.sh"

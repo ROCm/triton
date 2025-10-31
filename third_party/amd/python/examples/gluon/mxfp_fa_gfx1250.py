@@ -4,8 +4,8 @@ Multi-head attention kernel with MXFP data type in Gluon
 # ruff: noqa: E402
 import hip
 
-hip.hip.hipInit(0)
 # Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import re
 import pytest

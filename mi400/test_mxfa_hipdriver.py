@@ -6,10 +6,11 @@
 #   - aiter/test_mha_common.py
 
 import os
+# ruff: noqa: E402
+import hip
 
-if 'FFM_PATH' in os.environ:
-    import hip
-    hip.hip.hipInit(0)
+# Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import pytest
 import torch
