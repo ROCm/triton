@@ -22,7 +22,7 @@ concurrency:
 jobs:
   gfx1250:
     name: gfx1250
-    runs-on: ['self-hosted', 'rdna']
+    runs-on: ['self-hosted', 'ffm']
 
     steps:
       - name: Checkout
