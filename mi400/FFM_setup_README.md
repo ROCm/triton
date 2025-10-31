@@ -518,7 +518,7 @@ export PATH=$(realpath ./rocplay/rocplaycap-src-4.*/bin):${PATH}
 
 Test your rocplay installation using the `Toy Problem` (see above).
 
-```bash 
+```bash
 export HSA_KMT_MODEL_GPUVM_BASE=0x200000000 # NEEDED! do not forget.
 export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
 ```

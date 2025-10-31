@@ -374,5 +374,3 @@ http://logviewer-atl.amd.com/proj/mi450_runs/djavady_triton/testing_fb_base_quic
 - Use ROCcap 4.5.1 or later for bug fixes
 - Monitor your jobs through the log viewer
 - ETX machines are for scheduling only - actual simulations run on server farm nodes
-
-
