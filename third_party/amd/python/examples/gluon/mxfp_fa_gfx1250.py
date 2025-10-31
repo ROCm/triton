@@ -50,7 +50,7 @@ def _get_operand_reg_layout(operand, packed):
 
 
 @gluon.constexpr_function
-def _get_scale_reg_layout(operand, nonk, k, order):
+def _get_scale_reg_layout(operand, nonk, k):
     assert nonk in [64, 128] and k in [2, 4]
 
     # tile layout for warps_per_cta=[4, 1]
@@ -73,11 +73,6 @@ def _get_scale_reg_layout(operand, nonk, k, order):
 
     shape = [nonk, k]
 
-    # consider order
-    reg = [[b[order[1]], b[order[0]]] for b in reg]
-    warp = [[b[order[1]], b[order[0]]] for b in warp]
-    lane = [[b[order[1]], b[order[0]]] for b in lane]
-    shape = [shape[order[1]], shape[order[0]]]
     return ttgl.DistributedLinearLayout(reg, lane, warp, [], shape)
 
 
@@ -172,22 +167,22 @@ class AttentionConfig:
 
         # layouts
         self.q_layout = ttgl.constexpr(_get_operand_reg_layout(0, packed=False))
-        self.q_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, HEAD_SZ // 32, [1, 0]))
+        self.q_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, HEAD_SZ // 32))
 
         self.k_smem_layout = ttgl.constexpr(_get_operand_smem_layout(HEAD_SZ // KV_PACK_DIV, BLOCK_N))
         self.k_layout = ttgl.constexpr(_get_operand_reg_layout(1, packed=(KV_TYPE == 'e2m1')))
         self.k_scale_load_layout = ttgl.constexpr(_get_scale_load_layout(HEAD_SZ // 32, BLOCK_N))
         self.k_scale_smem_layout = ttgl.constexpr(_get_scale_smem_layout())
-        self.k_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, BLOCK_N, HEAD_SZ // 32, [0, 1]))
+        self.k_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, BLOCK_N, HEAD_SZ // 32))
 
         self.p_layout = ttgl.constexpr(_get_operand_reg_layout(0, packed=False))
-        self.p_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, BLOCK_N // 32, [1, 0]))
+        self.p_scale_layout = ttgl.constexpr(_get_scale_reg_layout(0, BLOCK_M, BLOCK_N // 32))
 
         self.v_smem_layout = ttgl.constexpr(_get_operand_smem_layout(BLOCK_N // KV_PACK_DIV, HEAD_SZ))
         self.v_layout = ttgl.constexpr(_get_operand_reg_layout(1, packed=(KV_TYPE == 'e2m1')))
         self.v_scale_load_layout = ttgl.constexpr(_get_scale_load_layout(BLOCK_N // 32, HEAD_SZ))
         self.v_scale_smem_layout = ttgl.constexpr(_get_scale_smem_layout())
-        self.v_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, HEAD_SZ, BLOCK_N // 32, [0, 1]))
+        self.v_scale_layout = ttgl.constexpr(_get_scale_reg_layout(1, HEAD_SZ, BLOCK_N // 32))
 
         self.acc_layout = ttgl.constexpr(_get_acc_layout())
 
@@ -420,7 +415,7 @@ class AttentionProgram:
 
         self._async_wait(wait_count)
         k = k_buffer.load(cfg.k_layout)
-        k_scale = k_scale_buffer.load(cfg.k_scale_layout)
+        k_scale = k_scale_buffer.permute([1, 0]).load(cfg.k_scale_layout)
         return k, k_scale
 
     @gluon.jit
@@ -433,7 +428,7 @@ class AttentionProgram:
 
         self._async_wait(wait_count)
         v = v_buffer.load(cfg.v_layout)
-        v_scale = v_scale_buffer.load(cfg.v_scale_layout)
+        v_scale = v_scale_buffer.permute([1, 0]).load(cfg.v_scale_layout)
         return v, v_scale
 
     @gluon.jit
@@ -691,6 +686,7 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     q = q.permute(0, 2, 1, 3).contiguous()
     k = k.permute(0, 2, 3, 1).contiguous()
     v = v.permute(0, 2, 1, 3).contiguous()
+    # NOTE: We transposed the last 2 dims of k_scale and v_scale for contiguous elements in async copy.
     # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
     # k_scale: [BATCH, NUM_K_HEADS, HEAD_SZ / 32, SEQLEN_K]
     # v_scale: [BATCH, NUM_K_HEADS, SEQLEN_K / 32, HEAD_SZ]
