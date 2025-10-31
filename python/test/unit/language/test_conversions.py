@@ -368,9 +368,8 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
     for i in range(256):
         downcast_test(getattr(tl, src_dtype), getattr(tl, dst_dtype), rounding, *stuff, max_repr, i, device=device)
 
-#TODO(GFX12, FFM): Enable `nan``
 @pytest.mark.parametrize("mode", [
-    'max', 'min', 'inf', '-inf', #`nan`
+    'max', 'min', 'inf', '-inf', 'nan'
 ])
 @pytest.mark.parametrize("dst_dtype", ["float8e4nv", "float8e5"])
 @pytest.mark.parametrize("src_dtype", ["float32", "float16", "bfloat16"])
@@ -425,8 +424,8 @@ def test_typeconvert_downcast_clamping(src_dtype, dst_dtype, mode, device, round
         BLOCK_SIZE
     )
 
+    dst = dst.to(device='cpu')
     if mode == 'nan':
         assert(torch.all(torch.isnan(dst)))
     else:
-        dst = dst.to(device='cpu')
         torch.testing.assert_close(dst, torch.full_like(dst, expected_result))
