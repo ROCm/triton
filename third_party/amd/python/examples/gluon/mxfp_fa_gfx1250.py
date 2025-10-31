@@ -555,7 +555,7 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
 
     # init program
     P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
-    P_SCALING: ttgl.constexpr = False
+    P_SCALING: ttgl.constexpr = True
     cfg = AttentionConfig(  #
         Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
     pgm = AttentionProgram.initialize(  #

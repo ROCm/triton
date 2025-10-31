@@ -44,7 +44,10 @@ pytest --count=1 -n 16 python/test/gluon/test_frontend.py
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/*
+pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 
 echo "=== Run E2E Upstream Tests ==="
 
