@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 # This script is meant to be used by the CI bots so paths in the below
 # are quite specific to the docker and file organizations within.
@@ -10,23 +10,13 @@ set -xeo pipefail
 pwd && ls
 
 echo "=== Clean up cache ==="
+
 rm -rf ~/.triton/cache
 
 echo "=== Setup Environment ==="
 
-export FFM_PATH=/data/mi450-git
-export FFM_BIN_PATH=$FFM_PATH/_builds/Release/bin
-export HSA_MODEL_LIB=$FFM_PATH/_builds/Release/lib/libhsakmtmodel.so
-export HSA_ENABLE_SDMA=0
-export HSA_ENABLE_INTERRUPT=0
-export HSA_MODEL_TOPOLOGY=$FFM_PATH/topology
+cd /ffm && source ffmlite_env.sh && cd -
 export HSA_MODEL_NUM_THREADS=1
-export ROCM_PATH=/opt/rocm
-export TARGET_ARCH=gfx1250
-export LD_LIBRARY_PATH=$ROCM_PATH/lib
-
-pip uninstall -y triton pytorch-triton pytorch-triton-rocm
-pip install pytest-repeat
 
 echo "=== Build and Install Triton ==="
 
@@ -35,8 +25,11 @@ export TRITON_BUILD_WITH_CLANG_LLD="TRUE"
 export TRITON_BUILD_WITH_CCACHE="TRUE"
 export CCACHE_COMPRESS="true"
 
-LLVM_LIBRARY_DIR=/data/build/amd-mlir-9f0b4533535f-debug-install LLVM_SYSPATH=/data/build/amd-mlir-9f0b4533535f-debug-install \
-    pip3 install --no-build-isolation .
+LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
+
+echo "=== Sanity Check ==="
+
+python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
 
 echo "=== Run Lit Tests ==="
 

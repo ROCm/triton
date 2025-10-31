@@ -1,8 +1,8 @@
 # ruff: noqa: E402
 import hip
 
-hip.hip.hipInit(0)
 # Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import torch
 import pytest

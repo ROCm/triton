@@ -1,10 +1,9 @@
 # fmt: off
+# ruff: noqa: E402
+import hip
 
-import os
-
-if 'FFM_PATH' in os.environ:
-    import hip
-    hip.hip.hipInit(0)
+# Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 
 import numpy as np

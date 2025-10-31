@@ -4,8 +4,8 @@ Multi-head attention kernel with MXFP data type in Gluon
 # ruff: noqa: E402
 import hip
 
-hip.hip.hipInit(0)
 # Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import re
 import pytest
@@ -555,7 +555,7 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
 
     # init program
     P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
-    P_SCALING: ttgl.constexpr = True
+    P_SCALING: ttgl.constexpr = False
     cfg = AttentionConfig(  #
         Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2)
     pgm = AttentionProgram.initialize(  #
@@ -800,6 +800,24 @@ def get_variants():
     return variants
 
 
+def static_check(kernel):
+    amdgcn = kernel.asm['amdgcn']
+
+    # check use correct wmma scaled instruction
+    wmma_instrs = re.search(r'v_wmma_[^ ]+', amdgcn)
+    for instr in wmma_instrs.groups():
+        assert instr == 'v_wmma_scale_f32_16x16x128_f8f6f4'
+
+    # check there is no convert layout for P via shared memory
+    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
+    assert len(ds_store_instrs) == 0
+
+    # check always use transposed load of K and V from shared memory
+    ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
+    for instr in ds_load_instrs:
+        assert instr == 'ds_load_tr8_b64'
+
+
 @pytest.mark.parametrize("q_type,kv_type", get_variants())
 @pytest.mark.parametrize("batch", [1])
 @pytest.mark.parametrize("seqlen_q", [256])
@@ -818,13 +836,16 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
     k_scale, k_scale_ref = _create_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
     v_scale, v_scale_ref = _create_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
 
-    o, _ = attn_fwd(q, k, v, q_scale, k_scale, v_scale, q_type, kv_type, block_m, block_n, pipelined)
+    o, kernel = attn_fwd(q, k, v, q_scale, k_scale, v_scale, q_type, kv_type, block_m, block_n, pipelined)
     o = o.to(torch.float32)
 
     o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
-    # Workaround for a small number of mismatches
+    # Check compiled kernel code
+    static_check(kernel)
+
+    # Check output correctness
     matches = torch.isclose(o, o_ref, atol=0.1, rtol=0.1)
     total = o.numel()
     mismatches = total - matches.sum().item()

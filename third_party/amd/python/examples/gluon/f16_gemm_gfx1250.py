@@ -1,10 +1,8 @@
 # ruff: noqa: E402
-import os
+import hip
 
-if 'FFM_PATH' in os.environ:
-    # Needed for internal dev flow for now; will remove later
-    import hip
-    hip.hip.hipInit(0)
+# Needed for internal dev flow for now; will remove later
+hip.hip.hipInit(0)
 
 import pytest
 import torch
