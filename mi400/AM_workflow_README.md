@@ -88,6 +88,16 @@ To enable GUMMI (for more accurate memory modeling), add these parameters to the
 - `--compass-config`
 - `--compass-arg`
 
+USE THIS GROUPFILE FOR GUMMI RUNS!
+
+group mi400am_1CP_1xcc_UMC_Loopback_cpfw --model=tb_am_rs64_fw --test-args "-use_kmd=1 -tc_BindAqlProcess=1 -fb_base=0x30000000000 -tc_EnableHIQ=0 -tc_LoadMesUCode=1" --pm4p2-args-end="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k gfx11_pktplay_base_settings monitors.counters.perf.en_level=2 monitors.counters.perf.dump_freq=1000 test.force_flush_end_of_cb=true model.gpu.compute_only_model=true monitors.counters.perf.config_file=$ANCHOR_gfxperf/build/rhel7/perfmon/mi400_perfmon.yml monitors.counters.perf.config_file2=$STEM/gc/src/am/config/counters/mi400_miperf.yml model.gpu.sh.sa.tex.tcp.tcp_clause_enable=clause model.enable_multipipe=true make_mi400_xcd_ml_B0 make_mi400_1XCC_umc_const_delay_rd_320_wr_64_capped_hbm4_2p5kw_bw"
+group mi400am_1CP_1xcc_COMPASS_cpfw --model=tb_am_rs64_fw --test-args "-use_kmd=1 -tc_BindAqlProcess=1 -fb_base=0x30000000000 -tc_EnableHIQ=0 -tc_LoadMesUCode=1" --compass  --compass-arg="wallclockdevice-0/progressStatsPs=100000" --compass-arg="outputTimeseriesFile=True" --compass-arg=".*/dfPoolSize=131072"   --compass-arg="generic_sdptrace_replay_device.*/trafficTurnedOff=True"  --compass-arg="abstractsdma.*/trafficTurnedOff=True" --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/am-mi450.cfg  --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/MI450_B0_2p5KW_overrides.cfg --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/MI450_B0_2p5KW_overrides_bw_bound.cfg --pm4p2-args-end="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k_gummi gfx11_pktplay_base_settings monitors.counters.perf.en_level=2 monitors.counters.perf.dump_freq=1000 test.force_flush_end_of_cb=true model.gpu.compute_only_model=true monitors.counters.perf.config_file=$ANCHOR_gfxperf/build/rhel7/perfmon/mi400_perfmon.yml monitors.counters.perf.config_file2=$STEM/gc/src/am/config/counters/mi400_miperf.yml model.gpu.sh.sa.tex.tcp.tcp_clause_enable=clause model.enable_multipipe=true make_mi400_xcd_ml_B0"
+    group gclk1p7_gl2clk1p7 --pm4p2-args-end="make_mi450_gclk1p7_gl2clk1p7"
+        group mtype_RW --pm4p2-args="model.gpu.sh.sa.tex.tcp.mtype_info=RW"
+            roc_capture_fp6_256x256x256_TT__pipelined_with_cluster_dispatch_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
+            roc_capture_fp6_256x256x256_TT__pipelined_with_non_cluster_dispatch_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
+            <YOUR_TESTNAME_IN_AQLPLAY.TXT>_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
+
 ### Creating Your GROUPFILE
 
 1. Navigate to the test plan directory:
@@ -364,3 +374,5 @@ http://logviewer-atl.amd.com/proj/mi450_runs/djavady_triton/testing_fb_base_quic
 - Use ROCcap 4.5.1 or later for bug fixes
 - Monitor your jobs through the log viewer
 - ETX machines are for scheduling only - actual simulations run on server farm nodes
+
+
