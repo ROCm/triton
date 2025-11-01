@@ -576,6 +576,18 @@ bool TargetInfo::supportVectorizedAtomics() const {
   return true;
 }
 
+bool TargetInfo::supportsDirectToLDSScattering() const {
+  switch (getISAFamily()) {
+  case ISAFamily::CDNA3:
+  case ISAFamily::CDNA4:
+    return false;
+  default:
+    llvm::report_fatal_error(
+        "Unsupported architecture for direct to lds loads");
+    return false;
+  }
+}
+
 bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {
   switch (getISAFamily()) {
   case ISAFamily::CDNA1:
