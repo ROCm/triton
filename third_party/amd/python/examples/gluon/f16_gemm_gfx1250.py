@@ -202,16 +202,16 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 
 
 @gluon.jit
-def persistent_gemm_tdm_pipelined_with_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
-                                                       M, N, K,  #
-                                                       stride_am, stride_ak,  #
-                                                       stride_bk, stride_bn,  #
-                                                       stride_cm, stride_cn,  #
-                                                       BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                                                       BLOCK_K: ttgl.constexpr,  #
-                                                       NUM_BUFFERS: ttgl.constexpr,  #
-                                                       TRANSPOSE_B: ttgl.constexpr,  #
-                                                       NUM_WARPS: ttgl.constexpr):
+def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
+                                                      M, N, K,  #
+                                                      stride_am, stride_ak,  #
+                                                      stride_bk, stride_bn,  #
+                                                      stride_cm, stride_cn,  #
+                                                      BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                                                      BLOCK_K: ttgl.constexpr,  #
+                                                      NUM_BUFFERS: ttgl.constexpr,  #
+                                                      TRANSPOSE_B: ttgl.constexpr,  #
+                                                      NUM_WARPS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -332,16 +332,16 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 
 
 @gluon.jit
-def gemm_tdm_pipelined_single_warp_schedule_kernel(a_ptr, b_ptr, c_ptr,  #
-                                                   M, N, K,  #
-                                                   stride_am, stride_ak,  #
-                                                   stride_bk, stride_bn,  #
-                                                   stride_cm, stride_cn,  #
-                                                   BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                                                   BLOCK_K: ttgl.constexpr,  #
-                                                   NUM_BUFFERS: ttgl.constexpr,  #
-                                                   TRANSPOSE_B: ttgl.constexpr,  #
-                                                   NUM_WARPS: ttgl.constexpr):
+def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,  #
+                                                            M, N, K,  #
+                                                            stride_am, stride_ak,  #
+                                                            stride_bk, stride_bn,  #
+                                                            stride_cm, stride_cn,  #
+                                                            BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                                                            BLOCK_K: ttgl.constexpr,  #
+                                                            NUM_BUFFERS: ttgl.constexpr,  #
+                                                            TRANSPOSE_B: ttgl.constexpr,  #
+                                                            NUM_WARPS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -469,7 +469,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
         num_sms = 8
         grid = (min(num_sms, triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), 1)
         if PREFETCH:
-            persistent_gemm_tdm_pipelined_with_prefetch_kernel[grid](
+            persistent_gemm_tdm_pipelined_lds_prefetch_kernel[grid](
                 a_device, b_device, c_device,  #
                 M, N, K,  #
                 stride_am, stride_ak,  #
@@ -498,7 +498,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
 @pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
 @pytest.mark.parametrize("TRANSPOSE_B", [False, True])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
-def test_runtime_gemm_tdm_pipelined_single_warp_schedule(BLOCK_M, BLOCK_N, NUM_BUFFERS, TRANSPOSE_B, M, N, K):
+def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK_N, NUM_BUFFERS, TRANSPOSE_B, M, N, K):
     num_warps = 4
     BLOCK_K = 128  # 4 subtiles * 32 (wmma kdim)
 
@@ -519,7 +519,7 @@ def test_runtime_gemm_tdm_pipelined_single_warp_schedule(BLOCK_M, BLOCK_N, NUM_B
     c_device = c.cuda()
 
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    gemm_tdm_pipelined_single_warp_schedule_kernel[grid](
+    gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel[grid](
         a_device, b_device, c_device,  #
         M, N, K,  #
         stride_am, stride_ak,  #
@@ -536,18 +536,24 @@ def test_runtime_gemm_tdm_pipelined_single_warp_schedule(BLOCK_M, BLOCK_N, NUM_B
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-warps", type=int, choices=[4, 8], required=True, help='num warps')
+    parser.add_argument("-M", type=int, default=256, help='problem M size')
+    parser.add_argument("-N", type=int, default=256, help='problem N size')
+    parser.add_argument("-K", type=int, default=1024, help='problem K size')
+    parser.add_argument("--num-warps", type=int, choices=[4, 8], default=4, help='num warps')
+    parser.add_argument("--num-buffers", type=int, choices=[1, 2, 4], default=2, help='num shared memory buffers')
+    parser.add_argument("--persistent", action="store_true", help="Use persistent variant")
+    parser.add_argument("--prefetch-lds", action="store_true", help="Enable prefetch LDS")
     args = parser.parse_args()
 
-    M, N, K = 256, 256, 1024
+    M, N, K = args.M, args.N, args.K
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
-    NUM_BUFFERS = 2
+    NUM_BUFFERS = args.num_buffers
     NUM_WARPS = args.num_warps
     TRANSPOSE_B = True
-    PERSISTENT = True
-    PREFETCH = False
+    PERSISTENT = args.persistent
+    PREFETCH = args.prefetch_lds
     print(
-        f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {NUM_BUFFERS=}, {TRANSPOSE_B=}, {PERSISTENT=}, {PREFETCH=}, {NUM_WARPS=}"
+        f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"
     )
     test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, M, N, K,
                                     NUM_WARPS)
