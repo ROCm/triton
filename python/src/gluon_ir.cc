@@ -895,7 +895,7 @@ void init_gluon_ir(py::module &&m) {
         });
 
   m.def("get_amd_wmma_scale_layout",
-        [](unsigned opIdx, std::vector<int64_t> &shape, unsigned mfmaMDim,
+        [](unsigned opIdx, std::vector<int64_t> &shape, unsigned wmmaMDim,
            std::vector<unsigned> &tilesPerWarp,
            std::vector<unsigned> &warpsPerCTA) -> py::object {
           DialectRegistry registry;
@@ -906,7 +906,7 @@ void init_gluon_ir(py::module &&m) {
           ctx.loadAllAvailableDialects();
 
           auto ll = ttg::chooseScaledWmmaScaleLayout(
-              &ctx, opIdx, shape, mfmaMDim, tilesPerWarp, warpsPerCTA);
+              &ctx, opIdx, shape, wmmaMDim, tilesPerWarp, warpsPerCTA);
           auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
           return layoutToGluon(attr);
         });

@@ -1320,7 +1320,7 @@ def scaled_wmma_scale_preshuffle(a_base, stride_am, stride_ak, a_scale, b_base, 
     SCALE_KWIDTH: ttgl.constexpr = 4 if SCALE_BLOCK_K >= 4 else SCALE_BLOCK_K
 
     tiles_per_warp: ttgl.constexpr = [2, 2]
-    NON_K_PRESHUFFLE_BLOCK_SIZE: ttgl.constexpr = 128
+    NON_K_PRESHUFFLE_BLOCK_SIZE: ttgl.constexpr = 64
 
     scale_blocked_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 1], [8, 4], [4, 1], [1, 0])
     a_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 16], [8, 4], [4, 1], [1, 0])
@@ -1370,9 +1370,9 @@ def scaled_wmma_scale_preshuffle(a_base, stride_am, stride_ak, a_scale, b_base, 
     b_scale_offsets = offs_scale_bn[:, None] * stride_scale + offs_scale_bk[None, :]
     scale_b = ttgl.load(b_scale + b_scale_offsets)
 
-    scale_a = scale_a.reshape(BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE, SCALE_BLOCK_K // SCALE_KWIDTH, 32, 4,
+    scale_a = scale_a.reshape(BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE, SCALE_BLOCK_K // SCALE_KWIDTH, 16, 4,
                               SCALE_KWIDTH).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, SCALE_BLOCK_K)
-    scale_b = scale_b.reshape(BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE, SCALE_BLOCK_K // SCALE_KWIDTH, 32, 4,
+    scale_b = scale_b.reshape(BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE, SCALE_BLOCK_K // SCALE_KWIDTH, 16, 4,
                               SCALE_KWIDTH).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, SCALE_BLOCK_K)
     scale_a = ttgl.convert_layout(scale_a, a_scale_linear_layout)
     scale_b = ttgl.convert_layout(scale_b, b_scale_linear_layout)
@@ -1418,21 +1418,22 @@ def test_compile_wmma_scale_preshuffle(M, N, K, type_a, type_b, TRANSPOSED_WMMA)
 
 
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
-@pytest.mark.parametrize("M, N, K", [(128, 128, 64), (128, 128, 128), (256, 256, 256)])
+@pytest.mark.parametrize("M, N, K", [(64, 64, 64), (128, 128, 128), (256, 256, 256)])
 @pytest.mark.parametrize("type_a", ["e5m2", "e2m1", "e4m3"])
 @pytest.mark.parametrize("type_b", ["e5m2", "e2m1", "e4m3"])
 @pytest.mark.parametrize("TRANSPOSED_WMMA", [True, False])
 def test_runtime_wmma_scale_preshuffle(M, N, K, type_a, type_b, TRANSPOSED_WMMA):
 
     def pack_scale(x):
+        PRESHUFFLE_FACTOR = 64
         NON_K, K_SCALE = x.shape
-        num_chunk_m = NON_K // 128
+        num_chunk_m = NON_K // PRESHUFFLE_FACTOR
         SCALE_KWIDTH = 4 if K_SCALE >= 4 else K_SCALE
         num_chunk_k = K_SCALE // SCALE_KWIDTH
 
-        x = x.view(num_chunk_m, 4, 32, num_chunk_k, SCALE_KWIDTH)
+        x = x.view(num_chunk_m, 4, 16, num_chunk_k, SCALE_KWIDTH)
         x = x.permute(0, 3, 2, 1, 4).contiguous()
-        return x.view(NON_K // 128, K_SCALE * 128)
+        return x.view(NON_K // PRESHUFFLE_FACTOR, K_SCALE * PRESHUFFLE_FACTOR)
 
     torch.manual_seed(0)
 
