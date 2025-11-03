@@ -7,10 +7,10 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
+import argparse
 import re
 import pytest
 import torch
-
 import math
 from einops import repeat
 
@@ -610,12 +610,12 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
                     HEAD_SZ: ttgl.constexpr,  #
                     BLOCK_M: ttgl.constexpr,  #
                     BLOCK_N: ttgl.constexpr,  #
-                    SCALE_PRESHUFFLED: ttgl.constexpr):
+                    SCALE_PRESHUFFLED: ttgl.constexpr,  #
+                    P_SCALING: ttgl.constexpr):
     end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
 
     # init program
     P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
-    P_SCALING: ttgl.constexpr = True
     cfg = AttentionConfig(  #
         Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2,
         SCALE_PRESHUFFLED)
@@ -655,12 +655,12 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
                               HEAD_SZ: ttgl.constexpr,  #
                               BLOCK_M: ttgl.constexpr,  #
                               BLOCK_N: ttgl.constexpr,  #
-                              SCALE_PRESHUFFLED: ttgl.constexpr):
+                              SCALE_PRESHUFFLED: ttgl.constexpr,  #
+                              P_SCALING: ttgl.constexpr):
     end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
 
     # init program
     P_TYPE: ttgl.constexpr = Q_TYPE  # always assume P_TYPE == Q_TYPE
-    P_SCALING: ttgl.constexpr = True
     cfg = AttentionConfig(  #
         Q_TYPE, P_TYPE, P_SCALING, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, 2,
         SCALE_PRESHUFFLED)
@@ -780,8 +780,8 @@ def _preshuffle_scale(x):
 
 def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
              q_scale: torch.Tensor, k_scale: torch.Tensor, v_scale: torch.Tensor,  #
-             q_type: str, kv_type: str, BLOCK_M: int, BLOCK_N: int, pipelined: bool = False,  #
-             SCALE_PRESHUFFLED: bool = False):
+             q_type: str, kv_type: str, block_m: int, block_n: int, pipelined: bool = True,  #
+             scale_preshuffled: bool = True, p_scaling: bool = False):
     batch, seqlen_q, num_q_heads, head_sz = q.shape
     _, seqlen_k, num_k_heads, _ = k.shape
     sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
@@ -794,7 +794,7 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     v = v.permute(0, 2, 1, 3).contiguous()
     # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
     q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
-    if SCALE_PRESHUFFLED:
+    if scale_preshuffled:
         # k_scale: [BATCH, NUM_K_HEADS, SEQLEN_K / 64, HEAD_SZ * 2]
         # v_scale: [BATCH, NUM_K_HEADS, HEAD_SZ / 64, SEQLEN_K * 2]
         k_scale = _preshuffle_scale(k_scale.permute(0, 2, 1, 3).contiguous())
@@ -817,15 +817,15 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     o = o.cuda()
 
     # Use (NUM_Q_HEADS, NUM_BLOCKS, BATCH) for better xcd locality
-    grid = (num_q_heads, cdiv(seqlen_q, BLOCK_M), batch)
+    grid = (num_q_heads, cdiv(seqlen_q, block_m), batch)
     kargs = [
         q, k, v, q_scale, k_scale, v_scale, o, sm_scale,  #
-        q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, BLOCK_M, BLOCK_N,  #
-        SCALE_PRESHUFFLED
+        q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n, scale_preshuffled,
+        p_scaling
     ]
     if pipelined:
-        assert cdiv(seqlen_k, BLOCK_N) > 4
-        assert cdiv(seqlen_k, BLOCK_N) % 2 == 0
+        assert cdiv(seqlen_k, block_n) > 4
+        assert cdiv(seqlen_k, block_n) % 2 == 0
         kernel = attn_fwd_pipelined_kernel[grid](*kargs, num_warps=4)
     else:
         kernel = attn_fwd_kernel[grid](*kargs, num_warps=4)
@@ -938,9 +938,9 @@ def static_check(kernel, scale_preshuffled):
 @pytest.mark.parametrize("block_m", [128])
 @pytest.mark.parametrize("block_n", [128])
 @pytest.mark.parametrize("pipelined", [False, True])
-@pytest.mark.parametrize("SCALE_PRESHUFFLED", [False, True])
+@pytest.mark.parametrize("scale_preshuffled", [False, True])
 def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
-                  pipelined, SCALE_PRESHUFFLED):
+                  pipelined, scale_preshuffled):
     q, q_ref = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
     k, k_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
     v, v_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
@@ -949,14 +949,14 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
     v_scale, v_scale_ref = _create_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
 
     o, kernel = attn_fwd(q, k, v, q_scale, k_scale, v_scale, q_type, kv_type, block_m, block_n, pipelined,
-                         SCALE_PRESHUFFLED)
+                         scale_preshuffled)
     o = o.to(torch.float32)
 
     o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
     # Check compiled kernel code
-    static_check(kernel, SCALE_PRESHUFFLED)
+    static_check(kernel, scale_preshuffled)
 
     # Check output correctness
     matches = torch.isclose(o, o_ref, atol=0.1, rtol=0.1)
@@ -967,17 +967,6 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
 
 
 if __name__ == "__main__":
-    configs = [  #
-        {
-            "q_type": q_type, "kv_type": kv_type, "batch": 1, "seqlen_q": 256, "seqlen_k": 1024, "num_q_heads":
-            num_q_heads, "num_k_heads": num_k_heads, "head_sz": head_sz, "block_m": 128, "block_n": 128, "pipelined":
-            pipelined, "scale_preshuffled": True
-        }
-        for q_type, kv_type in get_variants()
-        for head_sz in [64, 128]
-        for pipelined in [False, True]
-        for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]
-    ]
 
     def launch(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
                pipelined, scale_preshuffled):
@@ -1001,6 +990,19 @@ if __name__ == "__main__":
               f"- vgpr_count: {vgpr_count}\n"
               f"- vgpr_spill_count: {vgpr_spill_count}\n")
 
-    for config in configs:
-        print(f"Config: {config}")
-        launch(**config)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--q_type", type=str, choices=['e4m3', 'e5m2'], required=True)
+    parser.add_argument("--kv_type", type=str, choices=['e4m3', 'e5m2', 'e2m1'], required=True)
+    parser.add_argument("--batch", type=int, required=True)
+    parser.add_argument("--seqlen_q", type=int, required=True)
+    parser.add_argument("--seqlen_k", type=int, required=True)
+    parser.add_argument("--num_q_heads", type=int, default=16)
+    parser.add_argument("--num_k_heads", type=int, default=16)
+    parser.add_argument("--head_sz", type=int, default=128)
+    parser.add_argument("--block_m", type=int, default=128)
+    parser.add_argument("--block_n", type=int, default=128)
+    parser.add_argument("--pipelined", action="store_true", default=True)
+    parser.add_argument("--scale_preshuffled", action="store_true", default=True)
+    args = parser.parse_args()
+    args = vars(args)
+    launch(**args)
