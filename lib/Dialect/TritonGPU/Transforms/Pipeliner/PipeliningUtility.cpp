@@ -175,7 +175,8 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     return op;
   if (isConstantIntValue(pred, 1))
     return op;
-  if (isa<LLVM::AssumeOp, ttng::FenceAsyncSharedOp>(op))
+  if (isa<triton::AssertOp, LLVM::AssumeOp, ttng::FenceAsyncSharedOp>(op))
+    // if (isa<LLVM::AssumeOp, ttng::FenceAsyncSharedOp>(op))
     return op;
   if (isa<ttg::AsyncCommitGroupOp, ttg::AsyncWaitOp>(op))
     return op;
