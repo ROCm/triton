@@ -11,7 +11,6 @@ import triton
 from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
-import argparse
 
 
 @aggregate
@@ -535,6 +534,8 @@ def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK
 
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("-M", type=int, default=256, help='problem M size')
     parser.add_argument("-N", type=int, default=256, help='problem N size')
@@ -543,7 +544,13 @@ if __name__ == "__main__":
     parser.add_argument("--num-buffers", type=int, choices=[1, 2, 4], default=2, help='num shared memory buffers')
     parser.add_argument("--persistent", action="store_true", help="Use persistent variant")
     parser.add_argument("--prefetch-lds", action="store_true", help="Enable prefetch LDS")
+    parser.add_argument("--single-warp-schedule", action="store_true", help="Use single warp per SIMD schedule variant")
     args = parser.parse_args()
+
+    assert not (args.persistent and args.single_warp_schedule)
+    if args.single_warp_schedule:
+        assert args.num_warps == 4
+        assert args.prefetch_lds
 
     M, N, K = args.M, args.N, args.K
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
@@ -555,5 +562,11 @@ if __name__ == "__main__":
     print(
         f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"
     )
-    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, M, N, K,
-                                    NUM_WARPS)
+    if args.single_warp_schedule:
+        test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK_N,  #
+                                                                      NUM_BUFFERS, TRANSPOSE_B,  #
+                                                                      M, N, K)
+    else:
+        test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K,  #
+                                        NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,  #
+                                        M, N, K, NUM_WARPS)

@@ -547,34 +547,14 @@ def test_attention(config):
     )
 
     attn_fn[grid](
-        q,
-        k,
-        v,
-        o,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        q.stride(3),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        k.stride(3),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        v.stride(3),
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
-        o.stride(3),
-        sm_scale,
-        SEQLEN_Q,
-        SEQLEN_K,
-        BLOCK_M,
-        BLOCK_N,
-        HEAD_SZ,
-        num_warps=4,
-    )
+        q, k, v, o,  #
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
+        sm_scale, SEQLEN_Q, SEQLEN_K,  #
+        BLOCK_M, BLOCK_N,  #
+        HEAD_SZ, num_warps=4)
     o = o.cpu()
     rtol = 0.004
     atol = 0.004
@@ -583,8 +563,26 @@ def test_attention(config):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-b", type=int, default=1, help='batch size')
+    parser.add_argument("--seqlen-q", type=int, default=1024, help='Q sequence length')
+    parser.add_argument("--seqlen-k", type=int, default=1024, help='K/V sequence length')
+    parser.add_argument("--num-heads-q", type=int, default=8, help='Number of Q heads')
+    parser.add_argument("--num-heads-k", type=int, default=8, help='Number of K/V heads')
+    parser.add_argument("--head-size", type=int, default=128, help='Q/K/V head size')
+    parser.add_argument("--block-m", type=int, default=128, help='BLOCK_M size')
+    parser.add_argument("--block-n", type=int, default=128, help='BLOCK_N size')
+    parser.add_argument("--pipeline", action="store_true", help="Use pipelined variant")
+    args = parser.parse_args()
     config = {
-        "BATCH": 8, "SEQLEN_Q": 1024, "SEQLEN_K": 1024, "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8, "HEAD_SZ": 128, "BLOCK_M":
-        128, "BLOCK_N": 128, "ATTN_FN": attn_fwd_pipelined_kernel
+        "BATCH": args.b,  #
+        "SEQLEN_Q": args.seqlen_q, "SEQLEN_K": args.seqlen_k,  #
+        "NUM_Q_HEADS": args.num_heads_q, "NUM_K_HEADS": args.num_heads_k,  #
+        "HEAD_SZ": args.head_size,  #
+        "BLOCK_M": args.block_m, "BLOCK_N": args.block_n,  #
+        "ATTN_FN": attn_fwd_pipelined_kernel if args.pipeline else attn_fwd_kernel
     }
+    print(config)
     test_attention(config)
