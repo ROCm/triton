@@ -169,7 +169,7 @@ def drawVec(dim0, dim1, vecDim, vecSize, shape, tid, ax, cmap, fontSize):
             ha='center', va='center', fontsize=fontSize, color='black')
 
 
-def plot(layout, out_file):
+def plot(layout, warpId, out_file):
     shape = layout.tensorSize()
     fig, ax = plt.subplots(figsize=(shape[0], shape[1]))
     cmap = cm.colormaps.get_cmap("Set1")
@@ -183,7 +183,7 @@ def plot(layout, out_file):
 
     for lane in range(laneSize):
         for reg in range(0, regSize, vecSize):
-            dim0, dim1 = layout.apply(reg, lane)
+            dim0, dim1 = layout.apply(reg, lane, warpId)
             #print(f"{dim0=}, {dim1=}")
             drawVec(dim0, dim1, vecDim, vecSize, shape, lane, ax, cmap, fontSize)
 
@@ -216,9 +216,10 @@ def plot(layout, out_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Parse and print a Triton linear layout.")
-    parser.add_argument("--register", help='Register bases, e.g. "[[0,1],[0,2],[0,4],[0,16],[0,32],[0,64]]"')
-    parser.add_argument("--lane", help='Lane bases, e.g. "[[1,0],[2,0],[4,0],[8,0],[16,0],[0,8]]"')
-    parser.add_argument("--warp", help='Warp bases, e.g. "[[32,0],[64,0],[128,0]]"')
+    parser.add_argument("--regBase", help='Register bases, e.g. "[[0,1],[0,2],[0,4],[0,16],[0,32],[0,64]]"')
+    parser.add_argument("--laneBase", help='Lane bases, e.g. "[[1,0],[2,0],[4,0],[8,0],[16,0],[0,8]]"')
+    parser.add_argument("--warpBase", help='Warp bases, e.g. "[[32,0],[64,0],[128,0]]"')
+    parser.add_argument("--warpId", type=int, default=0)
     parser.add_argument("--o")
 
     args = parser.parse_args()
@@ -226,9 +227,10 @@ def main():
     def parse_bases(s):
         return ast.literal_eval(s) if s else []
 
-    register_bases = parse_bases(args.register)
-    lane_bases = parse_bases(args.lane)
-    warp_bases = parse_bases(args.warp)
+    register_bases = parse_bases(args.regBase)
+    lane_bases = parse_bases(args.laneBase)
+    warp_bases = parse_bases(args.warpBase)
+    warpId = args.warpId
     out_file = args.o
 
     layout = LinearLayout(register_bases, lane_bases, warp_bases)
@@ -246,9 +248,13 @@ def main():
     else:
         print("No vectorized dimension found.")
 
-    print(f"register size: {2**len(register_bases)}")
 
-    plot(layout, out_file)
+    warpSize = 2** len(layout.warp_bases)
+    if warpId >= warpSize:
+        print(f"warpId must be < {warpSize}, but got {warpId}")
+        exit(0)
+
+    plot(layout, warpId, out_file)
 
 
 if __name__ == "__main__":
