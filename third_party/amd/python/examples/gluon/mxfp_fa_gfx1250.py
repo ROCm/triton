@@ -426,12 +426,10 @@ class AttentionProgram:
                                 sm_scale)
 
     @gluon.jit
-    def issue_global_load_k(self, i):
-        cfg = self.cfg
+    def issue_global_load_k(self, i, buf):
         k_step: ttgl.constexpr = self.k_step
         k_scale_step: ttgl.constexpr = self.k_scale_step
 
-        buf = i % cfg.NUM_BUFFERS
         k_buffer = self.k_buffer.index(buf)
         k_scale_buffer = self.k_scale_buffer.index(buf)
 
@@ -441,12 +439,10 @@ class AttentionProgram:
         cp.global_to_shared(k_scale_buffer, k_scale_ptrs)
 
     @gluon.jit
-    def issue_global_load_v(self, i):
-        cfg = self.cfg
+    def issue_global_load_v(self, i, buf):
         v_step: ttgl.constexpr = self.v_step
         v_scale_step: ttgl.constexpr = self.v_scale_step
 
-        buf = i % cfg.NUM_BUFFERS
         v_buffer = self.v_buffer.index(buf)
         v_scale_buffer = self.v_scale_buffer.index(buf)
 
@@ -468,10 +464,9 @@ class AttentionProgram:
         )).permute((0, 3, 2, 1, 4)).reshape((non_k_dim, k_dim))
 
     @gluon.jit
-    def shared_load_k(self, i, wait_count):
+    def shared_load_k(self, buf, wait_count):
         cfg = self.cfg
 
-        buf = i % cfg.NUM_BUFFERS
         k_buffer = self.k_buffer.index(buf)
         k_scale_buffer = self.k_scale_buffer.index(buf)
         if cfg.SCALE_PRESHUFFLED:
@@ -485,10 +480,9 @@ class AttentionProgram:
         return k, k_scale
 
     @gluon.jit
-    def shared_load_v(self, i, wait_count):
+    def shared_load_v(self, buf, wait_count):
         cfg = self.cfg
 
-        buf = i % cfg.NUM_BUFFERS
         v_buffer = self.v_buffer.index(buf)
         v_scale_buffer = self.v_scale_buffer.index(buf)
         if cfg.SCALE_PRESHUFFLED:
@@ -502,7 +496,7 @@ class AttentionProgram:
         return v, v_scale
 
     @gluon.jit
-    def compute_qk(self, i, k, k_scale):
+    def compute_qk(self, k, k_scale):
         cfg = self.cfg
 
         zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N], 0.0, ttgl.float32, cfg.acc_layout)
@@ -510,14 +504,14 @@ class AttentionProgram:
         return qk
 
     @gluon.jit
-    def compute_pv(self, i, p, p_scale, v, v_scale, acc):
+    def compute_pv(self, p, p_scale, v, v_scale, acc):
         cfg = self.cfg
 
         acc = wmma_scaled(p, p_scale, cfg.P_TYPE, v, v_scale, cfg.KV_TYPE, acc)
         return acc
 
     @gluon.jit
-    def softmax0(self, i, qk, m_i):
+    def softmax0(self, qk, m_i):
         sm_scale: ttgl.constexpr = self.sm_scale
 
         m_ij = ttgl.maximum(m_i, ttgl.max(qk, 1))
@@ -532,7 +526,7 @@ class AttentionProgram:
         return p, alpha, m_ij
 
     @gluon.jit
-    def softmax1(self, i, p, alpha, acc, l_i):
+    def softmax1(self, p, alpha, acc, l_i):
         cfg = self.cfg
 
         l_ij = ttgl.sum(p, 1)
@@ -634,14 +628,14 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
     acc = ttgl.full([BLOCK_M, HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
 
     for i in range(0, end):
-        pgm.issue_global_load_k(i)
-        k, k_scale = pgm.shared_load_k(i, wait_count=0)
-        p = pgm.compute_qk(i, k, k_scale)
-        p, alpha, m_i = pgm.softmax0(i, p, m_i)
-        p, p_scale, acc, l_i = pgm.softmax1(i, p, alpha, acc, l_i)
-        pgm.issue_global_load_v(i)
-        v, v_scale = pgm.shared_load_v(i, wait_count=0)
-        acc = pgm.compute_pv(i, p, p_scale, v, v_scale, acc)
+        pgm.issue_global_load_k(i, buf=0)
+        k, k_scale = pgm.shared_load_k(buf=0, wait_count=0)
+        p = pgm.compute_qk(k, k_scale)
+        p, alpha, m_i = pgm.softmax0(p, m_i)
+        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+        pgm.issue_global_load_v(i, buf=0)
+        v, v_scale = pgm.shared_load_v(buf=0, wait_count=0)
+        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
 
     acc = acc / l_i[:, None]
     pgm.store_output(acc)
@@ -678,64 +672,68 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
     l_i = ttgl.full([BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
     acc = ttgl.full([BLOCK_M, HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
 
-    # pipeline prologue (-4)
-    pgm.issue_global_load_k(0)
+    # pipeline prologue, loop -3
+    pgm.issue_global_load_k(0, buf=0)
 
-    # pipeline prologue (-2)
-    pgm.issue_global_load_k(1)
+    # pipeline prologue, loop -2
+    pgm.issue_global_load_k(1, buf=1)
 
-    k0, k0_scale = pgm.shared_load_k(0, wait_count=1)
+    k, k_scale = pgm.shared_load_k(buf=0, wait_count=1)
 
-    pgm.issue_global_load_v(0)
+    pgm.issue_global_load_v(0, buf=0)
 
-    p0 = pgm.compute_qk(0, k0, k0_scale)
+    # pipeline prologue, loop -1
+    qk = pgm.compute_qk(k, k_scale)
 
-    pgm.issue_global_load_k(2)
+    pgm.issue_global_load_k(2, buf=0)
 
-    p0, alpha0, m_i = pgm.softmax0(0, p0, m_i)
-    k1, k1_scale = pgm.shared_load_k(1, wait_count=2)
+    p, alpha, m_i = pgm.softmax0(qk, m_i)
+    k, k_scale = pgm.shared_load_k(buf=1, wait_count=2)
 
-    pgm.issue_global_load_v(1)
+    pgm.issue_global_load_v(1, buf=1)
 
-    # pipeline loop (0 to end-4)
+    # main loop, loop 0 to end-3, unrolled by 2
     for i in range(0, end - 2, 2):
-        p1 = pgm.compute_qk(i + 1, k1, k1_scale)
-        p0, p0_scale, acc, l_i = pgm.softmax1(i, p0, alpha0, acc, l_i)
-        v0, v0_scale = pgm.shared_load_v(i, wait_count=2)
+        # loop i
+        qk = pgm.compute_qk(k, k_scale)
+        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+        v, v_scale = pgm.shared_load_v(buf=0, wait_count=2)
 
-        pgm.issue_global_load_k(i + 3)
+        pgm.issue_global_load_k(i + 3, buf=1)
 
-        acc = pgm.compute_pv(i, p0, p0_scale, v0, v0_scale, acc)
-        p1, alpha1, m_i = pgm.softmax0(i + 1, p1, m_i)
-        k0, k0_scale = pgm.shared_load_k(i + 2, wait_count=2)
+        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+        p, alpha, m_i = pgm.softmax0(qk, m_i)
+        k, k_scale = pgm.shared_load_k(buf=0, wait_count=2)
 
-        pgm.issue_global_load_v(i + 2)
+        pgm.issue_global_load_v(i + 2, buf=0)
 
-        p0 = pgm.compute_qk(i + 2, k0, k0_scale)
-        p1, p1_scale, acc, l_i = pgm.softmax1(i + 1, p1, alpha1, acc, l_i)
-        v1, v1_scale = pgm.shared_load_v(i + 1, wait_count=2)
+        # loop i+1
+        qk = pgm.compute_qk(k, k_scale)
+        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+        v, v_scale = pgm.shared_load_v(buf=1, wait_count=2)
 
         if i + 4 < end:
-            pgm.issue_global_load_k(i + 4)
+            pgm.issue_global_load_k(i + 4, buf=0)
 
-        acc = pgm.compute_pv(i + 1, p1, p1_scale, v1, v1_scale, acc)
-        p0, alpha0, m_i = pgm.softmax0(i + 2, p0, m_i)
-        k1, k1_scale = pgm.shared_load_k(i + 3, wait_count=2)
+        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+        p, alpha, m_i = pgm.softmax0(qk, m_i)
+        k, k_scale = pgm.shared_load_k(buf=1, wait_count=2)
 
-        pgm.issue_global_load_v(i + 3)
+        pgm.issue_global_load_v(i + 3, buf=1)
 
-    # pipeline epilogue (end-2)
-    p1 = pgm.compute_qk(end - 1, k1, k1_scale)
-    p0, p0_scale, acc, l_i = pgm.softmax1(end - 2, p0, alpha0, acc, l_i)
-    v0, v0_scale = pgm.shared_load_v(end - 2, wait_count=1)
+    # pipeline epilogue, loop end-2
+    qk = pgm.compute_qk(k, k_scale)
+    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+    v, v_scale = pgm.shared_load_v(buf=0, wait_count=1)
 
-    acc = pgm.compute_pv(end - 2, p0, p0_scale, v0, v0_scale, acc)
-    p1, alpha1, m_i = pgm.softmax0(end - 1, p1, m_i)
+    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+    p, alpha, m_i = pgm.softmax0(qk, m_i)
 
-    p1, p1_scale, acc, l_i = pgm.softmax1(end - 1, p1, alpha1, acc, l_i)
-    v1, v1_scale = pgm.shared_load_v(end - 1, wait_count=0)
+    # pipeline epilogue, loop end-1
+    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+    v, v_scale = pgm.shared_load_v(buf=1, wait_count=0)
 
-    acc = pgm.compute_pv(end - 1, p1, p1_scale, v1, v1_scale, acc)
+    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
 
     # write output
     acc = acc / l_i[:, None]
