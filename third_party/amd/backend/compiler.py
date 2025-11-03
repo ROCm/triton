@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import subprocess
 import functools
 from pathlib import Path
@@ -265,6 +266,28 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
+
+        '''
+        if 'triton_kernel' in str(mod):
+            print("compiling triton kernel")
+            #pm.run(mod)
+            tname = "/var/lib/jenkins/OAI-triton/hack_nan.ttgir"
+            outname = "./tempout.ir"
+            with open(outname, 'wb') as fd_out:
+                fd_out.write(str(mod).encode())
+                fd_out.close()
+            if os.path.isfile(tname) is False:
+                tname = outname
+                print("cannot find the ttgir")
+            mod2 = ir.parse_mlir_module(tname, mod.context)
+            mod2.context = mod.context
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            mod = mod2
+        else:
+            print("compiling other kernel")
+        '''
+
         return mod
 
     @staticmethod
@@ -391,6 +414,17 @@ class HIPBackend(BaseBackend):
         if options.schedule_hint == 'attention':
             flags.append('sink-insts-to-avoid-spills')
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
+        if 'triton_kernel' in amdgcn:
+            print("compiling target kernel!")
+            if "AMD_INSERT_AMDGCN" in os.environ.keys():
+                insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+                if not os.path.exists(insert_module_path):
+                    raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+                with open(insert_module_path, "r") as file:
+                    file_content = file.readlines()
+                amdgcn = ''.join(file_content)
+        else:
+            print("compiling other kernel!")
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
