@@ -123,3 +123,16 @@ Following https://amd.atlassian.net/wiki/spaces/MLSE/pages/1181562650/Triton+FFM
 download the new FFM package under `/data/ci/ffm` and unzip it and then
 send pull request to update `.github/workflows/gfx1250-ci.sh` to use
 the new path for mounting volume.
+
+Common issues you may encounter:
+1) When CI job is executing, you get "model: failed to load /ffm/lib/libhsakmtmodel.so: /ffm/lib/libhsakmtmodel.so: cannot open shared object file: Permission denied".
+   Ensure that the correct permissions are set for the libhsakmtmodel.so in the FFM package. You may need to do:
+    ```sh
+    chmod o+rx libhsakmtmodel.so
+    ```
+2) When CI job is executing, you get "Error parsing TOML file: toml::parse: error opening file "/ffm/ffm_config.toml" model args not used".
+   Ensure that HSA_MODEL_TOML env variable is set and correctly points to the location of the ffm_config.toml file in the FFM package. In addition,
+   ensure that the correct permissions are set for ffm_config.toml. You may need to do:
+   ```sh
+   chmod o+r ffm_config.toml
+   ```
