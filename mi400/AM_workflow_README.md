@@ -179,7 +179,7 @@ Generate CAP files using the FFM documentation in Triton for your target kernels
 
 ```bash
 cd /proj/mi450_runs/
-mkdir -p /proj/mi450_runs/<your_username>_triton/
+mkdir -p /proj/mi450_runs/${USERNAME}_triton/
 ```
 
 ### Step 4: Initialize Infrastructure
@@ -293,23 +293,69 @@ cd $STEM
 
 ## Setting Up Kernel Simulation
 
-### Step 1: Transfer CAP Files
+### Step 1: Generating Meta-Data for a run
 
-Copy your generated CAP files to the Atlanta filesystem:
+To prevent tracking problems, every workload must carry its metadata directly; embedding it in the file name is undesirable since it makes names overly long and unreadable. Put your CAP file to a dedicated folder - e.g., ${USERNAME}-kernel-<int>, where <int> as an arbitrary integer number. You must include IRs of your kernel as well. Here is the structure of a workload folder:
+
+```bash
+$ tree ${USERNAME}-kernel-<int>
+${USERNAME}-kernel-<int>
+|-- README.md
+|-- irs
+|   |-- kernel.amdgcn
+|   |-- kernel.hsaco
+|   |-- kernel.llir
+|   `-- kernel.ttgir
+`-- kernel.cap
+```
+
+Execute your kernel before capturing with rocplay using the following Triton's env. variables to generate IRs:
+
+```bash
+$ TRITON_KERNEL_DUMP=1 TRITON_DUMP_DIR=$(realpath ./tmp) python3 <triton-kernel>.py ...
+$ cp ./tmp/*/* ${USERNAME}-kernel-<int>/irs
+```
+
+Write/generate the following `README.md` file:
+
+```bash
+$ cat ./README.md
+# <> - fill out the field
+
+# include Triton and LLVM commits
+Triton commit: <>
+LLVM commit: <>
+
+# write the exact cmd command to run a kernel
+CMD: <>
+
+# include any extra used env. variables - e.g., TRITON_HIP_USE_ASYNC_COPY=OFF
+ENV: <>
+
+FFM verion/commit: <>
+Rocplaycap version: <>
+
+# Leave a comment (optional) - e.g., MXFP FA with e4m3 with fix `A`, `B` and `C`
+Comment: <>
+```
+
+### Step 2: Transfer CAP Files
+
+Copy your generated folder with the CAP file to the Atlanta filesystem:
 
 ```bash
 # Example location:
-/proj/mi450_runs/<your_username>_triton/cap_file_dir/
+/proj/mi450_runs/${USERNAME}_triton/work/
 ```
 
-### Step 2: Configure AQLPLAY Test
+### Step 3: Configure AQLPLAY Test
 
 Edit `gc/src/am/test/tests/dv/aqlplay.txt` and add a new entry:
 
 ```
 AQLPLAY(gemm_gfx1250_warp8,
-    test.file="/proj/mi450_runs/<your_username>_triton/cap_file_dir/roc_capture_python3.cap";
-    test.ini.test_args.aqlplay_tracefile=/proj/mi450_runs/<your_username>_triton/cap_file_dir/roc_capture_python3.cap;
+    test.file="/proj/mi450_runs/${USERNAME}_triton/work/${USERNAME}-kernel-<int>/kernel.cap";
+    test.ini.test_args.aqlplay_tracefile=/proj/mi450_runs/${USERNAME}_triton/work/${USERNAME}-kernel-<int>/kernel.cap;
     test.ini.test_args.tc_PageTableRegionBase=0x100000000;
     test.ini.test_args.tc_PageTableRegionSize=0xf00000000;
     test.ini.test_args.tc_FBLocation=0x20000000000;
@@ -341,9 +387,9 @@ make -j64 install
 ```bash
 perf_runner --lsf \
   --lsf-machine="select[type==RHEL8_64] rusage[mem=32000]" \
-  --outdir /proj/mi450_runs/<your_username>_triton/testing_fb_base_quick_check \
+  --outdir /proj/mi450_runs/${USERNAME}_triton/testing_fb_base_quick_check \
   --timeout 345600 \
-  /proj/mi450_runs/<your_username>_triton/gc/src/am/test/suites/mi400/testplan/aql_cluster_dispatch_bringup.txt
+  /proj/mi450_runs/${USERNAME}_triton/gc/src/am/test/suites/mi400/testplan/aql_cluster_dispatch_bringup.txt
 ```
 
 > **Note**: Simulations can take considerable time to complete.
@@ -353,7 +399,7 @@ perf_runner --lsf \
 Access the log viewer at:
 
 ```
-http://logviewer-atl.amd.com/proj/mi450_runs/<your_username>_triton/<output_directory>/.report/home.html
+http://logviewer-atl.amd.com/proj/mi450_runs/${USERNAME}_triton/<output_directory>/.report/home.html
 ```
 
 When it is completed, you will see a bunch of plots with the performance metrics you are interested in.
