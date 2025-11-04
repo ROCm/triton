@@ -8,6 +8,7 @@ from matplotlib.patches import Rectangle
 import matplotlib as cm
 import matplotlib.colors as mcolors
 from io import StringIO
+from collections import defaultdict
 
 def get_color(i):
     """
@@ -153,19 +154,24 @@ class LinearLayout:
 
         return None, 1
 
-def drawVec(dim0, dim1, vecDim, vecSize, shape, tid, ax, cmap, fontSize):
+def drawVec(dim0, dim1, vecDim, vecSize, shape, lanes, ax, cmap, fontSize):
     x = shape[0] - dim0 - 1
     if vecDim == 0:
         x += 1
     y = dim1
-    #print(f"{x=}, {y=}, {vecSize=}")
     width = vecSize if vecDim == 1 else 1
     height = 1 if vecDim == 1 else -vecSize
+
+    # Pick color based on first lane
+    tid = lanes[0]
     rect = Rectangle((y, x), width, height,
                      facecolor=get_color(tid), edgecolor='black', lw=0.3)
     ax.add_patch(rect)
+
+    # Combine all lane IDs into one string
+    lane_text = ", ".join(f"t{lane}" for lane in lanes)
     ax.text(y+0.5*width, x+0.5*height,
-            f"t{tid}",
+            lane_text,
             ha='center', va='center', fontsize=fontSize, color='black')
 
 
@@ -181,11 +187,15 @@ def plot(layout, warpId, out_file):
     regSize = 2** len(layout.register_bases)
     laneSize = 2** len(layout.lane_bases)
 
+    coord_to_lanes = defaultdict(list)
+
     for lane in range(laneSize):
         for reg in range(0, regSize, vecSize):
             dim0, dim1 = layout.apply(reg, lane, warpId)
-            #print(f"{dim0=}, {dim1=}")
-            drawVec(dim0, dim1, vecDim, vecSize, shape, lane, ax, cmap, fontSize)
+            coord_to_lanes[(dim0, dim1)].append(lane)
+
+    for (dim0, dim1), lanes in coord_to_lanes.items():
+        drawVec(dim0, dim1, vecDim, vecSize, shape, lanes, ax, cmap, fontSize)
 
     ax.text(-0.5, 0.5*shape[0],
             f"{shape[0]}",
