@@ -1,4 +1,4 @@
-# Plot script for triton layouts
+# Plot script for triton layouts (latex version)
 
 This script is used to draw Triton layouts in the context of matmul.
 Here is the help info from the script.
@@ -194,3 +194,62 @@ Knobs
 
 ## Draw WMMA access (`python plot_layout.py lds`)
 WMMA layout drawing is intended for Radeon consumer GPU usage. Currently it has very limited support.
+
+# Linear Layout Visualizer (matplotlib version)
+
+There is a new Python script that can visualize **Triton linear layouts**, showing how registers, lanes, and warps map to tensor coordinates.
+It generates a color-coded **PDF** where each rectangle represents a vector region, labeled with all lanes that map to it.
+
+
+## Usage
+
+```bash
+python3 plot_ll.py \
+  --regBase "[[0,1],[0,2],[0,4]]" \
+  --laneBase "[[1,0],[2,0],[4,0]]" \
+  --warpBase "[[0,8]]" \
+  --warpId 0 \
+  --o layout_demo
+```
+Output
+```bash
+- register:
+  register=1 --> (0, 1)
+  register=2 --> (0, 2)
+  register=4 --> (0, 4)
+- lane:
+  lane=1 --> (1, 0)
+  lane=2 --> (2, 0)
+  lane=4 --> (4, 0)
+- warp:
+  warp=1 --> (0, 8)
+
+Tensor shape: [0, 16]
+Vector dimension: 1, vector size: 8
+✅ Layout visualization saved to: layout_demo.pdf
+```
+
+## Overview
+
+The tool takes in three optional layout base matrices:
+
+- Register bases (--regBase)
+- Lane bases (--laneBase)
+- Warp bases (--warpBase)
+
+It then computes, for every lane and register combination, the corresponding 2D tensor coordinates 
+(e.g., (dim0, dim1)) using XOR-based mapping.
+All lanes that map to the same tensor coordinate are grouped together and displayed as one rectangle in the final plot, labeled with their lane IDs.
+
+The output is a PDF visualization showing the tensor layout from hardware indices.
+
+## Dependencies
+
+- Python ≥ 3.8
+- NumPy
+- Matplotlib
+
+Install via pip:
+```bash
+pip install numpy matplotlib
+```

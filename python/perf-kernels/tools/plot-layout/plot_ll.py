@@ -204,16 +204,11 @@ def plot(layout, warpId, out_file):
             f"{shape[1]}",
             ha='center', va='center', fontsize=fontSize, color='black')
 
-    #ax.text(-10, shape[0]*.5,
-    #        f"{layout.get_layout_str()}",
-    #        ha='left', va='center', fontsize=6, color='black')
-
     ax.set_xlim(0, shape[1])
     ax.set_ylim(0, shape[0])
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_aspect('equal')
-    #ax.set_title("title")
     plt.tight_layout()
     if out_file is None:
         out_file = "linear_layout_plot.pdf"
