@@ -209,10 +209,9 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
         if amd.has_cluster_feature(options.arch):
             cluster_info = amd.ClusterInfo()
-            if options.cluster_dims is not None:
-                cluster_info.clusterDimX = options.cluster_dims[0]
-                cluster_info.clusterDimY = options.cluster_dims[1]
-                cluster_info.clusterDimZ = options.cluster_dims[2]
+            cluster_info.clusterDimX = options.num_ctas
+            cluster_info.clusterDimY = 1
+            cluster_info.clusterDimZ = 1
             amd.passes.ttgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
@@ -263,8 +262,6 @@ class HIPBackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
         pm.run(mod, 'make_ttgir')
-        if amd.has_cluster_feature(options.arch):
-            metadata["cluster_dims"] = (cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
         return mod
 
     @staticmethod
@@ -377,8 +374,8 @@ class HIPBackend(BaseBackend):
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        cluster_dims = metadata["cluster_dims"]
-        fns[0].add_fn_attr("amdgpu-cluster-dims", f"{cluster_dims[0]},{cluster_dims[1]},{cluster_dims[2]}")
+        cluster_dim = metadata["num_ctas"]
+        fns[0].add_fn_attr("amdgpu-cluster-dims", f"{cluster_dim},1,1")
         fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size}")
         # LLVM AMDGPU backend supports the attribute "amdgpu-waves-per-eu"="<min>[, <max>]".
         # This attribute may be attached to a kernel function definition and is an optimization hint.

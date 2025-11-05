@@ -454,17 +454,17 @@ static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas
   }}
   if (gridX*gridY*gridZ > 0 && num_ctas > 1){{
     HIP_LAUNCH_CONFIG config;
-    config.gridDimX = gridX * clusterDimX;
-    config.gridDimY = gridY * clusterDimY;
-    config.gridDimZ = gridZ * clusterDimZ;
+    config.gridDimX = gridX * num_ctas;
+    config.gridDimY = gridY;
+    config.gridDimZ = gridZ;
     config.blockDimX = {warp_size}*num_warps;
     config.blockDimY = 1;
     config.blockDimZ = 1;
     hipLaunchAttribute attribute[1];
     attribute[0].id = hipLaunchAttributeClusterDimension;
-    attribute[0].val.clusterDim.x = clusterDimX;
-    attribute[0].val.clusterDim.y = clusterDimY;
-    attribute[0].val.clusterDim.z = clusterDimZ;
+    attribute[0].val.clusterDim.x = num_ctas;
+    attribute[0].val.clusterDim.y = 1;
+    attribute[0].val.clusterDim.z = 1;
     config.attrs = attribute;
     config.numAttrs = 1;
     config.hStream = stream;
