@@ -971,7 +971,7 @@ def test_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
 if __name__ == "__main__":
 
     def launch(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
-               pipelined, scale_preshuffled):
+               pipelined, scale_preshuffled, disable_p_scaling):
         q, _ = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
         k, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
         v, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
@@ -980,7 +980,7 @@ if __name__ == "__main__":
         v_scale, _ = _create_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
 
         _, kernel = attn_fwd(q, k, v, q_scale, k_scale, v_scale, q_type, kv_type, block_m, block_n, pipelined,
-                             scale_preshuffled)
+                             scale_preshuffled, not disable_p_scaling)
         amdgcn = kernel.asm['amdgcn']
 
         sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
@@ -998,13 +998,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch", type=int, required=True)
     parser.add_argument("--seqlen_q", type=int, required=True)
     parser.add_argument("--seqlen_k", type=int, required=True)
-    parser.add_argument("--num_q_heads", type=int, default=16)
-    parser.add_argument("--num_k_heads", type=int, default=16)
-    parser.add_argument("--head_sz", type=int, default=128)
-    parser.add_argument("--block_m", type=int, default=128)
-    parser.add_argument("--block_n", type=int, default=128)
-    parser.add_argument("--pipelined", action="store_true", default=True)
-    parser.add_argument("--scale_preshuffled", action="store_true", default=True)
+    parser.add_argument("--num_q_heads", type=int, required=True)
+    parser.add_argument("--num_k_heads", type=int, required=True)
+    parser.add_argument("--head_sz", type=int, required=True)
+    parser.add_argument("--block_m", type=int, required=True)
+    parser.add_argument("--block_n", type=int, required=True)
+    parser.add_argument("--pipelined", action="store_true")
+    parser.add_argument("--scale_preshuffled", action="store_true")
+    parser.add_argument("--disable_p_scaling", action="store_true")
     args = parser.parse_args()
     args = vars(args)
     launch(**args)
