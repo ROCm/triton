@@ -437,6 +437,7 @@ class AttentionProgram:
 
         k_scale_ptrs = (self.k_scale_ptr + i * k_scale_step) + self.k_scale_offs
         cp.global_to_shared(k_scale_buffer, k_scale_ptrs)
+        cp.commit_group()
 
     @gluon.jit
     def issue_global_load_v(self, i, buf):
@@ -450,6 +451,7 @@ class AttentionProgram:
 
         v_scale_ptrs = (self.v_scale_ptr + i * v_scale_step) + self.v_scale_offs
         cp.global_to_shared(v_scale_buffer, v_scale_ptrs)
+        cp.commit_group()
 
     @gluon.jit
     def unshuffle_scale_subview(self, cfg, buffer, non_k_dim, k_dim):
