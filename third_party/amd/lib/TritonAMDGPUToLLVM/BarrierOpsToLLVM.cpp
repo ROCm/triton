@@ -1,55 +1,18 @@
-/*
- * Copyright (c) 2023 NVIDIA Corporation & Affiliates. All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files
- * (the "Software"), to deal in the Software without restriction,
- * including without limitation the rights to use, copy, modify, merge,
- * publish, distribute, sublicense, and/or sell copies of the Software,
- * and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
-// #include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-
-// #include "Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton;
-constexpr int WIDTH = 32;
 
-// namespace {
-// struct FenceAsyncSharedOpConversion
-//     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::FenceAsyncSharedOp> {
-//   using ConvertOpToLLVMPattern<
-//       triton::nvidia_gpu::FenceAsyncSharedOp>::ConvertOpToLLVMPattern;
+constexpr int kBarrierCountBitWidth = 29;
+constexpr int kBarrierPhaseMask = ((1ULL << (32 - kBarrierCountBitWidth)) - 1);
+constexpr int kInitCountPos = 32;
 
-//   LogicalResult
-//   matchAndRewrite(triton::nvidia_gpu::FenceAsyncSharedOp op, OpAdaptor
-//   adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     Location loc = op->getLoc();
-//     rewriter.replaceOpWithNewOp<triton::nvgpu::FenceAsyncSharedOp>(
-//         op, adaptor.getBCluster());
-//     return success();
-//   }
-// };
+namespace {
 
 struct InitBarrierOpConversion
     : public ConvertOpToLLVMPattern<triton::amdgpu::InitBarrierOp> {
@@ -59,121 +22,105 @@ struct InitBarrierOpConversion
   matchAndRewrite(triton::amdgpu::InitBarrierOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
         loc, adaptor.getAlloc(),
         typeConverter->convertType(op.getAlloc().getType().getElementType()),
         rewriter);
 
+    auto *curBlock = rewriter.getInsertionBlock();
+    auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *ldsBarrierInitBlock = rewriter.createBlock(
+        curBlock->getParent(), std::next(Region::iterator(curBlock)));
+    rewriter.setInsertionPointToEnd(curBlock);
     auto id = getThreadId(rewriter, loc);
-    auto pred = icmp_eq(id, i32_val(0));
-    // Value val = i64_val(0);
-    Value count = i64_val(op.getCount());
-    // auto count64Bits = zext(i64_ty, op.getCount());
-    // ((val || count)<<32) || count
-    Value val = or_(shl(count, i64_val(32)), count);
-
-    store(val, smemObj.getBase());
+    auto pred = b.icmp_eq(id, b.i32_val(0));
+    LLVM::CondBrOp::create(rewriter, loc, pred, ldsBarrierInitBlock, endBlock);
+    rewriter.setInsertionPointToEnd(ldsBarrierInitBlock);
+    // Phase changes when underflow is detected (pending count becomes
+    // negative). The provided count from the user assumes that phase changes
+    // when pending count reaches zero, so make the adjustment here.
+    Value count = b.i64_val(op.getCount() - 1);
+    Value val = b.or_(b.shl(count, b.i64_val(kInitCountPos)), count);
+    b.store(val, smemObj.getBase());
+    LLVM::BrOp::create(rewriter, loc, ValueRange(), endBlock);
+    rewriter.setInsertionPointToStart(endBlock);
+    // Synchronize the whole CTA, so all waves see the LDS barrier
+    b.barrier();
     rewriter.eraseOp(op);
     return success();
   }
 };
 
-// struct InvalBarrierOpConversion
-//     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::InvalBarrierOp> {
-//   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+struct ArriveBarrierOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::ArriveBarrierOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
-//   LogicalResult
-//   matchAndRewrite(triton::nvidia_gpu::InvalBarrierOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     Location loc = op->getLoc();
-//     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
-//         loc, adaptor.getAlloc(),
-//         typeConverter->convertType(op.getAlloc().getType().getElementType()),
-//         rewriter);
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::ArriveBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    TritonLLVMOpBuilder b(loc, rewriter);
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, adaptor.getAlloc(),
+        typeConverter->convertType(op.getAlloc().getType().getElementType()),
+        rewriter);
+    auto count = adaptor.getCount();
+    // NOTE: The LLVM intrisic expects an i64_ty for count (update value)
+    // But count cannot be more than 32bits according to ISA docs.
+    Value priorState =
+        LLVM::createLLVMIntrinsicCallOp(
+            rewriter, loc, "llvm.amdgcn.ds.atomic.barrier.arrive.rtn.b64",
+            i64_ty, {smemObj.getBase(), b.i64_val(count)})
+            .getResult(0);
+    Value priorPhase = b.and_(
+        i32_ty, b.i32_val(kBarrierPhaseMask),
+        b.trunc(i32_ty, b.lshr(priorState, b.i64_val(kBarrierCountBitWidth))));
+    rewriter.replaceOp(op, priorPhase);
+    return success();
+  }
+};
 
-//     auto id = getThreadId(rewriter, loc);
-//     Value pred = icmp_eq(id, i32_val(0));
-//     ::mlir::triton::PTXBuilder ptxBuilder;
-//     const std::string ptx = "@$0 mbarrier.inval.shared::cta.b64 [$1];";
-//     auto &barSyncOp = *ptxBuilder.create<>(ptx);
-//     barSyncOp({ptxBuilder.newOperand(pred, "b"),
-//                ptxBuilder.newOperand(smemObj.getBase(), "r")},
-//               /*onlyAttachMLIRArgs=*/true);
-//     auto voidTy = void_ty(op->getContext());
-//     ptxBuilder.launch(rewriter, loc, voidTy);
-//     rewriter.eraseOp(op);
-//     return success();
-//   }
-// };
+struct WaitBarrierOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::WaitBarrierOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
-// struct BarrierExpectConversion
-//     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::BarrierExpectOp> {
-//   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-//   LogicalResult
-//   matchAndRewrite(triton::nvidia_gpu::BarrierExpectOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     Location loc = op->getLoc();
-//     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
-//         loc, adaptor.getAlloc(),
-//         typeConverter->convertType(op.getAlloc().getType().getElementType()),
-//         rewriter);
-
-//     auto id = getThreadId(rewriter, loc);
-//     Value pred = icmp_eq(id, i32_val(0));
-//     pred = and_(pred, adaptor.getPred());
-//     ::mlir::triton::PTXBuilder ptxBuilder;
-//     const std::string ptx =
-//         "@$0 mbarrier.arrive.expect_tx.shared.b64 _, [$1], " +
-//         std::to_string(op.getSize()) + ";";
-//     auto &barSyncOp = *ptxBuilder.create<>(ptx);
-//     barSyncOp({ptxBuilder.newOperand(pred, "b"),
-//                ptxBuilder.newOperand(smemObj.getBase(), "r")},
-//               /*onlyAttachMLIRArgs=*/true);
-//     auto voidTy = void_ty(op->getContext());
-//     ptxBuilder.launch(rewriter, loc, voidTy);
-//     rewriter.eraseOp(op);
-//     return success();
-//   }
-// };
-
-// struct WaitBarrierOpConversion
-//     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::WaitBarrierOp> {
-//   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-//   LogicalResult
-//   matchAndRewrite(triton::nvidia_gpu::WaitBarrierOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
-//         op.getLoc(), adaptor.getAlloc(),
-//         typeConverter->convertType(op.getAlloc().getType().getElementType()),
-//         rewriter);
-//     auto loc = op.getLoc();
-//     const std::string ptx =
-//         "{                                                           \n\t"
-//         ".reg .pred P1;                                              \n\t"
-//         "waitLoop:                                                   \n\t"
-//         "mbarrier.try_wait.parity.shared.b64 P1, [$0], $1;           \n\t"
-//         "@!P1 bra.uni waitLoop;                                      \n\t"
-//         "}                                                           \n\t";
-//     ::mlir::triton::PTXBuilder ptxBuilder;
-//     auto &waitLoop = *ptxBuilder.create<>(ptx);
-//     waitLoop({ptxBuilder.newOperand(smemObj.getBase(), "r"),
-//               ptxBuilder.newOperand(adaptor.getPhase(), "r")},
-//              /*onlyAttachMLIRArgs=*/true);
-//     auto voidTy = void_ty(op->getContext());
-//     ptxBuilder.launch(rewriter, op->getLoc(), voidTy);
-//     rewriter.eraseOp(op);
-//     return success();
-//   }
-// };
-// } // namespace
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::WaitBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    TritonLLVMOpBuilder b(loc, rewriter);
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, adaptor.getAlloc(),
+        typeConverter->convertType(op.getAlloc().getType().getElementType()),
+        rewriter);
+    Value phase = adaptor.getPhase();
+    auto *curBlock = rewriter.getInsertionBlock();
+    auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *waitBlock = rewriter.createBlock(
+        curBlock->getParent(), std::next(Region::iterator(curBlock)));
+    rewriter.setInsertionPointToEnd(curBlock);
+    LLVM::BrOp::create(rewriter, loc, ValueRange(), waitBlock);
+    rewriter.setInsertionPointToStart(waitBlock);
+    // Sleep for the minimum number of clocks. 64*SIMM16[6:0] = 64 * 1 = 64
+    // clocks.
+    ROCDL::SSleepOp::create(rewriter, loc, 1);
+    Value curState = b.load(i64_ty, smemObj.getBase());
+    Value curPhase = b.and_(
+        i32_ty, b.i32_val(kBarrierPhaseMask),
+        b.trunc(i32_ty, b.lshr(curState, b.i64_val(kBarrierCountBitWidth))));
+    Value phaseChanged = b.icmp_ne(curPhase, phase);
+    LLVM::CondBrOp::create(rewriter, loc, phaseChanged, endBlock, waitBlock);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+} // namespace
 
 void mlir::triton::AMD::populateBarrierOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     PatternBenefit benefit) {
-  // patterns.add<FenceAsyncSharedOpConversion>(typeConverter, benefit);
   patterns.add<InitBarrierOpConversion>(typeConverter, benefit);
-  // patterns.add<WaitBarrierOpConversion>(typeConverter, benefit);
-  // patterns.add<BarrierExpectConversion>(typeConverter, benefit);
+  patterns.add<WaitBarrierOpConversion>(typeConverter, benefit);
+  patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
 }

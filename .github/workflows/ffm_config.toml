@@ -63,7 +63,12 @@ dona.component.jitcu.enable_time_slicing=true
 [ffm_itrace_wave_id_filter]
 dona.component.jitcu_itrace.wave_id=0x1
 
-# if set, sgprs and vpgrs are initialized to a known value and an assert is triggered when trying to read from an
+# if set, sgprs, vpgrs and mregs are initialized to a known value. And error message is printed to itrace when trying
+# to read from an uninitialized gpr
+[ffm_validate_gprs]
+dona.component.shader_complex.validate_gprs=true
+
+# if set, sgprs, vpgrs and mregs are initialized to a known value and an assert is triggered when trying to read from an
 # uninitialized gpr
 [ffm_validate_gprs_strict]
 dona.component.shader_complex.validate_gprs_strict=true

@@ -934,4 +934,5 @@ SmallVector<Value> upcast8xMxfp4_SW(RewriterBase &rewriter, Operation *op,
   }
   return results;
 }
+
 } // namespace mlir::LLVM::AMD

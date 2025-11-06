@@ -200,7 +200,6 @@ bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
                                       unsigned vectorSize);
 
 bool isUsedByDotScaledOp(Operation *op);
-
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_
