@@ -1,0 +1,69 @@
+# forces itrace printouts to include all enabled threads/lanes instead of just the first and last active ones
+# this will also dump WMMA matrix data to itrace file for MIs
+[ffm_itrace_all_threads]
+dona.component.jitcu_itrace.all_lanes=true
+
+# FFM runs waves serially within a workgroup which causes waves to FFM-yield after signaling on a barrier or semaphore
+# this allows other waves receiving the signal to run, simulating concurrently running waves
+# useful for synchronisation app debugs
+[ffm_debug_sync_signals]
+dona.component.shader_complex.debug_barier_semaphore=true
+
+# dump WMMA matrix data to itrace for MIs
+# itrace must be enabled, good alternative to ffm_itrace_all_threads for debugging
+[ffm_itrace_dump_matrix]
+dona.component.jitcu_itrace.dump_matrix=true
+
+# limits itrace dumps to only VMEM instructions
+# itrace must be enabled
+[ffm_itrace_vmem_only]
+dona.component.jitcu_itrace.vmem_only=true
+
+# use fast float implementations instead of the ones in Math Engine
+# JIT-able and typically much faster but is not guaranteed to be bit accurate
+# some operations do not have a fast float implementation; these will fall back to MathEn
+[ffm_use_fast_float]
+dona.component.shader_complex.use_fast_float=true
+
+# enable JIT compile
+# whether this is faster or not depends on the type of the workload
+[ffm_use_jit]
+dona.component.shader_complex.use_jit=true
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to random wave execution order
+# useful for synchronisation app debug
+[ffm_exec_order_random]
+dona.component.shader_complex.exec_order=2
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to decreasing wave execution order
+# useful for synchronisation app debug
+[ffm_exec_order_descending]
+dona.component.shader_complex.exec_order=1
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to ascending wave execution order, i.e. any time wave 0 can run it will run
+# useful for synchronisation app debug
+[ffm_exec_order_ascending]
+dona.component.shader_complex.exec_order=3
+
+# force memory dependency check for s_wait operations
+# this is for wait counter debug for VGPR/LDS access
+# search "Application Wait Count Debug" on Confluence for details
+[ffm_force_mem_dep_check]
+dona.component.shader_complex.force_mem_dep_check=true
+
+# Allows waves / workgroups / clusters to be run in a timesliced manor.
+# This will enabling coding patterns such as consumer / producer models
+[ffm_enable_time_slicing]
+dona.component.jitcu.enable_time_slicing=true
+
+# only dump itrace for this wave, set to specified debug ID, in hex
+[ffm_itrace_wave_id_filter]
+dona.component.jitcu_itrace.wave_id=0x1
+
+# if set, sgprs and vpgrs are initialized to a known value and an assert is triggered when trying to read from an
+# uninitialized gpr
+[ffm_validate_gprs_strict]
+dona.component.shader_complex.validate_gprs_strict=true
