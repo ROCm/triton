@@ -90,6 +90,7 @@ To enable GUMMI (for more accurate memory modeling), add these parameters to the
 
 USE THIS GROUPFILE FOR GUMMI RUNS!
 
+```bash
 group mi400am_1CP_1xcc_UMC_Loopback_cpfw --model=tb_am_rs64_fw --test-args "-use_kmd=1 -tc_BindAqlProcess=1 -fb_base=0x30000000000 -tc_EnableHIQ=0 -tc_LoadMesUCode=1" --pm4p2-args-end="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k gfx11_pktplay_base_settings monitors.counters.perf.en_level=2 monitors.counters.perf.dump_freq=1000 test.force_flush_end_of_cb=true model.gpu.compute_only_model=true monitors.counters.perf.config_file=$ANCHOR_gfxperf/build/rhel7/perfmon/mi400_perfmon.yml monitors.counters.perf.config_file2=$STEM/gc/src/am/config/counters/mi400_miperf.yml model.gpu.sh.sa.tex.tcp.tcp_clause_enable=clause model.enable_multipipe=true make_mi400_xcd_ml_B0 make_mi400_1XCC_umc_const_delay_rd_320_wr_64_capped_hbm4_2p5kw_bw"
 group mi400am_1CP_1xcc_COMPASS_cpfw --model=tb_am_rs64_fw --test-args "-use_kmd=1 -tc_BindAqlProcess=1 -fb_base=0x30000000000 -tc_EnableHIQ=0 -tc_LoadMesUCode=1" --compass  --compass-arg="wallclockdevice-0/progressStatsPs=100000" --compass-arg="outputTimeseriesFile=True" --compass-arg=".*/dfPoolSize=131072"   --compass-arg="generic_sdptrace_replay_device.*/trafficTurnedOff=True"  --compass-arg="abstractsdma.*/trafficTurnedOff=True" --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/am-mi450.cfg  --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/MI450_B0_2p5KW_overrides.cfg --compass-config=deviceFiles/lightsaberGasketdeviceFiles/configs/MI450_B0_2p5KW_overrides_bw_bound.cfg --pm4p2-args-end="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k_gummi gfx11_pktplay_base_settings monitors.counters.perf.en_level=2 monitors.counters.perf.dump_freq=1000 test.force_flush_end_of_cb=true model.gpu.compute_only_model=true monitors.counters.perf.config_file=$ANCHOR_gfxperf/build/rhel7/perfmon/mi400_perfmon.yml monitors.counters.perf.config_file2=$STEM/gc/src/am/config/counters/mi400_miperf.yml model.gpu.sh.sa.tex.tcp.tcp_clause_enable=clause model.enable_multipipe=true make_mi400_xcd_ml_B0"
     group gclk1p7_gl2clk1p7 --pm4p2-args-end="make_mi450_gclk1p7_gl2clk1p7"
@@ -97,6 +98,7 @@ group mi400am_1CP_1xcc_COMPASS_cpfw --model=tb_am_rs64_fw --test-args "-use_kmd=
             roc_capture_fp6_256x256x256_TT__pipelined_with_cluster_dispatch_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
             roc_capture_fp6_256x256x256_TT__pipelined_with_non_cluster_dispatch_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
             <YOUR_TESTNAME_IN_AQLPLAY.TXT>_cap {"lsf-machine" : "select[type==local && (gb128||csbatch)] rusage[mem=32000]"}
+```
 
 ### Creating Your GROUPFILE
 
@@ -179,7 +181,7 @@ Generate CAP files using the FFM documentation in Triton for your target kernels
 
 ```bash
 cd /proj/mi450_runs/
-mkdir -p /proj/mi450_runs/${USERNAME}_triton/
+mkdir -p /proj/mi450_runs/${USER}_triton/
 ```
 
 ### Step 4: Initialize Infrastructure
@@ -295,11 +297,11 @@ cd $STEM
 
 ### Step 1: Generating Meta-Data for a run
 
-To prevent tracking problems, every workload must carry its metadata directly; embedding it in the file name is undesirable since it makes names overly long and unreadable. Put your CAP file to a dedicated folder - e.g., ${USERNAME}-kernel-<int>, where <int> as an arbitrary integer number. You must include IRs of your kernel as well. Here is the structure of a workload folder:
+To prevent tracking problems, every workload must carry its metadata directly; embedding it in the file name is undesirable since it makes names overly long and unreadable. Put your CAP file to a dedicated folder - e.g., ${USER}-kernel-<int>, where <int> as an arbitrary integer number. You must include IRs of your kernel as well. Here is the structure of a workload folder:
 
 ```bash
-$ tree ${USERNAME}-kernel-<int>
-${USERNAME}-kernel-<int>
+$ tree ${USER}-kernel-<int>
+${USER}-kernel-<int>
 |-- README.md
 |-- irs
 |   |-- kernel.amdgcn
@@ -313,7 +315,7 @@ Execute your kernel before capturing with rocplay using the following Triton's e
 
 ```bash
 $ TRITON_KERNEL_DUMP=1 TRITON_DUMP_DIR=$(realpath ./tmp) python3 <triton-kernel>.py ...
-$ cp ./tmp/*/* ${USERNAME}-kernel-<int>/irs
+$ cp ./tmp/*/* ${USER}-kernel-<int>/irs
 ```
 
 Write/generate the following `README.md` file:
@@ -345,7 +347,7 @@ Copy your generated folder with the CAP file to the Atlanta filesystem:
 
 ```bash
 # Example location:
-/proj/mi450_runs/${USERNAME}_triton/work/
+/proj/mi450_runs/${USER}_triton/work/
 ```
 
 ### Step 3: Configure AQLPLAY Test
@@ -354,8 +356,8 @@ Edit `gc/src/am/test/tests/dv/aqlplay.txt` and add a new entry:
 
 ```
 AQLPLAY(gemm_gfx1250_warp8,
-    test.file="/proj/mi450_runs/${USERNAME}_triton/work/${USERNAME}-kernel-<int>/kernel.cap";
-    test.ini.test_args.aqlplay_tracefile=/proj/mi450_runs/${USERNAME}_triton/work/${USERNAME}-kernel-<int>/kernel.cap;
+    test.file="/proj/mi450_runs/${USER}_triton/work/${USER}-kernel-<int>/kernel.cap";
+    test.ini.test_args.aqlplay_tracefile=/proj/mi450_runs/${USER}_triton/work/${USER}-kernel-<int>/kernel.cap;
     test.ini.test_args.tc_PageTableRegionBase=0x100000000;
     test.ini.test_args.tc_PageTableRegionSize=0xf00000000;
     test.ini.test_args.tc_FBLocation=0x20000000000;
@@ -387,9 +389,9 @@ make -j64 install
 ```bash
 perf_runner --lsf \
   --lsf-machine="select[type==RHEL8_64] rusage[mem=32000]" \
-  --outdir /proj/mi450_runs/${USERNAME}_triton/testing_fb_base_quick_check \
+  --outdir /proj/mi450_runs/${USER}_triton/triton-am-output \
   --timeout 345600 \
-  /proj/mi450_runs/${USERNAME}_triton/gc/src/am/test/suites/mi400/testplan/aql_cluster_dispatch_bringup.txt
+  /proj/mi450_runs/${USER}_triton/gc/src/am/test/suites/mi400/testplan/aql_cluster_dispatch_bringup.txt
 ```
 
 > **Note**: Simulations can take considerable time to complete.
@@ -399,14 +401,14 @@ perf_runner --lsf \
 Access the log viewer at:
 
 ```
-http://logviewer-atl.amd.com/proj/mi450_runs/${USERNAME}_triton/<output_directory>/.report/home.html
+http://logviewer-atl.amd.com/proj/mi450_runs/${USER}_triton/<output_directory>/.report/home.html
 ```
 
 When it is completed, you will see a bunch of plots with the performance metrics you are interested in.
 
 **Example**:
 ```
-http://logviewer-atl.amd.com/proj/mi450_runs/djavady_triton/testing_fb_base_quick_check/.report/home.html
+http://logviewer-atl.amd.com/proj/mi450_runs/${USER}_triton/triton-am-output/.report/home.html
 ```
 
 > **Important**: Update the URL to match your username and output directory name.
