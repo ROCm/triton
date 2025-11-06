@@ -1,0 +1,141 @@
+Lowering local_load: %6572 = "ttg.local_load"(%6571) {ttg.amdgpu.syncedViaAsyncWait = false} : (!ttg.memdesc<256x128xf8E5M2, #ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>, #ttg.shared_memory>) -> tensor<256x128xf8E5M2, #ttg.dot_op<{opIdx = 0, parent = #ttg.amd_mfma<{version = 4, warpsPerCTA = [8, 1], instrShape = [32, 32, 64], isTransposed = true}>, kWidth = 16}>>
+shape: 256, 128
+bitwidth = 8
+Lowering local_load: %17293 = "ttg.local_load"(%17292) {ttg.amdgpu.syncedViaAsyncWait = false} : (!ttg.memdesc<128x128xf8E5M2, #ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>, #ttg.shared_memory>) -> tensor<128x128xf8E5M2, #ttg.dot_op<{opIdx = 1, parent = #ttg.amd_mfma<{version = 4, warpsPerCTA = [8, 1], instrShape = [32, 32, 64], isTransposed = true}>, kWidth = 16}>>
+shape: 128, 128
+bitwidth = 8
+cvtDstLL: 
+ - register=1 -> (128, 0)
+   register=2 -> (272, 0)
+   register=4 -> (544, 0)
+   register=8 -> (1088, 0)
+   register=16 -> (4096, 0)
+   register=32 -> (8192, 0)
+   register=64 -> (32, 0)
+   register=128 -> (64, 0)
+ - lane=1 -> (1, 0)
+   lane=2 -> (2, 0)
+   lane=4 -> (4, 0)
+   lane=8 -> (8, 0)
+   lane=16 -> (16, 0)
+   lane=32 -> (2048, 0)
+ - warp=1 -> (0, 0)
+   warp=2 -> (0, 0)
+   warp=4 -> (0, 0)
+ - block is a size 1 dimension
+where out dims are: [offset (size 16384), block (size 1)]
+cvtDstLL after sublayout: 
+ - register=1 -> (128)
+   register=2 -> (272)
+   register=4 -> (544)
+   register=8 -> (1088)
+   register=16 -> (4096)
+   register=32 -> (8192)
+   register=64 -> (32)
+   register=128 -> (64)
+ - lane=1 -> (1)
+   lane=2 -> (2)
+   lane=4 -> (4)
+   lane=8 -> (8)
+   lane=16 -> (16)
+   lane=32 -> (2048)
+ - warp=1 -> (0)
+   warp=2 -> (0)
+   warp=4 -> (0)
+where out dims are: [offset (size 16384)]
+tile: 
+ - lane=1 -> (1)
+   lane=2 -> (2)
+   lane=4 -> (4)
+where out dims are: [offset (size 8)]
+fullTile: 
+ - lane=1 -> (1, 0)
+   lane=2 -> (2, 0)
+   lane=4 -> (4, 0)
+   lane=8 -> (0, 1)
+   lane=16 -> (0, 16)
+   lane=32 -> (0, 32)
+ - register=1 -> (0, 2)
+   register=2 -> (0, 4)
+   register=4 -> (0, 8)
+ - warp is a size 1 dimension
+where out dims are: [offset (size 8), addr (size 64)]
+maybeQuot: 
+ - register=1 -> (16)
+   register=2 -> (34)
+   register=4 -> (68)
+   register=8 -> (136)
+   register=16 -> (512)
+   register=32 -> (1024)
+   register=64 -> (4)
+   register=128 -> (8)
+ - lane=1 -> (1)
+   lane=2 -> (2)
+   lane=4 -> (256)
+ - warp=1 -> (0)
+   warp=2 -> (0)
+   warp=4 -> (0)
+where out dims are: [offset (size 2048)]
+reps: 
+ - register=1 -> (128)
+   register=2 -> (272)
+   register=4 -> (544)
+   register=8 -> (1088)
+   register=16 -> (4096)
+   register=32 -> (8192)
+   register=64 -> (32)
+   register=128 -> (64)
+ - lane=1 -> (0)
+   lane=2 -> (0)
+   lane=4 -> (0)
+   lane=8 -> (8)
+   lane=16 -> (16)
+   lane=32 -> (2048)
+ - warp=1 -> (0)
+   warp=2 -> (0)
+   warp=4 -> (0)
+where out dims are: [offset (size 16384)]
+addrToOffset: 
+ - offset=1 -> (0)
+   offset=2 -> (0)
+   offset=4 -> (0)
+ - addr=1 -> (8)
+   addr=2 -> (128)
+   addr=4 -> (272)
+   addr=8 -> (544)
+   addr=16 -> (16)
+   addr=32 -> (2048)
+where out dims are: [offset (size 16384)]
+reps after permStride: 
+ - register=1 -> (128)
+   register=2 -> (272)
+   register=4 -> (544)
+   register=8 -> (1088)
+   register=16 -> (4096)
+   register=32 -> (8192)
+   register=64 -> (64)
+   register=128 -> (32)
+ - lane=1 -> (0)
+   lane=2 -> (0)
+   lane=4 -> (0)
+   lane=8 -> (8)
+   lane=16 -> (16)
+   lane=32 -> (2048)
+ - warp=1 -> (0)
+   warp=2 -> (0)
+   warp=4 -> (0)
+where out dims are: [offset (size 16384)]
+addrLayout: 
+ - lane=1 -> (8)
+   lane=2 -> (128)
+   lane=4 -> (272)
+   lane=8 -> (544)
+   lane=16 -> (16)
+   lane=32 -> (2048)
+ - warp=1 -> (0)
+   warp=2 -> (0)
+   warp=4 -> (0)
+where out dims are: [offset (size 16384)]
+fused-attention-batch4-head32-d128-fwd-causal=False-warp_specialize=False:
+    N_CTX  Triton [FP8] (TFLOPS)
+0  8192.0            1267.579802
