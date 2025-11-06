@@ -131,7 +131,8 @@ def test_compile_gemm(a_dtype, b_dtype, k_dim, BLOCK_M, BLOCK_N, BLOCK_K):
     if a_dtype in ("fp8e4nv", "fp8e5"):
         a_ty = "fp8" if a_dtype == "fp8e4nv" else "bf8"
         b_ty = "fp8" if b_dtype == "fp8e4nv" else "bf8"
-        wmma_pattern += a_ty + "_" + b_ty
+        # NOTE: we always use transposed=True for wmma layout, which will swap A and B
+        wmma_pattern += b_ty + "_" + a_ty
     assert re.search(wmma_pattern, amdgcn)
 
 
@@ -141,8 +142,6 @@ def test_compile_gemm(a_dtype, b_dtype, k_dim, BLOCK_M, BLOCK_N, BLOCK_K):
 def test_runtime_gemm(a_dtype, b_dtype, k_dim, BLOCK_M, BLOCK_N, BLOCK_K, M, N, K):
     if BLOCK_K < k_dim:
         pytest.skip("Skip tests where BLOCK_K < k_dim")
-    if a_dtype == 'float8_e4m3fn' or b_dtype == 'float8_e4m3fn':
-        pytest.skip("Skip float8_e4m3fn tests for now due to accuracy issue")
 
     torch.manual_seed(42)
 
