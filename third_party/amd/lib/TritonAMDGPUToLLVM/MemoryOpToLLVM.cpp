@@ -32,6 +32,13 @@ public:
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
     unsigned bitWidth = llvmElemTy.getIntOrFloatBitWidth();
 
+    llvm::outs() << "Lowering local_load: " << op << "\n";
+    auto shape = dstTy.getShape();
+    llvm::outs() << "shape: " << shape[0] << ", " << shape[1] << "\n";
+    llvm::outs() << "bitwidth = " << bitWidth << "\n";
+
+
+
     // FP4 is represented as i8 and, when packed along K, can be
     // transposed using ds_read_tr8 which doesn't change packing.
     if (bitWidth != 16 && bitWidth != 8) {
@@ -53,12 +60,22 @@ public:
       auto sharedLL = triton::gpu::toLinearLayout(srcTy);
       cvtDstLL = triton::gpu::toLinearLayout(dstTy).invertAndCompose(sharedLL);
     }
+
+    if (shape[0] == 128) {
+        llvm::outs() << "cvtDstLL: " << cvtDstLL << "\n";
+    }
+
     auto kBlock = StringAttr::get(op.getContext(), "block");
     auto maybeSublayout = cvtDstLL.quotient({kBlock});
     if (!maybeSublayout) {
       return failure();
     }
     cvtDstLL = maybeSublayout.value();
+
+    if (shape[0] == 128) {
+        llvm::outs() << "cvtDstLL after sublayout: " << cvtDstLL << "\n";
+    }
+
 
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
         op.getLoc(), adaptor.getSrc(), llvmElemTy, rewriter);
@@ -109,6 +126,8 @@ private:
     if (cvt.hasInDim(kBlock))
       return failure();
 
+    auto shape =  op.getType().getShape();
+
     // Map onto offsets (contiguous part) and addr (non-contiguous part)
     LinearLayout fullTile;
     // Contiguous tile
@@ -141,6 +160,10 @@ private:
     // consecutive 64 bits loaded from the same lanes.
     tile = LinearLayout::identity1D(ldsParams.needContigReg, kLane, kOffset);
 
+    if (shape[0] == 128) {
+        llvm::outs() << "tile: " << tile << "\n";
+    }
+
     const auto isaFamily = targetInfo.getISAFamily();
     // B8 types on gfx1250 require a different tile with double the contiguity
     bool doubleB8Contiguity =
@@ -170,6 +193,10 @@ private:
     // Add warp dimension so we can invert and compose with reps later
     fullTile *= LinearLayout::identity1D(1, kWarp, kAddr);
 
+    if (shape[0] == 128) {
+        llvm::outs() << "fullTile: " << fullTile << "\n";
+    }
+
     if (cvt.getInDimSize(kReg) < fullTile.getInDimSize(kReg)) {
       return failure();
     }
@@ -179,8 +206,16 @@ private:
       return failure();
     }
 
+    if (shape[0] == 128) {
+        llvm::outs() << "maybeQuot: " << maybeQuot.value() << "\n";
+    }
+
     // From here on we perform the lowering
     auto reps = zerosLike(tile) * maybeQuot.value();
+
+    if (shape[0] == 128) {
+        llvm::outs() << "reps: " << reps << "\n";
+    }
 
     // Sanity check
     assert(fullTile.getInDimSize(kReg) * bitWidth == ldsParams.instBitWidth);
@@ -195,6 +230,11 @@ private:
     // addrToOffset gives us a map from kAddr into kOffset, which is the map of
     // the addresses each lane should hold
     auto addrToOffset = fullTile.invert().compose(reps);
+
+    if (shape[0] == 128) {
+        llvm::outs() << "addrToOffset: " << addrToOffset << "\n";
+    }
+
     // sanity check
     assert(addrToOffset.getInDimSizeLog2(kAddr) >= 3 &&
            addrToOffset.getInDimSizeLog2(kAddr) <= 6);
@@ -209,6 +249,11 @@ private:
     auto [nAdditive, permStrides] =
         actionAdditiveStrides(reps, addrLayout, maskSpanAffineOffset);
     reps = permStrides.apply(reps);
+
+    if (shape[0] == 128) {
+        llvm::outs() << "reps after permStride: " << reps << "\n";
+        llvm::outs() << "addrLayout: " << addrLayout << "\n";
+    }
 
     // Perform computation in bytes, LLVM optimises this better
     assert(bitWidth >= 8);

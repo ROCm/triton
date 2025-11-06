@@ -61,10 +61,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     else:
         lo, hi = 0, N_CTX
     offsetk_y = offset_y + lo
-    if dtype == tl.float8e5:
-        offsetv_y = offset_y * HEAD_DIM + lo
-    else:
-        offsetv_y = offset_y + lo
+    #if dtype == tl.float8e5:
+    #    offsetv_y = offset_y * HEAD_DIM + lo
+    #else:
+    offsetv_y = offset_y + lo
     # loop over k, v and update accumulator
     for start_n in tl.range(lo, hi, BLOCK_N, warp_specialize=warp_specialize):
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -94,10 +94,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         else:
             acc = acc * alpha[:, None]
         # prepare p and v for the dot
-        if dtype == tl.float8e5:
-            v = desc_v.load([0, offsetv_y]).T
-        else:
-            v = desc_v.load([offsetv_y, 0])
+        #if dtype == tl.float8e5:
+        #    v = desc_v.load([0, offsetv_y]).T
+        #else:
+        v = desc_v.load([offsetv_y, 0])
         p = p.to(dtype)
         # note that this non transposed v for FP8 is only supported on Blackwell
         acc = tl.dot(p, v, acc)
@@ -134,10 +134,10 @@ else:
 
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w, pre_hook=_host_descriptor_pre_hook) \
-    for BM in [64, 128]\
-    for BN in [32, 64, 128]\
+    for BM in [256]\
+    for BN in [128]\
     for s in NUM_STAGES_OPTIONS \
-    for w in [4, 8]\
+    for w in [8]\
 ]
 if "PYTEST_VERSION" in os.environ:
     # Use a single config in testing for reproducibility
@@ -688,20 +688,21 @@ TORCH_HAS_FP8 = hasattr(torch, 'float8_e5m2')
 BATCH, N_HEADS = 4, 32
 # vary seq length for fixed head and batch=4
 configs = []
-for HEAD_DIM in [64, 128]:
-    for mode in ["fwd", "bwd"]:
-        for causal in [True, False]:
+for HEAD_DIM in [128]:
+    for mode in ["fwd"]:
+        for causal in [False]:
             # Enable warpspec for causal fwd on Hopper
             enable_ws = mode == "fwd" and (is_blackwell() or (is_hopper() and not causal))
             for warp_specialize in [False, True] if enable_ws else [False]:
                 configs.append(
                     triton.testing.Benchmark(
                         x_names=["N_CTX"],
-                        x_vals=[2**i for i in range(10, 15)],
+                        #x_vals=[2**i for i in range(10, 15)],
+                        x_vals=[8192],
                         line_arg="provider",
-                        line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
+                        line_vals=["triton-fp8"]  +
                         (["flash"] if HAS_FLASH else []),
-                        line_names=["Triton [FP16]"] + (["Triton [FP8]"] if TORCH_HAS_FP8 else []) +
+                        line_names=["Triton [FP8]"] +
                         (["Flash-2"] if HAS_FLASH else []),
                         styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                         ylabel="TFLOPS",
@@ -729,8 +730,8 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, warp_specialize, mo
         if mode == "fwd" and "fp8" in provider:
             q = q.to(torch.float8_e5m2)
             k = k.to(torch.float8_e5m2)
-            v = v.permute(0, 1, 3, 2).contiguous()
-            v = v.permute(0, 1, 3, 2)
+            #v = v.permute(0, 1, 3, 2).contiguous()
+            #v = v.permute(0, 1, 3, 2)
             v = v.to(torch.float8_e5m2)
         sm_scale = 1.3
         fn = lambda: attention(q, k, v, causal, sm_scale, warp_specialize)
