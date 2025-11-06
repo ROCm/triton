@@ -107,7 +107,6 @@ def aot_compile(args):
     else:
         shader_info = ShaderInfo()
     shader_info.lds_bytes = ccinfo.metadata.shared
-    shader_info.cluster_dim = ccinfo.metadata.cluster_dims
     return shader_info
 
 

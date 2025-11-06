@@ -112,32 +112,11 @@ Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   if (getISAFamily() != ISAFamily::GFX1250) {
     return arith::ConstantIntOp::create(rewriter, loc, 0, 32);
   }
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-  // We do not have an intrinsic to get a flat cluster workgroup id so we need
-  // to calculate from x,y,z ids and sizes Note that the rder of dispatch is
-  // z->y->x
-  auto createIntrinsic = [&](auto instrinsic) {
-    return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, instrinsic,
-                                           {rewriter.getI32Type()}, {})
-        .getResult(0);
-  };
-
-  auto idX = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.x");
-  auto idY = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.y");
-  auto idZ = createIntrinsic("llvm.amdgcn.cluster.workgroup.id.z");
-  Value one =
-      arith::ConstantIntOp::create(rewriter, loc, rewriter.getI32Type(), 1);
-  auto dimX =
-      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.x"));
-  auto dimY =
-      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.y"));
-  auto dimZ =
-      b.add(one, createIntrinsic("llvm.amdgcn.cluster.workgroup.max.id.z"));
-
-  auto linearX = idX;
-  auto linearY = b.mul(idY, dimX);
-  return b.add(linearX, linearY);
+  // We dispatch only along x; return the workgroup id x
+  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
+                                         "llvm.amdgcn.cluster.workgroup.id.x",
+                                         {rewriter.getI32Type()}, {})
+      .getResult(0);
 }
 
 Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,

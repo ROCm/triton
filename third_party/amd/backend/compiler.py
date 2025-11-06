@@ -110,8 +110,8 @@ class HIPBackend(BaseBackend):
     def parse_options(self, opts) -> Any:
         args = {'arch': knobs.runtime.override_arch or self.target.arch}
 
-        if opts.get("num_ctas", 1) > 1:
-            raise ValueError("num_ctas > 1 not supported for AMD GPUs")
+        if not amd.has_cluster_feature(self.target.arch) and opts.get("num_ctas", 1) > 1:
+            raise ValueError("num_ctas > 1 not supported on target device")
 
         # Enable XF32 (TF32) for CDNA3 GPUs
         if self.target.arch == 'gfx942':
@@ -207,12 +207,6 @@ class HIPBackend(BaseBackend):
         emuTF32 = False
         passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_f32_dot_tc(pm, emuTF32)
-        if amd.has_cluster_feature(options.arch):
-            cluster_info = amd.ClusterInfo()
-            cluster_info.clusterDimX = options.num_ctas
-            cluster_info.clusterDimY = 1
-            cluster_info.clusterDimZ = 1
-            amd.passes.ttgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)

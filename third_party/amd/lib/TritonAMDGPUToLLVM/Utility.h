@@ -35,9 +35,9 @@ Value permute(Location loc, RewriterBase &rewriter, Value a, Value b,
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                ProgramIDDim axis);
 
-Value getGroupMask(RewriterBase &rewriter, Location loc, ArrayRef<Value> wid,
-                   ArrayRef<unsigned> ctasPerCga, ArrayRef<unsigned> splits,
-                   ArrayRef<unsigned> order);
+// Emit the cta multicast mask for a given cta id based on the src layout
+Value emitCtaMulticastMask(RewriterBase &rewriter, Location loc, Value blockId,
+                           const LinearLayout &cvt);
 
 std::pair<bool, bool>
 getCacheModifierFlagsForLoadStore(const triton::CacheModifier &cm, MemoryOp op);
