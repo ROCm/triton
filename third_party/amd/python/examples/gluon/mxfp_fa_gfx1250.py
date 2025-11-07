@@ -962,6 +962,24 @@ def static_check(kernel, scale_preshuffled, head_sz):
                 assert instr == "global_load_async_to_lds_b64"
 
 
+def static_profile(kernel):
+    amdgcn = kernel.asm['amdgcn']
+
+    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
+    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
+    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
+
+    print(f"- sgpr_count: {sgpr_count}\n"
+          f"- sgpr_spill_count: {sgpr_spill_count}\n"
+          f"- vgpr_count: {vgpr_count}\n"
+          f"- vgpr_spill_count: {vgpr_spill_count}\n"
+          f"- code_len_in_byte: {code_len_in_byte}\n"
+          f"- occupancy: {occupancy}\n")
+
+
 @pytest.mark.parametrize("q_type,kv_type", get_variants())
 @pytest.mark.parametrize("batch", [1])
 @pytest.mark.parametrize("seqlen_q", [256])
@@ -1012,16 +1030,7 @@ if __name__ == "__main__":
 
         _, kernel = attn_fwd(q, k, v, q_scale, k_scale, v_scale, q_type, kv_type, block_m, block_n, pipelined,
                              scale_preshuffled, not disable_p_scaling)
-        amdgcn = kernel.asm['amdgcn']
-
-        sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
-        sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-        vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
-        vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-        print(f"- sgpr_count: {sgpr_count}\n"
-              f"- sgpr_spill_count: {sgpr_spill_count}\n"
-              f"- vgpr_count: {vgpr_count}\n"
-              f"- vgpr_spill_count: {vgpr_spill_count}\n")
+        static_profile(kernel)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--q_type", type=str, choices=['e4m3', 'e5m2'], required=True)
