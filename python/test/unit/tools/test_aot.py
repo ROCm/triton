@@ -635,6 +635,7 @@ module attributes {{"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = {warp_si
             assert '.amdgcn_target "amdgcn-amd-amdhsa--gfx942"' in amdgcn
             assert '.wavefront_size: 64' in amdgcn
 
+
 def test_gluon_kernel():
     if not is_hip():
         pytest.skip("Gluon kernel is only supported on HIP")
