@@ -45,7 +45,7 @@ public:
     // Number of bits that each lane reads per issued instruction
     unsigned instBitWidth;
     // Number of elements that the instruction needs to be contiguous in LDS
-    unsigned tileSize;
+    unsigned needContigReg;
   };
   // Get the ds_read_tr parameters for the instruction that operates on the
   // element granularty specified by bitWidth
