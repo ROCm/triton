@@ -3203,9 +3203,9 @@ def test_amd_mbarrier(target):
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @amd_mbarrier_kernel() attributes {noinline = false} {
     %0 = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared, #smem, mutable>
-    amdgpu.init_barrier %0, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
-    %1 = amdgpu.arrive_barrier %0, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable> -> i32
-    amdgpu.wait_barrier %0, %1 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.init_barrier %0, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    %1 = amdg.arrive_barrier %0, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable> -> i32
+    amdg.wait_barrier %0, %1 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     tt.return
   }
 }
@@ -3253,11 +3253,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %7 = arith.addi %5, %6 : tensor<128x16xi32, #blocked>
     %8 = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared, #smem, mutable>
     %9 = ttg.local_alloc : () -> !ttg.memdesc<128x16xf16, #shared1, #smem, mutable>
-    amdgpu.init_barrier %8, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.init_barrier %8, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     %10 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x16x!tt.ptr<f16>, #blocked>
     %11 = tt.addptr %10, %7 : tensor<128x16x!tt.ptr<f16>, #blocked>, tensor<128x16xi32, #blocked>
     %12 = ttg.async_copy_global_to_local %11, %9 : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared1, #smem, mutable>
-    amdgpu.async_copy_mbarrier_arrive %8 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.async_copy_mbarrier_arrive %8 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     tt.return
   }
 }
@@ -3299,11 +3299,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %0 = tt.make_tensor_descriptor %arg0, [%c32_i32, %c128_i32], [%c128_i64, %c1_i64] : <f16>, <tensor<16x64xf16, #shared>>
     %1 = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared1, #smem, mutable>
     %2 = ttg.local_alloc : () -> !ttg.memdesc<16x64xf16, #shared, #smem, mutable>
-    amdgpu.init_barrier %1, 1 : !ttg.memdesc<1xi64, #shared1, #smem, mutable>
+    amdg.init_barrier %1, 1 : !ttg.memdesc<1xi64, #shared1, #smem, mutable>
     %c0_i32 = arith.constant 0 : i32
     %c2_i32 = arith.constant 2 : i32
     %true = arith.constant true
-    %3 = amdgpu.async_tdm_copy_global_to_local %0[%c0_i32, %c2_i32] into %2, %true, barrier = %1 : !tt.tensordesc<tensor<16x64xf16, #shared>>, !ttg.memdesc<1xi64, #shared1, #smem, mutable> -> !ttg.memdesc<16x64xf16, #shared, #smem, mutable>
+    %3 = amdg.async_tdm_copy_global_to_local %0[%c0_i32, %c2_i32] into %2, %true, barrier = %1 : !tt.tensordesc<tensor<16x64xf16, #shared>>, !ttg.memdesc<1xi64, #shared1, #smem, mutable> -> !ttg.memdesc<16x64xf16, #shared, #smem, mutable>
     %4 = ttg.local_load %2 : !ttg.memdesc<16x64xf16, #shared, #smem, mutable> -> tensor<16x64xf16, #blocked>
     tt.return
   }
