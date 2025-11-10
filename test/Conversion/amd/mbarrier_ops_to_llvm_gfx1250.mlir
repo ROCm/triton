@@ -9,7 +9,7 @@ module attributes {"ttg.target" = "hip:gfx1250", "ttg.num-ctas" = 1 : i32, "ttg.
     // GFX1250: %[[ALLOC_PTR:.+]] = llvm.extractvalue %arg0[0] : !llvm.struct<(ptr<3>, i32)>
     // GFX1250: llvm.store %[[INIT_VAL1]], %[[ALLOC_PTR]] : i64, !llvm.ptr<3>
     // GFX1250: rocdl.barrier
-    amdgpu.init_barrier %alloc, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.init_barrier %alloc, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     tt.return
   }
 
@@ -18,7 +18,7 @@ module attributes {"ttg.target" = "hip:gfx1250", "ttg.num-ctas" = 1 : i32, "ttg.
     // GFX1250: rocdl.s.sleep {{.*}}
     // GFX1250: llvm.load {{.*}} : !llvm.ptr<3> -> i64
     // GFX1250: llvm.icmp "ne" {{%arg1, %.*|%.*, %arg1}} : i32
-    amdgpu.wait_barrier %alloc, %phase : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.wait_barrier %alloc, %phase : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     tt.return
   }
 
@@ -27,7 +27,7 @@ module attributes {"ttg.target" = "hip:gfx1250", "ttg.num-ctas" = 1 : i32, "ttg.
     // GFX1250: %[[UPDATE_VAL1:.+]] = llvm.mlir.constant(1 : i64) : i64
     // GFX1250: %[[ALLOC_PTR:.+]] = llvm.extractvalue %arg0[0] : !llvm.struct<(ptr<3>, i32)>
     // GFX1250: llvm.call_intrinsic "llvm.amdgcn.ds.atomic.barrier.arrive.rtn.b64"(%[[ALLOC_PTR]], %[[UPDATE_VAL1]])
-    %prior_phase = amdgpu.arrive_barrier %alloc, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable> -> i32
+    %prior_phase = amdg.arrive_barrier %alloc, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable> -> i32
     tt.return
   }
 
@@ -35,7 +35,7 @@ module attributes {"ttg.target" = "hip:gfx1250", "ttg.num-ctas" = 1 : i32, "ttg.
   tt.func @async_copy_mbarrier_arrive(%alloc: !ttg.memdesc<1xi64, #shared, #smem, mutable>) {
     // GFX1250: %[[ALLOC_PTR:.+]] = llvm.extractvalue %arg0[0] : !llvm.struct<(ptr<3>, i32)>
     // GFX1250: llvm.call_intrinsic "llvm.amdgcn.ds.atomic.async.barrier.arrive.b64"(%[[ALLOC_PTR]])
-    amdgpu.async_copy_mbarrier_arrive %alloc : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    amdg.async_copy_mbarrier_arrive %alloc : !ttg.memdesc<1xi64, #shared, #smem, mutable>
     tt.return
   }
 }
