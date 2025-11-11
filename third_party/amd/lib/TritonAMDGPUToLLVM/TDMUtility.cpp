@@ -386,12 +386,13 @@ void fillTDMDescriptor(
               : std::nullopt,
           numDims);
 
-  auto warpId = getLaneAndWarpId(rewriter, loc).second;
+  auto warpIdOp = LLVM::createLLVMIntrinsicCallOp(
+      rewriter, loc, "llvm.amdgcn.wave.id", {i32_ty}, ValueRange{});
   auto warps = getWarpDistribution(blockShape, numWarps);
 
   // Compute warp coordinates for each dimension
   SmallVector<Value> warpCoord(numDims);
-  Value remainingId = warpId;
+  Value remainingId = warpIdOp.getResult(0);
   for (size_t i = 0; i < numDims - 1; ++i) {
     warpCoord[i] = b.urem(remainingId, b.i32_val(warps[i]));
     remainingId = b.udiv(remainingId, b.i32_val(warps[i]));
