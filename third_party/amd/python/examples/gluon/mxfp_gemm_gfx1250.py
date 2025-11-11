@@ -311,7 +311,7 @@ def run(config):
                                       stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
                                       dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
                                       group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, num_warps=numWarps,
-                                      num_ctas=numCtas)
+                                      num_ctas=numCtas, waves_per_eu=numWarps // 4)
 
     torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-5, atol=1e-8)
     print('✅Pass')
@@ -399,7 +399,7 @@ def test_runtime_mxgemm_tdm_pipelined(config):
                                           stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
                                           dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
                                           group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, num_warps=numWarps,
-                                          num_ctas=numCtas)
+                                          num_ctas=numCtas, waves_per_eu=numWarps // 4)
 
     if TRANSPOSE_B:
         assert 'ds_load_u8' not in k.asm['amdgcn']

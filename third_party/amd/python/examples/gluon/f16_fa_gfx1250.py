@@ -584,7 +584,7 @@ def test_attention(config):
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
         sm_scale, SEQLEN_Q, SEQLEN_K,  #
         BLOCK_M, BLOCK_N,  #
-        HEAD_SZ, num_warps=4)
+        HEAD_SZ, num_warps=4, waves_per_eu=1)
     o = o.cpu()
     rtol = 0.004
     atol = 0.004

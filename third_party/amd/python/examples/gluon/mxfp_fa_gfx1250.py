@@ -1202,9 +1202,9 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     if pipelined:
         assert cdiv(seqlen_k, block_n) > 4
         assert cdiv(seqlen_k, block_n) % 2 == 0
-        kernel = attn_fwd_pipelined_kernel[grid](*kargs, num_warps=4)
+        kernel = attn_fwd_pipelined_kernel[grid](*kargs, num_warps=4, waves_per_eu=1)
     else:
-        kernel = attn_fwd_kernel[grid](*kargs, num_warps=4)
+        kernel = attn_fwd_kernel[grid](*kargs, num_warps=4, waves_per_eu=1)
 
     return o.cpu().permute(0, 2, 1, 3), kernel
 
