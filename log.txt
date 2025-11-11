@@ -1,9 +1,39 @@
-Lowering local_load: %6572 = "ttg.local_load"(%6571) {ttg.amdgpu.syncedViaAsyncWait = false} : (!ttg.memdesc<256x128xf8E5M2, #ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>, #ttg.shared_memory>) -> tensor<256x128xf8E5M2, #ttg.dot_op<{opIdx = 0, parent = #ttg.amd_mfma<{version = 4, warpsPerCTA = [8, 1], instrShape = [32, 32, 64], isTransposed = true}>, kWidth = 16}>>
-shape: 256, 128
-bitwidth = 8
-Lowering local_load: %17293 = "ttg.local_load"(%17292) {ttg.amdgpu.syncedViaAsyncWait = false} : (!ttg.memdesc<128x128xf8E5M2, #ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>, #ttg.shared_memory>) -> tensor<128x128xf8E5M2, #ttg.dot_op<{opIdx = 1, parent = #ttg.amd_mfma<{version = 4, warpsPerCTA = [8, 1], instrShape = [32, 32, 64], isTransposed = true}>, kWidth = 16}>>
+// ds_read_tr*_b64 performs a cooperative transposed load across 16
+// threads. The instruction processes an Nx16 tile (N=4 for 16-bit, N=8 for
+// 8-bit). The loaded tile is re-packed/transposed where lane i will
+// receive the i-th column.
+//
+// Loaded tile layout (input):     Register layout (output after transpose):
+//     K0  K1  ... K15               R0  R1  R2  R3
+// M0[ ............... ]    =>  T0 [ .   .   .   . ]
+// M1[ ............... ]        T1 [ .   .   .   . ]
+// M2[ ............... ]        ...
+// M3[ ............... ]        T15[ .   .   .   . ]
+//
+// Each lane loads 64 contiguous bits from LDS. After the transpose,
+// lane i receives column i from the input (elements strided by 16
+// in the loaded tile).
+//
+// For example with N=4 (16-bit):
+// - Lane 0 receives elements from column 0: originally at [t0,t4,t8,t12]
+// - Lane 1 receives elements from column 1: originally at [t0,t4,t8,t12]
+//   These are the second 16 bits loaded by the same lanes before repacking
+// - Lane 4 receives elements from column 4: originally at [t1,t5,t9,t13]
+//
+// Note that there is no restriction on where elements are loaded
+// from, only that each lane needs to load 64 contiguous bits from shared
+// memory. We require N number of lanes to be contiguous since they read
+// consecutive 64 bits loaded from the same lanes.
+ 
+Lowering local_load: %17293 = "ttg.local_load"(%17292) {ttg.amdgpu.syncedViaAsyncWait = false} : (!ttg.memdesc<128x128xf8E5M2, 
+#ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>, #ttg.shared_memory>) -> 
+tensor<128x128xf8E5M2, #ttg.dot_op<{opIdx = 1, parent = #ttg.amd_mfma<{version = 4, warpsPerCTA = [8, 1], 
+instrShape = [32, 32, 64], isTransposed = true}>, kWidth = 16}>>
+ 
 shape: 128, 128
 bitwidth = 8
+ 
+***** Just combine the dstLL with shared layout, easy to see contiguity that way
 cvtDstLL: 
  - register=1 -> (128, 0)
    register=2 -> (272, 0)
@@ -24,6 +54,8 @@ cvtDstLL:
    warp=4 -> (0, 0)
  - block is a size 1 dimension
 where out dims are: [offset (size 16384), block (size 1)]
+ 
+***** Remove block dimension as we don't really care
 cvtDstLL after sublayout: 
  - register=1 -> (128)
    register=2 -> (272)
@@ -43,23 +75,44 @@ cvtDstLL after sublayout:
    warp=2 -> (0)
    warp=4 -> (0)
 where out dims are: [offset (size 16384)]
+ 
+***** This defines 64b contiguous tile
+***** Define the tile, we want data to be contiguous (M/N if we load to K contig) that way we can then load
+      and share it with other threads in a "transpose" way
+ 
 tile: 
  - lane=1 -> (1)
    lane=2 -> (2)
    lane=4 -> (4)
 where out dims are: [offset (size 8)]
+ 
+***** The full tile defines how the small tile is distributed in the warp. 
+***** This basically defines which logical addresses ("tile id") each thread will load. 
+***** 4x16 / 8x16 depending on data type is the inner tile. Example is B8
+***** Helpful to have both the MFMA layout and the DS_READ_TR address map layouts at hand
+***** Note: we are not hardcoding the need of MFMA layout, just mapping where the data goes
+fullTile =
+          tile * LinearLayout::identity1D(otherLanes, kLane, kAddr) *   // otherLanes = 2 (1 kLane base)
+          LinearLayout::identity1D(ldsParams.tileSize, kReg, kAddr) *   // tileSize = 8 (3 kReg bases)
+          LinearLayout::identity1D(missingLanes / otherLanes, kLane, kAddr); // (64 / 8) / 2 = 4 (2 kReg bases)
+ 
+ 
 fullTile: 
  - lane=1 -> (1, 0)
    lane=2 -> (2, 0)
    lane=4 -> (4, 0)
-   lane=8 -> (0, 1)
-   lane=16 -> (0, 16)
-   lane=32 -> (0, 32)
+   lane=8 -> (0, 1)    ////////// This can be inferred by looking at the MFMA "base tile" that is 8x16, thread 1
+-----------------
+   lane=16 -> (0, 16)  ////////////// fullTile is 8x16 for fp8 which is what a base tile is (refer to slides)
+   lane=32 -> (0, 32)  ////////////// then we extend to the other lanes to finish the tile
  - register=1 -> (0, 2)
    register=2 -> (0, 4)
    register=4 -> (0, 8)
  - warp is a size 1 dimension
 where out dims are: [offset (size 8), addr (size 64)]
+ 
+***** Here we check if we can divide the destination layout (in offsets) by our tile (in offsets). 
+      Result is the "adjusted offsets" (maybeQuot == offsets/8)
 maybeQuot: 
  - register=1 -> (16)
    register=2 -> (34)
@@ -76,6 +129,8 @@ maybeQuot:
    warp=2 -> (0)
    warp=4 -> (0)
 where out dims are: [offset (size 2048)]
+ 
+***** Basically the input layout with masked out the input tile
 reps: 
  - register=1 -> (128)
    register=2 -> (272)
@@ -95,6 +150,34 @@ reps:
    warp=2 -> (0)
    warp=4 -> (0)
 where out dims are: [offset (size 16384)]
+ 
+***** fullTile.invert().compose(reps) doing this gives a map of which offset in memory for
+      each of the logical addresses (tiles in the fullTile)
+ 
+fullTile
+ - lane=1 -> (1, 0)
+   lane=2 -> (2, 0)
+   lane=4 -> (4, 0)
+   lane=8 -> (0, 1)
+   lane=16 -> (0, 16)
+   lane=32 -> (0, 32)
+ - register=1 -> (0, 2)
+   register=2 -> (0, 4)
+   register=4 -> (0, 8)
+ - warp is a size 1 dimension
+where out dims are: [offset (size 8), addr (size 64)]
+fullTile.invert()
+ - offset=1 -> (1, 0, 0)
+   offset=2 -> (2, 0, 0)
+   offset=4 -> (4, 0, 0)
+ - addr=1 -> (8, 0, 0)
+   addr=2 -> (0, 1, 0)
+   addr=4 -> (0, 2, 0)
+   addr=8 -> (0, 4, 0)
+   addr=16 -> (16, 0, 0)
+   addr=32 -> (32, 0, 0)
+where out dims are: [lane (size 64), register (size 8), warp (size 1)]
+ 
 addrToOffset: 
  - offset=1 -> (0)
    offset=2 -> (0)
@@ -125,6 +208,10 @@ reps after permStride:
    warp=2 -> (0)
    warp=4 -> (0)
 where out dims are: [offset (size 16384)]
+ 
+***** Each addr in addrToOffset maps to a specific lane. Equivalent to addrToOffset 
+      and find/replace addr with lane (and removing offset dim)
+***** When emitting the final addresses we apply also reps (for the register part) to get the actual final offset
 addrLayout: 
  - lane=1 -> (8)
    lane=2 -> (128)
@@ -136,6 +223,33 @@ addrLayout:
    warp=2 -> (0)
    warp=4 -> (0)
 where out dims are: [offset (size 16384)]
-fused-attention-batch4-head32-d128-fwd-causal=False-warp_specialize=False:
-    N_CTX  Triton [FP8] (TFLOPS)
-0  8192.0            1267.579802
+ 
+ 
+B16 example of thread addresses (if only 1 ds_read_tr needs emitting: 4x64 local_load)
+i8AddrLayout
+ - register=1 -> (0) // added for conversion to i8 address purposes
+ - lane=1 -> (8)
+   lane=2 -> (16)
+   lane=4 -> (128)
+   lane=8 -> (256)
+   lane=16 -> (32)
+   lane=32 -> (64)
+ - warp is a size 1 dimension
+where out dims are: [offset (size 512)]
+0 ->    0    16 ->   32    32 ->   64    48 ->   96
+1 ->    8    17 ->   40    33 ->   72    49 ->  104
+2 ->   16    18 ->   48    34 ->   80    50 ->  112
+3 ->   24    19 ->   56    35 ->   88    51 ->  120
+4 ->  128    20 ->  160    36 ->  192    52 ->  224
+5 ->  136    21 ->  168    37 ->  200    53 ->  232
+6 ->  144    22 ->  176    38 ->  208    54 ->  240
+7 ->  152    23 ->  184    39 ->  216    55 ->  248
+8 ->  256    24 ->  288    40 ->  320    56 ->  352
+9 ->  264    25 ->  296    41 ->  328    57 ->  360
+10 ->  272    26 ->  304    42 ->  336    58 ->  368
+11 ->  280    27 ->  312    43 ->  344    59 ->  376
+12 ->  384    28 ->  416    44 ->  448    60 ->  480
+13 ->  392    29 ->  424    45 ->  456    61 ->  488
+14 ->  400    30 ->  432    46 ->  464    62 ->  496
+15 ->  408    31 ->  440    47 ->  472    63 ->  504
+B8 is similar (but slightly different)
