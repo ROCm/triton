@@ -7,8 +7,8 @@ This doc lists our internal CI setup details and how to update components.
 Currently we have the following machines:
 
 * Shark58 (Threadripper CPU machine)
-* bg-1e715-b03-2 (Conductor mi350 machine)
 * gbt350-odcdh1-b12-1 (Conductor mi350 machine)
+* smci350-zts-gtu-e6-15 (Conductor mi350 machine)
 
 We use GitHub Actions infrastructure to listen and dispatch workloads to CI
 machines. Once a job arrives, GitHub Action runner on a local machine
@@ -40,7 +40,7 @@ We will set up GitHub Runner under your user account. So good to be
 consistent regarding file ownership:
 
 ```sh
-sudo chown $(id -u):$(id -g) /data/ci
+sudo chown -R $(id -u):$(id -g) /data/ci
 ```
 
 ### Build docker image

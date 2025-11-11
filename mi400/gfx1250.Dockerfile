@@ -39,14 +39,14 @@ RUN pip install --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pybind11>=2.13.1" 
   pytest pytest-xdist pytest-repeat lit expecttest \
   pylama pre-commit clang-format
 RUN pip install --upgrade hip-python -i https://test.pypi.org/simple/
-RUN pip install --pre torch -i https://download.pytorch.org/whl/nightly/rocm7.0 && \
+RUN pip install torch -i https://download.pytorch.org/whl/rocm6.4 && \
   pip uninstall -y triton pytorch-triton pytorch-triton-rocm
 # We need to remove the PyTorch bundled libamdhip64.so to avoid interfering!
 RUN rm -rf $(pip show torch | grep ^Location: | cut -d' ' -f2-)/torch/lib/libamdhip64.so
 
 # Copy a local FFM Lite package for hermetic environment
 # In CI we may want to rebind it when invoking docker for easy upgrade.
-COPY rocm-ffmlite-mi450-f1d5d1bf-rel-20251023/ /ffm
+COPY rocm-ffmlite-mi450-oai-7ac1dbc-rel-20251031/ /ffm
 
 # Create non-root user account to mirror host user account
 ARG DOCKER_USERID=0
