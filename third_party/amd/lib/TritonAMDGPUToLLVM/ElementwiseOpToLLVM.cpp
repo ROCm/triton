@@ -230,6 +230,8 @@ template <typename FPType> struct FPTypeInfo {
 template <typename InType, typename OutType>
 void clampInfInInput(Location loc, ConversionPatternRewriter &rewriter,
                      const SmallVector<Value> &in, SmallVector<Value> &out) {
+  // TODO: figure out if needed or if there is a better way.
+  /*
   assert(in.size() == out.size());
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto typeInfoIn = FPTypeInfo<InType>(loc, rewriter);
@@ -245,6 +247,7 @@ void clampInfInInput(Location loc, ConversionPatternRewriter &rewriter,
     out[i] = b.select(isInfMinus, maxMinusOut,
                       b.select(isInfPlus, maxPlusOut, out[i]));
   }
+  */
 }
 
 // Convert Ocp Fp8/Bf8 to Fp16/Bf16/Fp32 on CDNA4

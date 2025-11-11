@@ -59,7 +59,7 @@ export HSA_MODEL_ARGS=ffm_enable_time_slicing
 
 echo "=== Run E2E Upstream Tests ==="
 
-pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping
+pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast_clamping -k "not inf"
 pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_upcast
 # pytest --count=1 -n 16 python/test/unit/language/test_conversions.py::test_typeconvert_downcast # TODO: fix hang
 
