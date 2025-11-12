@@ -92,6 +92,14 @@ def composition(cls):
     return cls
 
 
+@gluon.constexpr_function
+def get_padded_shared_layout(outer_dim, inner_dim, transposed=False):
+    shape = [outer_dim, inner_dim]
+    padding_interval = inner_dim
+    padding_amount = 16 if transposed else 8
+    return ttgl.PaddedSharedLayout.with_identity_for([[padding_interval, padding_amount]], shape, [1, 0])
+
+
 @aggregate
 class AttentionConfigBase:
     Q_TYPE: ttgl.constexpr  # the data type for Q, either 'e5m2' or 'e4m3'
@@ -138,10 +146,10 @@ class GlobalScaledAttentionConfig:
     acc_layout: ttgl.constexpr
 
     @gluon.constexpr_function
-    def get_operand_smem_layout(outer_dim, inner_dim):
+    def get_operand_smem_layout(outer_dim, inner_dim, transposed):
         shape = [outer_dim, inner_dim]
         padding_interval = inner_dim
-        padding_amount = 16
+        padding_amount = 16 if transposed else 8
         return ttgl.PaddedSharedLayout.with_identity_for([[padding_interval, padding_amount]], shape, [1, 0])
 
     @gluon.constexpr_function
@@ -158,10 +166,10 @@ class GlobalScaledAttentionConfig:
         wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
             version=3, transposed=True, warps_per_cta=[NUM_WARPS, 1], instr_shape=[16, 16, 128])
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
-        self.k_smem_layout = ttgl.constexpr(GlobalScaledAttentionConfig.get_operand_smem_layout(HEAD_SZ, BLOCK_N))
+        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout(BLOCK_N, HEAD_SZ))
         self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
         self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
-        self.v_smem_layout = ttgl.constexpr(GlobalScaledAttentionConfig.get_operand_smem_layout(BLOCK_N, HEAD_SZ))
+        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout(HEAD_SZ, BLOCK_N))
         self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
         self.acc_layout = ttgl.constexpr(wmma_layout)
 
@@ -227,17 +235,6 @@ class BlockScaledAttentionConfig:
             return ttgl.BlockedLayout([1, 4], [2, 16], [num_warps, 1], [1, 0])
 
     @gluon.constexpr_function
-    def get_operand_smem_layout(outer_dim, inner_dim):
-        shape = [outer_dim, inner_dim]
-        padding_interval = inner_dim
-        padding_amount = 16
-        return ttgl.PaddedSharedLayout.with_identity_for([[padding_interval, padding_amount]], shape, [1, 0])
-
-    @gluon.constexpr_function
-    def get_scale_smem_layout(outer_dim, inner_dim):
-        return ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0])
-
-    @gluon.constexpr_function
     def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
                  NUM_WARPS, P_SCALING, SCALE_PRESHUFFLED, NUM_BUFFERS):
         assert Q_TYPE in ['e5m2', 'e4m3']
@@ -268,8 +265,7 @@ class BlockScaledAttentionConfig:
         self.q_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.q_layout, [self.BLOCK_M, BLOCK_K_SCALE_QK]))
 
-        self.k_smem_layout = ttgl.constexpr(
-            BlockScaledAttentionConfig.get_operand_smem_layout(HEAD_SZ // KV_PACK_DIV, BLOCK_N))
+        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout(BLOCK_N, HEAD_SZ // KV_PACK_DIV))
         self.k_layout = ttgl.constexpr(
             BlockScaledAttentionConfig.get_operand_reg_layout(1, tiles_per_warp, num_warps, packed=(KV_TYPE == 'e2m1')))
         self.k_scale_layout = ttgl.constexpr(
@@ -285,8 +281,7 @@ class BlockScaledAttentionConfig:
         self.p_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.p_layout, [self.BLOCK_M, BLOCK_K_SCALE_PV]))
 
-        self.v_smem_layout = ttgl.constexpr(
-            BlockScaledAttentionConfig.get_operand_smem_layout(BLOCK_N // KV_PACK_DIV, HEAD_SZ))
+        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout(HEAD_SZ, BLOCK_N // KV_PACK_DIV))
         self.v_layout = ttgl.constexpr(
             BlockScaledAttentionConfig.get_operand_reg_layout(1, tiles_per_warp, num_warps, packed=(KV_TYPE == 'e2m1')))
         self.v_scale_layout = ttgl.constexpr(
@@ -383,9 +378,9 @@ class GlobalScaledAttentionProgram:
         k_off_zh = SEQLEN_K * (HEAD_SZ) * (NUM_K_HEADS * off_z + off_hk)
         k_desc = tdm.make_tensor_descriptor(  #
             base=k_off_zh + k_ptr,  #
-            shape=[HEAD_SZ, SEQLEN_K],  #
-            strides=[SEQLEN_K, 1],  #
-            block_shape=[HEAD_SZ, BLOCK_N],  #
+            shape=[SEQLEN_K, HEAD_SZ],  #
+            strides=[HEAD_SZ, 1],  #
+            block_shape=[BLOCK_N, HEAD_SZ],  #
             layout=cfg.k_smem_layout)
         k_buffer = ttgl.allocate_shared_memory(  #
             k_desc.dtype,  #
@@ -398,9 +393,9 @@ class GlobalScaledAttentionProgram:
         v_off_zh = (SEQLEN_K) * HEAD_SZ * (NUM_K_HEADS * off_z + off_hk)
         v_desc = tdm.make_tensor_descriptor(  #
             base=v_off_zh + v_ptr,  #
-            shape=[SEQLEN_K, HEAD_SZ],  #
-            strides=[HEAD_SZ, 1],  #
-            block_shape=[BLOCK_N, HEAD_SZ],  #
+            shape=[HEAD_SZ, SEQLEN_K],  #
+            strides=[SEQLEN_K, 1],  #
+            block_shape=[HEAD_SZ, BLOCK_N],  #
             layout=cfg.v_smem_layout)
         v_buffer = ttgl.allocate_shared_memory(  #
             v_desc.dtype,  #
@@ -435,19 +430,19 @@ class GlobalScaledAttentionProgram:
     def issue_global_load_k(self, i, buf):
         k_step: ttgl.constexpr = self.k_step
         k_buffer = self.k_buffer.index(buf)
-        tdm.async_load(self.k_desc, [0, i * k_step], k_buffer)
+        tdm.async_load(self.k_desc, [i * k_step, 0], k_buffer)
 
     @gluon.jit
     def issue_global_load_v(self, i, buf):
         v_step: ttgl.constexpr = self.v_step
         v_buffer = self.v_buffer.index(buf)
-        tdm.async_load(self.v_desc, [i * v_step, 0], v_buffer)
+        tdm.async_load(self.v_desc, [0, i * v_step], v_buffer)
 
     @gluon.jit
     def shared_load_k(self, buf, wait_count):
         cfg = self.cfg
 
-        k_buffer = self.k_buffer.index(buf)
+        k_buffer = self.k_buffer.index(buf).permute((1, 0))
 
         tdm.async_wait(wait_count)
         k = k_buffer.load(cfg.k_layout)
@@ -458,7 +453,7 @@ class GlobalScaledAttentionProgram:
     def shared_load_v(self, buf, wait_count):
         cfg = self.cfg
 
-        v_buffer = self.v_buffer.index(buf)
+        v_buffer = self.v_buffer.index(buf).permute((1, 0))
 
         tdm.async_wait(wait_count)
         v = v_buffer.load(cfg.v_layout)
@@ -698,13 +693,12 @@ class BlockScaledAttentionProgram:
         off_hk = off_h // GROUP_SIZE
 
         # create descriptor and buffer for k
-        # shape: [HEAD_SZ / KV_PACK_DIV, BLOCK_N]
         k_off_zh = SEQLEN_K * (HEAD_SZ // KV_PACK_DIV) * (NUM_K_HEADS * off_z + off_hk)
         k_desc = tdm.make_tensor_descriptor(  #
             base=k_off_zh + k_ptr,  #
-            shape=[HEAD_SZ // KV_PACK_DIV, SEQLEN_K],  #
-            strides=[SEQLEN_K, 1],  #
-            block_shape=[HEAD_SZ // KV_PACK_DIV, BLOCK_N],  #
+            shape=[SEQLEN_K, HEAD_SZ // KV_PACK_DIV],  #
+            strides=[HEAD_SZ // KV_PACK_DIV, 1],  #
+            block_shape=[BLOCK_N, HEAD_SZ // KV_PACK_DIV],  #
             layout=cfg.k_smem_layout)
         k_buffer = ttgl.allocate_shared_memory(  #
             k_desc.dtype,  #
@@ -721,14 +715,14 @@ class BlockScaledAttentionProgram:
             (HEAD_SZ // 32) * cfg.NON_K_PRESHUFFLE_BLOCK_SIZE_K,  #
             cfg.k_scale_smem_layout)
         k_scale_step: ttgl.constexpr = BLOCK_N // cfg.NON_K_PRESHUFFLE_BLOCK_SIZE_K
+
         # create descriptor and buffer for v
-        # shape: [BLOCK_N / KV_PACK_DIV, HEAD_SZ]
         v_off_zh = (SEQLEN_K // KV_PACK_DIV) * HEAD_SZ * (NUM_K_HEADS * off_z + off_hk)
         v_desc = tdm.make_tensor_descriptor(  #
             base=v_off_zh + v_ptr,  #
-            shape=[SEQLEN_K // KV_PACK_DIV, HEAD_SZ],  #
-            strides=[HEAD_SZ, 1],  #
-            block_shape=[BLOCK_N // KV_PACK_DIV, HEAD_SZ],  #
+            shape=[HEAD_SZ, SEQLEN_K // KV_PACK_DIV],  #
+            strides=[SEQLEN_K // KV_PACK_DIV, 1],  #
+            block_shape=[HEAD_SZ, BLOCK_N // KV_PACK_DIV],  #
             layout=cfg.v_smem_layout)
         v_buffer = ttgl.allocate_shared_memory(  #
             v_desc.dtype,  #
@@ -785,7 +779,7 @@ class BlockScaledAttentionProgram:
         k_buffer = self.k_buffer.index(buf)
         k_scale_buffer = self.k_scale_buffer.index(buf)
 
-        tdm.async_load(self.k_desc, [0, i * k_step], k_buffer)
+        tdm.async_load(self.k_desc, [i * k_step, 0], k_buffer)
         if cfg.SCALE_PRESHUFFLED:
             tdm.async_load(self.k_scale_desc, [i * k_scale_step, 0], k_scale_buffer)
         else:
@@ -806,7 +800,7 @@ class BlockScaledAttentionProgram:
         v_buffer = self.v_buffer.index(buf)
         v_scale_buffer = self.v_scale_buffer.index(buf)
 
-        tdm.async_load(self.v_desc, [i * v_step, 0], v_buffer)
+        tdm.async_load(self.v_desc, [0, i * v_step], v_buffer)
         if cfg.SCALE_PRESHUFFLED:
             tdm.async_load(self.v_scale_desc, [0, i * v_scale_step], v_scale_buffer)
         else:
@@ -822,7 +816,7 @@ class BlockScaledAttentionProgram:
     def shared_load_k(self, buf, wait_count):
         cfg = self.cfg
 
-        k_buffer = self.k_buffer.index(buf)
+        k_buffer = self.k_buffer.index(buf).permute((1, 0))
         k_scale_buffer = self.k_scale_buffer.index(buf)
         if cfg.SCALE_PRESHUFFLED:
             k_scale_buffer = self._unshuffle_scale_subview(k_scale_buffer, cfg.BLOCK_N, cfg.HEAD_SZ // 32,
@@ -839,7 +833,7 @@ class BlockScaledAttentionProgram:
     def shared_load_v(self, buf, wait_count):
         cfg = self.cfg
 
-        v_buffer = self.v_buffer.index(buf)
+        v_buffer = self.v_buffer.index(buf).permute((1, 0))
         v_scale_buffer = self.v_scale_buffer.index(buf)
         if cfg.SCALE_PRESHUFFLED:
             v_scale_buffer = self._unshuffle_scale_subview(v_scale_buffer, cfg.HEAD_SZ, cfg.BLOCK_N // 32,
@@ -1160,11 +1154,11 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
 
     # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
-    # k: [BATCH, NUM_K_HEADS, HEAD_SZ / KV_PACK_DIV, SEQLEN_K]
-    # v: [BATCH, NUM_K_HEADS, SEQLEN_K / KV_PACK_DIV, HEAD_SZ]
+    # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ / KV_PACK_DIV]
+    # v: [BATCH, NUM_K_HEADS, HEAD_SZ, SEQLEN_K / KV_PACK_DIV]
     q = q.permute(0, 2, 1, 3).contiguous()
-    k = k.permute(0, 2, 3, 1).contiguous()
-    v = v.permute(0, 2, 1, 3).contiguous()
+    k = k.permute(0, 2, 1, 3).contiguous()
+    v = v.permute(0, 2, 3, 1).contiguous()
     if block_scaling:
         # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
         q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
@@ -1174,7 +1168,7 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
             # v_scale(head_sz=64):  [BATCH, NUM_K_HEADS, HEAD_SZ / 64, SEQLEN_K * 2]
             k_scale = _preshuffle_scale(k_scale.permute(0, 2, 1, 3).contiguous())
             v_scale = _preshuffle_scale(
-                v_scale.permute(0, 2, 3, 1).contiguous(), _get_v_scale_preshuffle_factor(v.shape[3]))
+                v_scale.permute(0, 2, 3, 1).contiguous(), _get_v_scale_preshuffle_factor(head_sz))
         else:
             # NOTE: We transposed the last 2 dims of k_scale and v_scale for contiguous elements in async copy.
             # k_scale: [BATCH, NUM_K_HEADS, HEAD_SZ / 32, SEQLEN_K]
@@ -1287,36 +1281,6 @@ def _create_global_scale(dtype: str):
     return scale, scale_ref
 
 
-def static_check(kernel, scale_preshuffled, head_sz):
-    amdgcn = kernel.asm['amdgcn']
-
-    # check use correct wmma scaled instruction
-    wmma_instrs = re.search(r'v_wmma_[^ ]+', amdgcn)
-    for instr in wmma_instrs.groups():
-        assert instr == 'v_wmma_scale_f32_16x16x128_f8f6f4'
-
-    # check there is no convert layout for P via shared memory
-    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
-    assert len(ds_store_instrs) == 0
-
-    if not scale_preshuffled:
-        # TODO: Reenable this for scale preshuffling after tweaking layouts
-        # check always use transposed load of K and V from shared memory
-        ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
-        for instr in ds_load_instrs:
-            assert instr == 'ds_load_tr8_b64'
-
-    # check async global load is vectorized with scale preshuffling
-    if scale_preshuffled:
-        async_load_instrs = re.findall(r'global_load_async_to_lds_[^ ]+', amdgcn)
-        if head_sz == 128:
-            for instr in async_load_instrs:
-                assert instr == "global_load_async_to_lds_b128"
-        elif head_sz == 64:
-            for instr in async_load_instrs:
-                assert instr == "global_load_async_to_lds_b64"
-
-
 def static_profile(kernel):
     amdgcn = kernel.asm['amdgcn']
 
@@ -1363,10 +1327,34 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
-    # Check compiled kernel code
-    static_check(kernel, scale_preshuffled, head_sz)
+    amdgcn = kernel.asm['amdgcn']
 
-    # Check output correctness
+    # check use correct wmma scaled instruction
+    wmma_instrs = re.search(r'v_wmma_[^ ]+', amdgcn)
+    for instr in wmma_instrs.groups():
+        assert instr == 'v_wmma_scale_f32_16x16x128_f8f6f4'
+
+    # check there is no convert layout for P via shared memory
+    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
+    assert len(ds_store_instrs) == 0
+
+    # TODO: Reenable this for scale preshuffling after tweaking layouts
+    if not scale_preshuffled:
+        # check use non-transposed load of k, v and transposed load of k_scale, v_scale from shared memory
+        ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
+        assert set(ds_load_instrs) == {'ds_load_tr8_b64', 'ds_load_b128'}
+
+    # check async global load is vectorized with scale preshuffling
+    if scale_preshuffled:
+        async_load_instrs = re.findall(r'global_load_async_to_lds_[^ ]+', amdgcn)
+        if head_sz == 128:
+            for instr in async_load_instrs:
+                assert instr == "global_load_async_to_lds_b128"
+        elif head_sz == 64:
+            for instr in async_load_instrs:
+                assert instr == "global_load_async_to_lds_b64"
+
+    # check output correctness
     matches = torch.isclose(o, o_ref, atol=0.1, rtol=0.1)
     total = o.numel()
     mismatches = total - matches.sum().item()
@@ -1399,10 +1387,21 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
-    # Check compiled kernel code
-    static_check(kernel, False, head_sz)
+    amdgcn = kernel.asm['amdgcn']
 
-    # Check output correctness
+    # check use correct wmma scaled instruction
+    wmma_instrs = re.findall(r'v_wmma_[^ ]+', amdgcn)
+    assert len(wmma_instrs) > 0 and all(instr == 'v_wmma_scale_f32_16x16x128_f8f6f4' for instr in wmma_instrs)
+
+    # check there is no convert layout for p via shared memory
+    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
+    assert len(ds_store_instrs) == 0
+
+    # check always use non-transposed load of k and v from shared memory
+    ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
+    assert all(instr == 'ds_load_b128' for instr in ds_load_instrs)
+
+    # check output correctness
     matches = torch.isclose(o, o_ref, atol=0.25, rtol=0.25)
     total = o.numel()
     mismatches = total - matches.sum().item()
