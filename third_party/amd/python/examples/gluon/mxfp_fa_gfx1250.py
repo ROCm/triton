@@ -1321,6 +1321,7 @@ def static_profile(kernel):
     sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
     vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
     vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
     code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
     occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
 
@@ -1328,6 +1329,7 @@ def static_profile(kernel):
           f"- sgpr_spill_count: {sgpr_spill_count}\n"
           f"- vgpr_count: {vgpr_count}\n"
           f"- vgpr_spill_count: {vgpr_spill_count}\n"
+          f"- scratch_size: {scratch_size}\n"
           f"- code_len_in_byte: {code_len_in_byte}\n"
           f"- occupancy: {occupancy}\n")
 
