@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: 'true'
-      - name: Build and Test
+      - name: Build and Test Gluon
         run: |
           set -xeo pipefail
           RENDER_GID=$(getent group render | cut -d: -f3)
@@ -46,3 +46,20 @@ jobs:
             -w /code \
             --entrypoint bash \
             ci/gfx1250-env -lc "/code/.github/workflows/gfx1250.sh"
+      - name: Build and Test Triton
+        run: |
+          set -xeo pipefail
+          RENDER_GID=$(getent group render | cut -d: -f3)
+          echo "Render group ID: ${RENDER_GID}"
+          docker run --pull=never --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v /data/ci/actions-runner/_work/triton/triton:/code \
+            -v /data/ci/llvm/b5f20012-debug:/llvm \
+            -v /data/ci/ffm/rocm-ffmlite-mi450-fab174a3-ubuntu-24.04.2-lts:/ffm \
+            -v /data/ci/triton-cache:/home/mirror/.triton \
+            -v /data/ci/ccache:/home/mirror/.ccache \
+            -w /code \
+            --entrypoint bash \
+            ci/gfx1250-pytorch-env -lc "/code/.github/workflows/gfx1250-pytorch.sh"
