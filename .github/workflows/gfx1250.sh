@@ -68,4 +68,5 @@ echo "=== Run Triton GEMM/Attention Tests ==="
 PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 \
     mi400/test_gemm_hipdriver.py \
     mi400/test_mxgemm_hipdriver.py \
-    mi400/test_mxfa_hipdriver.py
+    mi400/test_mxfa_hipdriver.py \
+    mi400/test_softmax_hipdriver.py
