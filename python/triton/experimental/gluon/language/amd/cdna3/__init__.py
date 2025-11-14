@@ -104,8 +104,6 @@ def mfma(a, b, acc, _semantic: GluonSemantic = None):
     handle = _semantic.dot(a, b, acc, input_precision=knobs.language.fp32_default, max_num_imprecise_acc=None,
                            out_dtype=acc.dtype).handle
     return ttgl.tensor(handle, ret_type)
-<<<<<<< HEAD
-=======
 
 @builtin
 def buffer_atomic_rmw(op, ptr, offsets, value, mask=None, sem=None, scope=None, _semantic=None):
@@ -155,4 +153,3 @@ def sched_group_barrier(mask, size, group_id, _semantic: GluonSemantic = None):
     size = ttgl._unwrap_if_constexpr(size)
     group_id = ttgl._unwrap_if_constexpr(group_id)
     _semantic.builder.create_sched_group_barrier(mask, size, group_id)
->>>>>>> e392a058c ([Gluon Ext] expose sched_barrier, sched_group_barrier)
