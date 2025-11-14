@@ -28,7 +28,7 @@ add_triton_library(TritonAMDGPUToLLVM
     MembarUtility.cpp
     ScalarizePackedFOps.cpp
     TDMUtility.cpp
-    BarrierOpsToLLVM.cpp
+    BarrierOpToLLVM.cpp
 
     DEPENDS
     TritonAMDGPUConversionPassIncGen

@@ -45,7 +45,6 @@ def global_to_shared(smem, pointer, mask=None, other=None, cache_modifier="", _s
 def mbarrier_arrive(mbarrier, _semantic=None):
     """
     Arrive on the mbarrier once all outstanding async copies are complete.
-
     Args:
         mbarrier (shared_memory_descriptor): Barrier object to arrive on.
     """

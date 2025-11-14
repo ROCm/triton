@@ -379,20 +379,21 @@ getCacheModifierFlagsForLoadStore(const triton::CacheModifier &cm,
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                ProgramIDDim axis) {
   assert(moduleOp);
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
   int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(moduleOp);
-  assert(numCTAs >= 1);
   if (numCTAs == 1) {
+    // For single CTA the block id is the program id
     Value blockId = ::mlir::gpu::BlockIdOp::create(rewriter, loc,
                                                    mlir::gpu::Dimension(axis));
     return arith::IndexCastOp::create(rewriter, loc, i32_ty, blockId);
   }
-
-  static constexpr const char *intrinsics[] = {"llvm.amdgcn.cluster.id.x",
-                                               "llvm.amdgcn.cluster.id.y",
-                                               "llvm.amdgcn.cluster.id.z"};
-
-  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsics[int(axis)],
+  // For multiple CTAs the cluster id is the program id
+  std::array intrinsics = {"llvm.amdgcn.cluster.id.x",
+                           "llvm.amdgcn.cluster.id.y",
+                           "llvm.amdgcn.cluster.id.z"};
+  auto axisUInt = unsigned(axis);
+  assert(axisUInt < intrinsics.size());
+  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsics[axisUInt],
                                          {rewriter.getI32Type()}, {})
       .getResult(0);
 }
