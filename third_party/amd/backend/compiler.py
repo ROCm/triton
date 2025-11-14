@@ -9,6 +9,7 @@ import tempfile
 import re
 import functools
 import warnings
+import subprocess
 from pathlib import Path
 
 
@@ -454,15 +455,66 @@ class HIPBackend(BaseBackend):
         target_features = ''
         if knobs.compilation.enable_asan:
             target_features = '+xnack'
-        hsaco = amd.assemble_amdgcn(src, options.arch, target_features)
-        with tempfile.NamedTemporaryFile() as tmp_out:
-            with tempfile.NamedTemporaryFile() as tmp_in:
-                with open(tmp_in.name, "wb") as fd_in:
-                    fd_in.write(hsaco)
-                amd.link_hsaco(tmp_in.name, tmp_out.name)
-            with open(tmp_out.name, "rb") as fd_out:
-                ret = fd_out.read()
-        return ret
+        
+        # Use llvm-mc command line tool to assemble AMDGCN assembly to object file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.s', delete=False) as asm_file:
+            asm_file.write(src)
+            asm_file.flush()
+            asm_path = asm_file.name
+        
+        with tempfile.NamedTemporaryFile(suffix='.o', delete=False) as obj_file:
+            obj_path = obj_file.name
+        
+        with tempfile.NamedTemporaryFile(suffix='.hsaco', delete=False) as hsaco_file:
+            hsaco_path = hsaco_file.name
+        
+        try:
+            # Step 1: Assemble with llvm-mc
+            llvm_mc_cmd = [
+                '/opt/rocm/llvm/bin/llvm-mc',
+                '--triple=amdgcn-amd-amdhsa',
+                f'--mcpu={options.arch}',
+                '--filetype=obj',
+                '-o', obj_path,
+                asm_path
+            ]
+            if target_features:
+                llvm_mc_cmd.insert(3, f'--mattr={target_features}')
+
+            subprocess.run(llvm_mc_cmd, capture_output=True, text=True, check=True)
+            
+            # Step 2: Link with ld.lld
+            ld_lld_cmd = [
+                '/opt/rocm/llvm/bin/ld.lld',
+                '--threads=1',
+                '-shared',
+                obj_path,
+                '-o', hsaco_path
+            ]
+            
+            subprocess.run(ld_lld_cmd, capture_output=True, text=True, check=True)
+            
+            # Step 3: Read the final hsaco file
+            with open(hsaco_path, 'rb') as fd:
+                ret = fd.read()
+            
+            return ret
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Command failed: {e.cmd}\n"
+            if e.stdout:
+                error_msg += f"stdout: {e.stdout}\n"
+            if e.stderr:
+                error_msg += f"stderr: {e.stderr}\n"
+            raise RuntimeError(error_msg)
+        finally:
+            # Clean up temporary files
+            import os
+            for path in [asm_path, obj_path, hsaco_path]:
+                try:
+                    os.unlink(path)
+                except:
+                    pass
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:

@@ -2,13 +2,10 @@
 #include "pybind11/pybind11.h"
 #include <pybind11/stl.h>
 
-<<<<<<< HEAD
 #include <optional>
 #include <stdexcept>
 
-=======
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
->>>>>>> f11ba798a ([Gluon Ext] expose sched_barrier, sched_group_barrier)
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Types.h"
@@ -840,9 +837,18 @@ void init_gluon_ir(py::module &&m) {
                                                             src);
            })
       .def("create_async_tdm_wait", [](GluonOpBuilder &self, int num) {
-        ValueRange tokens;
-        self.create<ttag::AsyncTDMWait>(tokens, num);
+           ValueRange tokens;
+           self.create<ttag::AsyncTDMWait>(tokens, num);
+      })
+      .def("create_sched_barrier",
+          [](GluonOpBuilder &self, unsigned mask) {
+            self.create<rocdl::SchedBarrier>(mask);
+      })
+      .def("create_sched_group_barrier", [](GluonOpBuilder &self, unsigned mask,
+                                           unsigned size, unsigned groupId) {
+          self.create<rocdl::SchedGroupBarrier>(mask, size, groupId);
       });
+;
 
   m.def(
       "compute_tmem_reg_layout",
@@ -900,14 +906,6 @@ void init_gluon_ir(py::module &&m) {
 
         auto attr = ttg::LinearEncodingAttr::get(ctx, *layout);
         return layoutToGluon(attr);
-      })
-      .def("create_sched_barrier",
-           [](GluonOpBuilder &self, unsigned mask) {
-             self.create<rocdl::SchedBarrier>(mask);
-      })
-      .def("create_sched_group_barrier", [](GluonOpBuilder &self, unsigned mask,
-                                            unsigned size, unsigned groupId) {
-        self.create<rocdl::SchedGroupBarrier>(mask, size, groupId);
       });
 
   py::class_<ttg::WarpSpecializeOp, OpState>(m, "WarpSpecializeOp",
