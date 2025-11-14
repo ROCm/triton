@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "buffer_atomic_add", "buffer_atomic_and", "buffer_atomic_min", "buffer_atomic_max", "buffer_atomic_or",
-    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma"
+    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma", "sched_group_barrier"
 ]
 
 _atomic_op_str_to_op = {
@@ -236,3 +236,17 @@ def buffer_atomic_xchg(ptr, offsets, value, mask=None, sem=None, scope=None, _se
 
     return _buffer_atomic_rmw_impl('xchg', ptr, offsets, value, "cdna3", mask=mask, sem=sem, scope=scope,
                                    _semantic=_semantic)
+
+@builtin
+def sched_group_barrier(mask, size, group_id, _semantic: GluonSemantic = None):
+    """
+    sched_group_barrier to help instruction scheduling
+    Args:
+        mask (i32): the type of instructions to synchronize around(0x008:MFMA, 0x020:VMEM, 0x100:LDS_READ, 0x200:DS_WRITE)
+        size (i32): the number of matching instructions associated with this barrier
+        group_id (i32): what other sched_group_barriers to synchronize with
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    size = ttgl._unwrap_if_constexpr(size)
+    group_id = ttgl._unwrap_if_constexpr(group_id)
+    _semantic.builder.create_sched_group_barrier(mask, size, group_id)
