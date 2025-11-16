@@ -31,6 +31,7 @@ where
 * `/data/ci/llvm`: hosting LLVM packages
 * `/data/ci/triton-cache`: for mapping to `~/.triton`
 * `/data/ci/ccache`: for mapping to `~/.ccache`
+* `/data/ci/roccap`: for hosting CAP files generated from manual roccap invocation workflow
 
 Then follow steps in [Update LLVM](#update-llvm) and [Update FFM](#update-ffm)
 to populate `/data/ci/ffm` and `/data/ci/llvm` matching the current SHA and

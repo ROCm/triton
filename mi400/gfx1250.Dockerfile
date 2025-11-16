@@ -131,9 +131,22 @@ RUN mkdir -p /code && chown -R ${DOCKER_USERID}:${DOCKER_GROUPID} /code && \
 USER ${DOCKER_USERNAME}
 WORKDIR /home/${DOCKER_USERNAME}
 
+ARG ROCPLAYCAP_VERSION="4.5.1"
+
+RUN \
+  if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
+    wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/releases/rocplaycap-${ROCPLAYCAP_VERSION}/rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
+    tar -xf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
+    cd ./rocplaycap-src-${ROCPLAYCAP_VERSION} && \
+    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$HOME/.local -DCMAKE_PREFIX_PATH=/opt/rocm/ -DHSA_ROOT_DIR:PATH=/opt/rocm/hsa/ && \
+    cmake --build build --target install && \
+    cd .. && rm -rf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz ./rocplaycap-src-${ROCPLAYCAP_VERSION}; \
+  fi
+
 RUN pip config set global.break-system-packages true
 RUN mkdir $HOME/.ssh && echo -e "Host github.com\n\tHostname ssh.github.com\n\tPort 443" >> $HOME/.ssh/config
 ENV CCACHE_DIR=/home/${DOCKER_USERNAME}/.ccache
+ENV PATH="/home/${DOCKER_USERNAME}/.local/bin:${PATH}"
 
 WORKDIR /code
 ENTRYPOINT /usr/bin/bash
