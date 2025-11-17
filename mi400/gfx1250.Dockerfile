@@ -14,10 +14,12 @@
 # - /home/mirror/.ccache/: ccache directory
 #
 # Build with:
-# sudo docker build /path/to/ffm -f /path/to/this/dockerfile -t ci/gfx1250-env \
+# sudo docker build /path/to/ffm -f /path/to/this/dockerfile -t <image-name> \
 #   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
 # For NPI PyTorch add the following build args:
-#   --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
+#   --build-arg USE_NPI_ROCM=TRUE USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
+# For roccap add the following build args:
+#   --build-arg USE_NPI_ROCM=TRUE USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
 FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
@@ -41,6 +43,7 @@ RUN pip install --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pybind11>=2.13.1" 
   pytest pytest-xdist pytest-repeat lit expecttest \
   pylama pre-commit clang-format
 
+ARG USE_NPI_ROCM=FALSE
 # Switch to choose either NPI or regular torch distribution
 ARG USE_NPI_TORCH=FALSE
 
@@ -53,7 +56,7 @@ ARG ROCM_BUILD_NUMBER=710
 # getting it with your browser.
 
 RUN \
-  if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
+  if [ "${USE_NPI_ROCM}" = "TRUE" ]; then \
     AMDGPU_BUILD_NUMBER=$(curl -s http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/ | grep -oP 'Mesa UMD Build Number:\K\d+') && \
     echo "Using ROCm Build Number: ${ROCM_BUILD_NUMBER}" && \
     echo "Using AMDGPU Build Number: ${AMDGPU_BUILD_NUMBER}" && \
@@ -131,10 +134,11 @@ RUN mkdir -p /code && chown -R ${DOCKER_USERID}:${DOCKER_GROUPID} /code && \
 USER ${DOCKER_USERNAME}
 WORKDIR /home/${DOCKER_USERNAME}
 
+ARG USE_ROCCAP=FALSE
 ARG ROCPLAYCAP_VERSION="4.5.1"
 
 RUN \
-  if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
+  if [ "${USE_ROCCAP}" = "TRUE" ]; then \
     wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/releases/rocplaycap-${ROCPLAYCAP_VERSION}/rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     tar -xf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     cd ./rocplaycap-src-${ROCPLAYCAP_VERSION} && \

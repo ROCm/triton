@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
         with:
-          submodules: 'true'
+          ref: ${{ github.ref }}   # prevent merge
       - name: Invoke roccap
         run: |
           set -xeo pipefail
@@ -37,4 +37,5 @@ jobs:
             -v /data/ci/roccap/${DIRNAME}:/roccap \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-pytorch-env -lc "/code/.github/workflows/roccap.sh"
+            ci/gfx1250-roccap -lc "/code/.github/workflows/roccap.sh"
+          cd /data/ci/roccap && tar -czvf triton-roccap-${DIRNAME}.tgz ${DIRNAME}

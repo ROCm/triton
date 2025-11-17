@@ -7,8 +7,6 @@
 
 set -xeo pipefail
 
-pwd && ls
-
 echo "=== Clean up cache ==="
 
 rm -rf ~/.triton/cache
@@ -16,9 +14,8 @@ rm -rf ~/.triton/cache
 echo "=== Setup Environment ==="
 
 cd /ffm && source ffmlite_env.sh && cd -
-export HSA_MODEL_NUM_THREADS=16
-export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
-#export HSA_MODEL_ARGS=ffm_enable_time_slicing
+# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
+export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 
 echo "=== Build and Install Triton ==="
 
@@ -32,18 +29,37 @@ LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 echo "=== Sanity Check ==="
 
 python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
+which roccap
 
 echo "=== Invoke roccap ==="
 
+GIT_SHA="$(git rev-parse HEAD)"
+SCRIPT_PATH="$(realpath $0)"
+
 cd /roccap  # To make sure we generate the CAP file inside a known place
-cp "$0" .   # To save the current command for later reference
-echo "$(git rev-parse HEAD)" >> commit.txt
+rm -rf *    # Clean old data if any
+
+# Save the commit and script for reference
+echo $GIT_SHA >> commit.txt
+cp ${SCRIPT_PATH} .
+
+export HSA_KMT_MODEL_GPUVM_BASE=0x200000000
+export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
+export HSA_MODEL_NUM_THREADS=16
 
 # Change the following to the command you'd like to run to generate CAP file
 roccap capture --loglevel trace python3 \
-    /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py \
-        --q_type e4m3 --kv_type e4m3 --batch 1 \
-        --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 2 --num_k_heads 2 \
-        --head_sz 128 --block_m 128 --block_n 128 --pipelined \
-        --scale_type block --scale_preshuffled \
-        --disable_p_scaling --p_k_width=16
+    /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py \
+        -M 8192 -N 8192 -K 1024 --num-warps=4 --num-buffers=2 \
+        --prefetch-lds --single-warp-schedule
+
+# TODO: figure out failures due to broken torch.cuda.manual_seed_all(seed)
+#roccap capture --loglevel trace python3 \
+#    /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py \
+#        --q_type e4m3 --kv_type e4m3 --batch 1 \
+#        --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 2 --num_k_heads 2 \
+#        --head_sz 128 --block_m 128 --block_n 128 --pipelined \
+#        --scale_type block --scale_preshuffled \
+#        --disable_p_scaling --p_k_width=16
+
+find . -name "*.cap" -exec roccap play {} \;
