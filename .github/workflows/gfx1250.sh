@@ -49,12 +49,13 @@ grep "dona.component.jitcu.enable_time_slicing=true" ./hierarchy_runtime_params.
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+
 # TODO: Fix failures in mxfp variants when ffm_enable_time_slicing is enabled.
 unset HSA_MODEL_ARGS
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
 
 echo "=== Run E2E Upstream Tests ==="
