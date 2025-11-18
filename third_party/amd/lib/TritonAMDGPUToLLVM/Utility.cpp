@@ -401,9 +401,8 @@ Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, Value multicastMask,
              triton::CacheModifier cm, bool forceNoAliasAsyncLoads) {
-  // TODO: support multicastMask
   return triton::amdgpu::MaskedLoadOp::create(rewriter, loc, elemTy, ptr, pred,
-                                              falseVal, cm,
+                                              falseVal, multicastMask, cm,
                                               forceNoAliasAsyncLoads)
       .getResult();
 }

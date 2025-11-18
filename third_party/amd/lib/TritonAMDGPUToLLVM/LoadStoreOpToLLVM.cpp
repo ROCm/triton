@@ -663,18 +663,16 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     if (other)
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
-    Value multicastMask = b.i32_val(0);
+    Value multicastMask;
     auto mod = op->getParentOfType<ModuleOp>();
     int numCTAs = TritonGPUDialect::getNumCTAs(mod);
-    if (auto rankedType = dyn_cast<RankedTensorType>(ptr.getType())) {
-      auto encoding = dyn_cast<BlockedEncodingAttr>(rankedType.getEncoding());
 
-      if (numCTAs > 1 && encoding) {
-        Value clusterCTAId = targetInfo.getClusterCTAId(rewriter, loc);
-        auto regLayout = triton::gpu::toLinearLayout(rankedType);
-        multicastMask = LLVM::AMD::emitCtaMulticastMask(
-            rewriter, loc, clusterCTAId, regLayout);
-      }
+    if (numCTAs > 1) {
+      Value clusterCTAId = targetInfo.getClusterCTAId(rewriter, loc);
+      auto regLayout =
+          triton::gpu::toLinearLayout(cast<RankedTensorType>(ptr.getType()));
+      multicastMask = LLVM::AMD::emitCtaMulticastMask(rewriter, loc,
+                                                      clusterCTAId, regLayout);
     }
 
     // vectorized iteration through all the pointer/mask/other elements

@@ -696,6 +696,13 @@ bool TargetInfo::supportsMultiCTALaunch() const {
   return getISAFamily() == ISAFamily::GFX1250;
 }
 
+bool TargetInfo::supportsClusterLoadBitWidth(int biwWidth) const {
+  if (getISAFamily() == ISAFamily::GFX1250) {
+    return llvm::is_contained({32, 64, 128}, biwWidth);
+  }
+  return false;
+}
+
 void TargetInfo::localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                                        Operation *llLoadOp) const {
   if (requiresAliasInfoForAsyncOps())
