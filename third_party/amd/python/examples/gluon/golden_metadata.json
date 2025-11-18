@@ -1,0 +1,20 @@
+{
+  "BATCH8_SEQLENQ512_SEQLENK512_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN64_attn_fwd_pipelined_kernel": {
+    "sgpr_count": 101,
+    "sgpr_spill_count": 0,
+    "vgpr_count": 722,
+    "vgpr_spill_count": 0,
+    "scratch_size": 0,
+    "code_len_in_byte": 28244,
+    "occupancy": 1
+  },
+  "BATCH8_SEQLENQ1024_SEQLENK1024_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN128_attn_fwd_pipelined_kernel": {
+    "sgpr_count": 86,
+    "sgpr_spill_count": 0,
+    "vgpr_count": 941,
+    "vgpr_spill_count": 0,
+    "scratch_size": 0,
+    "code_len_in_byte": 52584,
+    "occupancy": 1
+  }
+}

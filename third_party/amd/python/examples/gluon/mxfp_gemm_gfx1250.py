@@ -4,6 +4,7 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
+import re
 import torch
 import pytest
 import triton
@@ -12,6 +13,26 @@ import triton.experimental.gluon.language as gl
 from triton.language.core import _aggregate as aggregate
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 import numpy as np
+
+
+def static_profile(kernel):
+    amdgcn = kernel.asm['amdgcn']
+
+    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
+    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
+    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
+    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
+
+    print(f"- sgpr_count: {sgpr_count}\n"
+          f"- sgpr_spill_count: {sgpr_spill_count}\n"
+          f"- vgpr_count: {vgpr_count}\n"
+          f"- vgpr_spill_count: {vgpr_spill_count}\n"
+          f"- scratch_size: {scratch_size}\n"
+          f"- code_len_in_byte: {code_len_in_byte}\n"
+          f"- occupancy: {occupancy}\n")
 
 
 def generate_configs():
@@ -416,12 +437,13 @@ def run(config):
 
     dtype_converter = {'float8_e5m2': "e5m2", "float8_e4m3": "e4m3", "float4": "e2m1"}
 
-    mxgemm_tdm_pipelined_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk,
-                                      stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
-                                      dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
-                                      group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, WITH_A_SCALE,
-                                      num_warps=numWarps, num_ctas=numCtas, waves_per_eu=numWarps // 4)
-
+    kernel = mxgemm_tdm_pipelined_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak,
+                                               stride_bk, stride_bn, stride_cm, stride_cn, stride_scale,
+                                               dtype_converter[dtype_a], dtype_converter[dtype_b], scale_block,
+                                               blockSizeM, blockSizeN, blockSizeK, group_size_m, TRANSPOSE_B,
+                                               NUM_BUFFERS, SCALE_PRESHUFFLE, WITH_A_SCALE, num_warps=numWarps,
+                                               num_ctas=numCtas, waves_per_eu=numWarps // 4)
+    static_profile(kernel)
     torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-5, atol=1e-8)
     print('✅Pass')
 
@@ -521,7 +543,7 @@ def test_runtime_mxgemm_tdm_pipelined(config):
                                           dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
                                           group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, WITH_A_SCALE,
                                           num_warps=numWarps, num_ctas=numCtas, waves_per_eu=numWarps // 4)
-
+    static_profile(k)
     if TRANSPOSE_B:
         assert 'ds_load_u8' not in k.asm['amdgcn']
 

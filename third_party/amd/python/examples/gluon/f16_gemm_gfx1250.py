@@ -4,6 +4,7 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
+import re
 import pytest
 import torch
 
@@ -11,6 +12,26 @@ import triton
 from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
+
+
+def static_profile(kernel):
+    amdgcn = kernel.asm['amdgcn']
+
+    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
+    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
+    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
+    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
+
+    print(f"- sgpr_count: {sgpr_count}\n"
+          f"- sgpr_spill_count: {sgpr_spill_count}\n"
+          f"- vgpr_count: {vgpr_count}\n"
+          f"- vgpr_spill_count: {vgpr_spill_count}\n"
+          f"- scratch_size: {scratch_size}\n"
+          f"- code_len_in_byte: {code_len_in_byte}\n"
+          f"- occupancy: {occupancy}\n")
 
 
 @aggregate
@@ -451,7 +472,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
 
     if not PERSISTENT:
         grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-        gemm_tdm_pipelined_kernel[grid](
+        kernel = gemm_tdm_pipelined_kernel[grid](
             a_device, b_device, c_device,  #
             M, N, K,  #
             stride_am, stride_ak,  #
@@ -460,13 +481,14 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
             NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
             num_warps=num_warps, waves_per_eu=num_warps // 4)
+        static_profile(kernel)
     else:
         # num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
         # NOTE: Explicitly set num_sms to small number to ensure that each CU will compute multiple tiles.
         num_sms = 8
         grid = (min(num_sms, triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), 1)
         if PREFETCH:
-            persistent_gemm_tdm_pipelined_lds_prefetch_kernel[grid](
+            kernel = persistent_gemm_tdm_pipelined_lds_prefetch_kernel[grid](
                 a_device, b_device, c_device,  #
                 M, N, K,  #
                 stride_am, stride_ak,  #
@@ -475,8 +497,9 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
                 num_warps=num_warps, waves_per_eu=num_warps // 4)
+            static_profile(kernel)
         else:
-            persistent_gemm_tdm_pipelined_kernel[grid](
+            kernel = persistent_gemm_tdm_pipelined_kernel[grid](
                 a_device, b_device, c_device,  #
                 M, N, K,  #
                 stride_am, stride_ak,  #
@@ -485,6 +508,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
                 num_warps=num_warps, waves_per_eu=num_warps // 4)
+            static_profile(kernel)
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))
@@ -516,7 +540,7 @@ def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK
     c_device = c.cuda()
 
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel[grid](
+    kernel = gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel[grid](
         a_device, b_device, c_device,  #
         M, N, K,  #
         stride_am, stride_ak,  #
@@ -525,6 +549,7 @@ def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
         NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
         num_warps=num_warps, waves_per_eu=num_warps // 4)
+    static_profile(kernel)
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))

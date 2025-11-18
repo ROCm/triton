@@ -8,11 +8,32 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
+import re
 import torch
 from triton.experimental import gluon
 import triton.experimental.gluon.language as gl
 from triton.language.core import _aggregate as aggregate
 import pytest
+
+
+def static_profile(kernel):
+    amdgcn = kernel.asm['amdgcn']
+
+    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
+    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
+    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
+    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
+    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
+    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
+
+    print(f"- sgpr_count: {sgpr_count}\n"
+          f"- sgpr_spill_count: {sgpr_spill_count}\n"
+          f"- vgpr_count: {vgpr_count}\n"
+          f"- vgpr_spill_count: {vgpr_spill_count}\n"
+          f"- scratch_size: {scratch_size}\n"
+          f"- code_len_in_byte: {code_len_in_byte}\n"
+          f"- occupancy: {occupancy}\n")
 
 
 @aggregate
@@ -543,8 +564,7 @@ def generate_configs():
     return base_configs
 
 
-@pytest.mark.parametrize("config", generate_configs())
-def test_attention(config):
+def run_attention(config):
     BATCH = config["BATCH"]
     SEQLEN_Q = config["SEQLEN_Q"]
     SEQLEN_K = config["SEQLEN_K"]
@@ -576,7 +596,7 @@ def test_attention(config):
         ((SEQLEN_Q + BLOCK_M - 1) // BLOCK_M),
     )
 
-    attn_fn[grid](
+    attn_kernel = attn_fn[grid](
         q, k, v, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
@@ -590,6 +610,12 @@ def test_attention(config):
     atol = 0.004
     torch.cuda.synchronize()
     torch.testing.assert_allclose(o, ref, rtol=rtol, atol=atol)
+    return attn_kernel
+
+
+@pytest.mark.parametrize("config", generate_configs())
+def test_attention(config):
+    run_attention(config)
 
 
 if __name__ == "__main__":
@@ -612,7 +638,8 @@ if __name__ == "__main__":
         "NUM_Q_HEADS": args.num_heads_q, "NUM_K_HEADS": args.num_heads_k,  #
         "HEAD_SZ": args.head_size,  #
         "BLOCK_M": args.block_m, "BLOCK_N": args.block_n,  #
-        "ATTN_FN": attn_fwd_pipelined_kernel if args.pipeline else attn_fwd_kernel
+        "ATTN_FN": attn_fwd_pipelined_kernel if args.pipeline else attn_fwd_kernel,  #
     }
     print(config)
-    test_attention(config)
+    attn_kernel = run_attention(config)
+    static_profile(attn_kernel)
