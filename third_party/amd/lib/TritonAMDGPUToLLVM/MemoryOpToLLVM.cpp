@@ -76,12 +76,21 @@ public:
       }
       return smemOffset;
     };
+    auto calcPaddedOffseti8 = [&](unsigned smemOffset) {
+      if (paddedEnc) {
+        // Apply the offset needed for padding.
+        unsigned padOffset = emitPadding(paddedEnc, bitWidth, smemOffset,
+                                         /*offsetInBytes=*/true);
+        smemOffset += padOffset;
+      }
+      return smemOffset;
+    };
 
     llvm::SmallVector<Value> values;
     auto result =
         lowerDsReadTr(op, ldsParams.value(), loc, cvtDstLL, values, smemBase,
                       affineOffset, maskSpanAffineOffset, calcPaddedOffset,
-                      llvmElemTy, rewriter, targetInfo);
+                      calcPaddedOffseti8, llvmElemTy, rewriter, targetInfo);
     if (failed(result)) {
       return failure();
     }
@@ -101,7 +110,8 @@ private:
       LinearLayout cvt,
       SmallVector<Value> &vals, // Input for stmatrix, output for ldmatrix
       Value smemBase, Value affineOffset, uint64_t maskSpanAffineOffset,
-      std::function<Value(Value)> calcPaddedOffset, Type llvmElemTy,
+      std::function<Value(Value)> calcPaddedOffset,
+      std::function<unsigned(unsigned)> calcPaddedOffseti8, Type llvmElemTy,
       ConversionPatternRewriter &rewriter,
       const ::triton::AMD::TargetInfo &targetInfo) const {
 
@@ -293,15 +303,16 @@ private:
       auto regIdx = reps.apply({{kReg, i}, {kLane, 0}, {kWarp, 0}})[0].second;
       auto regIdxI8 = regIdx * (bitWidth / 8);
       Value offset = b.xor_(regBase, b.i32_val(regIdxI8));
+      offset = calcPaddedOffset(offset);
       for (int i2 = 0; i2 < nAdditive; i2 += elemsPerInstr) {
         // all these constants will go as immediate values to ds_read_tr
         auto regIdxAdd =
             reps.apply({{kReg, i2}, {kLane, 0}, {kWarp, 0}})[0].second;
         auto regIdxAddI8 = regIdxAdd * (bitWidth / 8);
+        regIdxAddI8 = calcPaddedOffseti8(regIdxAddI8);
         Value innerOffset = b.add(offset, b.i32_val(regIdxAddI8));
-        auto vecAddr =
-            b.gep(smemPtrTy, i8_ty, smemBase, calcPaddedOffset(innerOffset),
-                  LLVM::GEPNoWrapFlags::inbounds);
+        auto vecAddr = b.gep(smemPtrTy, i8_ty, smemBase, innerOffset,
+                             LLVM::GEPNoWrapFlags::inbounds);
         llvm::append_range(vals,
                            lowerInst(rewriter, loc, vecAddr, i + i2, vecTy));
       }
@@ -391,6 +402,17 @@ private:
       }
       return smemOffset;
     };
+    auto calcPaddedOffseti8 = [&](unsigned smemOffset) {
+      auto bitwidth = getIntOrFloatOrPtrBitWidth(llvmElemTy);
+      if (auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+              srcTy.getEncoding())) {
+        // Apply the offset needed for padding.
+        unsigned padOffset = emitPadding(paddedEnc, bitwidth, smemOffset,
+                                         /*offsetInBytes=*/true);
+        smemOffset += padOffset;
+      }
+      return smemOffset;
+    };
 
     auto shape = srcTy.getShape();
     auto ldsTransLoadParams = targetInfo.queryLDSTransLoadParams(bitWidth);
@@ -452,9 +474,9 @@ private:
 
     SmallVector<Value> outVals = lowerLdSt(
         loc, rewriter.getContext(), cvt, {}, // Input for store, output for load
-        llvmElemTy, smemObj.getBase(), calcPaddedOffset, affineOffset,
-        maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo,
-        ldsTransLoadParams->tileSize, lowerInst);
+        llvmElemTy, smemObj.getBase(), calcPaddedOffset, calcPaddedOffseti8,
+        affineOffset, maskSpanAffineOffset, laneId, warpId, rewriter,
+        targetInfo, ldsTransLoadParams->tileSize, lowerInst);
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, retTy);
     rewriter.replaceOp(op, result);
     return success();

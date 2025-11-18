@@ -7,6 +7,9 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
+import os
+import sys
+import inspect
 import argparse
 import re
 import pytest
@@ -51,8 +54,23 @@ def composition(cls):
 def get_padded_shared_layout(shape, transposed=False):
     """ Get a padded shared layout without back conflict for a given tensor shape. """
     _, inner_dim = shape
-    padding_interval = inner_dim
-    padding_amount = 16 if transposed else 8
+    ## Here we assume the elements in LDS is 8-bit (for mxfp4, 2 mxfp4
+    ## are packed in 1 8-bit elements). Then 256 elements can occupy
+    ## 64 banks. Therefore, we want the padding_interval to be at
+    ## least 256 elements.
+    ## On the other hand, we only need to add padding after a row of
+    ## elements. So we also want the padding_interval to be at least inner_dim.
+    padding_interval = max(inner_dim, 256)
+    ## For K tensor, we use ds_load_b128 and 16 x 8-bit element is the vector size
+    ## For V tensor, there are 3 cases
+    ## 1. V is HEAD_SZ contiguous. In this case, ds_load_tr8_b64 is
+    ##    used. And the padding_amount should be the number of elements
+    ##    from 2 threads, i.e. 16 elements.
+    ## 2. V is seq_len contiguous and kWidth=16. In this case,
+    ##    ds_load_b128 is used, and padding_amount should be 16 as for K tensor.
+    ## 3. V is seq_len contiguous and kWidth=8. In this case,
+    ##    ds_load_b64 is used. In this case, we can also use 16 as the padding_amount.
+    padding_amount = 16
     return ttgl.PaddedSharedLayout.with_identity_for([[padding_interval, padding_amount]], shape, [1, 0])
 
 
@@ -140,7 +158,7 @@ class GlobalScaledAttentionConfig:
         # Use k_width=8 for p can make it has the same layout of qk
         self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
         self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ]))
-        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([HEAD_SZ, BLOCK_N]))
+        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ], transposed=True))
         self.acc_layout = ttgl.constexpr(wmma_layout)
 
 
@@ -228,7 +246,8 @@ class BlockScaledAttentionConfig:
         self.p_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.p_layout, [BLOCK_M, BLOCK_N // 32]))
 
-        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([HEAD_SZ, BLOCK_N // KV_PACK_DIV]))
+        self.v_smem_layout = ttgl.constexpr(  #
+            get_padded_shared_layout([BLOCK_N // KV_PACK_DIV, HEAD_SZ], transposed=True))
         self.v_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.v_layout, [HEAD_SZ, BLOCK_N // 32]))
         self.v_scale_smem_layout = ttgl.constexpr(ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
@@ -431,8 +450,8 @@ class GlobalScaledAttentionProgram:
 
         v_mem = MemoryUnit.initialize(  #
             base=v_ptr + k_off,  #
-            shape=[HEAD_SZ, SEQLEN_K],  #
-            block_shape=[HEAD_SZ, BLOCK_N],  #
+            shape=[SEQLEN_K, HEAD_SZ],  #
+            block_shape=[BLOCK_N, HEAD_SZ],  #
             layout=cfg.v_layout,  #
             smem_layout=cfg.v_smem_layout,  #
             num_buffers=NUM_BUFFERS)
@@ -476,7 +495,7 @@ class GlobalScaledAttentionProgram:
         cfg = self.cfg
 
         tdm.async_wait(wait_count)
-        v_buffer = self.v_mem.smem.index(buf).permute((1, 0))
+        v_buffer = self.v_mem.smem.index(buf)
         v = v_buffer.load(cfg.v_layout)
         v_scale = self.v_scale
         return v, v_scale
@@ -638,8 +657,8 @@ class BlockScaledAttentionProgram:
         v_off = (SEQLEN_K // KV_PACK_DIV) * HEAD_SZ * (NUM_K_HEADS * off_z + off_hk)
         v_mem = MemoryUnit.initialize(  #
             base=v_ptr + v_off,  #
-            shape=[HEAD_SZ, SEQLEN_K // KV_PACK_DIV],  #
-            block_shape=[HEAD_SZ, BLOCK_N // KV_PACK_DIV],  #
+            shape=[SEQLEN_K // KV_PACK_DIV, HEAD_SZ],  #
+            block_shape=[BLOCK_N // KV_PACK_DIV, HEAD_SZ],  #
             layout=cfg.v_layout,  #
             smem_layout=cfg.v_smem_layout,  #
             num_buffers=NUM_BUFFERS)
@@ -741,7 +760,7 @@ class BlockScaledAttentionProgram:
 
         self._async_wait(wait_count)
 
-        v_buffer = self.v_mem.smem.index(buf).permute((1, 0))
+        v_buffer = self.v_mem.smem.index(buf)
         v = v_buffer.load(cfg.v_layout)
 
         v_scale_buffer = self.v_scale_mem.smem.index(buf)
@@ -1056,10 +1075,10 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
 
     # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
     # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ / KV_PACK_DIV]
-    # v: [BATCH, NUM_K_HEADS, HEAD_SZ, SEQLEN_K / KV_PACK_DIV]
+    # v: [BATCH, NUM_K_HEADS, SEQLEN_K / KV_PACK_DIV, HEAD_SZ]
     q = q.permute(0, 2, 1, 3).contiguous()
     k = k.permute(0, 2, 1, 3).contiguous()
-    v = v.permute(0, 2, 3, 1).contiguous()
+    v = v.permute(0, 2, 1, 3).contiguous()
     if block_scaling:
         # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
         q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
@@ -1230,6 +1249,66 @@ def static_profile(kernel):
           f"- occupancy: {occupancy}\n")
 
 
+def get_source_mapping(amdgcn):
+    """
+    Create a mapping from amdgcn assembly to source code lines:
+
+    mapping = { (line_no, code): [instr1, instr2, ...] }
+
+    For call stack: fn1 -> fn2
+    line_no = "line1 -> line2 -> ..."
+    code    = "code1 -> code2 -> ..."
+    """
+    mapping = {}
+
+    mod = sys.modules.get(__name__)
+    src_lines = inspect.getsource(mod).splitlines()
+
+    lines = amdgcn.splitlines()
+    start_idx = next((i for i, line in enumerate(lines) if re.match(r'^\s*\.cfi_startproc', line)), None)
+    end_idx = next((i for i, line in enumerate(lines) if re.match(r'^\s*\.cfi_endproc', line)), None)
+    if start_idx is None or end_idx is None:
+        return mapping
+
+    loc = None
+    for line in lines[start_idx + 1:end_idx]:
+        # Look for .loc directive
+        if re.match(r'^\s*\.loc\s+', line):
+            loc_str = line.split(';')[-1].strip()
+            # Find location strings like 'file:line:column'
+            locs = re.findall(r'([^\s\[\]@]+:\d+:\d+)', loc_str)
+            callstack = []
+            for loc_item in locs:
+                file, line_num, _ = loc_item.split(':')
+                # Only map locations from current file
+                if file == os.path.basename(__file__):
+                    code_line = src_lines[int(line_num) - 1].strip()
+                    callstack.append((int(line_num), code_line))
+            if not callstack:
+                loc = None
+                continue
+            # Build call stack string (reverse for deepest call first)
+            line_str = " -> ".join(str(l[0]) for l in reversed(callstack))
+            code_str = " -> ".join(l[1] for l in reversed(callstack))
+            loc = (line_str, code_str)
+            mapping.setdefault(loc, [])
+            continue
+
+        if loc is None:
+            continue
+
+        # Clean up instruction line
+        instr = line.strip()
+        instr = re.sub(r'\s/\*.*?\*/', '', instr).strip()
+        if not instr or instr.startswith('.') or instr.startswith(';'):
+            continue
+
+        # Append instruction to the corresponding source code location
+        mapping[loc].append(instr)
+
+    return mapping
+
+
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
     "block_m,block_n,pipelined,scale_preshuffled,p_k_width",
@@ -1270,38 +1349,36 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
+    mapping = get_source_mapping(amdgcn)
 
-    # check use correct wmma scaled instruction
-    wmma_instrs = re.search(r'v_wmma_[^ ]+', amdgcn)
-    for instr in wmma_instrs.groups():
-        assert instr == 'v_wmma_scale_f32_16x16x128_f8f6f4'
-
-    # check there is no convert layout for P via shared memory
-    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
-    assert len(ds_store_instrs) == 0
-
-    # TODO: Reenable this for scale preshuffling after tweaking layouts
-    if not scale_preshuffled:
-        # check use non-transposed load of k, v and transposed load of k_scale, v_scale from shared memory
-        ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
-        ds_load_instrs = set(ds_load_instrs)
-
-        ds_load_required = {'ds_load_tr8_b64', 'ds_load_b128'}
-        if p_k_width == 16:
-            assert ds_load_instrs == ds_load_required
-        else:
-            assert ds_load_instrs == ds_load_required.union({'ds_load_2addr_b64'}) or \
-                   ds_load_instrs == ds_load_required.union({'ds_load_2addr_b64', 'ds_load_b64'})
-
-    # check async global load is vectorized with scale preshuffling
-    if scale_preshuffled:
-        async_load_instrs = re.findall(r'global_load_async_to_lds_[^ ]+', amdgcn)
-        if head_sz == 128:
-            for instr in async_load_instrs:
-                assert instr == "global_load_async_to_lds_b128"
-        elif head_sz == 64:
-            for instr in async_load_instrs:
-                assert instr == "global_load_async_to_lds_b64"
+    # check when k_width=8, there is no convert layout
+    if p_k_width == 8:
+        convert_layout_ops = [k[1] for k in mapping.keys() if re.match(r'.*ttgl.convert_layout.*', k[1])]
+        assert len(convert_layout_ops) == 0
+    for loc, instrs in mapping.items():
+        _, code = loc
+        # check use correct wmma instruction
+        if re.match(r'.*compute_pv.*', code) or re.match(r'.*compute_qk.*', code):
+            wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
+            assert len(wmma_instrs) > 0 and all(
+                instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
+        # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
+        if re.match(r'.*shared_load_k.* -> .*k_buffer.load', code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+            assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_b128") for instr in ds_load_instrs)
+            sources = [instr.split()[2] for instr in ds_load_instrs]
+            assert all(source == sources[0] for source in sources)
+        # check always use ds_load_tr8_b64 to load v and all instructions are using the same vgpr for address
+        if re.match(r'.*shared_load_v. -> .*v_buffer.load', code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+            assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_tr8_b64") for instr in ds_load_instrs)
+            sources = [instr.split()[2] for instr in ds_load_instrs]
+            assert all(source == sources[0] for source in sources)
+        # check use v_permlane16_swap for convert layout
+        if p_k_width == 16 and re.match(r'.*ttgl.convert_layout.*', code):
+            v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
+            assert len(v_permlane_instrs) > 0 and all(
+                instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
 
     # check output correctness
     matches = torch.isclose(o, o_ref, atol=0.1, rtol=0.1)
@@ -1347,24 +1424,36 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
+    mapping = get_source_mapping(amdgcn)
 
-    # check use correct wmma scaled instruction
-    wmma_instrs = re.findall(r'v_wmma_[^ ]+', amdgcn)
-    assert len(wmma_instrs) > 0 and all(instr == 'v_wmma_scale_f32_16x16x128_f8f6f4' for instr in wmma_instrs)
-
-    # check there is no convert layout for p via shared memory
-    ds_store_instrs = re.findall(r'ds_store_[^ ]+', amdgcn)
-    assert len(ds_store_instrs) == 0
-
-    # check always use non-transposed load of k and v from shared memory
-    ds_load_instrs = re.findall(r'ds_load_[^ ]+', amdgcn)
-    ds_load_instrs = set(ds_load_instrs)
-    ds_load_required = {'ds_load_b128'}
-    if p_k_width == 16:
-        assert ds_load_instrs == ds_load_required
-    else:
-        assert ds_load_instrs == ds_load_required.union({'ds_load_2addr_b64'}) or \
-               ds_load_instrs == ds_load_required.union({'ds_load_2addr_b64', 'ds_load_b64'})
+    # check when k_width=8, there is no convert layout
+    if p_k_width == 8:
+        convert_layout_ops = [k[1] for k in mapping.keys() if re.match(r'.*ttgl.convert_layout.*', k[1])]
+        assert len(convert_layout_ops) == 0
+    for loc, instrs in mapping.items():
+        _, code = loc
+        # check use correct wmma instruction
+        if re.match(r'.*compute_pv.*', code) or re.match(r'.*compute_qk.*', code):
+            wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
+            assert len(wmma_instrs) > 0 and all(
+                instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
+        # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
+        if re.match(r'.*shared_load_k.* -> .*k_buffer.load', code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+            assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_b128") for instr in ds_load_instrs)
+            sources = [instr.split()[2] for instr in ds_load_instrs]
+            assert all(source == sources[0] for source in sources)
+        # check always use ds_load_tr8_b64 to load v and all instructions are using the same vgpr for address
+        if re.match(r'.*shared_load_v. -> .*v_buffer.load', code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+            assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_tr8_b64") for instr in ds_load_instrs)
+            sources = [instr.split()[2] for instr in ds_load_instrs]
+            assert all(source == sources[0] for source in sources)
+        # check use v_permlane16_swap for convert layout
+        if p_k_width == 16 and re.match(r'.*ttgl.convert_layout.*', code):
+            v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
+            assert len(v_permlane_instrs) > 0 and all(
+                instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
 
     # check output correctness
     matches = torch.isclose(o, o_ref, atol=0.25, rtol=0.25)

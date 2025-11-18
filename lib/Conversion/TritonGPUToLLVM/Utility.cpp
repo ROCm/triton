@@ -485,11 +485,29 @@ Value emitPadding(Location loc, RewriterBase &rewriter,
   return padOffset;
 }
 
+unsigned emitPadding(triton::gpu::PaddedSharedEncodingAttr layout,
+                     unsigned bitwidth, unsigned smemOffset,
+                     bool offsetInBytes) {
+  unsigned padOffset = 0;
+  unsigned offScale = offsetInBytes ? bitwidth / 8 : 1;
+  unsigned elemInBytes = bitwidth / 8;
+  for (auto [interval, padding] :
+       llvm::zip_equal(layout.getIntervals(), layout.getPaddings())) {
+    unsigned intervalScaled = offScale * interval;
+    unsigned paddingScaled = offScale * padding;
+    if (smemOffset < intervalScaled)
+      break;
+    padOffset += smemOffset / intervalScaled * paddingScaled;
+  }
+  return padOffset;
+}
+
 SmallVector<Value>
 lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
                 std::function<Value(Value)> calcPaddedOffset,
+                std::function<unsigned(unsigned)> calcPaddedOffseti8,
                 Value affineOffset, uint64_t maskSpanAffineOffset,
                 RewriterBase &rewriter, const TargetInfoBase &targetInfo,
                 std::optional<int> maybeMaxVecElems, Operation *localLoadOp) {
@@ -517,15 +535,17 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
   };
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
   return lowerLdSt(loc, ctx, cvt, valsArray, llvmElemTy, smemBase,
-                   calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
-                   warpId, rewriter, targetInfo, maybeMaxVecElems, emitLdSt);
+                   calcPaddedOffset, calcPaddedOffseti8, affineOffset,
+                   maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo,
+                   maybeMaxVecElems, emitLdSt);
 }
 
 SmallVector<Value> lowerLdSt(
     Location loc, MLIRContext *ctx, LinearLayout cvt,
     ArrayRef<Value> valsArray, // Input for store, output for load
     Type llvmElemTy, Value smemBase,
-    std::function<Value(Value)> calcPaddedOffset, Value affineOffset,
+    std::function<Value(Value)> calcPaddedOffset,
+    std::function<unsigned(unsigned)> calcPaddedOffseti8, Value affineOffset,
     uint64_t maskSpanAffineOffset, Value laneId, Value warpId,
     RewriterBase &rewriter, const TargetInfoBase &targetInfo,
     std::optional<int> maybeMaxVecElems,
@@ -590,15 +610,16 @@ SmallVector<Value> lowerLdSt(
     auto regIdx = reps.apply({{kReg, i}, {kLane, 0}, {kWarp, 0}})[0].second;
     auto regIdxI8 = regIdx * (bitwidth / 8);
     Value offset = b.xor_(regBaseI8, b.i32_val(regIdxI8));
+    offset = calcPaddedOffset(offset);
     for (int j = 0; j < nAdditive; j += elemsPerVec) {
       // all these constants will go as immediate values to LDS/STS
       auto regIdxAdd =
           reps.apply({{kReg, j}, {kLane, 0}, {kWarp, 0}})[0].second;
       auto regIdxAddI8 = regIdxAdd * (bitwidth / 8);
+      regIdxAddI8 = calcPaddedOffseti8(regIdxAddI8);
       Value innerOffset = b.add(offset, b.i32_val(regIdxAddI8));
-      auto vecAddr =
-          b.gep(smemPtrTy, i8_ty, smemBase, calcPaddedOffset(innerOffset),
-                LLVM::GEPNoWrapFlags::inbounds);
+      auto vecAddr = b.gep(smemPtrTy, i8_ty, smemBase, innerOffset,
+                           LLVM::GEPNoWrapFlags::inbounds);
       llvm::append_range(outVals,
                          lowerInst(rewriter, loc, vals, vecAddr, i + j, vecTy));
     }
@@ -635,6 +656,19 @@ lowerLocalLdSt(Location loc, MLIRContext *ctx,
     }
     return smemOffset;
   };
+
+  auto calcPaddedOffseti8 = [&](unsigned smemOffset) {
+    auto bitwidth = getIntOrFloatOrPtrBitWidth(llvmElemTy);
+    if (auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+            srcTy.getEncoding())) {
+      // Apply the offset needed for padding.
+      unsigned padOffset =
+          emitPadding(paddedEnc, bitwidth, smemOffset, /*offsetInBytes=*/true);
+      smemOffset += padOffset;
+    }
+    return smemOffset;
+  };
+
   auto isStore = !valsArray.empty();
   // Remove broadcasting in the registers
   auto removeBroadcastSrc = actionRemoveBroadcastedRegs(cvt);
@@ -661,9 +695,9 @@ lowerLocalLdSt(Location loc, MLIRContext *ctx,
   }
 
   return lowerLdStShared(loc, ctx, cvt, valsArray, llvmElemTy,
-                         smemObj.getBase(), calcPaddedOffset, affineOffset,
-                         maskSpanAffineOffset, rewriter, targetInfo,
-                         maybeMaxVecElems, localLoadOp);
+                         smemObj.getBase(), calcPaddedOffset,
+                         calcPaddedOffseti8, affineOffset, maskSpanAffineOffset,
+                         rewriter, targetInfo, maybeMaxVecElems, localLoadOp);
 }
 
 bool emitTransferBetweenRegistersAndShared(
@@ -1654,17 +1688,20 @@ void finalizeTensorAtomicResults(Operation *op, RankedTensorType tensorTy,
   };
 
   auto noPaddingOffset = [](Value v) { return v; };
+  auto noPaddingOffseti8 = [](unsigned v) { return v; };
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
   lowerLdSt(loc, ctx, dstLayout, resultVals, valueElemTy, smemBase,
-            /*calcPaddedOffset=*/noPaddingOffset, /*affineOffset=*/b.i32_val(0),
+            /*calcPaddedOffset=*/noPaddingOffset, noPaddingOffseti8,
+            /*affineOffset=*/b.i32_val(0),
             /*maskSpanAffineOffset=*/0, laneId, warpId, rewriter, targetInfo,
             /*maybeMaxVecElems=*/{}, emitSt);
   b.barrier();
-  resultVals = lowerLdSt(loc, ctx, dstLayout, resultVals, valueElemTy, smemBase,
-                         /*calcPaddedOffset=*/noPaddingOffset,
-                         /*affineOffset=*/b.i32_val(0),
-                         /*maskSpanAffineOffset=*/0, laneId, warpId, rewriter,
-                         targetInfo, /*maybeMaxVecElems=*/{}, emitLd);
+  resultVals =
+      lowerLdSt(loc, ctx, dstLayout, resultVals, valueElemTy, smemBase,
+                /*calcPaddedOffset=*/noPaddingOffset, noPaddingOffseti8,
+                /*affineOffset=*/b.i32_val(0),
+                /*maskSpanAffineOffset=*/0, laneId, warpId, rewriter,
+                targetInfo, /*maybeMaxVecElems=*/{}, emitLd);
 
   // Create the result struct and replace the operation
   Value resultStruct =
