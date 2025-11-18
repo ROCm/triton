@@ -287,14 +287,14 @@ class MemoryUnit:
         self.smem_layout = ttgl.constexpr(smem_layout)
 
     @gluon.jit
-    def issue_tdm_load(self, idx, buf):
+    def issue_tdm_load(self, idx, buf, pred):
         axis: ttgl.constexpr = self.axis
         step: ttgl.constexpr = self.block_shape[axis]
         smem = self.smem.index(buf)
         if axis == 0:
-            tdm.async_load(self.desc, [idx * step, 0], smem)
+            tdm.async_load(self.desc, [idx * step, 0], smem, pred)
         else:
-            tdm.async_load(self.desc, [0, idx * step], smem)
+            tdm.async_load(self.desc, [0, idx * step], smem, pred)
 
     @gluon.jit
     def issue_async_copy(self, idx, buf):
@@ -454,12 +454,12 @@ class GlobalScaledAttentionProgram:
             sm_scale)
 
     @gluon.jit
-    def issue_global_load_k(self, i, buf):
-        self.k_mem.issue_tdm_load(i, buf)
+    def issue_global_load_k(self, i, buf, pred=True):
+        self.k_mem.issue_tdm_load(i, buf, pred)
 
     @gluon.jit
-    def issue_global_load_v(self, i, buf):
-        self.v_mem.issue_tdm_load(i, buf)
+    def issue_global_load_v(self, i, buf, pred=True):
+        self.v_mem.issue_tdm_load(i, buf, pred)
 
     @gluon.jit
     def shared_load_k(self, buf, wait_count):
@@ -683,30 +683,38 @@ class BlockScaledAttentionProgram:
             sm_scale)
 
     @gluon.jit
-    def issue_global_load_k(self, i, buf):
+    def issue_global_load_k(self, i, buf, pred=True):
         cfg = self.cfg
 
-        self.k_mem.issue_tdm_load(i, buf)
+        self.k_mem.issue_tdm_load(i, buf, pred)
         if cfg.SCALE_PRESHUFFLED:
-            self.k_scale_mem.issue_tdm_load(i, buf)
+            self.k_scale_mem.issue_tdm_load(i, buf, pred)
         else:
-            # We use TDM to avoid register spills for preshuffling, but TDM increases
-            # register usage for non-preshuffling case, we will converge later.
-            # Need to keep this line and enable or remove this after investigation.
-            self.k_scale_mem.issue_async_copy(i, buf)
+            # TODO: We use TDM to avoid register spills for preshuffling, but TDM increases register usage for
+            # non-preshuffling case, so that we fall back to async copy here. Because async copy does not have a pred
+            # field, we have to branch here, and also commit a group to keep the wait counts consistent. Switch to use
+            # the TDM once the issue is resolved.
+            if pred:
+                self.k_scale_mem.issue_async_copy(i, buf)
+            else:
+                cp.commit_group()
 
     @gluon.jit
-    def issue_global_load_v(self, i, buf):
+    def issue_global_load_v(self, i, buf, pred=True):
         cfg = self.cfg
 
-        self.v_mem.issue_tdm_load(i, buf)
+        self.v_mem.issue_tdm_load(i, buf, pred)
         if cfg.SCALE_PRESHUFFLED:
-            self.v_scale_mem.issue_tdm_load(i, buf)
+            self.v_scale_mem.issue_tdm_load(i, buf, pred)
         else:
-            # We use TDM to avoid register spills for preshuffling, but TDM increases
-            # register usage for non-preshuffling case, we will converge later.
-            # Need to keep this line and enable or remove this after investigation.
-            self.v_scale_mem.issue_async_copy(i, buf)
+            # TODO: We use TDM to avoid register spills for preshuffling, but TDM increases register usage for
+            # non-preshuffling case, so that we fall back to async copy here. Because async copy does not have a pred
+            # field, we have to branch here, and also commit a group to keep the wait counts consistent. Switch to use
+            # the TDM once the issue is resolved.
+            if pred:
+                self.v_scale_mem.issue_async_copy(i, buf)
+            else:
+                cp.commit_group()
 
     @gluon.jit
     def shared_load_k(self, buf, wait_count):
@@ -990,44 +998,37 @@ def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
 
     pgm.issue_global_load_v(1, buf=1)
 
-    # main loop, loop 0 to end-3, unrolled by 2
-    for i in range(0, end - 2, 2):
+    # main loop, loop 0 to end-3
+    # TODO: Ideally we should unroll the loop by 2 to remove the buffer index
+    # update, but our current codegen in llvm does not perform well. Re-enable
+    # unroll when fixed.
+    for i in range(0, end - 2):
+        buf = i % 2
+
         # loop i
         qk = pgm.compute_qk(k, k_scale)
         p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-        v, v_scale = pgm.shared_load_v(buf=0, wait_count=2)
+        v, v_scale = pgm.shared_load_v(buf, wait_count=2)
 
-        pgm.issue_global_load_k(i + 3, buf=1)
-
-        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
-        p, alpha, m_i = pgm.softmax0(qk, m_i)
-        k, k_scale = pgm.shared_load_k(buf=0, wait_count=2)
-
-        pgm.issue_global_load_v(i + 2, buf=0)
-
-        # loop i+1
-        qk = pgm.compute_qk(k, k_scale)
-        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-        v, v_scale = pgm.shared_load_v(buf=1, wait_count=2)
-
-        if i + 4 < end:
-            pgm.issue_global_load_k(i + 4, buf=0)
+        pgm.issue_global_load_k(i + 3, 1 - buf, pred=i != end - 3)
 
         acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
         p, alpha, m_i = pgm.softmax0(qk, m_i)
-        k, k_scale = pgm.shared_load_k(buf=1, wait_count=2)
+        k, k_scale = pgm.shared_load_k(buf, wait_count=2)
 
-        pgm.issue_global_load_v(i + 3, buf=1)
+        pgm.issue_global_load_v(i + 2, buf)
 
     # pipeline epilogue, loop end-2
     qk = pgm.compute_qk(k, k_scale)
     p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-    v, v_scale = pgm.shared_load_v(buf=0, wait_count=1)
+    v, v_scale = pgm.shared_load_v(buf=0, wait_count=2)
 
     acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
     p, alpha, m_i = pgm.softmax0(qk, m_i)
 
     # pipeline epilogue, loop end-1
+    # NOTE: in the last iteration, load k is disabled with predicate but still
+    # exists in the schedule, so we also take it into wait count.
     p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
     v, v_scale = pgm.shared_load_v(buf=1, wait_count=0)
 
