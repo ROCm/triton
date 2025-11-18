@@ -48,18 +48,25 @@ export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
 export HSA_MODEL_NUM_THREADS=16
 
 # Change the following to the command you'd like to run to generate CAP file
-roccap capture --loglevel trace python3 \
-    /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py \
-        -M 8192 -N 8192 -K 1024 --num-warps=4 --num-buffers=2 \
-        --prefetch-lds --single-warp-schedule
+#cmd=(
+#  roccap capture --loglevel trace python3
+#  /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+#  -M 8192 -N 8192 -K 1024 --num-warps=4 --num-buffers=2
+#  --prefetch-lds --single-warp-schedule
+#)
 
-# TODO: figure out failures due to broken torch.cuda.manual_seed_all(seed)
-#roccap capture --loglevel trace python3 \
-#    /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py \
-#        --q_type e4m3 --kv_type e4m3 --batch 1 \
-#        --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 2 --num_k_heads 2 \
-#        --head_sz 128 --block_m 128 --block_n 128 --pipelined \
-#        --scale_type block --scale_preshuffled \
-#        --disable_p_scaling --p_k_width=16
+cmd=(
+  roccap capture --loglevel trace python3
+  /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+  --q_type e4m3 --kv_type e4m3 --batch 1
+  --seqlen_q 8192 --seqlen_k 8192
+  --num_q_heads 2 --num_k_heads 2
+  --head_sz 128 --block_m 128 --block_n 128
+  --pipelined
+  --scale_type block --scale_preshuffled
+  --disable_p_scaling --p_k_width=16
+)
+
+"${cmd[@]}"
 
 find . -name "*.cap" -exec roccap play {} \;

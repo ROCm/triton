@@ -27,8 +27,6 @@ from triton.experimental.gluon.language.amd.gfx1250 import tdm
 from triton.experimental.gluon.language.amd.gfx1250 import buffer_load, buffer_store
 from triton.experimental.gluon.language.amd.gfx1250 import async_copy as cp
 
-torch.random.manual_seed(0)
-
 # ===-----------------------------------------------------------------------===#
 # Kernel Utilities
 # ===-----------------------------------------------------------------------===#
@@ -1332,6 +1330,8 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     if kv_type == 'e2m1' and p_k_width == 8:
         pytest.skip("e2m1 can not use k_width=8 for p")
 
+    torch.manual_seed(0)
+
     q, q_ref = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
     k, k_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
     v, v_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
@@ -1407,6 +1407,8 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
      if not (config != [128, 128, False, 16] and test[3:] != [1024, 1024, 1, 1, 128])])
 def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
                                 block_m, block_n, pipelined, p_k_width):
+    torch.manual_seed(0)
+
     q, q_ref = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
     k, k_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
     v, v_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
