@@ -1,0 +1,46 @@
+define(`AQLPLAY', `
+define $1_cap
+{
+
+    test.ini.test_args.tcore_log=enabled;
+    test.ini.test_args.sh_allow_gpr_read_before_write=true;
+    test.ini.test_args.tR600DumpTexturePulledData=enable;
+    test.ini.test_args.tc_tglHasChildOfVidmem=1;
+    test.ini.test_args.tc_MicrocodeLoadEnable=1;
+    test.ini.test_args.rlcFrontDoorLoad=1;
+    test.ini.test_args.tc_EnableInterrupts=1;
+    test.ini.test_args.tc_LoadMesUCode=0;
+    test.ini.test_args.tc_DisableCpCmpRings=0;
+        test.ini.test_args.tc_NoMmhubUTCL2=1;
+        test.ini.test_args.tc_DisableCpGfxRings=1;
+        test.ini.test_args.tc_EnableVM=1;
+        test.ini.test_args.tc_EnableHIQ=1;
+        test.ini.test_args.tc_PageTableRegionBase=0x7f0000000000;
+        test.ini.test_args.tc_PageTableRegionSize=0xf000000000;
+        test.ini.test_args.fbSizeInMBytes=1048576;
+        test.ini.test_args.tc_VidMemSizeInBytes=1099511627776;
+        test.ini.test_args.aqlplay_loglevel=trace;
+        test.ini.test_args.aqlplay_driver=TC2;
+        test.ini.test_args.aqlplay_syncAfterSubmit=1;
+    test.ini.test_args.tc_ulVidmemFragmentSize=4;
+    $2
+}
+')
+
+AQLPLAY(roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_global_scale_kwidth16_2025_11_17,
+    test.file="/proj/triton_regr/TRITON/MXFP_FA/11172025/roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_global_scale_kwidth16_2025_11_17.cap";
+    test.ini.test_args.aqlplay_tracefile=/proj/triton_regr/TRITON/MXFP_FA/11172025/roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_global_scale_kwidth16_2025_11_17.cap;
+    test.ini.test_args.tc_PageTableRegionBase=0x100000000;
+    test.ini.test_args.tc_PageTableRegionSize=0xf00000000;
+    test.ini.test_args.tc_FBLocation=0x20000000000;
+    test.ini.test_args.fb_base=0x20000000000;
+)
+
+AQLPLAY(roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_block_scale_preshuffling_kwidth16_2025_11_17,
+    test.file="/proj/triton_regr/TRITON/MXFP_FA/11172025/roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_block_scale_preshuffling_kwidth16_2025_11_17.cap";
+    test.ini.test_args.aqlplay_tracefile=/proj/triton_regr/TRITON/MXFP_FA/11172025/roc_capture_mxfp_fa_gfx1250_e4m3_e4m3_b1_qk8192_qh1_kh1_h128_bm128_bn128_block_scale_preshuffling_kwidth16_2025_11_17.cap;
+    test.ini.test_args.tc_PageTableRegionBase=0x100000000;
+    test.ini.test_args.tc_PageTableRegionSize=0xf00000000;
+    test.ini.test_args.tc_FBLocation=0x20000000000;
+    test.ini.test_args.fb_base=0x20000000000;
+)
