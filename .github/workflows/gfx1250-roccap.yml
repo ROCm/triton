@@ -16,14 +16,18 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: ${{ github.ref }}   # prevent merge
+      - name: Set environment variables
+        run: |
+          COMMIT=$(git rev-parse --short=8 HEAD)
+          RUN_ID=${{ github.run_id }}
+          DIRNAME="commit-${COMMIT}-run-${RUN_ID}"
+          echo "DIRNAME=${DIRNAME}" >> $GITHUB_ENV
       - name: Invoke roccap
         run: |
           set -xeo pipefail
           RENDER_GID=$(getent group render | cut -d: -f3)
           echo "Render group ID: ${RENDER_GID}"
-          COMMIT=$(git rev-parse --short=8 HEAD)
-          RUN_ID=${{ github.run_id }}
-          DIRNAME="commit-${COMMIT}-run-${RUN_ID}"
+          DIRNAME=${{ env.DIRNAME }}
           mkdir /data/ci/roccap/${DIRNAME}
           docker run --pull=never --rm \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
@@ -39,3 +43,9 @@ jobs:
             --entrypoint bash \
             ci/gfx1250-roccap -lc "/code/.github/workflows/roccap.sh"
           cd /data/ci/roccap && tar -czvf triton-roccap-${DIRNAME}.tgz ${DIRNAME}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: triton-roccap-${{ env.DIRNAME }}
+          path: /data/ci/roccap/${{ env.DIRNAME }}
+          retention-days: 7
