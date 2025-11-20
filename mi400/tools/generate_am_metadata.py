@@ -49,7 +49,7 @@ AQLPLAY({},
     return aqlplay_file
 
 
-def generate_group_file(names: list[str], group_name: str, enable_itrace: bool = False):
+def generate_group_file(names: list[str], group_name: str, enable_itrace: bool = False, enable_ttrace: bool = False):
     pm4p2_args = [
         "make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k",  #
         "gfx11_pktplay_base_settings",  #
@@ -72,6 +72,8 @@ def generate_group_file(names: list[str], group_name: str, enable_itrace: bool =
     ]
     if enable_itrace:
         args.insert(0, '--itrace on')
+    if enable_ttrace:
+        args.insert(0, '--ttrace')
     group_file = '''group mi400am_1CP_1xcc_UMC_Loopback_cpfw {}
     group {} --pm4p2-args-end="make_mi450_gclk1p7_gl2clk1p7"'''.format(' '.join(args), group_name)
     for name in names:
@@ -85,7 +87,7 @@ def main(args):
     if len(args.output_dir) > 0:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    group_file = generate_group_file(args.names, args.group_name, args.enable_itrace)
+    group_file = generate_group_file(args.names, args.group_name, args.enable_itrace, args.enable_ttrace)
     aqlplay_file = generate_aqlplay(args.names, args.capfile_root)
 
     with open(os.path.join(args.output_dir, 'group_file.txt'), 'w', encoding='utf-8', newline='\n') as f:
@@ -110,5 +112,6 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--capfile_root', type=str,
                         help='Root directory on ETX keeping the cap files, e.g. /proj/triton_regr/TRITON/MXFP_FA')
     parser.add_argument('-it', '--enable_itrace', action='store_true', help='Enable itrace or not')
+    parser.add_argument('-tt', '--enable_ttrace', action='store_true', help='Enable ttrace or not')
     args = parser.parse_args()
     main(args)

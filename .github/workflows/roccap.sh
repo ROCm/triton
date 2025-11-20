@@ -60,6 +60,9 @@ CAPFILE_ROOT="/proj/triton_regr/TRITON/MXFP_FA/01011970/"
 # Enabling itrace will take significant more time to finish.
 ENABLE_ITRACE=false
 
+# Enable ttrace or not.
+ENABLE_TTRACE=false
+
 # Specify the kernel name regex and dispatch number to capture:
 # - Kernel name regex should match the python function name decorated by
 #   @triton.jit / @gluon.jit.
@@ -118,6 +121,10 @@ gen_am_cmd=(
 
 if $ENABLE_ITRACE; then
   gen_am_cmd+=('-it')
+fi
+
+if $ENABLE_TTRACE; then
+  gen_am_cmd+=('-tt')
 fi
 
 "${gen_am_cmd[@]}"
