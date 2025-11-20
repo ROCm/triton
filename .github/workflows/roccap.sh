@@ -47,7 +47,24 @@ export HSA_KMT_MODEL_GPUVM_BASE=0x200000000
 export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
 export HSA_MODEL_NUM_THREADS=16
 
-# Change the following to the command you'd like to run to generate CAP file
+# 1. Change the following arguments according to your workload
+
+# Cap file will be generated as mxfp_fa_gfx1250_e4m3_e4m3_demo.cap
+NAME="mxfp_fa_gfx1250_e4m3_e4m3_demo"
+
+# Where you want to put your cap file later.
+# !Make sure to put cap file to this directory and give rwx permission bits.
+CAPFILE_ROOT="/proj/triton_regr/TRITON/MXFP_FA/01011970/"
+
+# Enable itrace or not.
+# Enabling itrace will take significant more time to finish.
+ENABLE_ITRACE=false
+
+# [Optional]Change the group name to better represent your workload.
+# It's fine to not change.
+GROUP_NAME="CU_Tile_GEMM"
+
+# 2. Change the following to the command you'd like to run to generate CAP file
 #cmd=(
 #  roccap capture --loglevel trace python3
 #  /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
@@ -56,7 +73,7 @@ export HSA_MODEL_NUM_THREADS=16
 #)
 
 cmd=(
-  roccap capture --loglevel trace python3
+  roccap capture --loglevel trace --file "${NAME}.cap" python3
   /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
   --q_type e4m3 --kv_type e4m3 --batch 1
   --seqlen_q 8192 --seqlen_k 8192
@@ -70,3 +87,18 @@ cmd=(
 "${cmd[@]}"
 
 find . -name "*.cap" -exec roccap play {} \;
+
+# 3. Generate AM metadata(aqlfile.txt and group_file.txt)
+
+gen_am_cmd=(
+  python3 /code/mi400/tools/generate_am_metadata.py
+  -n ${NAME}
+  -r ${CAPFILE_ROOT}
+  -g ${GROUP_NAME}
+)
+
+if $ENABLE_ITRACE; then
+  gen_am_cmd+=('-it')
+fi
+
+"${gen_am_cmd[@]}"

@@ -82,7 +82,8 @@ def generate_group_file(names: list[str], group_name: str, enable_itrace: bool =
 
 
 def main(args):
-    os.makedirs(args.output_dir, exist_ok=True)
+    if len(args.output_dir) > 0:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     group_file = generate_group_file(args.names, args.group_name, args.enable_itrace)
     aqlplay_file = generate_aqlplay(args.names, args.capfile_root)
@@ -100,7 +101,7 @@ if __name__ == '__main__':
         description='Generate aqlplay.txt and group_file.txt based on provided cap file names and directory.', epilog=
         'Usage: python3 generate_metadata.py -o ./output -r /proj/triton_regr/TRITON/MXFP_FA -n roccap_1 [roccap_2 [...]] [-it] [-g CU_Tile_GEMM]'
     )
-    parser.add_argument('-o', '--output_dir', type=str,
+    parser.add_argument('-o', '--output_dir', type=str, default='',
                         help='Directory to save generated files, i.e. aqlplay.txt and group_file.txt')
     parser.add_argument(
         '-n', '--names', type=str, nargs='+',
