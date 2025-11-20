@@ -13,17 +13,28 @@ using namespace mlir::triton::gpu;
 
 namespace {
 Attribute findEncodingFromUsers(Operation *op) {
+  Attribute sharedEnc;
+
   for (auto use : op->getUsers()) {
+    Attribute userEnc;
     if (auto load = llvm::dyn_cast<amdgpu::AsyncTDMCopyGlobalToLocalOp>(use)) {
-      auto enc = load.getResult().getType().getEncoding();
-      return enc;
+      userEnc = load.getResult().getType().getEncoding();
     } else if (auto store =
                    llvm::dyn_cast<amdgpu::AsyncTDMCopyLocalToGlobalOp>(use)) {
-      auto enc = store.getSrc().getType().getEncoding();
-      return enc;
+      userEnc = store.getSrc().getType().getEncoding();
+    }
+    if (!userEnc)
+      continue;
+
+    // Assign first encoding found; or error out if different encoding is found
+    if (!sharedEnc)
+      sharedEnc = userEnc;
+    else if (sharedEnc != userEnc) {
+      op->emitError("Descriptor is used with different shared encodings.");
+      return {};
     }
   }
-  return {};
+  return sharedEnc;
 }
 
 struct MakeTensorPtrOpConversion
@@ -62,8 +73,12 @@ struct MakeTensorPtrOpConversion
 
 struct MakeTensorDescOpConversion
     : public ConvertOpToLLVMPattern<triton::MakeTensorDescOp> {
-  using ConvertOpToLLVMPattern<
-      triton::MakeTensorDescOp>::ConvertOpToLLVMPattern;
+  MakeTensorDescOpConversion(LLVMTypeConverter &typeConverter,
+                             const AMD::TargetInfo &targetInfo,
+                             PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::MakeTensorDescOp>(typeConverter,
+                                                         benefit),
+        targetInfo(targetInfo) {}
 
   LogicalResult
   matchAndRewrite(triton::MakeTensorDescOp op, OpAdaptor adaptor,
@@ -76,14 +91,15 @@ struct MakeTensorDescOpConversion
 
     auto tensorDescTy = result.getType();
     auto blockTy = tensorDescTy.getBlockType();
-    auto enc = blockTy.getEncoding();
-    if (!enc) {
+    auto sharedEnc = blockTy.getEncoding();
+    if (!sharedEnc) {
       // TODO: add an extra pass to assign layout to descriptors
-      enc = findEncodingFromUsers(op);
-      if (!enc)
-        return rewriter.notifyMatchFailure(op, "Descriptor has no layout.");
+      sharedEnc = findEncodingFromUsers(op);
+      if (!sharedEnc)
+        return op.emitError("Descriptor requires a shared encoding during "
+                            "lowering");
     }
-    auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(enc);
+    auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(sharedEnc);
 
     unsigned padInterval = 0;
     unsigned padAmount = 0;
@@ -98,13 +114,25 @@ struct MakeTensorDescOpConversion
 
     Type elementType =
         getTypeConverter()->convertType(blockTy.getElementType());
-    SmallVector<int64_t> blockShape = llvm::to_vector(blockTy.getShape());
+    SmallVector<int64_t> blockShape = to_vector(blockTy.getShape());
     int numWarps = lookupNumWarps(op);
+
+    triton::LinearLayout sharedLayout;
+    if (paddedEnc) {
+      sharedLayout = paddedEnc.getLinearComponent();
+    } else {
+      sharedLayout = triton::gpu::toLinearLayout(blockTy.getShape(), sharedEnc);
+    }
+    auto shapePerCTA = triton::gpu::getShapePerCTA(sharedEnc, blockShape);
+    auto kBlock = rewriter.getStringAttr("block");
+    auto ctaLayout = sharedLayout.sublayout(
+        {kBlock}, to_vector(sharedLayout.getOutDimNames()));
 
     // Create TDM descriptor for 2D-5D tensors
     auto tdmDesc = LLVM::AMD::createTDMDescriptor(
-        rewriter, loc, getTypeConverter(), elementType, blockShape, numWarps,
-        padInterval, padAmount, tensorShape, tensorStride, basePtr);
+        rewriter, loc, getTypeConverter(), elementType, shapePerCTA, numWarps,
+        padInterval, padAmount, tensorShape, tensorStride, basePtr,
+        targetInfo.getClusterCTAId(rewriter, loc), ctaLayout);
 
     SmallVector<Value> groups = tdmDesc.getAllGroups();
 
@@ -114,6 +142,9 @@ struct MakeTensorDescOpConversion
     rewriter.replaceOp(op, desc);
     return success();
   }
+
+private:
+  const AMD::TargetInfo &targetInfo;
 };
 
 struct AdvanceOpConversion : public ConvertOpToLLVMPattern<triton::AdvanceOp> {
@@ -183,9 +214,9 @@ struct AdvanceOpConversion : public ConvertOpToLLVMPattern<triton::AdvanceOp> {
 
 void mlir::triton::AMD::populateTensorPtrOpsToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    PatternBenefit benefit) {
+    const AMD::TargetInfo &targetInfo, PatternBenefit benefit) {
   patterns.add<MakeTensorPtrOpConversion>(typeConverter, benefit);
   patterns.add<AdvanceOpConversion>(typeConverter, benefit);
-  patterns.add<MakeTensorDescOpConversion>(typeConverter, benefit);
+  patterns.add<MakeTensorDescOpConversion>(typeConverter, targetInfo, benefit);
   return;
 }

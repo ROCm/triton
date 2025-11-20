@@ -1,5 +1,6 @@
 #include "TDMUtility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 #include <optional>
 
 namespace mlir::LLVM::AMD {
@@ -200,8 +201,9 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
                                   SmallVector<int64_t> blockShape, int numWarps,
                                   unsigned padInterval, unsigned padAmount,
                                   SmallVector<Value> tensorShape,
-                                  SmallVector<Value> tensorStride,
-                                  Value srcPtr) {
+                                  SmallVector<Value> tensorStride, Value srcPtr,
+                                  Value ctaId,
+                                  const triton::LinearLayout &ctaLayout) {
   size_t numDims = tensorShape.size();
   assert(numDims >= 1 && numDims <= 5 && tensorStride.size() == numDims &&
          "TDM only supported for 1D-5D tensors.");
@@ -229,13 +231,30 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     blockShape[0] = ceil(blockShape[0], int64_t(numWarps));
   }
 
+  // We need to adjust the outer strides based on our CTAId and the block layout
+  auto kBlock = str_attr("block");
+  auto orderedCtaLayout =
+      ctaLayout.transposeOuts(standardOutDimNames(loc.getContext(), numDims));
+  auto ctaOffsets =
+      applyLinearLayout(loc, rewriter, orderedCtaLayout, {{kBlock, ctaId}});
+  // Apply CTA offsets to the base pointer
+  // Compute the global address offset: sum(ctaOffsets[i] * tensorStride[i])
+  Value ctaBaseOffset = b.i32_val(0);
+  for (size_t i = 0; i < numDims; ++i) {
+    Value dimOffset = b.mul(ctaOffsets[i].second, tensorStride[i]);
+    ctaBaseOffset = b.add(ctaBaseOffset, dimOffset);
+  }
+
+  Type globalPtrTy = ptr_ty(ctx, 1);
+  Value ctaAdjSrcPtr = b.gep(globalPtrTy, elementType, srcPtr, ctaBaseOffset);
+
   // group0 (128 bits / 4 dwords) effective bit encoding:
   // [1:0]:     pred (to be filled later)
   // [63:32]:   lds address (to be filled later)
   // [120:64]:  global address
   // [127:126]: type - currently always set to 0x2
   SmallVector<Value> group0(4, b.i32_val(0));
-  Value globalAddr = b.ptrtoint(i64_ty, srcPtr);
+  Value globalAddr = b.ptrtoint(i64_ty, ctaAdjSrcPtr);
   group0[2] = b.trunc(i32_ty, globalAddr);
   group0[3] = b.trunc(i32_ty, b.lshr(globalAddr, b.i64_val(32)));
   group0[3] = b.or_(group0[3], b.i32_val(1 << 31));
@@ -301,10 +320,10 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   // For 3D-5D tensors, fill group2 and group3
   // group2 (128 bits / 4 dwords) effective bit encoding:
   // [31:0]:    tensor_dim2 (3rd dimension from the end)
-  // [63:32]:   tensor_dim3 (4th dimension from the end) (or lds_addr_increment
-  // if iterate_enable) [111:64]:  tensor_dim2_stride (or global_addr_increment
-  // if iterate_enable) [127:112]: tile_dim3 (or iterate_count if
-  // iterate_enable)
+  // [63:32]:   tensor_dim3 (4th dimension from the end) (or
+  // lds_addr_increment if iterate_enable) [111:64]:  tensor_dim2_stride (or
+  // global_addr_increment if iterate_enable) [127:112]: tile_dim3 (or
+  // iterate_count if iterate_enable)
   SmallVector<Value> group2(4, b.i32_val(0));
   if (numDims >= 3) {
     // tensor_dim2 (3rd dimension from the end)
@@ -313,8 +332,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     // tensor_dim3 (4th dimension from the end)
     if (numDims >= 4) {
       group2[1] = tensorShape[numDims - 4];
-      // tensor_dim2_stride (48 bits: lower 32 bits in group2[2], upper 16 bits
-      // in group2[3])
+      // tensor_dim2_stride (48 bits: lower 32 bits in group2[2], upper 16
+      // bits in group2[3])
       group2[2] = tensorStride[numDims - 4];
     }
 
@@ -514,10 +533,10 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
     auto group3Vec = SmallVector<Value>(desc.begin() + 16, desc.end());
 
     fillTDMDescriptor(rewriter, loc, typeConverter, elementType,
-                      SmallVector<int64_t>(blockShape), numWarps, padInterval,
-                      padAmount, group0Vec, group1Vec, std::ref(group2Vec),
-                      std::ref(group3Vec), SmallVector<Value>(offset), dstPtr,
-                      pred, barrierPtr);
+                      to_vector(blockShape), numWarps, padInterval, padAmount,
+                      group0Vec, group1Vec, std::ref(group2Vec),
+                      std::ref(group3Vec), to_vector(offset), dstPtr, pred,
+                      barrierPtr);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);
@@ -535,10 +554,9 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
     auto group1Vec = SmallVector<Value>(desc.begin() + 4, desc.end());
 
     fillTDMDescriptor(rewriter, loc, typeConverter, elementType,
-                      SmallVector<int64_t>(blockShape), numWarps, padInterval,
-                      padAmount, group0Vec, group1Vec, std::nullopt,
-                      std::nullopt, SmallVector<Value>(offset), dstPtr, pred,
-                      barrierPtr);
+                      to_vector(blockShape), numWarps, padInterval, padAmount,
+                      group0Vec, group1Vec, std::nullopt, std::nullopt,
+                      to_vector(offset), dstPtr, pred, barrierPtr);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);

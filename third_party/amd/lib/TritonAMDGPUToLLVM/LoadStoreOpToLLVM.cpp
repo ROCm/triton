@@ -1082,8 +1082,12 @@ struct AsyncCopyGlobalToLocalOpConversion
         zipLoadValues(rewriter, loc, vec, srcElems, srcPtrTy, maskElements,
                       otherElems, otherTy, swizzledLaneOffsets);
 
-    Value threadPred = emitRedundantThreadPredicate(getFreeVariableMasks(srcTy),
-                                                    rewriter, loc, targetInfo);
+    auto freeVarMasks = getFreeVariableMasks(srcTy);
+    // We load redundant data on different CTAs; the broadcast mask will be used
+    // by the hardware to efficiently broadcast to different CTAs.
+    freeVarMasks[rewriter.getStringAttr("block")] = 0;
+    Value threadPred =
+        emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
 
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto emitGlobalLoadLds =
@@ -1173,11 +1177,6 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
       padAmount = paddedEnc.getPaddings()[0];
     }
 
-    auto mod = op->getParentOfType<ModuleOp>();
-    int numCTAs = TritonGPUDialect::getNumCTAs(mod);
-    if (numCTAs > 1)
-      return rewriter.notifyMatchFailure(op, "NYI: Support multicast.");
-
     SmallVector<Value> desc =
         unpackLLElements(loc, adaptor.getDesc(), rewriter);
 
@@ -1205,8 +1204,9 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
       barrierPtr = smemObj.getBase();
     }
 
+    auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
     mlir::LLVM::AMD::emitTDMOperation(rewriter, loc, getTypeConverter(), desc,
-                                      blockShape, numWarps, padInterval,
+                                      shapePerCTA, numWarps, padInterval,
                                       padAmount, offset, dstPtr, op.getPred(),
                                       elementType, barrierPtr, /*isLoad=*/true);
 
@@ -1254,11 +1254,13 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     SmallVector<Value> offset = adaptor.getIndices();
     int numWarps = triton::gpu::lookupNumWarps(op);
 
-    mlir::LLVM::AMD::emitTDMOperation(
-        rewriter, loc, getTypeConverter(), desc, blockShape, numWarps,
-        /*padInterval=*/0, /*padAmount=*/0, offset, dstPtr, b.true_val(),
-        elementType, /*barrierPtr=*/nullptr,
-        /*isLoad=*/false);
+    auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
+    mlir::LLVM::AMD::emitTDMOperation(rewriter, loc, getTypeConverter(), desc,
+                                      shapePerCTA, numWarps,
+                                      /*padInterval=*/0, /*padAmount=*/0,
+                                      offset, dstPtr, b.true_val(), elementType,
+                                      /*barrierPtr=*/nullptr,
+                                      /*isLoad=*/false);
 
     rewriter.eraseOp(op);
     return success();

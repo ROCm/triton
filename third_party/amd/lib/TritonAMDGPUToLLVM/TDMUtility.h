@@ -31,8 +31,9 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
                                   SmallVector<int64_t> blockShape, int numWarps,
                                   unsigned padInterval, unsigned padAmount,
                                   SmallVector<Value> tensorShape,
-                                  SmallVector<Value> tensorStride,
-                                  Value srcPtr);
+                                  SmallVector<Value> tensorStride, Value srcPtr,
+                                  Value ctaId,
+                                  const triton::LinearLayout &ctaLayout);
 
 // Update the global memory address with offset, and fill the shared memory
 // address and pred in a given TDM descriptor for >2D tensors.
