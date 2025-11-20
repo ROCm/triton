@@ -60,31 +60,50 @@ CAPFILE_ROOT="/proj/triton_regr/TRITON/MXFP_FA/01011970/"
 # Enabling itrace will take significant more time to finish.
 ENABLE_ITRACE=false
 
+# Specify the kernel name regex and dispatch number to capture:
+# - Kernel name regex should match the python function name decorated by
+#   @triton.jit / @gluon.jit.
+# - Dispatch number "0" means capture the first dispatch of the matched kernel.
+KERNEL_REGEX="attn_fwd_.*"
+DISPATCH_NUM=0
+CAP_DISPATCH="${KERNEL_REGEX}/${DISPATCH_NUM}"
+
 # [Optional]Change the group name to better represent your workload.
 # It's fine to not change.
 GROUP_NAME="CU_Tile_GEMM"
 
-# 2. Change the following to the command you'd like to run to generate CAP file
-#cmd=(
-#  roccap capture --loglevel trace python3
-#  /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-#  -M 8192 -N 8192 -K 1024 --num-warps=4 --num-buffers=2
-#  --prefetch-lds --single-warp-schedule
-#)
-
-cmd=(
-  roccap capture --loglevel trace --file "${NAME}.cap" python3
-  /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
-  --q_type e4m3 --kv_type e4m3 --batch 1
-  --seqlen_q 8192 --seqlen_k 8192
-  --num_q_heads 2 --num_k_heads 2
-  --head_sz 128 --block_m 128 --block_n 128
+# Change the following to the command you'd like to run to generate CAP file.
+# For example, in the GEMM case:
+# CMD=(
+#   python3 /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+#   -M 8192 -N 8192 -K 1024
+#   --num-warps=4
+#   --num-buffers=2
+#   --prefetch-lds --single-warp-schedule
+# )
+CMD=(
+  python3 /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+  --q_type e4m3
+  --kv_type e4m3
+  --batch 1
+  --seqlen_q 1024
+  --seqlen_k 1024
+  --num_q_heads 1
+  --num_k_heads 1
+  --head_sz 128
+  --block_m 128
+  --block_n 128
   --pipelined
-  --scale_type block --scale_preshuffled
-  --disable_p_scaling --p_k_width=16
+  --scale_type block
+  --scale_preshuffled
+  --disable_p_scaling
+  --p_k_width=8
 )
 
-"${cmd[@]}"
+
+# 2. Invoke roccap
+
+roccap capture --loglevel trace --disp "${CAP_DISPATCH}" --file "${NAME}.cap" "${CMD[@]}"
 
 find . -name "*.cap" -exec roccap play {} \;
 
