@@ -31,9 +31,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
                                   SmallVector<int64_t> blockShape, int numWarps,
                                   unsigned padInterval, unsigned padAmount,
                                   SmallVector<Value> tensorShape,
-                                  SmallVector<Value> tensorStride, Value srcPtr,
-                                  Value ctaId,
-                                  const triton::LinearLayout &ctaLayout);
+                                  SmallVector<Value> tensorStride,
+                                  Value srcPtr);
 
 // Update the global memory address with offset, and fill the shared memory
 // address and pred in a given TDM descriptor for >2D tensors.
@@ -53,7 +52,8 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       int numWarps, unsigned padInterval, unsigned padAmount,
                       ArrayRef<Value> offset, Value dstPtr, Value pred,
                       Value multicastMask, Type elementType, Value barrierPtr,
-                      bool isLoad);
+                      bool isLoad, const triton::LinearLayout &cgaLayout,
+                      Value ctaId);
 
 } // namespace mlir::LLVM::AMD
 

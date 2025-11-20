@@ -116,23 +116,12 @@ struct MakeTensorDescOpConversion
         getTypeConverter()->convertType(blockTy.getElementType());
     SmallVector<int64_t> blockShape = to_vector(blockTy.getShape());
     int numWarps = lookupNumWarps(op);
-
-    triton::LinearLayout sharedLayout;
-    if (paddedEnc) {
-      sharedLayout = paddedEnc.getLinearComponent();
-    } else {
-      sharedLayout = triton::gpu::toLinearLayout(blockTy.getShape(), sharedEnc);
-    }
     auto shapePerCTA = triton::gpu::getShapePerCTA(sharedEnc, blockShape);
-    auto kBlock = rewriter.getStringAttr("block");
-    auto ctaLayout = sharedLayout.sublayout(
-        {kBlock}, to_vector(sharedLayout.getOutDimNames()));
 
     // Create TDM descriptor for 2D-5D tensors
     auto tdmDesc = LLVM::AMD::createTDMDescriptor(
         rewriter, loc, getTypeConverter(), elementType, shapePerCTA, numWarps,
-        padInterval, padAmount, tensorShape, tensorStride, basePtr,
-        targetInfo.getClusterCTAId(rewriter, loc), ctaLayout);
+        padInterval, padAmount, tensorShape, tensorStride, basePtr);
 
     SmallVector<Value> groups = tdmDesc.getAllGroups();
 

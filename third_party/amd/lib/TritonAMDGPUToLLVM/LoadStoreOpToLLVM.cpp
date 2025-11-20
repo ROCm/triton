@@ -1210,11 +1210,16 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
       barrierPtr = smemObj.getBase();
     }
 
+    auto kBlock = rewriter.getStringAttr("block");
+    auto cgaLayout = sharedLayout.sublayout(
+        {kBlock}, to_vector(sharedLayout.getOutDimNames()));
+    auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
+
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
     mlir::LLVM::AMD::emitTDMOperation(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         padInterval, padAmount, offset, dstPtr, op.getPred(), multicastMask,
-        elementType, barrierPtr, /*isLoad=*/true);
+        elementType, barrierPtr, /*isLoad=*/true, cgaLayout, ctaId);
 
     rewriter.eraseOp(op);
     return success();
@@ -1260,13 +1265,20 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     SmallVector<Value> offset = adaptor.getIndices();
     int numWarps = triton::gpu::lookupNumWarps(op);
 
+    // Verifier ensures smem is not usind a PaddedSharedEncodingAttr
+    auto sharedLayout = triton::gpu::toLinearLayout(smemTy);
+    auto kBlock = rewriter.getStringAttr("block");
+    auto cgaLayout = sharedLayout.sublayout(
+        {kBlock}, to_vector(sharedLayout.getOutDimNames()));
+    auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
+
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
     mlir::LLVM::AMD::emitTDMOperation(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         /*padInterval=*/0, /*padAmount=*/0, offset, dstPtr, b.true_val(),
         /*multicastMask=*/{}, elementType,
         /*barrierPtr=*/nullptr,
-        /*isLoad=*/false);
+        /*isLoad=*/false, cgaLayout, ctaId);
 
     rewriter.eraseOp(op);
     return success();

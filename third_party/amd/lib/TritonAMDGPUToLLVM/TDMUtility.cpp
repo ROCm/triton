@@ -201,9 +201,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
                                   SmallVector<int64_t> blockShape, int numWarps,
                                   unsigned padInterval, unsigned padAmount,
                                   SmallVector<Value> tensorShape,
-                                  SmallVector<Value> tensorStride, Value srcPtr,
-                                  Value ctaId,
-                                  const triton::LinearLayout &ctaLayout) {
+                                  SmallVector<Value> tensorStride,
+                                  Value srcPtr) {
   size_t numDims = tensorShape.size();
   assert(numDims >= 1 && numDims <= 5 && tensorStride.size() == numDims &&
          "TDM only supported for 1D-5D tensors.");
@@ -231,30 +230,13 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     blockShape[0] = ceil(blockShape[0], int64_t(numWarps));
   }
 
-  // We need to adjust the outer strides based on our CTAId and the block layout
-  auto kBlock = str_attr("block");
-  auto orderedCtaLayout =
-      ctaLayout.transposeOuts(standardOutDimNames(loc.getContext(), numDims));
-  auto ctaOffsets =
-      applyLinearLayout(loc, rewriter, orderedCtaLayout, {{kBlock, ctaId}});
-  // Apply CTA offsets to the base pointer
-  // Compute the global address offset: sum(ctaOffsets[i] * tensorStride[i])
-  Value ctaBaseOffset = b.i32_val(0);
-  for (size_t i = 0; i < numDims; ++i) {
-    Value dimOffset = b.mul(ctaOffsets[i].second, tensorStride[i]);
-    ctaBaseOffset = b.add(ctaBaseOffset, dimOffset);
-  }
-
-  Type globalPtrTy = ptr_ty(ctx, 1);
-  Value ctaAdjSrcPtr = b.gep(globalPtrTy, elementType, srcPtr, ctaBaseOffset);
-
   // group0 (128 bits / 4 dwords) effective bit encoding:
   // [1:0]:     pred (to be filled later)
   // [63:32]:   lds address (to be filled later)
   // [120:64]:  global address
   // [127:126]: type - currently always set to 0x2
   SmallVector<Value> group0(4, b.i32_val(0));
-  Value globalAddr = b.ptrtoint(i64_ty, ctaAdjSrcPtr);
+  Value globalAddr = b.ptrtoint(i64_ty, srcPtr);
   group0[2] = b.trunc(i32_ty, globalAddr);
   group0[3] = b.trunc(i32_ty, b.lshr(globalAddr, b.i64_val(32)));
   group0[3] = b.or_(group0[3], b.i32_val(1 << 31));
@@ -384,7 +366,7 @@ void fillTDMDescriptor(
     std::optional<std::reference_wrapper<SmallVector<Value>>> group2,
     std::optional<std::reference_wrapper<SmallVector<Value>>> group3,
     SmallVector<Value> offset, Value dstPtr, Value pred, Value multicastMask,
-    Value barrierPtr) {
+    Value barrierPtr, const triton::LinearLayout &cgaLayout, Value ctaId) {
   size_t numDims = offset.size();
   assert(numDims >= 1 && numDims <= 5 && "TDM supports 1D to 5D tensors.");
 
@@ -427,6 +409,21 @@ void fillTDMDescriptor(
     globalOffset[i] = b.mul(b.i32_val(blockShapePerWarp), warpCoord[i]);
     offset[i] = b.add(offset[i], globalOffset[i]);
   }
+
+  // We need to adjust the outer strides based on our CTAId and the block layout
+  auto kBlock = str_attr("block");
+  auto orderedCtaLayout =
+      cgaLayout.transposeOuts(standardOutDimNames(loc.getContext(), numDims));
+  auto cgaOffsets =
+      applyLinearLayout(loc, rewriter, orderedCtaLayout, {{kBlock, ctaId}});
+  // Apply CTA offsets to the base pointer
+  // Compute the global address offset: sum(ctaOffsets[i] * tensorStride[i])
+  Value cgaBaseOffset = b.i32_val(0);
+  for (size_t i = 0; i < numDims; ++i) {
+    Value dimOffset = b.mul(cgaOffsets[i].second, tensorStride[i]);
+    cgaBaseOffset = b.add(cgaBaseOffset, dimOffset);
+  }
+  srcPtr = b.gep(globalPtrTy, elementType, srcPtr, cgaBaseOffset);
 
   // Calculate the full global address offset based on all dimensions
   Value baseOffset = b.i32_val(0);
@@ -524,7 +521,8 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       int numWarps, unsigned padInterval, unsigned padAmount,
                       ArrayRef<Value> offset, Value dstPtr, Value pred,
                       Value multicastMask, Type elementType, Value barrierPtr,
-                      bool isLoad) {
+                      bool isLoad, const triton::LinearLayout &cgaLayout,
+                      Value ctaId) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   assert(blockShape.size() <= 5);
@@ -540,7 +538,7 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       to_vector(blockShape), numWarps, padInterval, padAmount,
                       group0Vec, group1Vec, std::ref(group2Vec),
                       std::ref(group3Vec), to_vector(offset), dstPtr, pred,
-                      multicastMask, barrierPtr);
+                      multicastMask, barrierPtr, cgaLayout, ctaId);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);
@@ -561,7 +559,7 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       to_vector(blockShape), numWarps, padInterval, padAmount,
                       group0Vec, group1Vec, std::nullopt, std::nullopt,
                       to_vector(offset), dstPtr, pred, multicastMask,
-                      barrierPtr);
+                      barrierPtr, cgaLayout, ctaId);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);
