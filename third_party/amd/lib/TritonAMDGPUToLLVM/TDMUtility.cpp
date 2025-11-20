@@ -383,7 +383,8 @@ void fillTDMDescriptor(
     unsigned padAmount, SmallVector<Value> &group0, SmallVector<Value> &group1,
     std::optional<std::reference_wrapper<SmallVector<Value>>> group2,
     std::optional<std::reference_wrapper<SmallVector<Value>>> group3,
-    SmallVector<Value> offset, Value dstPtr, Value pred, Value barrierPtr) {
+    SmallVector<Value> offset, Value dstPtr, Value pred, Value multicastMask,
+    Value barrierPtr) {
   size_t numDims = offset.size();
   assert(numDims >= 1 && numDims <= 5 && "TDM supports 1D to 5D tensors.");
 
@@ -472,6 +473,8 @@ void fillTDMDescriptor(
   group0[3] =
       b.or_(group0[3], b.trunc(i32_ty, b.lshr(globalAddr, b.i64_val(32))));
 
+  if (multicastMask)
+    group1[0] = b.or_(group1[0], multicastMask);
   // Update groups with adjusted tensor shapes
   group1[1] = b.shl(tensorShape[numDims - 1], b.i32_val(16));
   group1[2] = b.lshr(tensorShape[numDims - 1], b.i32_val(16));
@@ -520,7 +523,8 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       ArrayRef<Value> desc, ArrayRef<int64_t> blockShape,
                       int numWarps, unsigned padInterval, unsigned padAmount,
                       ArrayRef<Value> offset, Value dstPtr, Value pred,
-                      Type elementType, Value barrierPtr, bool isLoad) {
+                      Value multicastMask, Type elementType, Value barrierPtr,
+                      bool isLoad) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   assert(blockShape.size() <= 5);
@@ -536,7 +540,7 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
                       to_vector(blockShape), numWarps, padInterval, padAmount,
                       group0Vec, group1Vec, std::ref(group2Vec),
                       std::ref(group3Vec), to_vector(offset), dstPtr, pred,
-                      barrierPtr);
+                      multicastMask, barrierPtr);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);
@@ -556,7 +560,8 @@ void emitTDMOperation(RewriterBase &rewriter, Location loc,
     fillTDMDescriptor(rewriter, loc, typeConverter, elementType,
                       to_vector(blockShape), numWarps, padInterval, padAmount,
                       group0Vec, group1Vec, std::nullopt, std::nullopt,
-                      to_vector(offset), dstPtr, pred, barrierPtr);
+                      to_vector(offset), dstPtr, pred, multicastMask,
+                      barrierPtr);
 
     auto group0 = packLLVector(loc, group0Vec, rewriter);
     auto group1 = packLLVector(loc, group1Vec, rewriter);

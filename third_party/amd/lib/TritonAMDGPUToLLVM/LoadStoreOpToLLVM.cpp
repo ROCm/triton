@@ -1168,14 +1168,20 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         llvm::dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
     Type elementType = getTypeConverter()->convertType(smemTy.getElementType());
 
+    triton::LinearLayout sharedLayout;
     unsigned padInterval = 0;
     unsigned padAmount = 0;
     if (paddedEnc) {
       assert(paddedEnc.getIntervals().size() == 1 &&
              paddedEnc.getPaddings().size() == 1);
+      sharedLayout = paddedEnc.getLinearComponent();
       padInterval = paddedEnc.getIntervals()[0];
       padAmount = paddedEnc.getPaddings()[0];
+    } else {
+      sharedLayout = triton::gpu::toLinearLayout(smemTy);
     }
+    Value multicastMask = LLVM::AMD::emitCtaMulticastMask(
+        rewriter, loc, targetInfo.getClusterCTAId(rewriter, loc), sharedLayout);
 
     SmallVector<Value> desc =
         unpackLLElements(loc, adaptor.getDesc(), rewriter);
@@ -1205,10 +1211,10 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     }
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
-    mlir::LLVM::AMD::emitTDMOperation(rewriter, loc, getTypeConverter(), desc,
-                                      shapePerCTA, numWarps, padInterval,
-                                      padAmount, offset, dstPtr, op.getPred(),
-                                      elementType, barrierPtr, /*isLoad=*/true);
+    mlir::LLVM::AMD::emitTDMOperation(
+        rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
+        padInterval, padAmount, offset, dstPtr, op.getPred(), multicastMask,
+        elementType, barrierPtr, /*isLoad=*/true);
 
     rewriter.eraseOp(op);
     return success();
@@ -1255,12 +1261,12 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     int numWarps = triton::gpu::lookupNumWarps(op);
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
-    mlir::LLVM::AMD::emitTDMOperation(rewriter, loc, getTypeConverter(), desc,
-                                      shapePerCTA, numWarps,
-                                      /*padInterval=*/0, /*padAmount=*/0,
-                                      offset, dstPtr, b.true_val(), elementType,
-                                      /*barrierPtr=*/nullptr,
-                                      /*isLoad=*/false);
+    mlir::LLVM::AMD::emitTDMOperation(
+        rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
+        /*padInterval=*/0, /*padAmount=*/0, offset, dstPtr, b.true_val(),
+        /*multicastMask=*/{}, elementType,
+        /*barrierPtr=*/nullptr,
+        /*isLoad=*/false);
 
     rewriter.eraseOp(op);
     return success();
