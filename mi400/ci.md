@@ -14,7 +14,7 @@ We use GitHub Actions infrastructure to listen and dispatch workloads to CI
 machines. Once a job arrives, GitHub Action runner on a local machine
 runs `.github/workflows/gfx1250-ci.yml` and fires up the _local_
 `ci/gfx1250-dev` docker, inside which `.github/workflows/gfx1250.sh`
-gotten executed.
+gotten executed. Similarly for other CI workflows.
 
 ## Setup CI machine
 
@@ -24,7 +24,7 @@ To add a new CI machine, first we set up the directories expected to mount to
 the CI docker on the host file system:
 
 ```sh
-sudo mkdir -p /data/ci/ffm /data/ci/llvm /data/ci/triton-cache /data/ci/ccache
+sudo mkdir -p /data/ci/ffm /data/ci/llvm /data/ci/triton-cache /data/ci/ccache /data/ci/roccap
 ```
 where
 * `/data/ci/ffm`: hosting FFM Lite packages
@@ -51,6 +51,14 @@ cd /data/ci/ffm/
 docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-env \
   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
+docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
+  --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+  --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+  --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
+docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
+  --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+  --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+  --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
 ```
 
 The above creates a `mirror` user account inside the docker which has the same
@@ -75,9 +83,13 @@ Ask somebody with admin access if you cannot access the above page.
 
 A list of labels will be asked to categorize the machine. You can see the
 existing machines at https://github.amd.com/GFX-IP-Arch/triton/settings/actions/runners
-to choose suitable ones. Note that if adding `ffm`, the machine will be
-picked up for `CI/gfx1250` tasks; don't add that until proven the machine
-is fully set up for it! These labels can be updated via GitHub UI anyway.
+to choose suitable ones. Note that
+
+* If adding `ffm`, the machine will be picked up for `CI/gfx1250` tasks.
+* If adding `roccap`, the machine will be picked up for `roccap/gfx1250` tasks.
+
+Don't add that until proven the machine is fully set up for it! These labels
+can be updated via GitHub UI anyway.
 
 ### Run GitHub Action runner
 

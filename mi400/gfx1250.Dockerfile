@@ -2,7 +2,7 @@
 # But it tries to be cooperative with mirror accounts inside the docker to
 # avoid touching all files with root ownership; so you can build on top it
 # for personal development environment.
-#
+
 # This docker image tries to install necessary packages to be hermetic.
 # Though in order to make updating key components easier, it expects volume
 # binding to the following directories inside docker:
@@ -12,14 +12,23 @@
 # - /ffm/: Directory containing FFM pre-built package
 # - /home/mirror/.triton/: Triton cache directory
 # - /home/mirror/.ccache/: ccache directory
-#
-# Build with:
-# sudo docker build /path/to/ffm -f /path/to/this/dockerfile -t <image-name> \
-#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
-# For NPI PyTorch add the following build args:
-#   --build-arg USE_NPI_ROCM=TRUE USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
-# For roccap add the following build args:
-#   --build-arg USE_NPI_ROCM=TRUE USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
+
+# Build docker with public PyTorch:
+# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-env \
+#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
+
+# Build docker with NPI PyTorch:
+# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
+#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
+
+# Build docker with NPI ROCm + roccap:
+# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
+#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
 FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
