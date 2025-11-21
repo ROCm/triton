@@ -54,8 +54,9 @@ bool comesFromAsyncWait(Value token) {
 void addLocalBarrierAfterAmdGpuAsyncWait(ModuleOp mod) {
   auto *ctx = mod->getContext();
 
-  SmallVector<amdgpu::AsyncWaitOp> waits;
+  SmallVector<Operation *> waits;
   mod->walk([&waits](amdgpu::AsyncWaitOp waitOp) { waits.push_back(waitOp); });
+  mod->walk([&waits](amdgpu::AsyncTDMWait waitOp) { waits.push_back(waitOp); });
 
   IRRewriter builder(mod.getContext());
   for (auto waitOp : waits) {
