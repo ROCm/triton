@@ -7,11 +7,11 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LayoutUtility.h"
 
-namespace {
-
 using namespace mlir;
 using namespace mlir::triton;
 using namespace mlir::triton::gpu;
+
+namespace mlir::triton::gpu {
 
 LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
                               MemDescType memDescTy, SharedMemoryObject smemObj,
@@ -47,7 +47,9 @@ LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
 
   return success();
 }
+} // namespace
 
+namespace {
 struct GlobalScratchAllocOpConversion
     : public ConvertOpToLLVMPattern<triton::gpu::GlobalScratchAllocOp> {
   const TargetInfoBase *targetInfo;

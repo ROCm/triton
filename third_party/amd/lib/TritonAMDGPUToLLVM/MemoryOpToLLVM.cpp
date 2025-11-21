@@ -8,7 +8,19 @@
 
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
+using ::mlir::triton::gpu::BlockedEncodingAttr;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
+using ::mlir::RankedTensorType;
+
+namespace mlir::triton::gpu {
+LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
+                              MemDescType memDescTy, SharedMemoryObject smemObj,
+                              ArrayRef<Value> inVals,
+                              const LLVMTypeConverter *typeConverter,
+                              ConversionPatternRewriter &rewriter,
+                              const TargetInfoBase &targetInfo);
+}
 
 namespace {
 template <typename LocalLoadOpType>
@@ -256,12 +268,128 @@ private:
   const AMD::TargetInfo &targetInfo;
 };
 
+struct TransStore8BitOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::LocalStoreOp> {
+public:
+  using ConvertOpToLLVMPattern<
+      triton::gpu::LocalStoreOp>::ConvertOpToLLVMPattern;
+
+  TransStore8BitOpConversion(const LLVMTypeConverter &converter,
+                         const AMD::TargetInfo &targetInfo,
+                         PatternBenefit benefit = 1)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalStoreOp>(converter, benefit),
+        targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalStoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto *ctx = op.getContext();
+    auto mod = op->getParentOfType<mlir::ModuleOp>();
+    StringRef intrinsicName = "llvm.amdgcn.perm";
+    Operation *permFuncOperation = SymbolTable::lookupSymbolIn(mod, intrinsicName);
+    LLVM::LLVMFuncOp permFuncOp;
+    if (!permFuncOperation) {
+      auto insertionPoint = rewriter.saveInsertionPoint();
+      rewriter.setInsertionPointToStart(mod.getBody());
+      LLVM::LLVMFunctionType permFuncType = LLVM::LLVMFunctionType::get(i32_ty, SmallVector<Type>{i32_ty, i32_ty, i32_ty});
+
+      permFuncOp = rewriter.create<LLVM::LLVMFuncOp>(loc, intrinsicName, permFuncType);
+      rewriter.restoreInsertionPoint(insertionPoint);
+    } else {
+      permFuncOp = cast<LLVM::LLVMFuncOp>(*permFuncOperation);
+    }
+
+    if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA4) return failure();
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
+    auto typeConverter = getTypeConverter();
+
+    Value regVal = op.getSrc();
+    Value memDescVal = op.getDst();
+
+    auto regTy = cast<RankedTensorType>(regVal.getType());
+    auto memDescTy = cast<MemDescType>(memDescVal.getType());
+
+    auto regElemTy = regTy.getElementType();
+    if (regElemTy.getIntOrFloatBitWidth() != 8) return failure();
+
+    auto regEnc = dyn_cast<BlockedEncodingAttr>(regTy.getEncoding());
+    auto memEnc = dyn_cast<SwizzledSharedEncodingAttr>(memDescTy.getEncoding());
+    if (!regEnc || !memEnc) return failure();
+
+    auto regOrder = regEnc.getOrder();
+    auto memOrder = memEnc.getOrder();
+    if (regOrder.size()!=2 || memOrder.size()!=2) return failure();
+    if (regOrder[0] != memOrder[1]) return failure();
+
+    auto regSizePerThread = regEnc.getSizePerThread();
+    auto vec = memEnc.getVec();
+    if (regSizePerThread[0] < 4 || regSizePerThread[1] < 4 || vec < 4) return failure();
+
+    auto regVals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
+    auto regOffsets = emitOffsetForLayout(regEnc, regTy);
+    std::map<SmallVector<unsigned>, Value> regOffValues;
+    for (size_t i = 0; i < regOffsets.size(); i++) {
+      regOffValues[regOffsets[i]] = regVals[i];
+    }
+    llvm::dbgs() << "@@@@@ construct regOffValues end.\n";
+    auto llvmRegElemTy = typeConverter->convertType(regElemTy);
+    for (unsigned i=0; i<regSizePerThread[regOrder[1]]; i+=4) {
+      for (unsigned j=0; j<regSizePerThread[regOrder[0]]; j+=4) {
+        Type ty = vec_ty(llvmRegElemTy, 4);
+        SmallVector<Value> raw{tb.undef(ty), tb.undef(ty), tb.undef(ty), tb.undef(ty)};
+        for (int l = 0; l < 4; ++l) 
+          for (int k = 0; k < 4; ++k) {
+            raw[l] = tb.insert_element(raw[l], regOffValues[{i + l, j + k}], tb.i32_val(k));
+          }
+
+        Value raw0 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[1], i32_ty), tb.bitcast(raw[0], i32_ty), tb.i32_val(0x05010400)}).getResult();  // 10, 11, 12, 13, 00, 01, 02, 03
+        Value raw1 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[1], i32_ty), tb.bitcast(raw[0], i32_ty), tb.i32_val(0x07030602)}).getResult();  // 01, 11, 00, 10, 03, 13, 02, 12 
+        Value raw2 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[3], i32_ty), tb.bitcast(raw[2], i32_ty), tb.i32_val(0x05010400)}).getResult();  // 30, 31, 32, 33, 20, 21, 22, 23
+        Value raw3 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[3], i32_ty), tb.bitcast(raw[2], i32_ty), tb.i32_val(0x07030602)}).getResult();  // 21, 31, 20, 30, 23, 33, 22, 32 
+
+        raw[0] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw2, raw0, tb.i32_val(0x05040100)}).getResult(), ty);  // 01, 11, 00, 10, 21, 31, 20, 30
+        raw[1] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw2, raw0, tb.i32_val(0x07060302)}).getResult(), ty);  // 31, 21, 
+        raw[2] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw3, raw1, tb.i32_val(0x05040100)}).getResult(), ty);  // 02, 03, 12, 13, 22, 23, 32, 33
+        raw[3] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw3, raw1, tb.i32_val(0x07060302)}).getResult(), ty);
+
+        for (int l = 0; l < 4; ++l) 
+          for (int k = 0; k < 4; ++k) {
+            regOffValues[{i + k, j + l}] = tb.extract_element(llvmRegElemTy, raw[l], tb.i32_val(k));
+          }
+      }
+    }
+    llvm::dbgs() << "@@@@@ shuffle regOffValues end.\n";
+    SmallVector<Value> resultVals;
+    for (size_t i = 0; i < regOffsets.size(); i++) {
+      resultVals.push_back(regOffValues[regOffsets[i]]);
+    }
+    llvm::dbgs() << "@@@@@ construct resultVals end.\n";
+    auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getDst(),
+                                                         llvmElemTy, rewriter);
+
+    if (failed(mlir::triton::gpu::lowerLocalStore(loc, ctx, regVal, memDescTy, smemObj, resultVals,
+                               typeConverter, rewriter, targetInfo))) {
+      return failure();
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  const AMD::TargetInfo &targetInfo;
+};
+
 } // namespace
 
 void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfo &targetInfo, PatternBenefit benefit) {
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
+  patterns.add<TransStore8BitOpConversion>(
+      typeConverter, targetInfo, PatternBenefit(benefit.getBenefit() + 2));
   patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
       typeConverter, targetInfo, transBenefit);
   patterns.add<
