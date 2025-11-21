@@ -9,7 +9,8 @@ void populateExtractSliceOpToLLVMPatterns(
     mlir::LLVMTypeConverter &typeConverter, mlir::RewritePatternSet &patterns,
     mlir::PatternBenefit benefit);
 
-void populateInThreadTransposeOpToTTGPatterns(mlir::RewritePatternSet &patterns,
+void populateInThreadTransposeOpToTTGPatterns(mlir::LLVMTypeConverter &typeConverter,
+                                              mlir::RewritePatternSet &patterns,
                                               mlir::PatternBenefit benefit);
 void populateConcatOpToLLVMPatterns(mlir::LLVMTypeConverter &typeConverter,
                                     mlir::RewritePatternSet &patterns,

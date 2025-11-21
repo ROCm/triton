@@ -193,10 +193,10 @@ py::object layoutToGluon(Attribute layout) {
         toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto swizzled =
                  dyn_cast<ttg::SwizzledSharedEncodingAttr>(layout)) {
-    auto ctaLayout = nvmma.getCTALayout();
+    auto ctaLayout = swizzled.getCTALayout();
     return layouts.SwizzledSharedLayout(
         swizzled.getVec(), swizzled.getPerPhase(), swizzled.getMaxPhase(),
-        swizzled.getOrder(), toStdVector(ctaLayout.getCTAsPerCGA()),
+        toStdVector(swizzled.getOrder()), toStdVector(ctaLayout.getCTAsPerCGA()),
         toStdVector(ctaLayout.getCTASplitNum()),
         toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto autoEnc = dyn_cast<gluon::AutoEncodingAttr>(layout)) {
@@ -394,6 +394,22 @@ void init_gluon_ir(py::module &&m) {
                  ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return self.getChecked<ttg::SwizzledSharedEncodingAttr>(
                  ctx, vec, perPhase, maxPhase, order, ctaLayout);
+           })
+      .def("get_amd_rotating_shared_layout",
+           [](GluonOpBuilder &self, int vec, int perPhase, int maxPhase,
+              std::vector<unsigned> &order, std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
+             auto ctx = self.getContext();
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
+             return self.getChecked<ttg::AMDRotatingSharedEncodingAttr>(
+                 ctx, vec, perPhase, maxPhase, order, ctaLayout);
+           })
+      .def("create_in_thread_transpose",
+           [](GluonOpBuilder &self, Type resultType, Value& arg) -> Value {
+             return self.create<ttag::InThreadTransposeOp>(
+                 resultType, arg);
            })
       .def("get_tensor_memory_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &block, bool unpacked,

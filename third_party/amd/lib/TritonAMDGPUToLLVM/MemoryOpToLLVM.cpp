@@ -293,8 +293,10 @@ public:
       auto insertionPoint = rewriter.saveInsertionPoint();
       rewriter.setInsertionPointToStart(mod.getBody());
       LLVM::LLVMFunctionType permFuncType = LLVM::LLVMFunctionType::get(i32_ty, SmallVector<Type>{i32_ty, i32_ty, i32_ty});
-
       permFuncOp = rewriter.create<LLVM::LLVMFuncOp>(loc, intrinsicName, permFuncType);
+      LLVM::LLVMDialect *llvmDialect = ctx->getLoadedDialect<LLVM::LLVMDialect>();
+      permFuncOp->setAttr("llvm.readnone", UnitAttr::get(ctx));
+      permFuncOp->setAttr("llvm.nounwind", UnitAttr::get(ctx));
       rewriter.restoreInsertionPoint(insertionPoint);
     } else {
       permFuncOp = cast<LLVM::LLVMFuncOp>(*permFuncOperation);
