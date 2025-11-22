@@ -171,6 +171,25 @@ class HIPBackend(BaseBackend):
             lld = Path(lld_env_path)
             if lld.is_file():
                 return lld
+    
+        # Check ROCM_PATH environment variable
+        rocm_path = os.getenv("ROCM_PATH")
+        if rocm_path is not None:
+            lld = Path(rocm_path) / "llvm/bin/ld.lld"
+            if lld.is_file():
+                return lld
+
+        # Try rocm-sdk command
+        try:
+            sdk_root = subprocess.check_output(
+                ["rocm-sdk", "path", "--root"], text=True
+            ).strip()
+            lld = Path(sdk_root) / "llvm/bin/ld.lld"
+            if lld.is_file():
+                return lld
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+            
         # Check backend for ld.lld (used for pytorch wheels)
         lld = Path(__file__).parent / "llvm/bin/ld.lld"
         if lld.is_file():
