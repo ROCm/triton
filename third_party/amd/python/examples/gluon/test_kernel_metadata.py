@@ -14,7 +14,9 @@ import re
 import os
 import pytest
 
-from .f16_fa_gfx1250 import attn_fwd_pipelined_kernel, run_attention
+from .f16_fa_gfx1250 import attn_fwd_pipelined_kernel as f16_attn_fwd_pipelined_kernel
+from .f16_fa_gfx1250 import run_attention as run_f16_attention
+from .mxfp_fa_gfx1250 import run_attention as run_mxfp_attention
 
 GOLDEN_METADATA_OVERWRITE = (os.getenv('GOLDEN_METADATA_OVERWRITE', 'False').lower() in ('true', '1'))
 
@@ -96,7 +98,7 @@ def static_metadata_check(kernel, config: str):
                                            f"current={current_val}, golden={golden_val}")
 
 
-def generate_attention_configs():
+def generate_f16_attention_configs():
     base_configs = [
         # Tests for pipelined attention fwd kernel
         pytest.param({
@@ -105,7 +107,7 @@ def generate_attention_configs():
             "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8,  #
             "HEAD_SZ": 128,  #
             "BLOCK_M": 128, "BLOCK_N": 64,  #
-            "ATTN_FN": attn_fwd_pipelined_kernel,  #
+            "ATTN_FN": f16_attn_fwd_pipelined_kernel,  #
         }),
         pytest.param({
             "BATCH": 8,  #
@@ -113,15 +115,15 @@ def generate_attention_configs():
             "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8,  #
             "HEAD_SZ": 128,  #
             "BLOCK_M": 128, "BLOCK_N": 128,  #
-            "ATTN_FN": attn_fwd_pipelined_kernel,  #
+            "ATTN_FN": f16_attn_fwd_pipelined_kernel,  #
         }),
     ]
     return base_configs
 
 
-@pytest.mark.parametrize("config", generate_attention_configs())
-def test_attention_kernel_metadata(config):
-    attn_kernel = run_attention(config)
+@pytest.mark.parametrize("config", generate_f16_attention_configs())
+def test_f16_attention_kernel_metadata(config):
+    attn_kernel = run_f16_attention(config)
 
     BATCH = config["BATCH"]
     SEQLEN_Q = config["SEQLEN_Q"]
@@ -131,8 +133,61 @@ def test_attention_kernel_metadata(config):
     HEAD_SZ = config["HEAD_SZ"]
     BLOCK_M = config["BLOCK_M"]
     BLOCK_N = config["BLOCK_N"]
-    attn_fn = config["ATTN_FN"]
+    attn_fn = "f16_attn_fwd_pipelined_kernel"
 
     # Generate config name from pytest request
-    config_name = f"BATCH{BATCH}_SEQLENQ{SEQLEN_Q}_SEQLENK{SEQLEN_K}_QHEADS{NUM_Q_HEADS}_KVHEADS{NUM_K_HEADS}_HEADSZ{HEAD_SZ}_BM{BLOCK_M}_BN{BLOCK_N}_{attn_fn.__name__}"
+    config_name = f"BATCH{BATCH}_SEQLENQ{SEQLEN_Q}_SEQLENK{SEQLEN_K}_QHEADS{NUM_Q_HEADS}_KVHEADS{NUM_K_HEADS}_HEADSZ{HEAD_SZ}_BM{BLOCK_M}_BN{BLOCK_N}_{attn_fn}"
+    static_metadata_check(attn_kernel, config_name)
+
+
+def generate_mxfp_attention_configs():
+    base_configs = [
+        # Tests for pipelined attention fwd kernel
+        pytest.param({
+            "q_type": "e4m3", "kv_type": "e4m3",  #
+            "batch": 1,  #
+            "seqlen_q": 1024, "seqlen_k": 1024,  #
+            "num_q_heads": 1, "num_k_heads": 1,  #
+            "head_sz": 128,  #
+            "block_m": 128, "block_n": 128,  #
+            "scale_type": "block",  #
+            "p_k_width": 8,  #
+        }),
+        pytest.param({
+            "q_type": "e4m3", "kv_type": "e4m3",  #
+            "batch": 1,  #
+            "seqlen_q": 1024, "seqlen_k": 1024,  #
+            "num_q_heads": 1, "num_k_heads": 1,  #
+            "head_sz": 128,  #
+            "block_m": 128, "block_n": 128,  #
+            "scale_type": "global",  #
+            "p_k_width": 8,  #
+        }),
+    ]
+    return base_configs
+
+
+@pytest.mark.parametrize("config", generate_mxfp_attention_configs())
+def test_mxfp_attention_kernel_metadata(config):
+    config["pipelined"] = True
+    config["disable_p_scaling"] = True
+    config["scale_preshuffled"] = (config["scale_type"] == "block")
+    attn_kernel = run_mxfp_attention(**config)
+
+    QT = config["q_type"]
+    KVT = config["kv_type"]
+    BATCH = config["batch"]
+    SEQLEN_Q = config["seqlen_q"]
+    SEQLEN_K = config["seqlen_k"]
+    NUM_Q_HEADS = config["num_q_heads"]
+    NUM_K_HEADS = config["num_k_heads"]
+    HEAD_SZ = config["head_sz"]
+    BLOCK_M = config["block_m"]
+    BLOCK_N = config["block_n"]
+    SCALE_TYPE = config["scale_type"]
+    PKWIDTH = config["p_k_width"]
+    attn_fn = "mxfp_attn_fwd_pipelined_kernel"
+
+    # Generate config name from pytest request
+    config_name = f"{QT}x{KVT}_{SCALE_TYPE}_BATCH{BATCH}_SEQLENQ{SEQLEN_Q}_SEQLENK{SEQLEN_K}_QHEADS{NUM_Q_HEADS}_KVHEADS{NUM_K_HEADS}_HEADSZ{HEAD_SZ}_BM{BLOCK_M}_BN{BLOCK_N}_PKWIDTH{PKWIDTH}_{attn_fn}"
     static_metadata_check(attn_kernel, config_name)

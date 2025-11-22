@@ -54,10 +54,10 @@ HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/g
 
 # TODO: Fix failures in mxfp variants when ffm_enable_time_slicing is enabled.
 unset HSA_MODEL_ARGS
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
-pytest --count=1 -n 16 third_party/amd/python/examples/gluon/test_kernel_metadata.py
+HSA_MODEL_NUM_THREADS=8 pytest --count=1 -n 4 third_party/amd/python/examples/gluon/test_kernel_metadata.py
 
 echo "=== Run E2E Upstream Tests ==="
 

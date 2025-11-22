@@ -1465,31 +1465,32 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     assert mismatches < 10, f"Mismatched elements: {mismatches} / {total} ({mismatch_ratio:.6%})"
 
 
+def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
+                  scale_type, pipelined, disable_p_scaling, scale_preshuffled, p_k_width):
+    if kv_type == 'e2m1' and p_k_width == 8:
+        raise RuntimeError("e2m1 can not use k_width=8 for p")
+
+    q, _ = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
+    k, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
+    v, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
+    if scale_type == 'block':
+        q_scale, _ = _create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
+        k_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
+        v_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
+    else:
+        assert scale_type == 'global'
+        q_scale, _ = _create_global_scale(q_type)
+        k_scale, _ = _create_global_scale(kv_type)
+        v_scale, _ = _create_global_scale(kv_type)
+
+    _, kernel = attn_fwd(q, k, v,  #
+                         q_scale, k_scale, v_scale,  #
+                         q_type, kv_type, block_m, block_n,  #
+                         scale_type == 'block', pipelined, not disable_p_scaling, scale_preshuffled, p_k_width)
+    return kernel
+
+
 if __name__ == "__main__":
-
-    def launch(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
-               scale_type, pipelined, disable_p_scaling, scale_preshuffled, p_k_width):
-        if kv_type == 'e2m1' and p_k_width == 8:
-            raise RuntimeError("e2m1 can not use k_width=8 for p")
-
-        q, _ = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
-        k, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
-        v, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
-        if scale_type == 'block':
-            q_scale, _ = _create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
-            k_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
-            v_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
-        else:
-            assert scale_type == 'global'
-            q_scale, _ = _create_global_scale(q_type)
-            k_scale, _ = _create_global_scale(kv_type)
-            v_scale, _ = _create_global_scale(kv_type)
-
-        _, kernel = attn_fwd(q, k, v,  #
-                             q_scale, k_scale, v_scale,  #
-                             q_type, kv_type, block_m, block_n,  #
-                             scale_type == 'block', pipelined, not disable_p_scaling, scale_preshuffled, p_k_width)
-        static_profile(kernel)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--q_type", type=str, choices=['e4m3', 'e5m2'], required=True)
@@ -1520,4 +1521,6 @@ if __name__ == "__main__":
         help="The K width (in elements) for p. When set to 8, we can remove the layout conversion for p")
     args = parser.parse_args()
     args = vars(args)
-    launch(**args)
+
+    kernel = run_attention(**args)
+    static_profile(kernel)
