@@ -16,9 +16,7 @@ echo "=== Setup Environment ==="
 
 cd /ffm && source ffmlite_env.sh && cd -
 export HSA_MODEL_NUM_THREADS=1
-export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
-export HSA_MODEL_ARGS=ffm_enable_time_slicing
-# Add ROCm libs in front of ffm
+# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
 export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 
 echo "=== Build and Install Triton ==="
