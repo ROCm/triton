@@ -85,8 +85,9 @@ A list of labels will be asked to categorize the machine. You can see the
 existing machines at https://github.amd.com/GFX-IP-Arch/triton/settings/actions/runners
 to choose suitable ones. Note that
 
-* If adding `ffm`, the machine will be picked up for `CI/gfx1250` tasks.
-* If adding `roccap`, the machine will be picked up for `roccap/gfx1250` tasks.
+* If adding `ffm`, the machine will be picked up for `CI/gfx1250-gluon` tasks.
+* If adding `ffm` and `pytorch`, the machine will be picked up for `CI/gfx1250-triton` tasks.
+* If adding `ffm` and `roccap`, the machine will be picked up for `roccap/gfx1250` tasks.
 
 Don't add that until proven the machine is fully set up for it! These labels
 can be updated via GitHub UI anyway.

@@ -20,15 +20,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gfx1250:
-    name: gfx1250
+  gfx1250-gluon:
+    name: Gluon
     runs-on: ['self-hosted', 'ffm']
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          submodules: 'true'
       - name: Build and Test Gluon
         run: |
           set -xeo pipefail
@@ -45,7 +43,15 @@ jobs:
             -v /data/ci/ccache:/home/mirror/.ccache \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-env -lc "/code/.github/workflows/gfx1250.sh"
+            ci/gfx1250-env -lc "/code/.github/workflows/gluon.sh"
+
+  gfx1250-triton:
+    name: Triton
+    runs-on: ['self-hosted', 'ffm', 'pytorch']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
       - name: Build and Test Triton
         run: |
           set -xeo pipefail
@@ -62,4 +68,4 @@ jobs:
             -v /data/ci/ccache:/home/mirror/.ccache \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-pytorch-env -lc "/code/.github/workflows/gfx1250-pytorch.sh"
+            ci/gfx1250-pytorch-env -lc "/code/.github/workflows/triton.sh"

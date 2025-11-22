@@ -9,7 +9,7 @@ permissions:
 jobs:
   gfx1250:
     name: gfx1250
-    runs-on: ['self-hosted', 'roccap']
+    runs-on: ['self-hosted', 'ffm', 'roccap']
 
     steps:
       - name: Checkout
