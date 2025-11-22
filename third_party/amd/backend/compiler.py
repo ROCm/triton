@@ -179,9 +179,7 @@ class HIPBackend(BaseBackend):
                 return lld
         # Try rocm-sdk command
         try:
-            sdk_root = subprocess.check_output(
-                ["rocm-sdk", "path", "--root"], text=True
-            ).strip()
+            sdk_root = subprocess.check_output(["rocm-sdk", "path", "--root"], text=True).strip()
             lld = Path(sdk_root) / "llvm/bin/ld.lld"
             if lld.is_file():
                 return lld
