@@ -242,9 +242,7 @@ def make_launcher(constants, signature, warp_size, tensordesc_meta):
                 # If there is no descriptor's metadata, the descriptor has been decomposed to base pointer, shape and strides
                 if meta is None:
                     output.append("*" + dtype)
-                    for _ in range(ndim):
-                        output.append("i32")
-                    for _ in range(ndim):
+                    for _ in range(2 * ndim):
                         output.append("i64")
                     output.append("i1")
                 else:
@@ -325,6 +323,7 @@ def make_launcher(constants, signature, warp_size, tensordesc_meta):
         elif ty != "constexpr":
             internal_args_list.append(f"_arg{i}")
 
+    newline = '\n  '
     ptr_decls = [
         f"DevicePtrInfo ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}.valid) return NULL;"
         for i, ty in signature.items()
@@ -383,33 +382,33 @@ static const char *hipLibSearchPaths[] = {{"{libhip_path}"}};
 // The list of HIP dynamic library symbols and their signature we are interested
 // in this file.
 #define HIP_SYMBOL_LIST(FOR_EACH_ERR_FN, FOR_EACH_STR_FN)                     \\
-  FOR_EACH_STR_FN(hipGetLastError)                                            \\
-  FOR_EACH_STR_FN(hipGetErrorString, hipError_t hipError)                     \\
-  FOR_EACH_ERR_FN(hipDrvLaunchKernelEx,                                       \\
+  FOR_EACH_STR_FN(hipGetLastError, true)                                      \\
+  FOR_EACH_STR_FN(hipGetErrorString, true, hipError_t hipError)               \\
+  FOR_EACH_ERR_FN(hipDrvLaunchKernelEx, false,                                \\
                   const HIP_LAUNCH_CONFIG *config,                            \\
                   hipFunction_t f,                                            \\
                   void **kernelParams,                                        \\
                   void **extra)                                               \\
-  FOR_EACH_ERR_FN(hipModuleLaunchKernel, hipFunction_t f,                     \\
+  FOR_EACH_ERR_FN(hipModuleLaunchKernel, true, hipFunction_t f,               \\
                   unsigned int gridDimX, unsigned int gridDimY,               \\
                   unsigned int gridDimZ, unsigned int blockDimX,              \\
                   unsigned int blockDimY, unsigned int blockDimZ,             \\
                   unsigned int sharedMemBytes, hipStream_t stream,            \\
                   void **kernelParams, void **extra)                          \\
-  FOR_EACH_ERR_FN(hipModuleLaunchCooperativeKernel, hipFunction_t f,          \\
+  FOR_EACH_ERR_FN(hipModuleLaunchCooperativeKernel, true, hipFunction_t f,    \\
                   unsigned int gridDimX, unsigned int gridDimY,               \\
                   unsigned int gridDimZ, unsigned int blockDimX,              \\
                   unsigned int blockDimY, unsigned int blockDimZ,             \\
                   unsigned int sharedMemBytes, hipStream_t stream,            \\
                   void **kernelParams, void **extra)                          \\
-  FOR_EACH_ERR_FN(hipPointerGetAttribute, void *data,                         \\
+  FOR_EACH_ERR_FN(hipPointerGetAttribute, true, void *data,                   \\
                   hipPointer_attribute attribute, hipDeviceptr_t ptr)
 
 // The HIP symbol table for holding resolved dynamic library symbols.
 struct HIPSymbolTable {{
-#define DEFINE_EACH_ERR_FIELD(hipSymbolName, ...)                             \\
+#define DEFINE_EACH_ERR_FIELD(hipSymbolName, required, ...)                   \\
   hipError_t (*hipSymbolName)(__VA_ARGS__);
-#define DEFINE_EACH_STR_FIELD(hipSymbolName, ...)                             \\
+#define DEFINE_EACH_STR_FIELD(hipSymbolName, required, ...)                   \\
   const char *(*hipSymbolName)(__VA_ARGS__);
 
   HIP_SYMBOL_LIST(DEFINE_EACH_ERR_FIELD, DEFINE_EACH_STR_FIELD)
@@ -457,11 +456,11 @@ bool initSymbolTable() {{
   uint64_t hipFlags = 0;
   hipDriverProcAddressQueryResult symbolStatus;
   hipError_t status = hipSuccess;
-#define QUERY_EACH_FN(hipSymbolName, ...)                                      \
+#define QUERY_EACH_FN(hipSymbolName, required, ...)                            \
   status = hipGetProcAddress(#hipSymbolName,                                   \
                              (void **)&hipSymbolTable.hipSymbolName,           \
                              hipVersion, hipFlags, &symbolStatus);             \
-  if (status != hipSuccess) {{                                                 \
+  if (required && status != hipSuccess) {{                                     \
     PyErr_SetString(PyExc_RuntimeError,                                        \
                     "cannot get address for '" #hipSymbolName                  \
                     "' from libamdhip64.so");                                  \
@@ -479,7 +478,7 @@ static inline void gpuAssert(hipError_t code, const char *file, int line)
    if (code != HIP_SUCCESS)
    {{
       const char* prefix = "Triton Error [HIP]: ";
-       const char* str = hipSymbolTable.hipGetErrorString(code);
+      const char* str = hipSymbolTable.hipGetErrorString(code);
       char err[1024] = {{0}};
       snprintf(err, 1024, "%s Code: %d, Messsage: %s", prefix, code, str );
       PyErr_SetString(PyExc_RuntimeError, err);
@@ -494,6 +493,11 @@ static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas
   hipDeviceptr_t global_scratch = 0;
   void *params[] = {{ {', '.join(params)} }};
   if(num_ctas > 1) {{
+    if (!hipSymbolTable.hipDrvLaunchKernelEx) {{
+        PyErr_SetString(PyExc_RuntimeError, "missing hipDrvLaunchKernelEx symbol; please update HIP runtime");
+        return;
+    }}
+
     hipLaunchAttribute attributes[2];
     // Attribute0: Cluster dimensions
     attributes[0].id = 4;
@@ -650,9 +654,9 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   // raise exception asap
-  {'\n  '.join(tensor_desc_decls)}
-  {'\n  '.join(ptr_decls)}
-  {'\n  '.join(float_storage_decls)}
+  {newline.join(tensor_desc_decls)}
+  {newline.join(ptr_decls)}
+  {newline.join(float_storage_decls)}
   _launch(gridX, gridY, gridZ, num_warps, num_ctas, launch_cooperative_grid, shared_memory, (hipStream_t)_stream, (hipFunction_t)_function, (hipDeviceptr_t)profile_scratch{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
 
   if(launch_exit_hook != Py_None){{
