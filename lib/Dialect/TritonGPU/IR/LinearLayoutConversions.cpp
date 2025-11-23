@@ -122,12 +122,8 @@ sharedToLinearLayoutAMDRotating(ArrayRef<int64_t> shape,
   assert(shape.size() >= 2);
   int colDim = shared.getOrder()[0];
   int rowDim = shared.getOrder()[1];
-  // int numCols = shape[colDim];
-  // int numRows = shape[rowDim];
-  ArrayRef<unsigned> ctaSplitNum = shared.getCTALayout().getCTASplitNum();
-
-  int numCols = shape[colDim] / ctaSplitNum[colDim];
-  int numRows = shape[rowDim] / ctaSplitNum[rowDim];
+  int numCols = shape[colDim];
+  int numRows = shape[rowDim];
   StringAttr colDimName = outDimNames[colDim];
   StringAttr rowDimName = outDimNames[rowDim];
 
