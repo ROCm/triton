@@ -7,18 +7,9 @@
 
 set -xeo pipefail
 
-pwd && ls
-
 echo "=== Clean up cache ==="
 
 rm -rf ~/.triton/cache
-
-echo "=== Setup Environment ==="
-
-cd /ffm && source ffmlite_env.sh && cd -
-export HSA_MODEL_NUM_THREADS=1
-export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
-export HSA_MODEL_ARGS=ffm_enable_time_slicing
 
 echo "=== Build and Install Triton ==="
 
@@ -29,23 +20,32 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 
+echo "=== Setup Environment ==="
+
+cd /ffm && source ffmlite_env.sh && cd -
+export HSA_MODEL_NUM_THREADS=1
+export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
+export HSA_MODEL_ARGS=ffm_enable_time_slicing
+
+export TRITON_HIP_USE_ASYNC_COPY=1
+
 echo "=== Sanity Check ==="
 
+pip show torch
+pip show triton
 python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
+
+# Check if FFM configurations are enabled properly
+grep "dona.component.jitcu.enable_time_slicing=true" ./hierarchy_runtime_params.conf
 
 echo "=== Run Lit Tests ==="
 
 make test-lit
 
-export TRITON_HIP_USE_ASYNC_COPY=1
-
 echo "=== Run Gluon Unit Tests ==="
 
 pytest --count=1 -n 32 third_party/amd/python/test/test_gluon_gfx1250.py
 pytest --count=1 -n 16 python/test/gluon/test_frontend.py
-
-# Check if FFM configurations are enabled properly
-grep "dona.component.jitcu.enable_time_slicing=true" ./hierarchy_runtime_params.conf
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
 

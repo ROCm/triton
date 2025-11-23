@@ -11,12 +11,6 @@ echo "=== Clean up cache ==="
 
 rm -rf ~/.triton/cache
 
-echo "=== Setup Environment ==="
-
-cd /ffm && source ffmlite_env.sh && cd -
-# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
-export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
-
 echo "=== Build and Install Triton ==="
 
 export PYTHON="python3"
@@ -26,8 +20,16 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 
+echo "=== Setup Environment ==="
+
+cd /ffm && source ffmlite_env.sh && cd -
+# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
+export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+
 echo "=== Sanity Check ==="
 
+pip show torch
+pip show triton
 python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
 which roccap
 

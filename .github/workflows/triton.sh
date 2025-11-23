@@ -6,18 +6,9 @@
 # Don't run it as a generally applicable script!
 set -xeo pipefail
 
-pwd && ls
-
 echo "=== Clean up cache ==="
 
 rm -rf ~/.triton/cache
-
-echo "=== Setup Environment ==="
-
-cd /ffm && source ffmlite_env.sh && cd -
-export HSA_MODEL_NUM_THREADS=1
-# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
-export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 
 echo "=== Build and Install Triton ==="
 
@@ -28,8 +19,17 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 
+echo "=== Setup Environment ==="
+
+cd /ffm && source ffmlite_env.sh && cd -
+export HSA_MODEL_NUM_THREADS=1
+# Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
+export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+
 echo "=== Sanity Check ==="
 
+pip show torch
+pip show triton
 python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
 
 export TRITON_HIP_USE_ASYNC_COPY=1

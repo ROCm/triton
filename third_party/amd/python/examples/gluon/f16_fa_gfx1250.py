@@ -564,7 +564,7 @@ def generate_configs():
     return base_configs
 
 
-def run_attention(config):
+def run_attention(config, check=True):
     BATCH = config["BATCH"]
     SEQLEN_Q = config["SEQLEN_Q"]
     SEQLEN_K = config["SEQLEN_K"]
@@ -583,7 +583,8 @@ def run_attention(config):
     sm_scale = 1.0 / (HEAD_SZ**0.5)
 
     o = torch.zeros_like(q, dtype=torch.float32)
-    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    if check:
+        ref = torch.nn.functional.scaled_dot_product_attention(q, k, v)
 
     q = q.cuda()
     k = k.cuda()
@@ -605,11 +606,12 @@ def run_attention(config):
         sm_scale, SEQLEN_Q, SEQLEN_K,  #
         BLOCK_M, BLOCK_N,  #
         HEAD_SZ, num_warps=4, waves_per_eu=1)
+    torch.cuda.synchronize()
     o = o.cpu()
     rtol = 0.004
     atol = 0.004
-    torch.cuda.synchronize()
-    torch.testing.assert_allclose(o, ref, rtol=rtol, atol=atol)
+    if check:
+        torch.testing.assert_allclose(o, ref, rtol=rtol, atol=atol)
     return attn_kernel
 
 
