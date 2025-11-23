@@ -40,7 +40,7 @@ grep "dona.component.jitcu.enable_time_slicing=true" ./hierarchy_runtime_params.
 
 echo "=== Run Lit Tests ==="
 
-make test-lit
+make test-nogpu
 
 echo "=== Run Gluon Unit Tests ==="
 
