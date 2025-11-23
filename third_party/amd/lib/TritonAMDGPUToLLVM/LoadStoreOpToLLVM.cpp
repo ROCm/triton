@@ -1057,8 +1057,9 @@ struct AsyncCopyGlobalToLocalOpConversion
                       otherElems, otherTy, swizzledLaneOffsets);
 
     auto freeVarMasks = getFreeVariableMasks(srcTy);
-    // We load redundant data on different CTAs; the broadcast mask will be used
-    // by the hardware to efficiently broadcast to different CTAs.
+    // We load redundant data on different CTAs so each CTA has a copy in its
+    // shared memory; the multicast mask will be used by the hardware to
+    // efficiently broadcast to different CTAs.
     freeVarMasks[rewriter.getStringAttr("block")] = 0;
     Value threadPred =
         emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
