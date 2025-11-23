@@ -270,21 +270,21 @@ def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async-copy", "mli
            "GFX generation name of target device.">,
   ];
 }
-def TritonAMDGPUPlanCTAPass : Pass<"triton-amd-gpu-plan-cta", "mlir::ModuleOp"> {
-  let summary = "plan CTA";
-
-  let description = [{
-    This pass computes and applies "optimized" CTA tilings to DotOp, ReduceOp
-    and StoreLikeOps operations.
-  }];
-
-  let constructor = "mlir::createTritonAMDGPUPlanCTAPass()";
-
-  let dependentDialects = [
-    "mlir::triton::gpu::TritonGPUDialect",
-    "mlir::triton::amdgpu::TritonAMDGPUDialect"
-  ];
-}
+// def TritonAMDGPUPlanCTAPass : Pass<"triton-amd-gpu-plan-cta", "mlir::ModuleOp"> {
+//   let summary = "plan CTA";
+//
+//   let description = [{
+//     This pass computes and applies "optimized" CTA tilings to DotOp, ReduceOp
+//     and StoreLikeOps operations.
+//   }];
+//
+//   let constructor = "mlir::createTritonAMDGPUPlanCTAPass()";
+//
+//   let dependentDialects = [
+//     "mlir::triton::gpu::TritonGPUDialect",
+//     "mlir::triton::amdgpu::TritonAMDGPUDialect"
+//   ];
+// }
 
 def TritonAMDGPUUpdateAsyncWaitCount: Pass<"tritonamdgpu-update-async-wait-count", "mlir::ModuleOp"> {
   let summary = "Adjust async wait count to allow prefetching over multiple loop iterations";

@@ -32,8 +32,8 @@ void registerTritonAMDGPUOptimizeDotOperands();
 } // namespace mlir::triton::amdgpu
 
 namespace mlir {
-std::unique_ptr<Pass> createTritonAMDGPUPlanCTAPass(
-    triton::amdgpu::ClusterInfo *clusterInfo = nullptr);
+// std::unique_ptr<Pass> createTritonAMDGPUPlanCTAPass(
+//     triton::amdgpu::ClusterInfo *clusterInfo = nullptr);
 
 /// Generate the code for registering passes.
 #define GEN_PASS_REGISTRATION

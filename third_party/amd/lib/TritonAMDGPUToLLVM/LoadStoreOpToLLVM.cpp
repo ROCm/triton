@@ -2180,7 +2180,8 @@ struct TDMGlobalPrefetchConversion
     auto tid = getThreadId(rewriter, loc);
     auto waveId = getLaneAndWarpId(rewriter, loc).second;
     auto encoding =
-        cast<PaddedSharedEncodingAttr>(op.getResult().getType().getEncoding());
+        cast<PaddedSharedEncodingAttr>(op.getResult().getType().getEncoding())
+            .getCTALayout();
 
     auto mod = op->getParentOfType<ModuleOp>();
     int numCTAs = TritonGPUDialect::getNumCTAs(mod);

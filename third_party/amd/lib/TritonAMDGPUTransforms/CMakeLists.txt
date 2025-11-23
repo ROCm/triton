@@ -19,7 +19,7 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
-  PlanCTA.cpp
+  # PlanCTA.cpp
   DEPENDS
   TritonAMDGPUIR
   TritonAMDGPUTransformsIncGen

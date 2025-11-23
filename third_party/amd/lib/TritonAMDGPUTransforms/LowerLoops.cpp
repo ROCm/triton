@@ -2,6 +2,7 @@
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
+#include "triton/Dialect/TritonGPU/IR/CTAEncodingAttr.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/Support/Debug.h"
@@ -187,7 +188,7 @@ getDotEncodingWmma(Value inputValue, unsigned *opIdx, unsigned *vecSize) {
 static triton::gpu::PaddedSharedEncodingAttr
 getPaddedEncoding(mlir::MLIRContext *context, int opIdx,
                   ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
-                  triton::gpu::CTALayoutAttr CTALayout,
+                  triton::gpu::CTAEncodingAttr CTALayout,
                   unsigned typeWidthInBit) {
   // This is the padding strategy for TDM. We need to know here if this is going
   // to be transposed or not. I think NVIDIA has this exposed in the IR, but we
