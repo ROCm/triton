@@ -2,6 +2,42 @@ name: roccap
 
 on:
   workflow_dispatch:
+    inputs:
+      name:
+        description: 'CapFileName'
+        required: true
+        default: 'mxfp_fa_gfx1250_e4m3_e4m3_demo'
+        type: string
+      capFileRoot:
+        description: 'CapFileRoot'
+        required: true
+        default: '/proj/triton_regr/TRITON/MXFP_FA/01011970/'
+        type: string
+      enableITrace:
+        description: 'Enable ITrace'
+        default: false
+        type: boolean
+      enableTTrace:
+        description: 'Enable TTrace'
+        default: false
+        type: boolean
+      kernelRegex:
+        description: 'KernelRegex'
+        required: true
+        type: string
+      dispatchNum:
+        description: 'DispatchName'
+        default: 0
+        type: number
+      groupName:
+        description: 'GroupName'
+        required: false
+        default: 'CU_Tile_GEMM'
+        type: string
+      cmd:
+        description: 'Command'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -39,10 +75,26 @@ jobs:
             -v /data/ci/triton-cache:/home/mirror/.triton \
             -v /data/ci/ccache:/home/mirror/.ccache \
             -v /data/ci/roccap/${DIRNAME}:/roccap \
+            -e ROCCAP_NAME=${ROCCAP_NAME} \
+            -e ROCCAP_CAPFILE_ROOT=${ROCCAP_CAPFILE_ROOT} \
+            -e ROCCAP_ENABLE_ITRACE=${ROCCAP_ENABLE_ITRACE} \
+            -e ROCCAP_ENABLE_TTRACE=${ROCCAP_ENABLE_TTRACE} \
+            -e ROCCAP_KERNEL_REGEX="${ROCCAP_KERNEL_REGEX}" \
+            -e ROCCAP_DISPATCH_NUM=${ROCCAP_DISPATCH_NUM} \
+            -e ROCCAP_GROUP_NAME=${ROCCAP_GROUP_NAME} \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-roccap -lc "/code/.github/workflows/roccap.sh"
+            ci/gfx1250-roccap -lc "/code/.github/workflows/roccap.sh ${ROCCAP_CMD}"
           cd /data/ci/roccap && tar -czvf triton-roccap-${DIRNAME}.tgz ${DIRNAME}
+        env:
+          ROCCAP_NAME: ${{ inputs.name }}
+          ROCCAP_CAPFILE_ROOT: ${{ inputs.capFileRoot }}
+          ROCCAP_ENABLE_ITRACE: ${{ inputs.enableITrace }}
+          ROCCAP_ENABLE_TTRACE: ${{ inputs.enableTTrace }}
+          ROCCAP_KERNEL_REGEX: ${{ inputs.kernelRegex }}
+          ROCCAP_DISPATCH_NUM: ${{ inputs.dispatchNum }}
+          ROCCAP_GROUP_NAME: ${{ inputs.groupName }}
+          ROCCAP_CMD: ${{ inputs.cmd }}
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:

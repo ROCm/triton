@@ -49,83 +49,32 @@ export HSA_KMT_MODEL_GPUVM_BASE=0x200000000
 export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
 export HSA_MODEL_NUM_THREADS=16
 
-# 1. Change the following arguments according to your workload
+# 1. Invoke roccap
+cd /code/
+rm -rf *.cap
 
-# Cap file will be generated as mxfp_fa_gfx1250_e4m3_e4m3_demo.cap
-NAME="mxfp_fa_gfx1250_e4m3_e4m3_demo"
+CAP_DISPATCH="${ROCCAP_KERNEL_REGEX}/${ROCCAP_DISPATCH_NUM}"
+roccap capture --loglevel trace --disp "${CAP_DISPATCH}" --file "${ROCCAP_NAME}.cap" "$@"
 
-# Where you want to put your cap file later.
-# !Make sure to put cap file to this directory and give rwx permission bits.
-CAPFILE_ROOT="/proj/triton_regr/TRITON/MXFP_FA/01011970/"
-
-# Enable itrace or not.
-# Enabling itrace will take significant more time to finish.
-ENABLE_ITRACE=false
-
-# Enable ttrace or not.
-ENABLE_TTRACE=false
-
-# Specify the kernel name regex and dispatch number to capture:
-# - Kernel name regex should match the python function name decorated by
-#   @triton.jit / @gluon.jit.
-# - Dispatch number "0" means capture the first dispatch of the matched kernel.
-KERNEL_REGEX="attn_fwd_.*"
-DISPATCH_NUM=0
-CAP_DISPATCH="${KERNEL_REGEX}/${DISPATCH_NUM}"
-
-# [Optional]Change the group name to better represent your workload.
-# It's fine to not change.
-GROUP_NAME="CU_Tile_GEMM"
-
-# Change the following to the command you'd like to run to generate CAP file.
-# For example, in the GEMM case:
-# CMD=(
-#   python3 /code/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-#   -M 8192 -N 8192 -K 1024
-#   --num-warps=4
-#   --num-buffers=2
-#   --prefetch-lds --single-warp-schedule
-# )
-CMD=(
-  python3 /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
-  --q_type e4m3
-  --kv_type e4m3
-  --batch 1
-  --seqlen_q 1024
-  --seqlen_k 1024
-  --num_q_heads 1
-  --num_k_heads 1
-  --head_sz 128
-  --block_m 128
-  --block_n 128
-  --pipelined
-  --scale_type block
-  --scale_preshuffled
-  --disable_p_scaling
-  --p_k_width=8
-)
-
-
-# 2. Invoke roccap
-
-roccap capture --loglevel trace --disp "${CAP_DISPATCH}" --file "${NAME}.cap" "${CMD[@]}"
+mv *.cap /roccap/
 
 find . -name "*.cap" -exec roccap play {} \;
 
-# 3. Generate AM metadata(aqlfile.txt and group_file.txt)
+# 2. Generate AM metadata(aqlfile.txt and group_file.txt)
+cd /roccap
 
 gen_am_cmd=(
   python3 /code/mi400/tools/generate_am_metadata.py
-  -n ${NAME}
-  -r ${CAPFILE_ROOT}
-  -g ${GROUP_NAME}
+  -n ${ROCCAP_NAME}
+  -r ${ROCCAP_CAPFILE_ROOT}
+  -g ${ROCCAP_GROUP_NAME}
 )
 
-if $ENABLE_ITRACE; then
+if $ROCCAP_ENABLE_ITRACE; then
   gen_am_cmd+=('-it')
 fi
 
-if $ENABLE_TTRACE; then
+if $ROCCAP_ENABLE_TTRACE; then
   gen_am_cmd+=('-tt')
 fi
 

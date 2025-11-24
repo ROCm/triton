@@ -500,6 +500,29 @@ $ roccap play ./roc_capture_a.out.cap
 
 Note, `aqlplay_goldchecks.json` gets generated together with a bunch of `*.bin.lz4` files.
 
+### Capture CAP files via Github Action Workflow
+Now you can use our Github Action Workflow to capture CAP files following these steps:
+1. Go to https://github.amd.com/GFX-IP-Arch/triton/actions/workflows/gfx1250-roccap.yml
+2. Click 'Run workflow'.
+3. Choose the branch where you want to capture CAP files.
+4. Fill in other blanks. Meanings of options are listed below.
+5. Click 'Run workflow' button to trigger the workflow.
+6. Download artifacts from the webpage once the workflow finished.
+
+#### Workflow options
+| Name          | Description                                                                                                                                                                                                                                                                  |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CapFileName   | Name of the cap file(without extension). The cap file will be generated as ${CapFileName}.cap                                                                                                                                                                                                   |
+| CapFileRoot   | Where you want to put your cap file later. Make sure to put cap file to this directory and give rwx permission bits.                                                                                                                                                         |
+| Enable ITrace | Enable itrace or not. Enabling itrace will take significant more time to finish.                                                                                                                                                                                             |
+| Enable TTrace | Enable ttrace or not.                                                                                                                                                                                                                                                        |
+| KernelRegex   | Specify the kernel name regex to capture. Kernel name regex should match the python function name decorated by @triton.jit / @gluon.jit. For example, attn_fwd_.* |
+| DispatchName  | Specify the dispatch number to capture. Dispatch number "0" means capture the first dispatch of the matched kernel.                                                                                                                                                          |
+| GroupName     | [Optional]Change the group name to better represent your workload. It's fine to not change.                                                                                                                                                                                  |
+| Command       | Command to run the kernel. Triton source code is under /code/. Both absolute and relative path are supported. For example, you can run python3 ./third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py, or /code/third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py |
+
+Please check https://github.amd.com/GFX-IP-Arch/triton/blob/shared/gfx1250-dev-sept/.github/workflows/gfx1250-roccap.yml for details.
+
 ### Compiler Explorer Setup
 
 ##### On your local machine
