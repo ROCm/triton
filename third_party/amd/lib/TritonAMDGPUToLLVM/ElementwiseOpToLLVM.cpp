@@ -227,29 +227,6 @@ template <typename FPType> struct FPTypeInfo {
   TritonLLVMOpBuilder b;
 };
 
-template <typename InType, typename OutType>
-void clampInfInInput(Location loc, ConversionPatternRewriter &rewriter,
-                     const SmallVector<Value> &in, SmallVector<Value> &out) {
-  // TODO: figure out if needed or if there is a better way.
-  /*
-  assert(in.size() == out.size());
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-  auto typeInfoIn = FPTypeInfo<InType>(loc, rewriter);
-  auto [infPlusIn, infMinusIn] = *(typeInfoIn.getPlusMinusInf());
-
-  auto typeInfoOut = FPTypeInfo<OutType>(loc, rewriter);
-  auto [maxPlusOut, maxMinusOut] = *(typeInfoOut.getPlusMinusMax());
-  for (size_t i = 0; i < in.size(); ++i) {
-    auto isInfPlus =
-        b.icmp_eq(b.bitcast(in[i], typeInfoIn.getIntType()), infPlusIn);
-    auto isInfMinus =
-        b.icmp_eq(b.bitcast(in[i], typeInfoIn.getIntType()), infMinusIn);
-    out[i] = b.select(isInfMinus, maxMinusOut,
-                      b.select(isInfPlus, maxPlusOut, out[i]));
-  }
-  */
-}
-
 // Convert Ocp Fp8/Bf8 to Fp16/Bf16/Fp32 on CDNA4
 template <typename ConvertOp>
 static SmallVector<Value>
@@ -447,10 +424,8 @@ static SmallVector<Value>
 Fp16_to_Fp8E5M2_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) {
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8F16Op>(
-        loc, rewriter, v);
-    clampInfInInput<Float16Type, Float8E5M2Type>(loc, rewriter, v, result);
-    return result;
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8F16Op>(loc,
+                                                                   rewriter, v);
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkBf8F16Op>(loc, rewriter,
@@ -682,10 +657,8 @@ static SmallVector<Value>
 Fp16_to_Fp8E4M3FN_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
                           const SmallVector<Value> &v) {
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8F16Op>(
-        loc, rewriter, v);
-    clampInfInInput<Float16Type, Float8E4M3FNType>(loc, rewriter, v, result);
-    return result;
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8F16Op>(loc,
+                                                                   rewriter, v);
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkFp8F16Op>(loc, rewriter,
@@ -797,10 +770,8 @@ static SmallVector<Value>
 Fp32_to_Fp8E4M3FN_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
                           const SmallVector<Value> &v) {
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8F32Op>(
-        loc, rewriter, v);
-    clampInfInInput<Float32Type, Float8E4M3FNType>(loc, rewriter, v, result);
-    return result;
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8F32Op>(loc,
+                                                                   rewriter, v);
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkFp8F32Op>(loc, rewriter,
@@ -895,10 +866,8 @@ static SmallVector<Value>
 Fp32_to_Fp8E5M2_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) {
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8F32Op>(
-        loc, rewriter, v);
-    clampInfInInput<Float32Type, Float8E5M2Type>(loc, rewriter, v, result);
-    return result;
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8F32Op>(loc,
+                                                                   rewriter, v);
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkBf8F32Op>(loc, rewriter,
@@ -1474,10 +1443,8 @@ static SmallVector<Value>
 Bf16_to_Fp8E5M2_HW(Location loc, ConversionPatternRewriter &rewriter,
                    const SmallVector<Value> &v) {
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8Bf16Op>(
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Bf8Bf16Op>(
         loc, rewriter, v);
-    clampInfInInput<BFloat16Type, Float8E5M2Type>(loc, rewriter, v, result);
-    return result;
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkBf8Bf16Op>(loc, rewriter,
@@ -1505,10 +1472,8 @@ Bf16_to_Fp8E4M3FN_RTNE_HW(Location loc, ConversionPatternRewriter &rewriter,
                           const SmallVector<Value> &v) {
 
   if (v.size() == 8) {
-    auto result = cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8Bf16Op>(
+    return cvtScalePk8DowncastToFp8<ROCDL::CvtScaleF32Pk8Fp8Bf16Op>(
         loc, rewriter, v);
-    clampInfInInput<BFloat16Type, Float8E4M3FNType>(loc, rewriter, v, result);
-    return result;
   }
   assert(v.size() == 4);
   return cvtScalePk4DowncastToFp8<ROCDL::CvtScaleF32PkFp8Bf16Op>(loc, rewriter,
