@@ -88,178 +88,6 @@ def get_load_layout(shape, num_warps):
 
 
 @aggregate
-class AttentionConfigBase:
-    Q_TYPE: ttgl.constexpr  # the data type for Q, either 'e5m2' or 'e4m3'
-    P_TYPE: ttgl.constexpr  # the data type for P; we always assume P_TYPE == Q_TYPE
-    KV_TYPE: ttgl.constexpr  # the data type for K and V, either 'e5m2', 'e4m3' or 'e2m1'
-    SEQLEN_Q: ttgl.constexpr
-    SEQLEN_K: ttgl.constexpr
-    NUM_Q_HEADS: ttgl.constexpr
-    NUM_K_HEADS: ttgl.constexpr
-    HEAD_SZ: ttgl.constexpr
-    BLOCK_M: ttgl.constexpr
-    BLOCK_N: ttgl.constexpr
-    NUM_WARPS: ttgl.constexpr
-    NUM_BUFFERS: ttgl.constexpr
-
-    @gluon.constexpr_function
-    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 NUM_WARPS, NUM_BUFFERS):
-        self.Q_TYPE = ttgl.constexpr(Q_TYPE)
-        self.P_TYPE = ttgl.constexpr(Q_TYPE)
-        self.KV_TYPE = ttgl.constexpr(KV_TYPE)
-        self.SEQLEN_Q = ttgl.constexpr(SEQLEN_Q)
-        self.SEQLEN_K = ttgl.constexpr(SEQLEN_K)
-        self.NUM_Q_HEADS = ttgl.constexpr(NUM_Q_HEADS)
-        self.NUM_K_HEADS = ttgl.constexpr(NUM_K_HEADS)
-        self.HEAD_SZ = ttgl.constexpr(HEAD_SZ)
-        self.BLOCK_M = ttgl.constexpr(BLOCK_M)
-        self.BLOCK_N = ttgl.constexpr(BLOCK_N)
-        self.NUM_WARPS = ttgl.constexpr(NUM_WARPS)
-        self.NUM_BUFFERS = ttgl.constexpr(NUM_BUFFERS)
-
-
-@composition
-@aggregate
-class GlobalScaledAttentionConfig:
-    base: AttentionConfigBase
-
-    q_layout: ttgl.constexpr
-    k_smem_layout: ttgl.constexpr
-    k_layout: ttgl.constexpr
-    p_layout: ttgl.constexpr
-    v_smem_layout: ttgl.constexpr
-    v_layout: ttgl.constexpr
-    acc_layout: ttgl.constexpr
-
-    # Whether the layout convert between QK and P is trivial - no data movement. This can happen when we use
-    # k_width=8 for P and V, which effectively makes QK and P have the same layout.
-    CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
-
-    @gluon.constexpr_function
-    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
-        assert Q_TYPE in ['e5m2', 'e4m3']
-        assert KV_TYPE in ['e5m2', 'e4m3']
-        assert NUM_WARPS == 4 or NUM_WARPS == 8
-        assert P_K_WIDTH == 16 or P_K_WIDTH == 8
-
-        self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
-                                        BLOCK_N, NUM_WARPS, NUM_BUFFERS)
-
-        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warps_per_cta=[NUM_WARPS, 1], instr_shape=[16, 16, 128])
-        self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
-        self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
-        self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, P_K_WIDTH))
-        self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, P_K_WIDTH))
-        # Use k_width=8 for p can make it has the same layout of qk
-        self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
-        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ]))
-        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ], transposed=True))
-        self.acc_layout = ttgl.constexpr(wmma_layout)
-
-
-@composition
-@aggregate
-class BlockScaledAttentionConfig:
-    base: AttentionConfigBase
-
-    q_layout: ttgl.constexpr
-    q_scale_layout: ttgl.constexpr
-
-    k_smem_layout: ttgl.constexpr
-    k_layout: ttgl.constexpr
-    k_scale_load_layout: ttgl.constexpr
-    k_scale_smem_layout: ttgl.constexpr
-    k_scale_layout: ttgl.constexpr
-
-    p_layout: ttgl.constexpr
-    p_scale_layout: ttgl.constexpr
-
-    v_smem_layout: ttgl.constexpr
-    v_layout: ttgl.constexpr
-    v_scale_load_layout: ttgl.constexpr
-    v_scale_smem_layout: ttgl.constexpr
-    v_scale_layout: ttgl.constexpr
-
-    acc_layout: ttgl.constexpr
-
-    # Whether scales for K and V are preshuffled for better memory access.
-    SCALE_PRESHUFFLED: ttgl.constexpr
-    # Whether to use per-block scaling for P; if False, use an uniform scale of 1.0.
-    P_SCALING: ttgl.constexpr
-    # Whether the layout convert between QK and P is trivial - no data movement. This can happen when we use
-    # k_width=8 for P and V, which effectively makes QK and P have the same layout. But note we can use k_width=8 for
-    # V when it is a mxfp4, so this only applies when KV_TYPE is not 'e2m1'.
-    CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
-
-    @gluon.constexpr_function
-    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 P_SCALING, SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
-        assert Q_TYPE in ['e5m2', 'e4m3']
-        assert KV_TYPE in ['e5m2', 'e4m3', 'e2m1']
-        assert NUM_WARPS == 4 or NUM_WARPS == 8
-        assert P_K_WIDTH == 16 or (KV_TYPE != 'e2m1' and P_K_WIDTH == 8)
-        KV_PACK_DIV: ttgl.constexpr = 2 if KV_TYPE == 'e2m1' else 1
-
-        self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
-                                        BLOCK_N, NUM_WARPS, NUM_BUFFERS)
-
-        self.P_SCALING = ttgl.constexpr(P_SCALING)
-        self.SCALE_PRESHUFFLED = ttgl.constexpr(SCALE_PRESHUFFLED)
-
-        tiles_per_warp: ttgl.constexpr = [2, 2] if SCALE_PRESHUFFLED else [1, 1]
-        num_warps: ttgl.constexpr = NUM_WARPS
-
-        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warps_per_cta=[num_warps, 1], instr_shape=[16, 16, 128],
-            tiles_per_warp=tiles_per_warp)
-        wmma_layout_packed: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warps_per_cta=[num_warps, 1], instr_shape=[16, 16, 64],
-            tiles_per_warp=tiles_per_warp)
-
-        self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
-        if KV_TYPE == 'e2m1':
-            self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout_packed, k_width=16))
-            self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
-            self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout_packed, k_width=16))
-            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(False)
-        else:
-            self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=16))
-            self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=P_K_WIDTH))
-            self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=P_K_WIDTH))
-            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
-
-        self.q_scale_layout = ttgl.constexpr(
-            ttgl.amd.gfx1250.get_wmma_scale_layout(self.q_layout, [BLOCK_M, HEAD_SZ // 32]))
-
-        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ // KV_PACK_DIV]))
-
-        self.k_scale_layout = ttgl.constexpr(
-            ttgl.amd.gfx1250.get_wmma_scale_layout(self.k_layout, [BLOCK_N, HEAD_SZ // 32]))
-        self.k_scale_smem_layout = ttgl.constexpr(ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
-        self.k_scale_load_layout = ttgl.constexpr(get_load_layout([HEAD_SZ // 32, BLOCK_N], num_warps))
-
-        self.p_scale_layout = ttgl.constexpr(
-            ttgl.amd.gfx1250.get_wmma_scale_layout(self.p_layout, [BLOCK_M, BLOCK_N // 32]))
-
-        self.v_smem_layout = ttgl.constexpr(  #
-            get_padded_shared_layout([BLOCK_N // KV_PACK_DIV, HEAD_SZ], transposed=True))
-        self.v_scale_layout = ttgl.constexpr(
-            ttgl.amd.gfx1250.get_wmma_scale_layout(self.v_layout, [HEAD_SZ, BLOCK_N // 32]))
-        self.v_scale_smem_layout = ttgl.constexpr(ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
-        self.v_scale_load_layout = ttgl.constexpr(get_load_layout([BLOCK_N // 32, HEAD_SZ], num_warps))
-
-        self.acc_layout = ttgl.constexpr(wmma_layout)
-
-
-# ===-----------------------------------------------------------------------===#
-# Kernel Primitives
-# ===-----------------------------------------------------------------------===#
-
-
-@aggregate
 class MemoryUnit:
     """
     MemoryUnit abstracts the logic of transferring data to/from global memory for 2D tensor.
@@ -377,6 +205,83 @@ class MemoryUnit:
 
 
 @aggregate
+class AttentionConfigBase:
+    Q_TYPE: ttgl.constexpr  # the data type for Q, either 'e5m2' or 'e4m3'
+    P_TYPE: ttgl.constexpr  # the data type for P; we always assume P_TYPE == Q_TYPE
+    KV_TYPE: ttgl.constexpr  # the data type for K and V, either 'e5m2', 'e4m3' or 'e2m1'
+    SEQLEN_Q: ttgl.constexpr
+    SEQLEN_K: ttgl.constexpr
+    NUM_Q_HEADS: ttgl.constexpr
+    NUM_K_HEADS: ttgl.constexpr
+    HEAD_SZ: ttgl.constexpr
+    BLOCK_M: ttgl.constexpr
+    BLOCK_N: ttgl.constexpr
+    NUM_BUFFERS: ttgl.constexpr
+    NUM_WARPS: ttgl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
+                 NUM_BUFFERS, NUM_WARPS):
+        self.Q_TYPE = ttgl.constexpr(Q_TYPE)
+        self.P_TYPE = ttgl.constexpr(Q_TYPE)
+        self.KV_TYPE = ttgl.constexpr(KV_TYPE)
+        self.SEQLEN_Q = ttgl.constexpr(SEQLEN_Q)
+        self.SEQLEN_K = ttgl.constexpr(SEQLEN_K)
+        self.NUM_Q_HEADS = ttgl.constexpr(NUM_Q_HEADS)
+        self.NUM_K_HEADS = ttgl.constexpr(NUM_K_HEADS)
+        self.HEAD_SZ = ttgl.constexpr(HEAD_SZ)
+        self.BLOCK_M = ttgl.constexpr(BLOCK_M)
+        self.BLOCK_N = ttgl.constexpr(BLOCK_N)
+        self.NUM_BUFFERS = ttgl.constexpr(NUM_BUFFERS)
+        self.NUM_WARPS = ttgl.constexpr(NUM_WARPS)
+
+
+# ===-----------------------------------------------------------------------===#
+# Global Scaled Attention Program
+# ===-----------------------------------------------------------------------===#
+
+
+@composition
+@aggregate
+class GlobalScaledAttentionConfig:
+    base: AttentionConfigBase
+
+    q_layout: ttgl.constexpr
+    k_smem_layout: ttgl.constexpr
+    k_layout: ttgl.constexpr
+    p_layout: ttgl.constexpr
+    v_smem_layout: ttgl.constexpr
+    v_layout: ttgl.constexpr
+    acc_layout: ttgl.constexpr
+
+    # Whether the layout convert between QK and P is trivial - no data movement. This can happen when we use
+    # k_width=8 for P and V, which effectively makes QK and P have the same layout.
+    CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
+                 P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
+        assert Q_TYPE in ['e5m2', 'e4m3']
+        assert KV_TYPE in ['e5m2', 'e4m3']
+        assert NUM_WARPS == 4 or NUM_WARPS == 8
+        assert P_K_WIDTH == 16 or P_K_WIDTH == 8
+
+        self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
+                                        BLOCK_N, NUM_BUFFERS, NUM_WARPS)
+
+        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
+            version=3, transposed=True, warps_per_cta=[NUM_WARPS, 1], instr_shape=[16, 16, 128])
+        self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
+        self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
+        self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, P_K_WIDTH))
+        self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, P_K_WIDTH))
+        self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
+        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ]))
+        self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ], transposed=True))
+        self.acc_layout = ttgl.constexpr(wmma_layout)
+
+
+@aggregate
 class GlobalScaledAttentionProgram:
     cfg: GlobalScaledAttentionConfig
 
@@ -479,20 +384,18 @@ class GlobalScaledAttentionProgram:
         self.v_mem.issue_tdm_load(i, buf, pred)
 
     @gluon.jit
-    def shared_load_k(self, buf, wait_count):
+    def shared_load_k(self, buf):
         cfg = self.cfg
 
-        tdm.async_wait(wait_count)
         k_buffer = self.k_mem.smem.index(buf).permute((1, 0))
         k = k_buffer.load(cfg.k_layout)
         k_scale = self.k_scale
         return k, k_scale
 
     @gluon.jit
-    def shared_load_v(self, buf, wait_count):
+    def shared_load_v(self, buf):
         cfg = self.cfg
 
-        tdm.async_wait(wait_count)
         v_buffer = self.v_mem.smem.index(buf)
         v = v_buffer.load(cfg.v_layout)
         v_scale = self.v_scale
@@ -546,6 +449,109 @@ class GlobalScaledAttentionProgram:
     def store_output(self, acc):
         o = acc.to(self.o_mem.dtype)
         self.o_mem.buffer_store(o)
+
+    @gluon.jit
+    def async_wait(self, count):
+        tdm.async_wait(count * 2)
+
+
+# ===-----------------------------------------------------------------------===#
+# Block Scaled Attention Program
+# ===-----------------------------------------------------------------------===#
+
+
+@composition
+@aggregate
+class BlockScaledAttentionConfig:
+    base: AttentionConfigBase
+
+    q_layout: ttgl.constexpr
+    q_scale_layout: ttgl.constexpr
+
+    k_smem_layout: ttgl.constexpr
+    k_layout: ttgl.constexpr
+    k_scale_load_layout: ttgl.constexpr
+    k_scale_smem_layout: ttgl.constexpr
+    k_scale_layout: ttgl.constexpr
+
+    p_layout: ttgl.constexpr
+    p_scale_layout: ttgl.constexpr
+
+    v_smem_layout: ttgl.constexpr
+    v_layout: ttgl.constexpr
+    v_scale_load_layout: ttgl.constexpr
+    v_scale_smem_layout: ttgl.constexpr
+    v_scale_layout: ttgl.constexpr
+
+    acc_layout: ttgl.constexpr
+
+    # Whether scales for K and V are preshuffled for better memory access.
+    SCALE_PRESHUFFLED: ttgl.constexpr
+    # Whether to use per-block scaling for P; if False, use an uniform scale of 1.0.
+    P_SCALING: ttgl.constexpr
+    # Whether the layout convert between QK and P is trivial - no data movement. This can happen when we use
+    # k_width=8 for P and V, which effectively makes QK and P have the same layout. But note we can use k_width=8 for
+    # V when it is a mxfp4, so this only applies when KV_TYPE is not 'e2m1'.
+    CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
+                 P_SCALING, SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
+        assert Q_TYPE in ['e5m2', 'e4m3']
+        assert KV_TYPE in ['e5m2', 'e4m3', 'e2m1']
+        assert NUM_WARPS == 4 or NUM_WARPS == 8
+        assert P_K_WIDTH == 16 or (KV_TYPE != 'e2m1' and P_K_WIDTH == 8)
+        KV_PACK_DIV: ttgl.constexpr = 2 if KV_TYPE == 'e2m1' else 1
+
+        self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
+                                        BLOCK_N, NUM_BUFFERS, NUM_WARPS)
+
+        self.P_SCALING = ttgl.constexpr(P_SCALING)
+        self.SCALE_PRESHUFFLED = ttgl.constexpr(SCALE_PRESHUFFLED)
+
+        tiles_per_warp: ttgl.constexpr = [2, 2] if SCALE_PRESHUFFLED else [1, 1]
+        num_warps: ttgl.constexpr = NUM_WARPS
+
+        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
+            version=3, transposed=True, warps_per_cta=[num_warps, 1], instr_shape=[16, 16, 128],
+            tiles_per_warp=tiles_per_warp)
+        wmma_layout_packed: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
+            version=3, transposed=True, warps_per_cta=[num_warps, 1], instr_shape=[16, 16, 64],
+            tiles_per_warp=tiles_per_warp)
+
+        self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
+        if KV_TYPE == 'e2m1':
+            self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout_packed, k_width=16))
+            self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
+            self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout_packed, k_width=16))
+            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(False)
+        else:
+            self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=16))
+            self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=P_K_WIDTH))
+            self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=P_K_WIDTH))
+            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
+
+        self.q_scale_layout = ttgl.constexpr(
+            ttgl.amd.gfx1250.get_wmma_scale_layout(self.q_layout, [BLOCK_M, HEAD_SZ // 32]))
+
+        self.k_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ // KV_PACK_DIV]))
+
+        self.k_scale_layout = ttgl.constexpr(
+            ttgl.amd.gfx1250.get_wmma_scale_layout(self.k_layout, [BLOCK_N, HEAD_SZ // 32]))
+        self.k_scale_smem_layout = ttgl.constexpr(ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+        self.k_scale_load_layout = ttgl.constexpr(get_load_layout([HEAD_SZ // 32, BLOCK_N], num_warps))
+
+        self.p_scale_layout = ttgl.constexpr(
+            ttgl.amd.gfx1250.get_wmma_scale_layout(self.p_layout, [BLOCK_M, BLOCK_N // 32]))
+
+        self.v_smem_layout = ttgl.constexpr(  #
+            get_padded_shared_layout([BLOCK_N // KV_PACK_DIV, HEAD_SZ], transposed=True))
+        self.v_scale_layout = ttgl.constexpr(
+            ttgl.amd.gfx1250.get_wmma_scale_layout(self.v_layout, [HEAD_SZ, BLOCK_N // 32]))
+        self.v_scale_smem_layout = ttgl.constexpr(ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0]))
+        self.v_scale_load_layout = ttgl.constexpr(get_load_layout([BLOCK_N // 32, HEAD_SZ], num_warps))
+
+        self.acc_layout = ttgl.constexpr(wmma_layout)
 
 
 @aggregate
@@ -734,10 +740,8 @@ class BlockScaledAttentionProgram:
                 cp.commit_group()
 
     @gluon.jit
-    def shared_load_k(self, buf, wait_count):
+    def shared_load_k(self, buf):
         cfg = self.cfg
-
-        self._async_wait(wait_count)
 
         k_buffer = self.k_mem.smem.index(buf).permute((1, 0))
         k = k_buffer.load(cfg.k_layout)
@@ -753,10 +757,8 @@ class BlockScaledAttentionProgram:
         return k, k_scale
 
     @gluon.jit
-    def shared_load_v(self, buf, wait_count):
+    def shared_load_v(self, buf):
         cfg = self.cfg
-
-        self._async_wait(wait_count)
 
         v_buffer = self.v_mem.smem.index(buf)
         v = v_buffer.load(cfg.v_layout)
@@ -825,7 +827,7 @@ class BlockScaledAttentionProgram:
         self.o_mem.buffer_store(o)
 
     @gluon.jit
-    def _async_wait(self, count):
+    def async_wait(self, count):
         if self.cfg.SCALE_PRESHUFFLED:
             tdm.async_wait(count * 2)
         else:
@@ -878,43 +880,120 @@ class BlockScaledAttentionProgram:
                 .reshape((non_k_dim, k_dim)))
 
 
+# ===-----------------------------------------------------------------------===#
+# Kernel Schedules
+# ===-----------------------------------------------------------------------===#
+
+
 @gluon.jit
-def get_program(q_ptr, k_ptr, v_ptr,  #
-                q_scale_ptr, k_scale_ptr, v_scale_ptr,  #
-                o_ptr,  #
-                sm_scale,  #
-                Q_TYPE: ttgl.constexpr,  #
-                KV_TYPE: ttgl.constexpr,  #
-                SEQLEN_Q: ttgl.constexpr,  #
-                SEQLEN_K: ttgl.constexpr,  #
-                NUM_Q_HEADS: ttgl.constexpr,  #
-                NUM_K_HEADS: ttgl.constexpr,  #
-                HEAD_SZ: ttgl.constexpr,  #
-                BLOCK_M: ttgl.constexpr,  #
-                BLOCK_N: ttgl.constexpr,  #
-                BLOCK_SCALING: ttgl.constexpr,  #
-                P_SCALING: ttgl.constexpr,  #
-                SCALE_PRESHUFFLED: ttgl.constexpr,  #
-                P_K_WIDTH: ttgl.constexpr,  #
-                NUM_BUFFERS: ttgl.constexpr):
-    NUM_WARPS: ttgl.constexpr = ttgl.num_warps()
-    if BLOCK_SCALING:
-        cfg = BlockScaledAttentionConfig(  #
-            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_SCALING,
-            SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
-        pgm = BlockScaledAttentionProgram.initialize(  #
-            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
-    else:
-        cfg = GlobalScaledAttentionConfig(  #
-            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_K_WIDTH,
-            NUM_BUFFERS, NUM_WARPS)
-        pgm = GlobalScaledAttentionProgram.initialize(  #
-            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
-    return pgm
+def attn_fwd_loop(pgm):
+    cfg = pgm.cfg
+
+    m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+    l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+    acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+
+    end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
+    for i in range(0, end):
+        pgm.issue_global_load_k(i, buf=0)
+
+        pgm.async_wait(0)
+        k, k_scale = pgm.shared_load_k(buf=0)
+
+        qk = pgm.compute_qk(k, k_scale)
+
+        p, alpha, m_i = pgm.softmax0(qk, m_i)
+        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+
+        pgm.issue_global_load_v(i, buf=0)
+
+        pgm.async_wait(0)
+        v, v_scale = pgm.shared_load_v(buf=0)
+
+        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+
+    acc = acc / l_i[:, None]
+    pgm.store_output(acc)
+
+
+@gluon.jit
+def attn_fwd_pipeline(pgm):
+    cfg = pgm.cfg
+
+    m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+    l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+    acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+
+    end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
+
+    # pipeline prologue, iter -3
+    pgm.issue_global_load_k(0, buf=0)
+
+    # pipeline prologue, iter -2
+    pgm.issue_global_load_k(1, buf=1)
+
+    pgm.async_wait(1)
+    k, k_scale = pgm.shared_load_k(buf=0)
+
+    pgm.issue_global_load_v(0, buf=0)
+
+    # pipeline prologue, iter -1
+    qk = pgm.compute_qk(k, k_scale)
+
+    pgm.issue_global_load_k(2, buf=0)
+
+    p, alpha, m_i = pgm.softmax0(qk, m_i)
+    pgm.async_wait(2)
+    k, k_scale = pgm.shared_load_k(buf=1)
+
+    pgm.issue_global_load_v(1, buf=1)
+
+    # main loop from 0 to end-3
+    # TODO: Ideally we should unroll the loop by 2 to remove the buffer index
+    # update, but our current codegen in llvm does not perform well. Re-enable
+    # unroll when fixed.
+    for i in range(0, end - 2):
+        buf = i % 2
+
+        qk = pgm.compute_qk(k, k_scale)  # .......................... iter i+1
+        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)  # .. iter i
+
+        pgm.async_wait(2)
+        v, v_scale = pgm.shared_load_v(buf)  # ...................... iter i
+        pgm.issue_global_load_k(i + 3, 1 - buf, pred=i != end - 3)  # iter i+3
+
+        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)  # ........ iter i
+        p, alpha, m_i = pgm.softmax0(qk, m_i)  # .................... iter i+1
+
+        pgm.async_wait(2)
+        k, k_scale = pgm.shared_load_k(buf)  # ...................... iter i+2
+        pgm.issue_global_load_v(i + 2, buf)  # ...................... iter i+2
+
+    # pipeline epilogue, iter end-2
+    qk = pgm.compute_qk(k, k_scale)
+    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+    pgm.async_wait(2)
+    v, v_scale = pgm.shared_load_v(buf=0)
+
+    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+    p, alpha, m_i = pgm.softmax0(qk, m_i)
+
+    # pipeline epilogue, iter end-1
+    # NOTE: in the last iteration, load k is disabled with predicate but still
+    # exists in the schedule, so we also take it into wait count.
+    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
+    pgm.async_wait(0)
+    v, v_scale = pgm.shared_load_v(buf=1)
+
+    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
+
+    # write output
+    acc = acc / l_i[:, None]
+    pgm.store_output(acc)
 
 
 # ===-----------------------------------------------------------------------===#
-# Gluon Kernel
+# Entry Point
 # ===-----------------------------------------------------------------------===#
 
 
@@ -933,132 +1012,29 @@ def attn_fwd_kernel(q_ptr, k_ptr, v_ptr,  #
                     BLOCK_M: ttgl.constexpr,  #
                     BLOCK_N: ttgl.constexpr,  #
                     BLOCK_SCALING: ttgl.constexpr,  #
+                    PIPELINED: ttgl.constexpr,  #
                     P_SCALING: ttgl.constexpr,  #
                     SCALE_PRESHUFFLED: ttgl.constexpr,  #
                     P_K_WIDTH: ttgl.constexpr):
-    # init program
-    pgm = get_program(  #
-        q_ptr, k_ptr, v_ptr, q_scale_ptr, k_scale_ptr, v_scale_ptr, o_ptr, sm_scale,  #
-        Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, BLOCK_SCALING,
-        P_SCALING, SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS=1)
-    cfg = pgm.cfg
+    NUM_WARPS: ttgl.constexpr = ttgl.num_warps()
+    NUM_BUFFERS: ttgl.constexpr = 2 if PIPELINED else 1
+    if BLOCK_SCALING:
+        cfg = BlockScaledAttentionConfig(  #
+            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_SCALING,
+            SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
+        pgm = BlockScaledAttentionProgram.initialize(  #
+            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
+    else:
+        cfg = GlobalScaledAttentionConfig(  #
+            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_K_WIDTH,
+            NUM_BUFFERS, NUM_WARPS)
+        pgm = GlobalScaledAttentionProgram.initialize(  #
+            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
 
-    # init accumulator and softmax state
-    m_i = ttgl.full([BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-    l_i = ttgl.full([BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-    acc = ttgl.full([BLOCK_M, HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
-
-    end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
-    for i in range(0, end):
-        pgm.issue_global_load_k(i, buf=0)
-        k, k_scale = pgm.shared_load_k(buf=0, wait_count=0)
-        p = pgm.compute_qk(k, k_scale)
-        p, alpha, m_i = pgm.softmax0(p, m_i)
-        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-        pgm.issue_global_load_v(i, buf=0)
-        v, v_scale = pgm.shared_load_v(buf=0, wait_count=0)
-        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
-
-    acc = acc / l_i[:, None]
-    pgm.store_output(acc)
-
-
-@gluon.jit
-def attn_fwd_pipelined_kernel(q_ptr, k_ptr, v_ptr,  #
-                              q_scale_ptr, k_scale_ptr, v_scale_ptr,  #
-                              o_ptr,  #
-                              sm_scale,  #
-                              Q_TYPE: ttgl.constexpr,  #
-                              KV_TYPE: ttgl.constexpr,  #
-                              SEQLEN_Q: ttgl.constexpr,  #
-                              SEQLEN_K: ttgl.constexpr,  #
-                              NUM_Q_HEADS: ttgl.constexpr,  #
-                              NUM_K_HEADS: ttgl.constexpr,  #
-                              HEAD_SZ: ttgl.constexpr,  #
-                              BLOCK_M: ttgl.constexpr,  #
-                              BLOCK_N: ttgl.constexpr,  #
-                              BLOCK_SCALING: ttgl.constexpr,  #
-                              P_SCALING: ttgl.constexpr,  #
-                              SCALE_PRESHUFFLED: ttgl.constexpr,  #
-                              P_K_WIDTH: ttgl.constexpr):
-    # init program
-    pgm = get_program(  #
-        q_ptr, k_ptr, v_ptr, q_scale_ptr, k_scale_ptr, v_scale_ptr, o_ptr, sm_scale,  #
-        Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, BLOCK_SCALING,
-        P_SCALING, SCALE_PRESHUFFLED, P_K_WIDTH, NUM_BUFFERS=2)
-    cfg = pgm.cfg
-
-    # init accumulator and softmax state
-    m_i = ttgl.full([BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-    l_i = ttgl.full([BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-    acc = ttgl.full([BLOCK_M, HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
-
-    end = ttgl.cdiv(SEQLEN_K, BLOCK_N)
-
-    # pipeline prologue, loop -3
-    pgm.issue_global_load_k(0, buf=0)
-
-    # pipeline prologue, loop -2
-    pgm.issue_global_load_k(1, buf=1)
-
-    k, k_scale = pgm.shared_load_k(buf=0, wait_count=1)
-
-    pgm.issue_global_load_v(0, buf=0)
-
-    # pipeline prologue, loop -1
-    qk = pgm.compute_qk(k, k_scale)
-
-    pgm.issue_global_load_k(2, buf=0)
-
-    p, alpha, m_i = pgm.softmax0(qk, m_i)
-    k, k_scale = pgm.shared_load_k(buf=1, wait_count=2)
-
-    pgm.issue_global_load_v(1, buf=1)
-
-    # main loop, loop 0 to end-3
-    # TODO: Ideally we should unroll the loop by 2 to remove the buffer index
-    # update, but our current codegen in llvm does not perform well. Re-enable
-    # unroll when fixed.
-    for i in range(0, end - 2):
-        buf = i % 2
-
-        # loop i
-        qk = pgm.compute_qk(k, k_scale)
-        p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-        v, v_scale = pgm.shared_load_v(buf, wait_count=2)
-
-        pgm.issue_global_load_k(i + 3, 1 - buf, pred=i != end - 3)
-
-        acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
-        p, alpha, m_i = pgm.softmax0(qk, m_i)
-        k, k_scale = pgm.shared_load_k(buf, wait_count=2)
-
-        pgm.issue_global_load_v(i + 2, buf)
-
-    # pipeline epilogue, loop end-2
-    qk = pgm.compute_qk(k, k_scale)
-    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-    v, v_scale = pgm.shared_load_v(buf=0, wait_count=2)
-
-    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
-    p, alpha, m_i = pgm.softmax0(qk, m_i)
-
-    # pipeline epilogue, loop end-1
-    # NOTE: in the last iteration, load k is disabled with predicate but still
-    # exists in the schedule, so we also take it into wait count.
-    p, p_scale, acc, l_i = pgm.softmax1(p, alpha, acc, l_i)
-    v, v_scale = pgm.shared_load_v(buf=1, wait_count=0)
-
-    acc = pgm.compute_pv(p, p_scale, v, v_scale, acc)
-
-    # write output
-    acc = acc / l_i[:, None]
-    pgm.store_output(acc)
-
-
-# ===-----------------------------------------------------------------------===#
-# Entry Point
-# ===-----------------------------------------------------------------------===#
+    if PIPELINED:
+        attn_fwd_pipeline(pgm)
+    else:
+        attn_fwd_loop(pgm)
 
 
 def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
@@ -1070,10 +1046,13 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
     assert head_sz in {64, 128}
     assert block_n == 128
+    if pipelined:
+        assert cdiv(seqlen_k, block_n) > 4
+        assert cdiv(seqlen_k, block_n) % 2 == 0
 
     # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
-    # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ / KV_PACK_DIV]
-    # v: [BATCH, NUM_K_HEADS, SEQLEN_K / KV_PACK_DIV, HEAD_SZ]
+    # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
+    # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
     q = q.permute(0, 2, 1, 3).contiguous()
     k = k.permute(0, 2, 1, 3).contiguous()
     v = v.permute(0, 2, 1, 3).contiguous()
@@ -1135,18 +1114,13 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     args = [
         q, k, v, q_scale, k_scale, v_scale, o, sm_scale,  #
         q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,  #
-        block_scaling, p_scaling, scale_preshuffled, p_k_width
+        block_scaling, pipelined, p_scaling, scale_preshuffled, p_k_width
     ]
     kwargs = {
         "num_warps": 4,
         "waves_per_eu": 1,
     }
-    if pipelined:
-        assert cdiv(seqlen_k, block_n) > 4
-        assert cdiv(seqlen_k, block_n) % 2 == 0
-        kernel = attn_fwd_pipelined_kernel[grid](*args, **kwargs)
-    else:
-        kernel = attn_fwd_kernel[grid](*args, **kwargs)
+    kernel = attn_fwd_kernel[grid](*args, **kwargs)
 
     return o.cpu().permute(0, 2, 1, 3), kernel
 
@@ -1156,9 +1130,9 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
 # ===-----------------------------------------------------------------------===#
 
 
-def _attn_fwd_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
-                  q_scale: torch.Tensor | float, k_scale: torch.Tensor | float,
-                  v_scale: torch.Tensor | float) -> torch.Tensor:
+def attn_fwd_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
+                 q_scale: torch.Tensor | float, k_scale: torch.Tensor | float,
+                 v_scale: torch.Tensor | float) -> torch.Tensor:
 
     q = q * q_scale
     k = k * k_scale
@@ -1176,7 +1150,7 @@ def _attn_fwd_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     return output
 
 
-def _create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int = -1):
+def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int = -1):
     size = (b, s, h, d)
     if dtype == 'e4m3':
         sig = torch.randint(0, 2, size, dtype=torch.uint8)
@@ -1203,7 +1177,7 @@ def _create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int = 
     return v, v_ref
 
 
-def _create_block_scale(dtype: str, b: int, s: int, h: int, d: int, scale_dim: int):
+def create_block_scale(dtype: str, b: int, s: int, h: int, d: int, scale_dim: int):
     # Limit scale to an empirical range for accuracy
     if dtype == 'e4m3':
         low, high = 1 / 16, 2
@@ -1219,7 +1193,7 @@ def _create_block_scale(dtype: str, b: int, s: int, h: int, d: int, scale_dim: i
     return scale.data, scale_ref
 
 
-def _create_global_scale(dtype: str):
+def create_global_scale(dtype: str):
     assert dtype in ['e4m3', 'e5m2']
     low, high = (0x7F - 1), 0x7F + 1
     scale = torch.randint(low, high + 1, (), dtype=torch.uint8).item()
@@ -1332,12 +1306,12 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
 
     torch.manual_seed(0)
 
-    q, q_ref = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
-    k, k_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
-    v, v_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
-    q_scale, q_scale_ref = _create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
-    k_scale, k_scale_ref = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
-    v_scale, v_scale_ref = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
+    q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
+    k, k_ref = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
+    v, v_ref = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
+    q_scale, q_scale_ref = create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
+    k_scale, k_scale_ref = create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
+    v_scale, v_scale_ref = create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
 
     o, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
@@ -1345,7 +1319,7 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
                          True, pipelined, False, scale_preshuffled, p_k_width)
     o = o.to(torch.float32)
 
-    o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
+    o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
@@ -1409,12 +1383,12 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
                                 block_m, block_n, pipelined, p_k_width):
     torch.manual_seed(0)
 
-    q, q_ref = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
-    k, k_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
-    v, v_ref = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
-    q_scale, q_scale_ref = _create_global_scale(q_type)
-    k_scale, k_scale_ref = _create_global_scale(kv_type)
-    v_scale, v_scale_ref = _create_global_scale(kv_type)
+    q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
+    k, k_ref = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
+    v, v_ref = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz)
+    q_scale, q_scale_ref = create_global_scale(q_type)
+    k_scale, k_scale_ref = create_global_scale(kv_type)
+    v_scale, v_scale_ref = create_global_scale(kv_type)
 
     o, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
@@ -1422,7 +1396,7 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
                          False, pipelined, False, False, p_k_width)
     o = o.to(torch.float32)
 
-    o_ref = _attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
+    o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
@@ -1470,18 +1444,18 @@ def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
     if kv_type == 'e2m1' and p_k_width == 8:
         raise RuntimeError("e2m1 can not use k_width=8 for p")
 
-    q, _ = _create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
-    k, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
-    v, _ = _create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
+    q, _ = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
+    k, _ = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
+    v, _ = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
     if scale_type == 'block':
-        q_scale, _ = _create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
-        k_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
-        v_scale, _ = _create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
+        q_scale, _ = create_block_scale(q_type, batch, seqlen_q, num_q_heads, head_sz, scale_dim=3)
+        k_scale, _ = create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=3)
+        v_scale, _ = create_block_scale(kv_type, batch, seqlen_k, num_k_heads, head_sz, scale_dim=1)
     else:
         assert scale_type == 'global'
-        q_scale, _ = _create_global_scale(q_type)
-        k_scale, _ = _create_global_scale(kv_type)
-        v_scale, _ = _create_global_scale(kv_type)
+        q_scale, _ = create_global_scale(q_type)
+        k_scale, _ = create_global_scale(kv_type)
+        v_scale, _ = create_global_scale(kv_type)
 
     _, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
