@@ -116,6 +116,10 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                             const std::string &);
   // ADD_PASS_WRAPPER_1("add_plan_cta", mlir::createTritonAMDGPUPlanCTAPass,
   //                   mlir::triton::amdgpu::ClusterInfo *);
+  m.def("add_in_thread_transpose", [](mlir::PassManager &pm) {
+    pm.addNestedPass<mlir::triton::FuncOp>(
+        mlir::createTritonAMDGPUInThreadTranspose());
+  });
 }
 
 void addControlConstant(llvm::Module *module, const char *name,
