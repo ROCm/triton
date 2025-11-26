@@ -36,4 +36,5 @@ export TRITON_HIP_USE_ASYNC_COPY=1
 
 echo "=== Run Triton Unit Tests ==="
 
+pytest --count=1 -n 12 python/test/unit/language/test_core.py::test_num_ctas_pre_sm90
 pytest --count=1 -n 12 python/test/unit/language/test_core.py::test_scan2d
