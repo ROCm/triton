@@ -1221,7 +1221,7 @@ def static_profile(kernel):
           f"- occupancy: {occupancy}\n")
 
 
-def get_source_mapping(amdgcn):
+def get_source_mapping(pipelined, amdgcn):
     """
     Create a mapping from amdgcn assembly to source code lines:
 
@@ -1230,11 +1230,23 @@ def get_source_mapping(amdgcn):
     For call stack: fn1 -> fn2
     line_no = "line1 -> line2 -> ..."
     code    = "code1 -> code2 -> ..."
+
+    Only collect instructions inside the main loop of the kernel.
     """
     mapping = {}
 
     mod = sys.modules.get(__name__)
     src_lines = inspect.getsource(mod).splitlines()
+
+    func = attn_fwd_pipeline if pipelined else attn_fwd_loop
+    func_start, func_end = func.starting_line_number + 1, func.starting_line_number + len(func.raw_src) - 1
+
+    def is_in_loop(line_no: int) -> bool:
+        if line_no < func_start or line_no > func_end:
+            return False
+        line = src_lines[line_no - 1]
+        indent = len(line) - len(line.lstrip())
+        return indent >= 8
 
     lines = amdgcn.splitlines()
     start_idx = next((i for i, line in enumerate(lines) if re.match(r'^\s*\.cfi_startproc', line)), None)
@@ -1243,6 +1255,7 @@ def get_source_mapping(amdgcn):
         return mapping
 
     loc = None
+    loc_in_loop = False
     for line in lines[start_idx + 1:end_idx]:
         # Look for .loc directive
         if re.match(r'^\s*\.loc\s+', line):
@@ -1251,18 +1264,23 @@ def get_source_mapping(amdgcn):
             locs = re.findall(r'([^\s\[\]@]+:\d+:\d+)', loc_str)
             callstack = []
             for loc_item in locs:
-                file, line_num, _ = loc_item.split(':')
+                file, line_no, _ = loc_item.split(':')
                 # Only map locations from current file
                 if file == os.path.basename(__file__):
-                    code_line = src_lines[int(line_num) - 1].strip()
-                    callstack.append((int(line_num), code_line))
+                    code_line = src_lines[int(line_no) - 1].strip()
+                    callstack.append((int(line_no), code_line))
             if not callstack:
                 loc = None
                 continue
+
+            # Decide whether the current loc is in loop
+            loc_in_loop = any(is_in_loop(l[0]) for l in callstack)
+
             # Build call stack string (reverse for deepest call first)
-            line_str = " -> ".join(str(l[0]) for l in reversed(callstack))
-            code_str = " -> ".join(l[1] for l in reversed(callstack))
-            loc = (line_str, code_str)
+            callstack.reverse()
+            line_no_str = " -> ".join(str(l[0]) for l in callstack)
+            code_str = " -> ".join(l[1] for l in callstack)
+            loc = (line_no_str, code_str)
             mapping.setdefault(loc, [])
             continue
 
@@ -1276,7 +1294,11 @@ def get_source_mapping(amdgcn):
             continue
 
         # Append instruction to the corresponding source code location
-        mapping[loc].append(instr)
+        if loc_in_loop:
+            mapping[loc].append(instr)
+
+    # remove empty entries
+    mapping = {loc: instrs for loc, instrs in mapping.items() if instrs}
 
     return mapping
 
@@ -1323,33 +1345,44 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
-    mapping = get_source_mapping(amdgcn)
+    mapping = get_source_mapping(pipelined, amdgcn)
 
-    # check when k_width=8, there is no convert layout
-    if p_k_width == 8:
-        convert_layout_ops = [k[1] for k in mapping.keys() if re.match(r'.*ttgl.convert_layout.*', k[1])]
-        assert len(convert_layout_ops) == 0
+    groups = {
+        'qk': r'.*compute_qk.*',
+        'pv': r'.*compute_pv.*',
+        'ds_load_k': r'.*shared_load_k.* -> .*k_buffer.load',
+        'ds_load_v': r'.*shared_load_v.* -> .*v_buffer.load',
+        'convert_layout': r'.*ttgl.convert_layout.*',
+    }
+    for g in groups.keys():
+        code = [loc[1] for loc in mapping.keys() if re.match(groups[g], loc[1])]
+        # check when k_width=8, there is no convert layout
+        if g == 'convert_layout' and p_k_width == 8:
+            assert len(code) == 0
+            continue
+        # check all groups exist
+        assert len(code) > 0
     for loc, instrs in mapping.items():
         _, code = loc
         # check use correct wmma instruction
-        if re.match(r'.*compute_pv.*', code) or re.match(r'.*compute_qk.*', code):
+        if re.match(groups['pv'], code) or re.match(groups['qk'], code):
             wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
             assert len(wmma_instrs) > 0 and all(
                 instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
         # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
-        if re.match(r'.*shared_load_k.* -> .*k_buffer.load', code):
-            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+        if re.match(groups['ds_load_k'], code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
             assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_b128") for instr in ds_load_instrs)
             sources = [instr.split()[2] for instr in ds_load_instrs]
             assert all(source == sources[0] for source in sources)
         # check always use ds_load_tr8_b64 to load v and all instructions are using the same vgpr for address
-        if re.match(r'.*shared_load_v. -> .*v_buffer.load', code):
-            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+        if re.match(groups['ds_load_v'], code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
             assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_tr8_b64") for instr in ds_load_instrs)
             sources = [instr.split()[2] for instr in ds_load_instrs]
             assert all(source == sources[0] for source in sources)
         # check use v_permlane16_swap for convert layout
-        if p_k_width == 16 and re.match(r'.*ttgl.convert_layout.*', code):
+        if p_k_width == 16 and re.match(groups['convert_layout'], code):
             v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
             assert len(v_permlane_instrs) > 0 and all(
                 instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
@@ -1400,33 +1433,44 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     o_ref = o_ref.to(torch.float32)
 
     amdgcn = kernel.asm['amdgcn']
-    mapping = get_source_mapping(amdgcn)
+    mapping = get_source_mapping(pipelined, amdgcn)
 
-    # check when k_width=8, there is no convert layout
-    if p_k_width == 8:
-        convert_layout_ops = [k[1] for k in mapping.keys() if re.match(r'.*ttgl.convert_layout.*', k[1])]
-        assert len(convert_layout_ops) == 0
+    groups = {
+        'qk': r'.*compute_qk.*',
+        'pv': r'.*compute_pv.*',
+        'ds_load_k': r'.*shared_load_k.* -> .*k_buffer.load',
+        'ds_load_v': r'.*shared_load_v.* -> .*v_buffer.load',
+        'convert_layout': r'.*ttgl.convert_layout.*',
+    }
+    for g in groups.keys():
+        code = [loc[1] for loc in mapping.keys() if re.match(groups[g], loc[1])]
+        # check when k_width=8, there is no convert layout
+        if g == 'convert_layout' and p_k_width == 8:
+            assert len(code) == 0
+            continue
+        # check all groups exist
+        assert len(code) > 0
     for loc, instrs in mapping.items():
         _, code = loc
         # check use correct wmma instruction
-        if re.match(r'.*compute_pv.*', code) or re.match(r'.*compute_qk.*', code):
+        if re.match(groups['pv'], code) or re.match(groups['qk'], code):
             wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
             assert len(wmma_instrs) > 0 and all(
                 instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
         # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
-        if re.match(r'.*shared_load_k.* -> .*k_buffer.load', code):
-            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+        if re.match(groups['ds_load_k'], code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
             assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_b128") for instr in ds_load_instrs)
             sources = [instr.split()[2] for instr in ds_load_instrs]
             assert all(source == sources[0] for source in sources)
         # check always use ds_load_tr8_b64 to load v and all instructions are using the same vgpr for address
-        if re.match(r'.*shared_load_v. -> .*v_buffer.load', code):
-            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_*', instr)]
+        if re.match(groups['ds_load_v'], code):
+            ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
             assert len(ds_load_instrs) > 0 and all(instr.startswith("ds_load_tr8_b64") for instr in ds_load_instrs)
             sources = [instr.split()[2] for instr in ds_load_instrs]
             assert all(source == sources[0] for source in sources)
         # check use v_permlane16_swap for convert layout
-        if p_k_width == 16 and re.match(r'.*ttgl.convert_layout.*', code):
+        if p_k_width == 16 and re.match(groups['convert_layout'], code):
             v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
             assert len(v_permlane_instrs) > 0 and all(
                 instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
