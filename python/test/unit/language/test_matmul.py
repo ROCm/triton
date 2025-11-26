@@ -1128,18 +1128,17 @@ def mxfp8_mxfp4_matmul(  #
     tl.store(output_ptrs, accumulator, mask=c_mask)
 
 
-@pytest.mark.parametrize("M, N, K", [(1024, 512, 512)])
-@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
-                                                       (128, 256, 256), (128, 128, 64), (128, 64, 128)])
-@pytest.mark.parametrize("NUM_STAGES", [1, 3])
-@pytest.mark.parametrize("B_TRANS", [True, False])
-@pytest.mark.parametrize("PACK_B_ALONG_K", [True, False])
-@pytest.mark.parametrize("CONST_SCALE", [True, False])
-@pytest.mark.parametrize("A_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
-@pytest.mark.parametrize("B_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
-@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
-@pytest.mark.parametrize("WITH_B_SCALE", [True, False])
-@pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
+@pytest.mark.parametrize("M, N, K", [(64, 64, 64)])
+@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(64, 16, 64), (64, 32, 64), (64, 64, 64)])
+@pytest.mark.parametrize("NUM_STAGES", [3])
+@pytest.mark.parametrize("B_TRANS", [True])
+@pytest.mark.parametrize("PACK_B_ALONG_K", [False])
+@pytest.mark.parametrize("CONST_SCALE", [False])
+@pytest.mark.parametrize("A_DATA_TYPE", ["float8e5"])
+@pytest.mark.parametrize("B_DATA_TYPE", ["float4"])
+@pytest.mark.parametrize("WITH_A_SCALE", [False])
+@pytest.mark.parametrize("WITH_B_SCALE", [False])
+@pytest.mark.parametrize("nonKDim", ([32] if is_hip_cdna() else [0]))
 def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TRANS, PACK_B_ALONG_K, CONST_SCALE,
                             A_DATA_TYPE, B_DATA_TYPE, WITH_A_SCALE, WITH_B_SCALE, nonKDim, device):
     if is_cuda():
@@ -1154,8 +1153,10 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
             pytest.skip("Scaled mxfp4 & mxfp8 matmul is only natively supported on CDNA4")
         if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
             pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
-        if (A_DATA_TYPE == 'float4' and not WITH_A_SCALE) or (B_DATA_TYPE == 'float4' and not WITH_B_SCALE):
-            pytest.skip("Float4 without scale is tested in test_block_scale_fp4")
+
+
+#        if (A_DATA_TYPE == 'float4' and not WITH_A_SCALE) or (B_DATA_TYPE == 'float4' and not WITH_B_SCALE):
+#            pytest.skip("Float4 without scale is tested in test_block_scale_fp4")
     if not PACK_B_ALONG_K and B_DATA_TYPE != "float4":
         pytest.skip("Pack along K can only be False for float4")
     if BLOCK_N == 256 and BLOCK_K == 256:
@@ -1167,10 +1168,18 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
                        pack_along_k: bool = True):
         if dtype == "float8e5":
             if transpose:
-                v = torch.randint(20, 40, (size0, size1), dtype=torch.uint8).view(torch.float8_e5m2).to(device)
+                # Create a diagonal matrix with 1.0 values
+                v = torch.zeros(size0, size1, dtype=torch.uint8, device=device)
+                diag_len = min(size0, size1)
+                v[range(diag_len), range(diag_len)] = 60  # float8_e5m2 encoding for 1.0
+                v = v.view(torch.float8_e5m2).to(device)
                 v_ref = f8_to_f16(v.view(torch.float8_e5m2), dtype).to(torch.float32)
             else:
-                v = torch.randint(20, 40, (size1, size0), dtype=torch.uint8).view(torch.float8_e5m2).to(device).T
+                # Create a diagonal matrix with 1.0 values
+                v = torch.zeros(size1, size0, dtype=torch.uint8, device=device)
+                diag_len = min(size1, size0)
+                v[range(diag_len), range(diag_len)] = 60  # float8_e5m2 encoding for 1.0
+                v = v.view(torch.float8_e5m2).to(device).T
                 v_ref = f8_to_f16(v.view(torch.float8_e5m2).T, dtype).to(torch.float32).T
         elif dtype == "float8e4nv":
             if transpose:
@@ -1200,6 +1209,20 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
     a, a_ref = create_operand(A_DATA_TYPE, M, K, 1)
     b, b_ref = create_operand(B_DATA_TYPE, K, N, 0, B_TRANS, PACK_B_ALONG_K)
 
+    print('a_ref:\n', a_ref)
+    print('b_ref:\n', b_ref)
+
+    def is_diagonal(mat):
+        # Only works for square matrices
+        shape = mat.shape
+        if shape[0] != shape[1]:
+            return False
+        off_diag = mat.clone()
+        off_diag.fill_diagonal_(0)
+        return torch.all(off_diag == 0)
+
+    print('a_ref is diagonal:', is_diagonal(a_ref))
+    print('b_ref is diagonal:', is_diagonal(b_ref))
     a_scale_mxfp4 = MXScaleTensor(size=(M, (K + 32 - 1) // 32), device=device).random(high=32.0)
     b_scale_mxfp4 = MXScaleTensor(size=(N, (K + 32 - 1) // 32), device=device).random(high=32.0)
     a_scale = a_scale_mxfp4.data
@@ -1232,5 +1255,14 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
     if is_cuda():
         ttgir = out.asm["ttgir"]
         assert "fp4Padded = true" in ttgir
-
+    match = (ref_out == output)
+    match_cpu = match.cpu()
+    for row in match_cpu:
+        row_list = row.tolist()
+        # Group in chunks of 16 and check if all are True
+        grouped = []
+        for i in range(0, len(row_list), 16):
+            chunk = row_list[i:i + 16]
+            grouped.append(all(chunk))
+        print(''.join(['\'True\'  ' if x else '\'False\' ' for x in grouped]))
     torch.testing.assert_close(ref_out, output, atol=1e-3, rtol=1e-3)

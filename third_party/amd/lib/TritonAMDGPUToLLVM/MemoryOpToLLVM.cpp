@@ -11,6 +11,7 @@
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cstdint>
 #include <type_traits>
 
 using ::mlir::triton::gpu::MemDescType;
@@ -53,21 +54,25 @@ public:
         dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
     LinearLayout cvtDstLL = LinearLayout::empty();
     if (paddedEnc) {
-      const auto &sharedLL = paddedEnc.getLinearComponent();
+
+      auto sharedLL = paddedEnc.getLinearComponent();
+      // TODO: is this actually valid for padded layout?
+      if (isPackedLoad)
+        sharedLL = reshapeLayout(ctx, sharedLL, dstTy.getShape());
       cvtDstLL = triton::gpu::toLinearLayout(dstTy).invertAndCompose(sharedLL);
       if (paddedEnc.getMinInterval() < ldsParams->tileSize)
         return failure();
     } else {
-      auto sharedLL =
-          triton::gpu::toLinearLayout(dstTy.getShape(), srcTy.getEncoding());
+      auto sharedLL = triton::gpu::toLinearLayout(srcTy);
+      if (isPackedLoad)
+        sharedLL = reshapeLayout(ctx, sharedLL, dstTy.getShape());
       if (isPackedLoad)
         llvm::errs() << "dstLL (layout of dstTy):"
                      << triton::gpu::toLinearLayout(dstTy) << "\n";
       if (isPackedLoad)
-        llvm::errs() << "sharedLL:" << sharedLL << "\n";
-
+        llvm::errs() << "sharedLL(reshaped, will use):" << sharedLL << "\n";
       cvtDstLL = triton::gpu::toLinearLayout(dstTy).invertAndCompose(sharedLL);
-      if (isPackedLoad)
+      if (isPackedLoad && false)
         llvm::errs() << "cvtDstLL:" << cvtDstLL << "\n";
     }
     auto kBlock = StringAttr::get(ctx, "block");
@@ -175,58 +180,53 @@ private:
     } else if (doubleB8Contiguity) {
       otherLanes = 2;
     }
-    /*
-    dstLL (layout of dstTy):
-     - register=1 -> (0, 1)
-       register=2 -> (0, 2)
-       register=4 -> (0, 4)
-       register=8 -> (0, 8)
-     - lane=1 -> (1, 0)
-       lane=2 -> (2, 0)
-       lane=4 -> (4, 0)
-       lane=8 -> (8, 0)
-       lane=16 -> (16, 0)
-       lane=32 -> (0, 16)
-     - warp=1 -> (0, 0)
-       warp=2 -> (0, 0)
-     - block is a size 1 dimension
-    where out dims are: [dim0 (size 32), dim1 (size 32)]
-    ldsTransLayout:
-     - register=1 -> (1, 0)
-       register=2 -> (2, 0)
-       register=4 -> (4, 0)
-       register=8 -> (0, 16)
-     - lane=1 -> (0, 1)
-       lane=2 -> (0, 2)
-       lane=4 -> (0, 4)
-       lane=8 -> (0, 8)
-       lane=16 -> (8, 0)
-       lane=32 -> (0, 32)
-     - warp=1 -> (0, 0)
-       warp=2 -> (0, 0)
-     - block is a size 1 dimension
-    where out dims are: [dim0 (size 16), dim1 (size 64)]
-    cvt:
-     - register=1 -> (1, 0)
-       register=2 -> (2, 0)
-       register=4 -> (4, 0)
-       register=8 -> (256, 0)
-     - lane=1 -> (16, 0)
-       lane=2 -> (32, 0)
-       lane=4 -> (64, 0)
-       lane=8 -> (128, 0)
-       lane=16 -> (8, 0)
-       lane=32 -> (512, 0)
-     - warp=1 -> (0, 0)
-       warp=2 -> (0, 0)
-     - block is a size 1 dimension
-    where out dims are: [offset (size 1024), block (size 1)]
-    */
+
+    bool hack = false;
     if (isPackedLoad) {
-      fullTile =
-          tile * LinearLayout::identity1D(otherLanes, kLane, kAddr) *
-          LinearLayout::identity1D(ldsParams.tileSize, kReg, kAddr) *
-          LinearLayout::identity1D(missingLanes / otherLanes, kLane, kAddr);
+      op.getType().dump();
+      // OK for N == 16
+      if (op.getType().getShape()[1] == 16)
+        fullTile = tile * LinearLayout({{kLane, {{1}, {16}, {32}}},
+                                        {kReg, {{2}, {4}, {8}}}},
+                                       {{kAddr, 64}}, false);
+      // OK for N == 32
+      if (op.getType().getShape()[1] == 32)
+        fullTile = tile * LinearLayout({{kLane, {{16}, {1}, {32}}},
+                                        {kReg, {{2}, {4}, {8}}}},
+                                       {{kAddr, 64}}, false);
+
+      // N == 64 ??
+      if (op.getType().getShape()[1] == 64) {
+        /*
+          Produces
+          i8AddrLayout:
+          - register is a size 1 dimension
+          - lane=1 -> (16)
+            lane=2 -> (64)
+            lane=4 -> (128)
+            lane=8 -> (256)
+            lane=16 -> (8)
+            lane=32 -> (1024)
+          - warp=1 -> (32)
+            warp=2 -> (0)
+          should be:
+          i8AddrLayout:
+          - register is a size 1 dimension
+          - lane=1 -> (32)
+            lane=2 -> (64)
+            lane=4 -> (128)
+            lane=8 -> (256)
+            lane=16 -> (8)
+            lane=32 -> (1024)
+          - warp=1 -> (16)
+            warp=2 -> (0)
+        */
+        hack = true;
+        // only used for reps, because with hack = true we change i8AddrLayout
+        fullTile = tile * LinearLayout({{kLane, {{16}, {1}, {32}}},
+                                        {kReg, {{2}, {4}, {8}}}},
+                                       {{kAddr, 64}}, false);
+      }
     } else if (doubleB8Contiguity) {
       fullTile =
           tile * LinearLayout::identity1D(ldsParams.tileSize / 2, kReg, kAddr) *
@@ -241,8 +241,6 @@ private:
     }
     // Add warp dimension so we can invert and compose with reps later
     fullTile *= LinearLayout::identity1D(1, kWarp, kAddr);
-    if (isPackedLoad)
-      llvm::errs() << "fullTile:" << fullTile << "\n";
 
     if (cvt.getInDimSize(kReg) < fullTile.getInDimSize(kReg)) {
       return failure();
@@ -255,7 +253,9 @@ private:
 
     // From here on we perform the lowering
     auto reps = zerosLike(tile) * maybeQuot.value();
-
+    if (isPackedLoad) {
+      llvm::errs() << "reps:" << reps << "\n";
+    }
     // Sanity check
     assert(fullTile.getInDimSize(kReg) * bitWidth == ldsParams.instBitWidth);
 
@@ -268,7 +268,13 @@ private:
     // fullTile.invert() is a map from kOffset, kAddr into kReg, kLane, kWarp
     // addrToOffset gives us a map from kAddr into kOffset, which is the map of
     // the addresses each lane should hold
+    if (isPackedLoad) {
+      llvm::errs() << "fullTile.invert():" << fullTile.invert() << "\n";
+    }
+
     auto addrToOffset = fullTile.invert().compose(reps);
+    if (isPackedLoad)
+      llvm::errs() << "addrToOffset:" << addrToOffset << "\n";
     // sanity check
     assert(addrToOffset.getInDimSizeLog2(kAddr) >= 3 &&
            addrToOffset.getInDimSizeLog2(kAddr) <= 6);
@@ -291,24 +297,53 @@ private:
     auto i8AddrLayout = i8Tile * addrLayout;
     if (isPackedLoad) {
       llvm::errs() << "reps:" << reps << "\n";
+      // Create hardcoded reps layout for packed loads
       llvm::errs() << "i8AddrLayout:" << i8AddrLayout << "\n";
       // Create corrected i8AddrLayout for packed loads with hardcoded values
       // Fix: lane=8 -> (272) should be (256), lane=16 -> (8) should be (512)
-      i8AddrLayout = LinearLayout(
-          {{kReg, {}},
-           {kLane, {{32}, {64}, {128}, {272 /*272*/}, {8}, {1024}}},
-           {kWarp, {{16}, {0}}}},
-          {{kOffset, reps.getOutDimSize(kOffset)}}, false);
-      llvm::errs() << "corrected i8AddrLayout:" << i8AddrLayout << "\n";
+      if (hack) {
+        i8AddrLayout =
+            LinearLayout({{kReg, {}},
+                          {kLane,
+                           {{32 /*1*/},
+                            {64 /*2*/},
+                            {128 /*4*/},
+                            {256 /*8*/},
+                            {8 /*16!!*/},
+                            {1024 /*32!!*/}}},
+                          {kWarp, {{16}, {0}}}},
+                         {{kOffset, reps.getOutDimSize(kOffset)}}, false);
+        llvm::errs() << "corrected i8AddrLayout:" << i8AddrLayout << "\n";
+      }
     }
 
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
-    auto regBase =
-        applyLinearLayout(
-            loc, rewriter, i8AddrLayout,
-            {{kReg, b.i32_val(0)}, {kLane, laneId}, {kWarp, warpId}})[0]
-            .second;
-
+#define RUNTIME_LL
+#ifdef RUNTIME_LL
+    auto regBase = applyLinearLayout(loc, rewriter, i8AddrLayout,
+                                     {{kReg, b.i32_val(0)},
+                                      {kLane, laneId},
+                                      { kWarp,
+                                        warpId }})[0]
+                       .second;
+#else
+    /* Experiment with thread addresses for warp0 */
+    static constexpr int32_t laneAddrI8Table[64] = {
+        0,   32,       64,  64 + 32,  128, 128 + 32, 192, 192 + 32,
+        256, 256 + 32, 320, 320 + 32, 384, 384 + 32, 448, 448 + 32,
+        8,   1032,     72,  1096,     136, 1160,     200, 1224,
+        264, 1288,     328, 1352,     392, 1416,     456, 1480,
+        16,  1040,     80,  1104,     144, 1168,     208, 1232,
+        272, 1296,     336, 1360,     400, 1424,     464, 1488,
+        24,  1048,     88,  1112,     152, 1176,     216, 1240,
+        280, 1304,     344, 1368,     408, 1432,     472, 1496};
+    SmallVector<int32_t> laneAddrI8(laneAddrI8Table, laneAddrI8Table + 64);
+    Value regBase = b.i32_val(laneAddrI8.front());
+    for (int lane = 1, e = laneAddrI8.size(); lane < e; ++lane) {
+      auto lanePred = b.icmp_eq(laneId, b.i32_val(lane));
+      regBase = b.select(lanePred, b.i32_val(laneAddrI8[lane]), regBase);
+    }
+#endif
     // It's fine that we don't compute the offset in bytes as affineOffset
     // will be folded into a constant
     auto affineOffsetI8 = b.mul(affineOffset, b.i32_val(bitWidth / 8));

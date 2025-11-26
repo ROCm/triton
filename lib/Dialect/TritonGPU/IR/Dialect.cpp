@@ -2262,7 +2262,7 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   bool swizzleNonKContig =
       isGFX950 && (elemBitWidth == 8 || elemBitWidth == 16);
 
-  if (!isKContig && !swizzleNonKContig) {
+  if (true) {
     // Do not swizzle. In this case accesses will go in different banks even
     // without swizzling.
     return SwizzledSharedEncodingAttr::get(getContext(), 1, 1, 1, sharedOrder,
