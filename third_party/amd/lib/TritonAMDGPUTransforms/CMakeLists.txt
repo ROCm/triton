@@ -20,6 +20,8 @@ add_triton_library(TritonAMDGPUTransforms
   UpdateAsyncWaitCount.cpp
   Utility.cpp
   # PlanCTA.cpp
+  WarpPipeliner.cpp
+
   DEPENDS
   TritonAMDGPUIR
   TritonAMDGPUTransformsIncGen
