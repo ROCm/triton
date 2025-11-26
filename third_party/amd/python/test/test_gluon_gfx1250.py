@@ -1012,33 +1012,6 @@ def test_compile_async_copy_mbarrier(BLOCK_M, BLOCK_N):
     assert not re.search("s_wait_asynccnt 0x0", amdgcn)
 
 
-@pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
-@pytest.mark.parametrize("NUM_BUFFERS", [1, 2])
-@pytest.mark.parametrize("NUM_WARPS", [4])
-def test_compile_tensor_copy_mbarrier(BLOCK_M, BLOCK_N, NUM_BUFFERS, NUM_WARPS):
-    BLOCKED_LAYOUT = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
-    signature = {
-        "a_ptr": "*fp16", "b_ptr": "*fp16", "M": "i32", "N": "i32",  #
-        "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "NUM_BUFFERS": "constexpr", "BLOCKED_LAYOUT": "constexpr",
-        "NUM_WARPS": "constexpr"
-    }
-    constexprs = {
-        "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "NUM_BUFFERS": NUM_BUFFERS, "BLOCKED_LAYOUT": BLOCKED_LAYOUT,
-        "NUM_WARPS": NUM_WARPS
-    }
-    attrs = []
-    k = triton.compile(
-        gluon._runtime.GluonASTSource(fn=tensor_async_copy_mbarrier_kernel, signature=signature, attrs=attrs,
-                                      constexprs=constexprs), target=GPUTarget("hip", 'gfx1250', 32))
-    pattern = ("tensor_load_to_lds", "ds_atomic_barrier_arrive_rtn_b64", "s_sleep")
-
-    amdgcn = k.asm["amdgcn"]
-    for pattern in pattern:
-        assert re.search(pattern, amdgcn)
-
-    assert not re.search("s_wait_tensorcnt 0x0", amdgcn)
-
-
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64), (1, 512), (256, 2)])
 @pytest.mark.parametrize("NUM_BUFFERS", [2])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
@@ -1245,6 +1218,33 @@ def tensor_async_copy_mbarrier_kernel(a_ptr, b_ptr, M, N,  #
         mask_b = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
 
         ttgl.store(b_ptr + offs_b, a, mask=mask_b)
+
+
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
+@pytest.mark.parametrize("NUM_BUFFERS", [1, 2])
+@pytest.mark.parametrize("NUM_WARPS", [4])
+def test_compile_tensor_copy_mbarrier(BLOCK_M, BLOCK_N, NUM_BUFFERS, NUM_WARPS):
+    BLOCKED_LAYOUT = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
+    signature = {
+        "a_ptr": "*fp16", "b_ptr": "*fp16", "M": "i32", "N": "i32",  #
+        "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "NUM_BUFFERS": "constexpr", "BLOCKED_LAYOUT": "constexpr",
+        "NUM_WARPS": "constexpr"
+    }
+    constexprs = {
+        "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "NUM_BUFFERS": NUM_BUFFERS, "BLOCKED_LAYOUT": BLOCKED_LAYOUT,
+        "NUM_WARPS": NUM_WARPS
+    }
+    attrs = []
+    k = triton.compile(
+        gluon._runtime.GluonASTSource(fn=tensor_async_copy_mbarrier_kernel, signature=signature, attrs=attrs,
+                                      constexprs=constexprs), target=GPUTarget("hip", 'gfx1250', 32))
+    pattern = ("tensor_load_to_lds", "ds_atomic_barrier_arrive_rtn_b64", "s_sleep")
+
+    amdgcn = k.asm["amdgcn"]
+    for pattern in pattern:
+        assert re.search(pattern, amdgcn)
+
+    assert not re.search("s_wait_tensorcnt 0x0", amdgcn)
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64), (1, 512), (256, 2)])

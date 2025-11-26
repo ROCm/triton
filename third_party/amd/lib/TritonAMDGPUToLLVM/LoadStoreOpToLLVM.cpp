@@ -490,7 +490,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
   LogicalResult lowerDirectToLDSLoad(
       RewriterBase &rewriter, Location loc, RankedTensorType srcTy,
       MemDescType dstTy, SmallVector<Value> loadVals, Value llDst,
-      Type resElemTy, unsigned vec, triton::AMD::ISAFamily isaFamily,
+      Type resElemTy, unsigned vec, int numCTAs,
+      triton::AMD::ISAFamily isaFamily,
       std::function<SmallVector<Value>(RewriterBase &, Location,
                                        ArrayRef<Value>, Value, int, VectorType,
                                        Value)>
@@ -513,20 +514,20 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       sharedLayout = triton::gpu::toLinearLayout(dstTy);
     }
     auto cvt = srcLayout.invertAndCompose(sharedLayout);
-
-    Value ctaMulticastMask;
-    if (numCTAs > 1 && isaFamily == ISAFamily::GFX1250) {
-      if (!cvt.isTrivialOver({str_attr("block")})) {
-        return emitError(loc, "async copy global to local does not support "
-                              "non-trivial block dimension");
-      }
-      ctaMulticastMask = LLVM::AMD::emitCtaMulticastMask(
-          rewriter, loc, targetInfo.getClusterCTAId(rewriter, loc), srcLayout);
+    if (!cvt.isTrivialOver({str_attr("block")})) {
+      return emitError(
+          loc,
+          "direct to lds loads do not support non-trivial block dimension");
     }
-
     cvt = cvt.sublayout(
         {str_attr("register"), str_attr("lane"), str_attr("warp")},
         {str_attr("offset")});
+
+    Value ctaMulticastMask;
+    if (numCTAs > 1 && isaFamily == ISAFamily::GFX1250) {
+      ctaMulticastMask = LLVM::AMD::emitCtaMulticastMask(
+          rewriter, loc, targetInfo.getClusterCTAId(rewriter, loc), srcLayout);
+    }
 
     auto smemObj =
         LLVM::getSharedMemoryObjectFromStruct(loc, llDst, resElemTy, rewriter);
@@ -931,9 +932,10 @@ struct BufferLoadToLocalOpConversion
       return {};
     };
 
+    int numCTAs = TritonGPUDialect::getNumCTAs(op->getParentOfType<ModuleOp>());
     auto res = lowerDirectToLDSLoad(
         rewriter, loc, ptrType, flatDstTy, loadVals, llDst, resElemTy, vec,
-        targetInfo.getISAFamily(), emitBufferLoadLds);
+        numCTAs, targetInfo.getISAFamily(), emitBufferLoadLds);
     if (failed(res)) {
       return failure();
     }
@@ -1069,9 +1071,10 @@ struct AsyncCopyGlobalToLocalOpConversion
       return {};
     };
 
+    int numCTAs = TritonGPUDialect::getNumCTAs(op->getParentOfType<ModuleOp>());
     auto res = lowerDirectToLDSLoad(
         rewriter, loc, srcTy, flatDstTy, loadVals, llDst, resElemTy, vec,
-        targetInfo.getISAFamily(), emitGlobalLoadLds);
+        numCTAs, targetInfo.getISAFamily(), emitGlobalLoadLds);
     if (failed(res)) {
       return failure();
     }
@@ -1145,7 +1148,7 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     auto paddedEnc =
         llvm::dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
     Type elementType = getTypeConverter()->convertType(smemTy.getElementType());
-    int numCTAs = getNumCTAs(smemTy.getEncoding());
+    int numCTAs = TritonGPUDialect::getNumCTAs(op->getParentOfType<ModuleOp>());
 
     triton::LinearLayout sharedLayout;
     unsigned padInterval = 0;
@@ -1159,7 +1162,6 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     } else {
       sharedLayout = triton::gpu::toLinearLayout(smemTy);
     }
-
     Value multicastMask;
     if (numCTAs > 1) {
       multicastMask = LLVM::AMD::emitCtaMulticastMask(
@@ -1232,7 +1234,7 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     auto tensorDescTy = op.getDesc().getType();
     auto smemTy = op.getSrc().getType();
     Type elementType = getTypeConverter()->convertType(smemTy.getElementType());
-    int numCTAs = getNumCTAs(smemTy.getEncoding());
+    int numCTAs = TritonGPUDialect::getNumCTAs(op->getParentOfType<ModuleOp>());
 
     SmallVector<Value> desc =
         unpackLLElements(loc, adaptor.getDesc(), rewriter);
@@ -2042,9 +2044,7 @@ struct AsyncWaitOpConversion
     case ISAFamily::GFX1250: {
       // Clamp asyncCnt to 6bits(hw imit); lower means conservative
       unsigned asyncCnt = std::min(63u, op.getNumInst());
-      LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
-                                      "llvm.amdgcn.s.wait.asynccnt", {},
-                                      {b.i16_val(asyncCnt)});
+      ROCDL::WaitAsynccntOp::create(rewriter, loc, asyncCnt);
       break;
     }
     default:
@@ -2072,9 +2072,7 @@ struct AsyncTDMWaitConversion
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
-                                    "llvm.amdgcn.s.wait.tensorcnt", {},
-                                    {b.i16_val(op.getNum())});
+    ROCDL::WaitTensorcntOp::create(rewriter, loc, op.getNum());
     rewriter.eraseOp(op);
     return success();
   }

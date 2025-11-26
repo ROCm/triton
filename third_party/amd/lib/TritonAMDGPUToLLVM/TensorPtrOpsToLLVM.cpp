@@ -96,8 +96,7 @@ struct MakeTensorDescOpConversion
       // TODO: add an extra pass to assign layout to descriptors
       sharedEnc = findEncodingFromUsers(op);
       if (!sharedEnc)
-        return op.emitError("Descriptor requires a shared encoding during "
-                            "lowering");
+        return rewriter.notifyMatchFailure(op, "Descriptor has no layout.");
     }
     auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(sharedEnc);
 
