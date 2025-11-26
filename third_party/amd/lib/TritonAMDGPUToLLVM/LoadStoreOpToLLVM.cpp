@@ -498,7 +498,6 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
           lowerInst) const {
     TritonLLVMOpBuilder b(loc, rewriter);
     auto *ctx = rewriter.getContext();
-    int numCTAs = getNumCTAs(dstTy.getEncoding());
 
     // Build src to shared layout and remove broadcasted registers
     auto srcLayout = triton::gpu::toLinearLayout(srcTy);
