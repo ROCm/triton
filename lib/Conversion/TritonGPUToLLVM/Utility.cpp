@@ -571,6 +571,7 @@ SmallVector<Value> lowerLdSt(
   auto i8Tile =
       zerosLike(LinearLayout::identity1D(bitwidth / 8, kReg, kOffset));
   auto i8AddrLayout = i8Tile * addrLayout;
+  llvm::errs() << "i8AddrLayout:" << i8AddrLayout << "\n";
 
   auto regBaseI8 =
       applyLinearLayout(

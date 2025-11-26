@@ -2,6 +2,7 @@
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -9,22 +10,27 @@
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
+#include "llvm/Support/raw_ostream.h"
+#include <type_traits>
 
 using ::mlir::triton::gpu::MemDescType;
 
 namespace {
-class TransLocalLoadOpConversion
-    : public ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp> {
+template <typename OpT>
+class TransLocalLoadOpConversion : public ConvertOpToLLVMPattern<OpT> {
 public:
+  static constexpr bool isPackedLoad =
+      std::is_same_v<OpT, triton::amdgpu::LocalLoadPackedTransposedOp>;
+
   TransLocalLoadOpConversion(const LLVMTypeConverter &converter,
                              const AMD::TargetInfo &targetInfo,
                              PatternBenefit benefit = 2)
-      : ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp>(converter, benefit),
+      : ConvertOpToLLVMPattern<OpT>(converter, benefit),
         targetInfo(targetInfo) {}
-  using OpAdaptor = typename triton::gpu::LocalLoadOp::Adaptor;
+  using OpAdaptor = typename OpT::Adaptor;
 
   LogicalResult
-  matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
+  matchAndRewrite(OpT op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto ctx = rewriter.getContext();
     auto loc = op.getLoc();
@@ -52,8 +58,17 @@ public:
       if (paddedEnc.getMinInterval() < ldsParams->tileSize)
         return failure();
     } else {
-      auto sharedLL = triton::gpu::toLinearLayout(srcTy);
+      auto sharedLL =
+          triton::gpu::toLinearLayout(dstTy.getShape(), srcTy.getEncoding());
+      if (isPackedLoad)
+        llvm::errs() << "dstLL (layout of dstTy):"
+                     << triton::gpu::toLinearLayout(dstTy) << "\n";
+      if (isPackedLoad)
+        llvm::errs() << "sharedLL:" << sharedLL << "\n";
+
       cvtDstLL = triton::gpu::toLinearLayout(dstTy).invertAndCompose(sharedLL);
+      if (isPackedLoad)
+        llvm::errs() << "cvtDstLL:" << cvtDstLL << "\n";
     }
     auto kBlock = StringAttr::get(ctx, "block");
     auto maybeSublayout = cvtDstLL.quotient({kBlock});
@@ -96,9 +111,8 @@ public:
 
 private:
   LogicalResult lowerDsReadTr(
-      triton::gpu::LocalLoadOp op,
-      ::triton::AMD::TargetInfo::LDSTransLoadParams ldsParams, Location loc,
-      LinearLayout cvt,
+      OpT op, ::triton::AMD::TargetInfo::LDSTransLoadParams ldsParams,
+      Location loc, LinearLayout cvt,
       SmallVector<Value> &vals, // Input for stmatrix, output for ldmatrix
       Value smemBase, Value affineOffset, uint64_t maskSpanAffineOffset,
       std::function<Value(Value)> calcPaddedOffset, Type llvmElemTy,
@@ -161,8 +175,59 @@ private:
     } else if (doubleB8Contiguity) {
       otherLanes = 2;
     }
-
-    if (doubleB8Contiguity) {
+    /*
+    dstLL (layout of dstTy):
+     - register=1 -> (0, 1)
+       register=2 -> (0, 2)
+       register=4 -> (0, 4)
+       register=8 -> (0, 8)
+     - lane=1 -> (1, 0)
+       lane=2 -> (2, 0)
+       lane=4 -> (4, 0)
+       lane=8 -> (8, 0)
+       lane=16 -> (16, 0)
+       lane=32 -> (0, 16)
+     - warp=1 -> (0, 0)
+       warp=2 -> (0, 0)
+     - block is a size 1 dimension
+    where out dims are: [dim0 (size 32), dim1 (size 32)]
+    ldsTransLayout:
+     - register=1 -> (1, 0)
+       register=2 -> (2, 0)
+       register=4 -> (4, 0)
+       register=8 -> (0, 16)
+     - lane=1 -> (0, 1)
+       lane=2 -> (0, 2)
+       lane=4 -> (0, 4)
+       lane=8 -> (0, 8)
+       lane=16 -> (8, 0)
+       lane=32 -> (0, 32)
+     - warp=1 -> (0, 0)
+       warp=2 -> (0, 0)
+     - block is a size 1 dimension
+    where out dims are: [dim0 (size 16), dim1 (size 64)]
+    cvt:
+     - register=1 -> (1, 0)
+       register=2 -> (2, 0)
+       register=4 -> (4, 0)
+       register=8 -> (256, 0)
+     - lane=1 -> (16, 0)
+       lane=2 -> (32, 0)
+       lane=4 -> (64, 0)
+       lane=8 -> (128, 0)
+       lane=16 -> (8, 0)
+       lane=32 -> (512, 0)
+     - warp=1 -> (0, 0)
+       warp=2 -> (0, 0)
+     - block is a size 1 dimension
+    where out dims are: [offset (size 1024), block (size 1)]
+    */
+    if (isPackedLoad) {
+      fullTile =
+          tile * LinearLayout::identity1D(otherLanes, kLane, kAddr) *
+          LinearLayout::identity1D(ldsParams.tileSize, kReg, kAddr) *
+          LinearLayout::identity1D(missingLanes / otherLanes, kLane, kAddr);
+    } else if (doubleB8Contiguity) {
       fullTile =
           tile * LinearLayout::identity1D(ldsParams.tileSize / 2, kReg, kAddr) *
           LinearLayout::identity1D(otherLanes, kLane, kAddr) *
@@ -176,6 +241,8 @@ private:
     }
     // Add warp dimension so we can invert and compose with reps later
     fullTile *= LinearLayout::identity1D(1, kWarp, kAddr);
+    if (isPackedLoad)
+      llvm::errs() << "fullTile:" << fullTile << "\n";
 
     if (cvt.getInDimSize(kReg) < fullTile.getInDimSize(kReg)) {
       return failure();
@@ -222,6 +289,18 @@ private:
     auto i8Tile =
         zerosLike(LinearLayout::identity1D(bitWidth / 8, kReg, kOffset));
     auto i8AddrLayout = i8Tile * addrLayout;
+    if (isPackedLoad) {
+      llvm::errs() << "reps:" << reps << "\n";
+      llvm::errs() << "i8AddrLayout:" << i8AddrLayout << "\n";
+      // Create corrected i8AddrLayout for packed loads with hardcoded values
+      // Fix: lane=8 -> (272) should be (256), lane=16 -> (8) should be (512)
+      i8AddrLayout = LinearLayout(
+          {{kReg, {}},
+           {kLane, {{32}, {64}, {128}, {272 /*272*/}, {8}, {1024}}},
+           {kWarp, {{16}, {0}}}},
+          {{kOffset, reps.getOutDimSize(kOffset)}}, false);
+      llvm::errs() << "corrected i8AddrLayout:" << i8AddrLayout << "\n";
+    }
 
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto regBase =
@@ -262,8 +341,12 @@ private:
           dsReadTr =
               ROCDL::ds_read_tr16_b64::create(rewriter, loc, vTy, vecAddr);
         } else {
-          dsReadTr =
-              ROCDL::ds_read_tr8_b64::create(rewriter, loc, vTyI32, vecAddr);
+          if (isPackedLoad)
+            dsReadTr =
+                ROCDL::ds_read_tr4_b64::create(rewriter, loc, vTyI32, vecAddr);
+          else
+            dsReadTr =
+                ROCDL::ds_read_tr8_b64::create(rewriter, loc, vTyI32, vecAddr);
         }
         break;
       }
@@ -310,148 +393,6 @@ private:
     assert(vals.size() == cvt.getInDimSize(kReg));
     vals = permStrides.inverse().apply(vals);
 
-    return success();
-  }
-
-private:
-  const AMD::TargetInfo &targetInfo;
-};
-
-class LocalLoadPackedTransposedOpConversion
-    : public ConvertOpToLLVMPattern<
-          triton::amdgpu::LocalLoadPackedTransposedOp> {
-public:
-  LocalLoadPackedTransposedOpConversion(const LLVMTypeConverter &converter,
-                                        const AMD::TargetInfo &targetInfo,
-                                        PatternBenefit benefit = 2)
-      : ConvertOpToLLVMPattern<triton::amdgpu::LocalLoadPackedTransposedOp>(
-            converter, benefit),
-        targetInfo(targetInfo) {}
-  using OpAdaptor =
-      typename triton::amdgpu::LocalLoadPackedTransposedOp::Adaptor;
-
-  LogicalResult
-  matchAndRewrite(triton::amdgpu::LocalLoadPackedTransposedOp op,
-                  OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    MemDescType srcTy = op.getSrc().getType();
-    RankedTensorType dstTy = op.getType();
-    auto typeConverter = this->getTypeConverter();
-    auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
-    unsigned bitWidth = llvmElemTy.getIntOrFloatBitWidth();
-
-    // FP4 is represented as i8 and
-    if (bitWidth != 8) {
-      return failure();
-    }
-    // FP4 packed along M/N are not supported yet on GFX1250
-    if (targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250) {
-      return failure();
-    }
-
-    return lowerSharedToDotOperandTransLL(op, adaptor, typeConverter, rewriter);
-  }
-
-private:
-  LogicalResult
-  lowerSharedToDotOperandTransLL(triton::amdgpu::LocalLoadPackedTransposedOp op,
-                                 OpAdaptor adaptor,
-                                 const LLVMTypeConverter *typeConverter,
-                                 ConversionPatternRewriter &rewriter) const {
-    auto ctx = rewriter.getContext();
-    auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    auto kReg = str_attr("register");
-    auto kLane = str_attr("lane");
-    auto kWarp = str_attr("warp");
-    auto kOffset = str_attr("offset");
-    auto dstTy = cast<RankedTensorType>(op.getType());
-    auto srcTy = cast<MemDescType>(op.getSrc().getType());
-    auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
-    auto bitWidth = llvmElemTy.getIntOrFloatBitWidth();
-    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
-                                                         llvmElemTy, rewriter);
-    mlir::Type retTy = dstTy;
-    auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
-    auto affineOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
-    auto maskSpanAffineOffset = smemObj.getMaskSpanOffsets(srcTy);
-    auto calcPaddedOffset = [&](Value smemOffset) {
-      TritonLLVMOpBuilder b(loc, rewriter);
-      auto bitWidth = llvmElemTy.getIntOrFloatBitWidth();
-      if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-              srcTy.getEncoding())) {
-        // Apply the offset needed for padding.
-        Value padOffset = emitPadding(loc, rewriter, paddedLayout, bitWidth,
-                                      smemOffset, /*offsetInBytes=*/true);
-        smemOffset = b.add(smemOffset, padOffset);
-      }
-      return smemOffset;
-    };
-
-    auto shape = srcTy.getShape();
-    auto ldsTransLoadParams = targetInfo.queryLDSTransLoadParams(bitWidth);
-    if (!ldsTransLoadParams)
-      return failure();
-    // FP4 are packed into i8 so the real bitWidth is different
-    auto llBitWidth = 4;
-    auto ldsTransLayout = triton::gpu::chooseDsReadTrLayout(
-        dstTy.getEncoding(), shape, llBitWidth,
-        ldsTransLoadParams->instBitWidth,
-        ldsTransLoadParams->numLanesInShuffleGroup);
-
-    // Check that we have computed a layout
-    if (!ldsTransLayout) {
-      return failure();
-    }
-
-    auto smemPtrTy = ptr_ty(ctx, 3);
-    auto paddedEnc =
-        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
-    LinearLayout cvt = LinearLayout::empty();
-    if (paddedEnc) {
-      const auto &sharedLL = paddedEnc.getLinearComponent();
-      cvt = ldsTransLayout->invertAndCompose(sharedLL);
-    } else {
-      auto sharedLL = triton::gpu::toLinearLayout(srcTy);
-      cvt = ldsTransLayout->invertAndCompose(sharedLL);
-    }
-    // Check that we will be able to vectorize the load.
-    // Need to have exactly ldsTransLoadParams->tileSize,
-    // otherwise we can't use ds_read_tr
-    auto [elemsPerVec, permutation] =
-        largestVectorisation(ctx, cvt, bitWidth, ldsTransLoadParams->tileSize);
-
-    if (paddedEnc)
-      elemsPerVec = std::min<int>(elemsPerVec, paddedEnc.getMinInterval());
-
-    if (elemsPerVec != ldsTransLoadParams->tileSize)
-      return failure();
-
-    cvt = cvt.sublayout({kReg, kLane, kWarp}, {kOffset});
-    auto lowerInst = [&](RewriterBase &rewriter, Location loc,
-                         ArrayRef<Value> inVals, Value vecAddr, int idx,
-                         VectorType vTy) -> SmallVector<Value> {
-      auto numElemsI32 = (vTy.getNumElements() * bitWidth / 32);
-      auto vTyI32 = VectorType::get(numElemsI32, i32_ty);
-      Value dsReadTr =
-          ROCDL::ds_read_tr4_b64::create(rewriter, loc, vTyI32, vecAddr);
-      Value vecVal = b.bitcast(dsReadTr, vTy);
-      SmallVector<Value> loadedVals;
-      for (int v = 0; v < vTy.getNumElements(); v++) {
-        loadedVals.push_back(
-            b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
-      }
-
-      return loadedVals;
-    };
-
-    SmallVector<Value> outVals = lowerLdSt(
-        loc, rewriter.getContext(), cvt, {}, // Input for store, output for load
-        llvmElemTy, smemObj.getBase(), calcPaddedOffset, affineOffset,
-        maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo,
-        ldsTransLoadParams->tileSize, lowerInst);
-    Value result = packLLElements(loc, typeConverter, outVals, rewriter, retTy);
-    rewriter.replaceOp(op, result);
     return success();
   }
 
@@ -618,10 +559,11 @@ void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
   PatternBenefit barrierBenefit = PatternBenefit(benefit.getBenefit() + 1);
 
-  patterns.add<TransLocalLoadOpConversion>(typeConverter, targetInfo,
-                                           transBenefit);
-  patterns.add<LocalLoadPackedTransposedOpConversion>(typeConverter, targetInfo,
-                                                      benefit);
+  patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
+      typeConverter, targetInfo, transBenefit);
+  patterns.add<
+      TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
+      typeConverter, targetInfo, transBenefit);
   patterns.add<LocalBarrierOpConversion, MemoryCounterWaitOpConversion>(
       typeConverter, targetInfo, barrierBenefit);
 }
