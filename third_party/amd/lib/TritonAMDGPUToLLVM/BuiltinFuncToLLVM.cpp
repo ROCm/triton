@@ -122,10 +122,14 @@ private:
           LLVM::createConstantF32(loc, rewriter, 1.0), expNegTwoX->getResult(0),
           defaultFlags);
 
-      // Calculate 2 / (1 + e^(-2x))
-      auto twoOverOnePlusExp = rewriter.create<LLVM::FDivOp>(
+      // Calculate 2 / (1 + e^(-2x)) using fast divide (rcp intrinsic)
+      const char *rcpIntrinsic = "llvm.amdgcn.rcp.f32";
+      auto rcpOp = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, rcpIntrinsic,
+                                                   rewriter.getF32Type(),
+                                                   onePlusExp->getResult(0));
+      auto twoOverOnePlusExp = rewriter.create<LLVM::FMulOp>(
           loc, rewriter.getF32Type(),
-          LLVM::createConstantF32(loc, rewriter, 2.0), onePlusExp->getResult(0),
+          LLVM::createConstantF32(loc, rewriter, 2.0), rcpOp->getResult(0),
           defaultFlags);
 
       // Calculate 2/(1 + e^(-2x)) - 1
