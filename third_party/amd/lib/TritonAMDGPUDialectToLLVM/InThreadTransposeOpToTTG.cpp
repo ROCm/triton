@@ -139,7 +139,7 @@ namespace mlir::triton::AMD {
 void populateInThreadTransposeOpToTTGPatterns(LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
                                               PatternBenefit benefit) {
   patterns.add<InThreadTransposeOpConversion>(patterns.getContext(), benefit);
-  patterns.add<InThreadTranspose8bitOpConversion>(typeConverter, benefit);
+  patterns.add<InThreadTranspose8bitOpConversion>(typeConverter, PatternBenefit(benefit.getBenefit() + 1));
 }
 
 } // namespace mlir::triton::AMD
