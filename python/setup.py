@@ -234,7 +234,7 @@ def get_llvm_package_info():
     # Create a stable symlink that doesn't include revision
     sym_name = f"llvm-{system_suffix}"
     #url = f"https://oaitriton.blob.core.windows.net/public/llvm-builds/{name}.tar.gz"
-    url = f"https://github.com/llvm/llvm-project/archive/6e3b47597fabb8df8cf822331461cecbac907c6f.zip"
+    url = f"file:///root/llvm-6e3b4759-almalinux-x64.tar.gz"
     return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH", sym_name=sym_name)
 
 
