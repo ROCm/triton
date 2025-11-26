@@ -104,7 +104,7 @@ public:
         Value raw2 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[3], i32_ty), tb.bitcast(raw[2], i32_ty), tb.i32_val(0x05010400)}).getResult();  // 20, 21, 22, 23, 30, 31, 32, 33
         Value raw3 = rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{tb.bitcast(raw[3], i32_ty), tb.bitcast(raw[2], i32_ty), tb.i32_val(0x07030602)}).getResult();  // 20, 30, 21, 31, 22, 32, 23, 33
 
-        raw[0] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw2, raw0, tb.i32_val(0x05040100)}).getResult(), ty);  // 00, 10, 01, 11, 20, 30, 21, 31, 
+        raw[0] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw2, raw0, tb.i32_val(0x05040100)}).getResult(), ty);  // 00, 10, 01, 11, 20, 30, 21, 31
         raw[1] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw2, raw0, tb.i32_val(0x07060302)}).getResult(), ty);  // 00, 10, 20, 30, 01, 11, 21, 31
         raw[2] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw3, raw1, tb.i32_val(0x05040100)}).getResult(), ty);  // 02, 12, 03, 13, 22, 32, 23, 33
         raw[3] = tb.bitcast(rewriter.create<LLVM::CallOp>(loc, permFuncOp, SmallVector<Value>{raw3, raw1, tb.i32_val(0x07060302)}).getResult(), ty);  // 02, 12, 22, 32, 03, 13, 23, 33

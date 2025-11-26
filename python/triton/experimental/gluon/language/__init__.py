@@ -71,6 +71,7 @@ from ._core import (
     to_tensor,
     warp_specialize,
     where,
+    get_shared_from_dot_operand_layout,
 )
 from ._layouts import (
     AutoLayout,

@@ -488,3 +488,21 @@ def thread_barrier(_semantic=None):
     Insert a barrier to synchronize threads within a CTA.
     """
     return _semantic.debug_barrier()
+
+
+@builtin
+def get_shared_from_dot_operand_layout(dotOperandLayout, shape, order, type_witdth_in_bit, need_trans, ctas_per_cga = None, cta_split_num = None, cta_order = None, _semantic=None):
+    dotOperandLayout = _unwrap_if_constexpr(dotOperandLayout)
+    shape = _unwrap_if_constexpr(shape)
+    order = _unwrap_if_constexpr(order)
+    type_witdth_in_bit = _unwrap_if_constexpr(type_witdth_in_bit)
+    need_trans = _unwrap_if_constexpr(need_trans)
+    ctas_per_cga = _unwrap_if_constexpr(ctas_per_cga)
+    cta_split_num = _unwrap_if_constexpr(cta_split_num)
+    cta_order = _unwrap_if_constexpr(cta_order)
+    builder = _semantic.builder
+    rank = len(order)
+    ctas_per_cga = ctas_per_cga or [1] * rank
+    cta_split_num = cta_split_num or [1] * rank
+    cta_order = cta_order or list(reversed(range(rank)))
+    return builder.get_swizzled_shared_layout_from_dot(dotOperandLayout._to_ir(builder), shape, order, ctas_per_cga, cta_split_num, cta_order, type_witdth_in_bit, need_trans)

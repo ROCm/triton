@@ -395,6 +395,20 @@ void init_gluon_ir(py::module &&m) {
              return self.getChecked<ttg::SwizzledSharedEncodingAttr>(
                  ctx, vec, perPhase, maxPhase, order, ctaLayout);
            })
+      .def("get_swizzled_shared_layout_from_dot",
+           [](GluonOpBuilder &self, Attribute opEnc, std::vector<int64_t> shape,
+               std::vector<unsigned> &order, std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder, unsigned typeWidthInBit, bool needTrans) {
+             auto ctx = self.getContext();
+             auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(opEnc);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
+             auto sharedEnc = ttg::SwizzledSharedEncodingAttr::get(
+                ctx, dotOpEnc, shape, order,
+                ctaLayout, typeWidthInBit, needTrans);
+             return layoutToGluon(sharedEnc);
+           })
       .def("get_amd_rotating_shared_layout",
            [](GluonOpBuilder &self, int vec, int perPhase, int maxPhase,
               std::vector<unsigned> &order, std::vector<unsigned> &ctasPerCga,
