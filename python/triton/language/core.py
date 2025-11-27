@@ -339,6 +339,9 @@ class constexpr(base_value):
         args = (_unwrap_if_constexpr(x) for x in _normalize_tuple(args))
         return self.value.__getitem__(*args)
 
+    def bit_length(self):
+        return constexpr(self.value.bit_length())
+
 
 CONSTEXPR_0 = constexpr(0)
 
