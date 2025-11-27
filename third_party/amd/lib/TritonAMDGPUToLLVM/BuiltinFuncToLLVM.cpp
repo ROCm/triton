@@ -104,10 +104,11 @@ private:
       assert(operands[0].getType().getIntOrFloatBitWidth() == 32);
       LLVM::FastmathFlagsAttr defaultFlags{};
 
-      // Numerically stable tanh: tanh(x) = 2/(1 + e^(-2x)) - 1
-      // Avoids overflow for large x, same operation count as standard formula
+      // Numerically stable tanh: tanh(x) = (1 - e^(-2x)) / (1 + e^(-2x))
+      // Equivalent to standard formula but avoids overflow for large positive x
+      // Uses same structure as original: one exp, reuse it, one FDIV
 
-      // Calculate -2*x (multiply by -2 directly, avoiding separate negation)
+      // Calculate -2*x
       auto negTwoX = rewriter.create<LLVM::FMulOp>(
           loc, rewriter.getF32Type(), operands[0],
           LLVM::createConstantF32(loc, rewriter, -2.0), defaultFlags);
@@ -116,26 +117,22 @@ private:
       auto expNegTwoX = createFastExpf(rewriter, loc, negTwoX->getResult(0),
                                        rewriter.getF32Type(), ftz);
 
-      // Calculate 1 + e^(-2x)
-      auto onePlusExp = rewriter.create<LLVM::FAddOp>(
+      // Calculate 1 - e^(-2x)
+      auto numerator = rewriter.create<LLVM::FSubOp>(
           loc, rewriter.getF32Type(),
           LLVM::createConstantF32(loc, rewriter, 1.0), expNegTwoX->getResult(0),
           defaultFlags);
 
-      // Calculate 2 / (1 + e^(-2x)) using fast divide (rcp intrinsic)
-      const char *rcpIntrinsic = "llvm.amdgcn.rcp.f32";
-      auto rcpOp = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, rcpIntrinsic,
-                                                   rewriter.getF32Type(),
-                                                   onePlusExp->getResult(0));
-      auto twoOverOnePlusExp = rewriter.create<LLVM::FMulOp>(
+      // Calculate 1 + e^(-2x)
+      auto denominator = rewriter.create<LLVM::FAddOp>(
           loc, rewriter.getF32Type(),
-          LLVM::createConstantF32(loc, rewriter, 2.0), rcpOp->getResult(0),
+          LLVM::createConstantF32(loc, rewriter, 1.0), expNegTwoX->getResult(0),
           defaultFlags);
 
-      // Calculate 2/(1 + e^(-2x)) - 1
-      replacementOp = rewriter.create<LLVM::FSubOp>(
-          loc, returnType, twoOverOnePlusExp->getResult(0),
-          LLVM::createConstantF32(loc, rewriter, 1.0), defaultFlags);
+      // Calculate tanh(x) = (1 - e^(-2x)) / (1 + e^(-2x))
+      replacementOp = rewriter.create<LLVM::FDivOp>(
+          loc, returnType, numerator->getResult(0), denominator->getResult(0),
+          defaultFlags);
     }
 
     if (replacementOp) {
