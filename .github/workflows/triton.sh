@@ -36,6 +36,34 @@ export TRITON_HIP_USE_ASYNC_COPY=1
 
 echo "=== Run Triton Unit Tests ==="
 
-pytest --count=1 -n 12 python/test/unit/language/test_core.py::test_override_arch
-pytest --count=1 -n 12 python/test/unit/language/test_core.py::test_num_ctas_pre_sm90
-pytest --count=1 -n 12 python/test/unit/language/test_core.py::test_scan2d
+# Array of test patterns to exclude
+EXCLUDE_PATTERNS=(
+    "test_bin_op"
+    "test_dot"
+    "test_load_scope_sem_coop_grid_cta_one"
+    "test_propagate_nan"
+    "test_shift_op"
+    "test_scaled_dot"
+    "test_atomic_cas"
+    "test_tensor_atomic_cas"
+    "test_tensor_atomic_rmw"
+    "test_ptx_cast"
+    "test_trans_4d"
+    "test_load_store_same_ptr" # takes >60 mins
+)
+
+# Build the -k expression: "not (pattern1 or pattern2 or ...)"
+K_EXPR="not ("
+for i in "${!EXCLUDE_PATTERNS[@]}"; do
+    if [ $i -gt 0 ]; then
+        K_EXPR="$K_EXPR or "
+    fi
+    K_EXPR="$K_EXPR${EXCLUDE_PATTERNS[$i]}"
+done
+K_EXPR="$K_EXPR)"
+
+echo "Running pytest with filter: $K_EXPR"
+
+pytest -n 36 \
+    -k "$K_EXPR" \
+    python/test/unit/language/test_core.py
