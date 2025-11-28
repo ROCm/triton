@@ -139,14 +139,23 @@ private:
     auto *combineOp = &op.getCombineOp();
     auto srcIndices = emitIndices(op.getLoc(), rewriter, targetInfo,
                                   helper.getSrcLayout(), operandType, true);
+
+    int elemPerGroup = 16;
     // reduce within threads
-    for (const auto &[_, i] : uniqueOffsets) {
+    //for (const auto &[_, i] : uniqueOffsets) {
+    for (int i = 0; i < uniqueOffsets.size()/2; i++) {
       SmallVector<unsigned> key = offsets[i];
+      SmallVector<unsigned> key1 = offsets[i + elemPerGroup];
       key[op.getAxis()] = 0;
+      key1[op.getAxis()] = 0;
       bool isFirst = accs.find(key) == accs.end();
+      bool isFirst1 = accs.find(key1) == accs.end();
       accumulate(op.getLoc(), rewriter, *combineOp, accs[key], srcValues[i]);
+      accumulate(op.getLoc(), rewriter, *combineOp, accs[key1], srcValues[i + elemPerGroup]);
       if (isFirst)
         indices[key] = srcIndices[i];
+      if (isFirst1)
+          indices[key1] = srcIndices[i + elemPerGroup];
     }
   }
 
