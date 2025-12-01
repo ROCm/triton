@@ -394,6 +394,7 @@ void fillTDMDescriptor(
   // Compute warp coordinates for each dimension
   SmallVector<Value> warpCoord(numDims);
   Value remainingId = warpId;
+
   for (size_t i = 0; i < numDims - 1; ++i) {
     warpCoord[i] = b.urem(remainingId, b.i32_val(warps[i]));
     remainingId = b.udiv(remainingId, b.i32_val(warps[i]));
