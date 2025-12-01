@@ -1,6 +1,6 @@
 
 
-# Setup Multithreaded MI450 FFM with Tritonn
+# Setup Multithreaded MI450 FFM with Triton
 
 **Workflow**: Linux Host Machine → MI450 FFM Docker Container → Triton through FFM Driver override
 
