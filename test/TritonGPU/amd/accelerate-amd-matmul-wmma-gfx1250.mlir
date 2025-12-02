@@ -194,3 +194,61 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked2 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked4 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+// CHECK{LITERAL}: #linear = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16]], lane = [[0, 32], [0, 64], [1, 0], [2, 0], [4, 0]], warp = [[8, 0], [16, 0]], block = []}>
+// CHECK-LABEL: wmma_dot_scaled_mxfp8_bf16
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_dot_scaled_mxfp8_bf16(
+      %arg0: tensor<32x128x!tt.ptr<f8E4M3FN>, #blocked4>,
+      %arg1: tensor<32x4x!tt.ptr<i8>, #blocked2>,
+      %arg2: tensor<128x32x!tt.ptr<bf16>, #blocked>,
+      %output: tensor<32x32x!tt.ptr<f32>, #blocked>
+      ) {
+    // CHECK: tt.load %arg1 {amdg.decomposed_dot_scaled_source = true} : tensor<32x4x!tt.ptr<i8>, #blocked1>
+    // CHECK: %[[SCALE:.*]] = tt.reshape {{.*}} : tensor<32x4x32xi8, #blocked3> -> tensor<32x128xi8, #linear>
+    // CHECK: amdg.scaled_upcast_fp8 {{.*}} scale %[[SCALE]] : tensor<32x128xf8E4M3FN, #blocked>, tensor<32x128xi8, #linear> -> tensor<32x128xbf16, #blocked>
+    // CHECK: = tt.dot
+    %a = tt.load %arg0 : tensor<32x128x!tt.ptr<f8E4M3FN>, #blocked4>
+    %scale = tt.load %arg1 : tensor<32x4x!tt.ptr<i8>, #blocked2>
+    %b = tt.load %arg2 : tensor<128x32x!tt.ptr<bf16>, #blocked>
+    %c = arith.constant dense<0.000000e+00> : tensor<32x32xf32, #blocked>
+    %res = tt.dot_scaled %a scale %scale, %b, %c lhs = e4m3 rhs = bf16 {fastMath = false} : tensor<32x128xf8E4M3FN, #blocked4>, tensor<32x4xi8, #blocked2> * tensor<128x32xbf16, #blocked> -> tensor<32x32xf32, #blocked>
+
+    tt.store %output, %res : tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked2 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#blocked4 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+// CHECK{LITERAL}: #linear = #ttg.linear<{register = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0]], lane = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16]], warp = [[32, 0], [64, 0]], block = []}>
+// CHECK-LABEL: wmma_dot_scaled_f16_mxfp8
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_dot_scaled_f16_mxfp8(
+      %arg0: tensor<32x128x!tt.ptr<f16>, #blocked4>,
+      %arg1: tensor<32x4x!tt.ptr<i8>, #blocked2>,
+      %arg2: tensor<128x32x!tt.ptr<f8E5M2>, #blocked>,
+      %output: tensor<32x32x!tt.ptr<f32>, #blocked>
+      ) {
+    // CHECK: %[[TRANS:.*]] = tt.trans {{.*}} {order = array<i32: 0, 2, 1>} : tensor<4x32x32xi8, #blocked4> -> tensor<4x32x32xi8, #blocked5>
+    // CHECK: %[[SCALE:.*]] = tt.reshape %[[TRANS]] : tensor<4x32x32xi8, #blocked5> -> tensor<128x32xi8, #linear>
+    // CHECK: amdg.scaled_upcast_fp8 {{.*}} scale %[[SCALE]] : tensor<128x32xf8E5M2, #blocked2>, tensor<128x32xi8, #linear> -> tensor<128x32xf16, #blocked2>
+    // CHECK: = tt.dot
+    %a = tt.load %arg0 : tensor<32x128x!tt.ptr<f16>, #blocked4>
+    %scale = tt.load %arg1 : tensor<32x4x!tt.ptr<i8>, #blocked2>
+    %b = tt.load %arg2 : tensor<128x32x!tt.ptr<f8E5M2>, #blocked>
+    %c = arith.constant dense<0.000000e+00> : tensor<32x32xf32, #blocked>
+    %res = tt.dot_scaled %a, %b scale %scale, %c lhs = fp16 rhs = e5m2 {fastMath = false} : tensor<32x128xf16, #blocked4> * tensor<128x32xf8E5M2, #blocked>,  tensor<32x4xi8, #blocked2> -> tensor<32x32xf32, #blocked>
+
+    tt.store %output, %res : tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}

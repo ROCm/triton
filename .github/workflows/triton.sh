@@ -41,7 +41,6 @@ EXCLUDE_PATTERNS=(
     "test_dot"
     "test_load_scope_sem_coop_grid_cta_one"
     "test_propagate_nan"
-    "test_scaled_dot"
     "test_atomic_cas"
     "test_tensor_atomic_cas"
     "test_tensor_atomic_rmw"
