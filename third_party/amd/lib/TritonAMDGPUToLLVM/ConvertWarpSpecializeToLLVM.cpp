@@ -52,15 +52,10 @@ static void createBarrier(TritonLLVMIRRewriter &b, unsigned barIdx,
   LLVM::GlobalOp nbarGV;
   Operation *nbarGlobalOp = SymbolTable::lookupSymbolIn(moduleOp, nbarAttr);
   if (!nbarGlobalOp) {
-    // TODO: Workaround: Use an array of size 1 to bypass "target extension type
-    // cannot be used in a global" error. When LLVM is bumped to include the
-    // following PR: https://github.com/llvm/llvm-project/pull/169194 we can
-    // remove it.
-    auto globalTy = LLVM::LLVMArrayType::get(nbarTy, 1);
     RewriterBase::InsertionGuard guard(b);
     Location uloc = UnknownLoc::get(ctx);
     b.setInsertionPointToStart(moduleOp.getBody());
-    nbarGV = LLVM::GlobalOp::create(b, uloc, globalTy,
+    nbarGV = LLVM::GlobalOp::create(b, uloc, nbarTy,
                                     /*isConstant=*/false,
                                     LLVM::Linkage::Internal, namedBarrierName,
                                     /*value=*/Attribute(), /*alignment=*/0,
@@ -68,7 +63,7 @@ static void createBarrier(TritonLLVMIRRewriter &b, unsigned barIdx,
     // Add initializer region that returns 'poison'
     Block *initBlock = b.createBlock(&nbarGV.getInitializerRegion());
     b.setInsertionPointToStart(initBlock);
-    Value poison = LLVM::PoisonOp::create(b, uloc, globalTy);
+    Value poison = LLVM::PoisonOp::create(b, uloc, nbarTy);
     LLVM::ReturnOp::create(b, uloc, poison);
   } else {
     nbarGV = cast<LLVM::GlobalOp>(*nbarGlobalOp);
