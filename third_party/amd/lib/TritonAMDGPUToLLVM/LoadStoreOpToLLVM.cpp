@@ -865,7 +865,7 @@ struct BufferLoadToLocalOpConversion
       // dimensions.
       auto flatSharedEnc = SwizzledSharedEncodingAttr::get(
           op->getContext(), maybeSwizzledEnc.getVec(), 1, 1,
-          maybeSwizzledEnc.getOrder(), maybeSwizzledEnc.getCTALayout());
+          maybeSwizzledEnc.getOrder(), maybeSwizzledEnc.getCGALayout());
       flatDstTy = MemDescType::get(dstTy.getShape(), dstTy.getElementType(),
                                    flatSharedEnc, dstTy.getMemorySpace());
       swizzledLaneOffsets = emitSwizzledLaneOffsets(
@@ -1011,7 +1011,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     if (requiresSrcPtrSwizzling) {
       auto flatSharedEnc = SwizzledSharedEncodingAttr::get(
           op->getContext(), maybeSwizzledEnc.getVec(), 1, 1,
-          maybeSwizzledEnc.getOrder(), maybeSwizzledEnc.getCTALayout());
+          maybeSwizzledEnc.getOrder(), maybeSwizzledEnc.getCGALayout());
       flatDstTy = MemDescType::get(dstTy.getShape(), dstTy.getElementType(),
                                    flatSharedEnc, dstTy.getMemorySpace());
       swizzledLaneOffsets = emitSwizzledLaneOffsets(
@@ -1740,7 +1740,7 @@ struct AtomicCASOpConversion
             failureOrdering, StringRef(scopeStr.value()));
 
         // Extract the new_loaded value from the pair.
-        Value ret = b.extract_val(valueElemTy, cmpxchg, i);
+        Value ret = b.extract_val(valueElemTy, cmpxchg, 0);
         resultVals[i] = ret;
       } else { // for scalar
         // Build blocks to bypass the atomic instruction for ~rmwMask.
@@ -1782,9 +1782,10 @@ struct AtomicCASOpConversion
           return success();
         }
 
-        GCNBuilder BuilderMemfenceLDS;
-        BuilderMemfenceLDS.create("s_waitcnt lgkmcnt(0)")->operator()();
-        BuilderMemfenceLDS.launch(rewriter, loc, void_ty(ctx));
+        auto dsCount = rewriter.getI32IntegerAttr(0);
+        amdgpu::MemoryCounterWaitOp::create(rewriter, op->getLoc(),
+                                            /*load=*/nullptr, /*store=*/nullptr,
+                                            /*ds=*/dsCount);
         b.barrier();
         Value atomPtr =
             getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
@@ -2148,7 +2149,7 @@ struct TDMGlobalPrefetchConversion
     auto waveId = getLaneAndWarpId(rewriter, loc).second;
     auto encoding =
         cast<PaddedSharedEncodingAttr>(op.getResult().getType().getEncoding())
-            .getCTALayout();
+            .getCGALayout();
 
     auto mod = op->getParentOfType<ModuleOp>();
     int numCTAs = TritonGPUDialect::getNumCTAs(mod);

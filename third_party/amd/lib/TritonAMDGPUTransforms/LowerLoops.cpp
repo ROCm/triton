@@ -2,7 +2,7 @@
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
-#include "triton/Dialect/TritonGPU/IR/CTAEncodingAttr.h"
+#include "triton/Dialect/TritonGPU/IR/CGAEncodingAttr.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/Support/Debug.h"
@@ -188,7 +188,7 @@ getDotEncodingWmma(Value inputValue, unsigned *opIdx, unsigned *vecSize) {
 static triton::gpu::PaddedSharedEncodingAttr
 getPaddedEncoding(mlir::MLIRContext *context, int opIdx,
                   ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
-                  triton::gpu::CTAEncodingAttr CTALayout,
+                  triton::gpu::CGAEncodingAttr CGALayout,
                   unsigned typeWidthInBit) {
   // This is the padding strategy for TDM. We need to know here if this is going
   // to be transposed or not. I think NVIDIA has this exposed in the IR, but we
@@ -197,7 +197,7 @@ getPaddedEncoding(mlir::MLIRContext *context, int opIdx,
   const int bankBitWidth = 32;
   const int numBanks = 64;
   auto blockShapePerCTA =
-      triton::gpu::getShapePerCTA(CTALayout.getCTASplitNum(), shape);
+      triton::gpu::getShapePerCTA(CGALayout.getCTASplitNum(), shape);
   int innerDimLength = blockShapePerCTA[order[0]];
   unsigned maxVecSize = 128 / typeWidthInBit;
   // unsigned vecSize = std::min(maxVecSize, kWidth);
@@ -209,7 +209,7 @@ getPaddedEncoding(mlir::MLIRContext *context, int opIdx,
   // This is the row we are reading from
   unsigned padInterval = innerDimLength;
   return triton::gpu::PaddedSharedEncodingAttr::get(
-      context, {{padInterval, padAmount}}, order, shape, CTALayout);
+      context, {{padInterval, padAmount}}, order, shape, CGALayout);
 }
 
 // Adapted from
@@ -249,7 +249,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         return std::nullopt;
 
       auto srcTy = cast<ttg::TensorOrMemDesc>(loadedValue.getType());
-      auto ctaLayout = ttg::getCTALayout(srcTy.getEncoding());
+      auto cgaLayout = ttg::getCGALayout(srcTy.getEncoding());
       auto order = getOrderForMemory(srcTy);
       unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
       SmallVector<unsigned> sharedOrder;
@@ -271,7 +271,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
         tempAttr = ttg::SwizzledSharedEncodingAttr::get(
             loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-            ctaLayout, bitWidth, /*needTrans=*/false);
+            cgaLayout, bitWidth, /*needTrans=*/false);
         LDBG("Deduced shared encoding candidate from dot layout: " << tempAttr);
         sharedEncs.push_back(tempAttr);
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
@@ -283,7 +283,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         if (auto mfmaEnc = getDotEncodingMfma(userResult, &opIdx, &vecSize)) {
           LDBG("deduced opIdx: " << opIdx << "; deduced vecSize: " << vecSize);
           tempAttr = mfmaEnc.composeSharedLayoutForOperand(
-              ctaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
+              cgaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
               /*needTrans=*/false);
           LDBG("Deduced shared encoding candidate from mfma layout: "
                << tempAttr);
@@ -292,7 +292,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
                        getDotEncodingWmma(userResult, &opIdx, &vecSize)) {
           LDBG("deduced opIdx: " << opIdx << "; deduced vecSize: " << vecSize);
           tempAttr = dotEnc.composeSharedLayoutForOperand(
-              ctaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
+              cgaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
               /*needTrans=*/false);
           LDBG("Deduced shared encoding candidate from wmma layout: "
                << tempAttr);
@@ -309,7 +309,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
     return (a.getPerPhase() == b.getPerPhase() &&
             a.getMaxPhase() == b.getMaxPhase() &&
             a.getOrder() == b.getOrder() &&
-            a.getCTALayout() == b.getCTALayout());
+            a.getCGALayout() == b.getCGALayout());
   };
   if (sharedEncs.empty() || !sharedEncs.front())
     return std::nullopt;
@@ -367,7 +367,7 @@ getSharedEncIfAllUsersAreDotEncPadded(Value loadedValue) {
         return std::nullopt;
 
       auto srcTy = cast<ttg::TensorOrMemDesc>(loadedValue.getType());
-      auto ctaLayout = ttg::getCTALayout(srcTy.getEncoding());
+      auto cgaLayout = ttg::getCGALayout(srcTy.getEncoding());
       auto order = getOrderForMemory(srcTy);
       unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
       SmallVector<unsigned> sharedOrder;
@@ -390,7 +390,7 @@ getSharedEncIfAllUsersAreDotEncPadded(Value loadedValue) {
         // For async descriptor loads, enable padding.
         tempAttr = getPaddedEncoding(loadedValue.getContext(),
                                      dotOpEnc.getOpIdx(), srcTy.getShape(),
-                                     sharedOrder, ctaLayout, bitWidth);
+                                     sharedOrder, cgaLayout, bitWidth);
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
         // We use linear layout directly for scaled dot fp8 operands. For such
         // cases, we need to look further down the def-use chain to find the dot
@@ -400,7 +400,7 @@ getSharedEncIfAllUsersAreDotEncPadded(Value loadedValue) {
         if (auto dotEnc = getDotEncodingWmma(userResult, &opIdx, &vecSize)) {
           tempAttr =
               getPaddedEncoding(loadedValue.getContext(), opIdx,
-                                srcTy.getShape(), order, ctaLayout, bitWidth);
+                                srcTy.getShape(), order, cgaLayout, bitWidth);
         }
       }
     }

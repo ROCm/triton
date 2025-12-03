@@ -53,11 +53,11 @@ public:
       order = llvm::to_vector(blockedLayout.getOrder());
     }
 
-    auto ctaLayout = getCTALayout(tensorType.getEncoding());
+    auto cgaLayout = getCGALayout(tensorType.getEncoding());
     // At this point, we don't have any information about how this load is used.
     // Hence, we cannot set padding information
     Attribute encoding = SwizzledSharedEncodingAttr::get(
-        tensorType.getContext(), 1, 1, 1, order, ctaLayout);
+        tensorType.getContext(), 1, 1, 1, order, cgaLayout);
 
     // given this descriptor and the encoding, the framework should be able to
     // compute the LDS size.
@@ -67,7 +67,7 @@ public:
     Value alloc = LocalAllocOp::create(rewriter, loc, memDescType);
     Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
     // amdgpu::GlobalTDMPrefetch::create(rewriter,
-    //     loc, op.getDesc(), op.getIndices(), pred, waveId, ctaLayout);
+    //     loc, op.getDesc(), op.getIndices(), pred, waveId, cgaLayout);
     amdgpu::AsyncTDMCopyGlobalToLocalOp::create(rewriter, loc, op.getDesc(),
                                                 op.getIndices(), alloc, pred);
     amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
