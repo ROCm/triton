@@ -64,3 +64,6 @@ echo "Running pytest with filter: $K_EXPR"
 pytest -n 36 \
     -k "$K_EXPR" \
     python/test/unit/language/test_core.py
+
+pytest -n 36 \
+    python/test/unit/language/test_matmul.py
