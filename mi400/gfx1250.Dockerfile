@@ -22,13 +22,13 @@
 # docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
 #   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
 #   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
+#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=744
 
 # Build docker with NPI ROCm + roccap:
 # docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
 #   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
 #   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
+#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=744
 FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
@@ -59,23 +59,30 @@ ARG USE_NPI_TORCH=FALSE
 # Pick ROCm build number and it must match PyTorch NPI build
 # To get the build numbers, go to: http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/
 # and pick the desired build
-ARG ROCM_BUILD_NUMBER=710
+ARG ROCM_BUILD_NUMBER=744
+
 # We try to automatically get AMDGPU_BUILD_NUMBER in the following with curl.
 # If running into errors, you can manually specify AMDGPU_BUILD_NUMBER by
 # getting it with your browser.
+ARG AMDGPU_BUILD_NUMBER=0
+RUN set -eux; \
+    if [ "$AMDGPU_BUILD_NUMBER" = "0" ]; then \
+        AMDGPU_BUILD_NUMBER=$(curl -s http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/ | grep -oP 'Mesa UMD Build Number:\K\d+'); \
+    fi; \
+    echo "Using ROCm Build Number: ${ROCM_BUILD_NUMBER}"; \
+    echo "Using AMDGPU Build Number: ${AMDGPU_BUILD_NUMBER}"; \
+    echo "${AMDGPU_BUILD_NUMBER}" > /tmp/amdgpu_build_number
 
-RUN \
+RUN set -eux; \
   if [ "${USE_NPI_ROCM}" = "TRUE" ]; then \
-    AMDGPU_BUILD_NUMBER=$(curl -s http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/ | grep -oP 'Mesa UMD Build Number:\K\d+') && \
-    echo "Using ROCm Build Number: ${ROCM_BUILD_NUMBER}" && \
-    echo "Using AMDGPU Build Number: ${AMDGPU_BUILD_NUMBER}" && \
-    wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.2-24.04-1_all.deb && \
-    sudo apt-get install ./amdgpu-install-internal_7.2-24.04-1_all.deb && \
+    AMDGPU_BUILD_NUMBER=$(cat /tmp/amdgpu_build_number); \
+    wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.3-24.04-1_all.deb && \
+    sudo apt-get install ./amdgpu-install-internal_7.3-24.04-1_all.deb && \
     amdgpu-repo --amdgpu-build=${AMDGPU_BUILD_NUMBER} --rocm-build=compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER} && \
     amdgpu-install -y --usecase=rocm; \
   fi
 
-RUN \
+RUN set -eux; \
   if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
     URL_BASE=https://compute-artifactory.amd.com/artifactory/compute-pytorch-rocm/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/mi450 && \
     echo "Fetching wheels from ${URL_BASE}" && \
@@ -146,7 +153,7 @@ WORKDIR /home/${DOCKER_USERNAME}
 ARG USE_ROCCAP=FALSE
 ARG ROCPLAYCAP_VERSION="4.5.1"
 
-RUN \
+RUN set -eux; \
   if [ "${USE_ROCCAP}" = "TRUE" ]; then \
     wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/releases/rocplaycap-${ROCPLAYCAP_VERSION}/rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     tar -xf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
