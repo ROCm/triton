@@ -42,8 +42,6 @@ EXCLUDE_PATTERNS=(
     "test_load_scope_sem_coop_grid_cta_one"
     "test_propagate_nan"
     "test_atomic_cas"
-    "test_tensor_atomic_cas"
-    "test_tensor_atomic_rmw"
     "test_ptx_cast"
     "test_trans_4d"
     "test_load_store_same_ptr" # takes >60 mins
