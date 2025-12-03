@@ -49,7 +49,8 @@ AQLPLAY({},
     return aqlplay_file
 
 
-def generate_group_file(names: list[str], group_name: str, enable_itrace: bool = False, enable_ttrace: bool = False):
+def generate_group_file(names: list[str], num_xcc: int, group_name: str, enable_itrace: bool = False,
+                        enable_ttrace: bool = False):
     pm4p2_args = [
         "make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k",  #
         "gfx11_pktplay_base_settings",  #
@@ -65,9 +66,17 @@ def generate_group_file(names: list[str], group_name: str, enable_itrace: bool =
         "make_mi400_1XCC_umc_const_delay_rd_320_wr_64_capped_hbm4_2p5kw_bw"
     ]
 
+    if num_xcc == 8:
+        pm4p2_args[0] = "make_mi400_16cu_2se_8xcc_8cp_cu_cache_l0_64k_lds_320k"
+        pm4p2_args[-1] = "make_mi400_8XCC_umc_const_delay_rd_320_wr_64_capped_hbm4_2p5kw_bw"
+
+    test_args = ["-use_kmd=1", "-tc_BindAqlProcess=1", "-tc_EnableHIQ=0", "-tc_LoadMesUCode=1"]
+    if num_xcc == 8:
+        test_args = ["-tg_chunksize=1", "-num_xcds=8"] + test_args
+
     args = [
         "--model=tb_am_rs64_fw",
-        '--test-args "-use_kmd=1 -tc_BindAqlProcess=1  -tc_EnableHIQ=0 -tc_LoadMesUCode=1"',
+        f'--test-args "{" ".join(test_args)}"',
         f'--pm4p2-args-end="{" ".join(pm4p2_args)}"',
     ]
     if enable_itrace:
@@ -87,7 +96,7 @@ def main(args):
     if len(args.output_dir) > 0:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    group_file = generate_group_file(args.names, args.group_name, args.enable_itrace, args.enable_ttrace)
+    group_file = generate_group_file(args.names, args.num_xcc, args.group_name, args.enable_itrace, args.enable_ttrace)
     aqlplay_file = generate_aqlplay(args.names, args.capfile_root)
 
     with open(os.path.join(args.output_dir, 'group_file.txt'), 'w', encoding='utf-8', newline='\n') as f:
@@ -113,5 +122,6 @@ if __name__ == '__main__':
                         help='Root directory on ETX keeping the cap files, e.g. /proj/triton_regr/TRITON/MXFP_FA')
     parser.add_argument('-it', '--enable_itrace', action='store_true', help='Enable itrace or not')
     parser.add_argument('-tt', '--enable_ttrace', action='store_true', help='Enable ttrace or not')
+    parser.add_argument('--num_xcc', type=int, choices=[1, 8], help='Number of XCCs')
     args = parser.parse_args()
     main(args)

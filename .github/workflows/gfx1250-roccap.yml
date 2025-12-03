@@ -34,6 +34,11 @@ on:
         required: false
         default: 'CU_Tile_GEMM'
         type: string
+      numXCCs:
+        description: 'Number of XCCS(1 or 8)'
+        required: true
+        default: 1
+        type: number
       cmd:
         description: 'Command'
         required: true
@@ -82,6 +87,7 @@ jobs:
             -e ROCCAP_KERNEL_REGEX="${ROCCAP_KERNEL_REGEX}" \
             -e ROCCAP_DISPATCH_NUM=${ROCCAP_DISPATCH_NUM} \
             -e ROCCAP_GROUP_NAME=${ROCCAP_GROUP_NAME} \
+            -e ROCCAP_NUM_XCC=${ROCCAP_NUM_XCC} \
             -w /code \
             --entrypoint bash \
             ci/gfx1250-roccap -lc "/code/.github/workflows/roccap.sh ${ROCCAP_CMD}"
@@ -94,6 +100,7 @@ jobs:
           ROCCAP_KERNEL_REGEX: ${{ inputs.kernelRegex }}
           ROCCAP_DISPATCH_NUM: ${{ inputs.dispatchNum }}
           ROCCAP_GROUP_NAME: ${{ inputs.groupName }}
+          ROCCAP_NUM_XCC: ${{ inputs.numXCCs }}
           ROCCAP_CMD: ${{ inputs.cmd }}
       - name: Upload artifact
         uses: actions/upload-artifact@v3

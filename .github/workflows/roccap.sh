@@ -35,6 +35,8 @@ which roccap
 
 echo "=== Invoke roccap ==="
 
+env | grep "ROCCAP_"
+
 GIT_SHA="$(git rev-parse HEAD)"
 SCRIPT_PATH="$(realpath $0)"
 
@@ -53,10 +55,14 @@ export HSA_MODEL_NUM_THREADS=16
 cd /code/
 rm -rf *.cap
 
+export TRITON_KERNEL_DUMP=1
+export TRITON_DUMP_DIR="/roccap/"
+
 CAP_DISPATCH="${ROCCAP_KERNEL_REGEX}/${ROCCAP_DISPATCH_NUM}"
 roccap capture --loglevel trace --disp "${CAP_DISPATCH}" --file "${ROCCAP_NAME}.cap" "$@"
 
 mv *.cap /roccap/
+mv roc_capture.log /roccap/
 
 find . -name "*.cap" -exec roccap play {} \;
 
@@ -68,6 +74,7 @@ gen_am_cmd=(
   -n ${ROCCAP_NAME}
   -r ${ROCCAP_CAPFILE_ROOT}
   -g ${ROCCAP_GROUP_NAME}
+  --num_xcc ${ROCCAP_NUM_XCC}
 )
 
 if $ROCCAP_ENABLE_ITRACE; then
