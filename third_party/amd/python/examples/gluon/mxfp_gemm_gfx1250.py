@@ -216,22 +216,33 @@ def create_tensor_descriptor(cfg: MXFPGEMMConfig, a_ptr, a_offs, b_ptr, b_offs, 
 
 @gluon.jit
 def issue_loads(cfg: MXFPGEMMConfig, load_idx, a_desc, b_desc, a_scale_desc, b_scale_desc, a_buffer, b_buffer,
-                a_scale_buffer, b_scale_buffer):
+                a_scale_buffer, b_scale_buffer, pred=True):
     BLOCK_K_PACKED_A: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_A
     BLOCK_K_PACKED_B: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_B
 
-    gl.amd.gfx1250.tdm.async_load(a_desc, [0, load_idx * BLOCK_K_PACKED_A], a_buffer.index(load_idx % cfg.NUM_BUFFERS))
+    gl.amd.gfx1250.tdm.async_load(a_desc,  #
+                                  [0, load_idx * BLOCK_K_PACKED_A],  #
+                                  a_buffer.index(load_idx % cfg.NUM_BUFFERS),  #
+                                  pred=pred)
     if cfg.TRANSPOSE_B:
-        gl.amd.gfx1250.tdm.async_load(b_desc, [0, load_idx * BLOCK_K_PACKED_B],
-                                      b_buffer.index(load_idx % cfg.NUM_BUFFERS))
+        gl.amd.gfx1250.tdm.async_load(b_desc,  #
+                                      [0, load_idx * BLOCK_K_PACKED_B],  #
+                                      b_buffer.index(load_idx % cfg.NUM_BUFFERS),  #
+                                      pred=pred)
     else:
-        gl.amd.gfx1250.tdm.async_load(b_desc, [load_idx * BLOCK_K_PACKED_B, 0],
-                                      b_buffer.index(load_idx % cfg.NUM_BUFFERS))
+        gl.amd.gfx1250.tdm.async_load(b_desc,  #
+                                      [load_idx * BLOCK_K_PACKED_B, 0],  #
+                                      b_buffer.index(load_idx % cfg.NUM_BUFFERS),  #
+                                      pred=pred)
     if cfg.WITH_A_SCALE:
-        gl.amd.gfx1250.tdm.async_load(a_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED],
-                                      a_scale_buffer.index(load_idx % cfg.NUM_BUFFERS))
-    gl.amd.gfx1250.tdm.async_load(b_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED],
-                                  b_scale_buffer.index(load_idx % cfg.NUM_BUFFERS))
+        gl.amd.gfx1250.tdm.async_load(a_scale_desc,  #
+                                      [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED],  #
+                                      a_scale_buffer.index(load_idx % cfg.NUM_BUFFERS),  #
+                                      pred=pred)
+    gl.amd.gfx1250.tdm.async_load(b_scale_desc,  #
+                                  [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED],  #
+                                  b_scale_buffer.index(load_idx % cfg.NUM_BUFFERS),  #
+                                  pred=pred)
 
 
 @gluon.jit
@@ -317,21 +328,16 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
         load_idx += 1
 
     accumulator = gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=cfg.acc_layout)
-    for _ in range(0, gl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
+    loop_ub = gl.cdiv(K, BLOCK_K)
+    epilogue_lb = loop_ub - (NUM_BUFFERS - 1)
+    for i in range(0, loop_ub):
         issue_loads(cfg, load_idx, a_desc, b_desc, a_scale_desc, b_scale_desc, a_buffer, b_buffer, a_scale_buffer,
-                    b_scale_buffer)
+                    b_scale_buffer, pred=(i < epilogue_lb))
 
         load_idx += 1
 
         gl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 1) * cfg.NUM_LOADS_IN_BATCH)
 
-        a, b, scale_a, scale_b = issue_local_loads(cfg, wmma_idx, a_buffer, b_buffer, a_scale_buffer, b_scale_buffer)
-        accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator)
-        wmma_idx += 1
-
-    # epilogue
-    for i in gl.static_range(NUM_BUFFERS - 1):
-        gl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2 - i) * cfg.NUM_LOADS_IN_BATCH)
         a, b, scale_a, scale_b = issue_local_loads(cfg, wmma_idx, a_buffer, b_buffer, a_scale_buffer, b_scale_buffer)
         accumulator = gl.amd.gfx1250.wmma_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator)
         wmma_idx += 1
