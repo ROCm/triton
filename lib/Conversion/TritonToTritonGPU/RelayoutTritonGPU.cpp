@@ -34,14 +34,20 @@ struct TMEMLoadOpPattern : public OpConversionPattern<ttng::TMEMLoadOp> {
   LogicalResult
   matchAndRewrite(ttng::TMEMLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    Type resultType = getTypeConverter()->convertType(op.getType());
     RankedTensorType type = getTMEMTensorLayout(
         typeConverter, op.getType(), op.getSrc().getType(), lookupNumWarps(op));
     rewriter.modifyOpInPlace(op, [&] { op.getResult().setType(type); });
-    Type resultType = getTypeConverter()->convertType(op.getType());
+    if (type == resultType)
+      return success();
+
     rewriter.setInsertionPointAfter(op);
     auto cvt = ConvertLayoutOp::create(rewriter, op.getLoc(), resultType,
                                        op.getResult());
-    rewriter.replaceAllUsesExcept(op.getResult(), cvt, cvt);
+    // Bypass the rewriter to avoid issues with the conversion framework's
+    // tracking of conditional replacements.
+    // See https://github.com/llvm/llvm-project/commit/504b50789602
+    op.getResult().replaceAllUsesExcept(cvt, cvt);
     return success();
   }
 };
