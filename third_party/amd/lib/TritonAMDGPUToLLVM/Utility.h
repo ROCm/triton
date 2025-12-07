@@ -240,31 +240,41 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
 */
 
 template <typename ConvertOp>
-SmallVector<Value, 8> upcast8xMxfp8_HW(RewriterBase &rewriter, Location loc,
-                                       ArrayRef<Value> inputVals, int idx,
-                                       ArrayRef<Value> scales, Type elemType) {
-
+SmallVector<Value, 8> upcast8xMxfp8fp4_HW(RewriterBase &rewriter, Location loc,
+                                          ArrayRef<Value> inputVals, int idx,
+                                          ArrayRef<Value> scales) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  Value packedVec = b.undef(vec_ty(i8_ty, 8));
-  for (int ii : llvm::seq(8))
+  bool toFp16 = (std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8F16Fp8Op> ||
+                 std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8F16Bf8Op> ||
+                 std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8F16Fp4Op>);
+  Type resElemType = toFp16 ? f16_ty : bf16_ty;
+  Type resType = vec_ty(resElemType, 8);
+
+  bool fromFP4 = (std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8F16Fp4Op> ||
+                  std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8Bf16Fp4Op>);
+
+  auto packedSize = fromFP4 ? 4 : 8;
+  Value packedVec = b.undef(vec_ty(i8_ty, packedSize));
+  for (int ii : llvm::seq(packedSize))
     packedVec = b.insert_element(packedVec, inputVals[idx + ii], b.i32_val(ii));
-  packedVec = b.bitcast(packedVec, vec_ty(i32_ty, 2));
-  Type retElemType = elemType.isF16() ? f16_ty : bf16_ty;
-  Type resType = vec_ty(retElemType, 8);
+  packedVec =
+      fromFP4 ? b.bitcast(packedVec, i32_ty)
+              : b.bitcast(packedVec, vec_ty(i32_ty, packedSize / sizeof(int)));
 
   Value packedScale = b.undef(vec_ty(i8_ty, 4));
+  auto scaleIdx = fromFP4 ? (idx + idx) : idx;
   for (int ii : llvm::seq(4))
-    packedScale = b.insert_element(packedScale, scales[idx], b.i32_val(ii));
+    packedScale =
+        b.insert_element(packedScale, scales[scaleIdx], b.i32_val(ii));
   Value scaleInt32 = b.bitcast(packedScale, i32_ty);
   auto res = ConvertOp::create(rewriter, loc, resType, packedVec, scaleInt32,
                                /*opSel*/ 0)
                  .getRes();
+  Value elements = b.bitcast(res, vec_ty(resElemType, 8));
 
-  Value elements = b.bitcast(res, vec_ty(elemType, 8));
   SmallVector<Value, 8> results;
-
-  for (int ii = 0; ii < 8; ii++) {
+  for (auto ii : llvm::seq(8)) {
     results.push_back(b.extract_element(elements, b.i32_val(ii)));
   }
 

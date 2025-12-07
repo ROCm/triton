@@ -10,13 +10,17 @@ using namespace mlir;
 using namespace mlir::triton;
 using mlir::LLVM::AMD::upcast4xMxfp8_HW;
 using mlir::LLVM::AMD::upcast8xMxfp4_HW;
-using mlir::LLVM::AMD::upcast8xMxfp8_HW;
+using mlir::LLVM::AMD::upcast8xMxfp8fp4_HW;
 
 // TODO: using if-then-else to repalce ternary operator on template
 namespace {
 struct ScaledUpcastFp4OpPattern
     : ConvertOpToLLVMPattern<amdgpu::ScaledUpcastFp4Op> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  ScaledUpcastFp4OpPattern(const LLVMTypeConverter &converter,
+                           const AMD::TargetInfo &targetInfo,
+                           PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
 
   LogicalResult
   matchAndRewrite(amdgpu::ScaledUpcastFp4Op upcastOp, OpAdaptor adaptor,
@@ -32,18 +36,34 @@ struct ScaledUpcastFp4OpPattern
     results.reserve(inputVals.size() * 2);
 
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    for (int i = 0; i < inputVals.size(); i += 4) {
-      SmallVector<Value, 4> v4i32 =
-          elemType.isF16() ? upcast8xMxfp4_HW<ROCDL::CvtScaleF32PkF16Fp4Op>(
-                                 rewriter, loc, inputVals, i, scaleVals[i * 2],
-                                 /*useShiftedScale=*/true)
-                           : upcast8xMxfp4_HW<ROCDL::CvtScaleF32PkBf16Fp4Op>(
-                                 rewriter, loc, inputVals, i, scaleVals[i * 2],
-                                 /*useShiftedScale=*/true);
-      for (int j = 0; j < 4; j++) {
-        Value elements = b.bitcast(v4i32[j], vec_ty(elemType, 2));
-        results.push_back(b.extract_element(elements, b.i32_val(0)));
-        results.push_back(b.extract_element(elements, b.i32_val(1)));
+    if (targetInfo.getISAFamily() == AMD::ISAFamily::GFX1250) {
+      assert(scaleVals.size() == 2 * inputVals.size());
+      for (int i = 0; i < inputVals.size(); i += 4) {
+
+        const auto &converted =
+            elemType.isF16()
+                ? upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8F16Fp4Op>(
+                      rewriter, loc, inputVals, i, scaleVals)
+                : upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8Bf16Fp4Op>(
+                      rewriter, loc, inputVals, i, scaleVals);
+
+        results.append(converted.begin(), converted.end());
+      }
+    } else {
+      for (int i = 0; i < inputVals.size(); i += 4) {
+        SmallVector<Value, 4> v4i32 =
+            elemType.isF16()
+                ? upcast8xMxfp4_HW<ROCDL::CvtScaleF32PkF16Fp4Op>(
+                      rewriter, loc, inputVals, i, scaleVals[i * 2],
+                      /*useShiftedScale=*/true)
+                : upcast8xMxfp4_HW<ROCDL::CvtScaleF32PkBf16Fp4Op>(
+                      rewriter, loc, inputVals, i, scaleVals[i * 2],
+                      /*useShiftedScale=*/true);
+        for (int j = 0; j < 4; j++) {
+          Value elements = b.bitcast(v4i32[j], vec_ty(elemType, 2));
+          results.push_back(b.extract_element(elements, b.i32_val(0)));
+          results.push_back(b.extract_element(elements, b.i32_val(1)));
+        }
       }
     }
 
@@ -52,6 +72,8 @@ struct ScaledUpcastFp4OpPattern
     rewriter.replaceOp(upcastOp, result);
     return success();
   }
+
+  const AMD::TargetInfo &targetInfo;
 };
 
 struct ScaledUpcastFp8OpPattern
@@ -84,15 +106,15 @@ struct ScaledUpcastFp8OpPattern
         const auto &converted =
             elemType.isF16()
                 ? (isa<Float8E4M3FNType>(fp8ElemType)
-                       ? upcast8xMxfp8_HW<ROCDL::CvtPkScalePk8F16Fp8Op>(
-                             rewriter, loc, inputVals, i, scaleVals, elemType)
-                       : upcast8xMxfp8_HW<ROCDL::CvtPkScalePk8F16Bf8Op>(
-                             rewriter, loc, inputVals, i, scaleVals, elemType))
+                       ? upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8F16Fp8Op>(
+                             rewriter, loc, inputVals, i, scaleVals)
+                       : upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8F16Bf8Op>(
+                             rewriter, loc, inputVals, i, scaleVals))
                 : (isa<Float8E4M3FNType>(fp8ElemType)
-                       ? upcast8xMxfp8_HW<ROCDL::CvtPkScalePk8Bf16Fp8Op>(
-                             rewriter, loc, inputVals, i, scaleVals, elemType)
-                       : upcast8xMxfp8_HW<ROCDL::CvtPkScalePk8Bf16Bf8Op>(
-                             rewriter, loc, inputVals, i, scaleVals, elemType));
+                       ? upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8Bf16Fp8Op>(
+                             rewriter, loc, inputVals, i, scaleVals)
+                       : upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8Bf16Bf8Op>(
+                             rewriter, loc, inputVals, i, scaleVals));
 
         results.append(converted.begin(), converted.end());
       }
@@ -137,6 +159,6 @@ struct ScaledUpcastFp8OpPattern
 void mlir::triton::AMD::populateScaledUpcastOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const AMD::TargetInfo &targetInfo, PatternBenefit benefit) {
-  patterns.add<ScaledUpcastFp4OpPattern>(typeConverter, benefit);
+  patterns.add<ScaledUpcastFp4OpPattern>(typeConverter, targetInfo, benefit);
   patterns.add<ScaledUpcastFp8OpPattern>(typeConverter, targetInfo, benefit);
 }

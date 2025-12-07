@@ -1022,6 +1022,12 @@ public:
 
       reshapeScale = broadcastScale(
           rewriter, dotOp, dotOp->getParentOfType<ModuleOp>(), scale, kDim);
+
+      auto newScaleType = RankedTensorType::get(
+          cast<RankedTensorType>(reshapeScale.getType()).getShape(),
+          scale.getType().getElementType(), vType.getEncoding());
+      reshapeScale = mlir::triton::gpu::ConvertLayoutOp::create(
+          rewriter, loc, newScaleType, reshapeScale);
     }
 
     // 4) Upcast with scale
