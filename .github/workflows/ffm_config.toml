@@ -2,6 +2,7 @@
 # this will also dump WMMA matrix data to itrace file for MIs
 [ffm_itrace_all_threads]
 dona.component.jitcu_itrace.all_lanes=true
+ffm_enable_itrace = true
 
 # FFM runs waves serially within a workgroup which causes waves to FFM-yield after signaling on a barrier or semaphore
 # this allows other waves receiving the signal to run, simulating concurrently running waves
@@ -9,15 +10,22 @@ dona.component.jitcu_itrace.all_lanes=true
 [ffm_debug_sync_signals]
 dona.component.shader_complex.debug_barier_semaphore=true
 
-# dump WMMA matrix data to itrace for MIs
+# dump WMMA matrix data to itrace
 # itrace must be enabled, good alternative to ffm_itrace_all_threads for debugging
 [ffm_itrace_dump_matrix]
 dona.component.jitcu_itrace.dump_matrix=true
+ffm_enable_itrace = true
+
+# dump decoded rsrc descriptors (where supported)
+# itrace must be enabled
+[ffm_itrace_dump_rsrc_desc]
+dona.component.jitcu_itrace.dump_rsrc_desc=true
 
 # limits itrace dumps to only VMEM instructions
 # itrace must be enabled
 [ffm_itrace_vmem_only]
 dona.component.jitcu_itrace.vmem_only=true
+ffm_enable_itrace = true
 
 # use fast float implementations instead of the ones in Math Engine
 # JIT-able and typically much faster but is not guaranteed to be bit accurate
@@ -35,6 +43,8 @@ dona.component.shader_complex.use_jit=true
 # useful for synchronisation app debug
 [ffm_exec_order_random]
 dona.component.shader_complex.exec_order=2
+# Uncomment out the line below to use a specific random seed
+#dona.component.shader_complex.random_seed=962665528
 
 # waves run round-robin, serially within a workgroup in-order of wave ID by default
 # this option changes the execution order to decreasing wave execution order
@@ -62,13 +72,34 @@ dona.component.jitcu.enable_time_slicing=true
 # only dump itrace for this wave, set to specified debug ID, in hex
 [ffm_itrace_wave_id_filter]
 dona.component.jitcu_itrace.wave_id=0x1
+ffm_enable_itrace = true
 
 # if set, sgprs, vpgrs and mregs are initialized to a known value. And error message is printed to itrace when trying
 # to read from an uninitialized gpr
 [ffm_validate_gprs]
 dona.component.shader_complex.validate_gprs=true
 
+# if set, enables assertions on things that are legal but usually suggest a problem with the kernel. Can be set individually too - see below
+[ffm_strict_mode]
+dona.component.shader_complex.validate_gprs_strict=true
+dona.component.shader_complex.barrier_checks_strict=true
+
 # if set, sgprs, vpgrs and mregs are initialized to a known value and an assert is triggered when trying to read from an
 # uninitialized gpr
 [ffm_validate_gprs_strict]
 dona.component.shader_complex.validate_gprs_strict=true
+
+# if set, will assert on doing doing legal but probably invalid - e.g. leaving a barrier that already has signals
+[ffm_barrier_checks_strict]
+dona.component.shader_complex.barrier_checks_strict=true
+
+# Enables itrace from command line
+[ffm_enable_itrace]
+    gclog.ProcessCommand = "class:.*.jitcu.itrace,debug-3"
+
+# Use gclog.cfg in current dir
+[ffm_local_gclog_cfg]
+    gclog.ProcessFile = "gclog.cfg"
+
+[ffm_gclog_flush]
+    gclog.fflush = true
