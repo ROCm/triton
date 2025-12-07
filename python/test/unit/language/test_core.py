@@ -3519,10 +3519,9 @@ def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, nu
         if mma == 16 and K == 64 and not (is_hip_gfx12() or is_hip_gfx11() or is_hip_gfx1250()):
             pytest.skip(f"K == {K} too small for mfma {mma} in scaled_dot")
 
-        # if type of both operands are fp8, the test is covered in gluon tests, skipped here to speed test with FFM
+        # if type of both operands are fp8, the tests are covered in gluon tests, so skipped here.
         if normal_type in ["e4m3", "e5m2"] and is_hip_gfx1250():
-            pytest.skip(
-                "both operands are fp8, the test is covered in gluon tests, skipped here to speed test with FFM")
+            pytest.skip("both operands are fp8, the tests are covered in gluon tests, so skipped here")
 
     @triton.jit
     def dot_scale_kernel(a_base, stride_a0, stride_a1, a_scale, b_base, stride_b0, stride_b1, b_scale, out,

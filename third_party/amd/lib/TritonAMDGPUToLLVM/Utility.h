@@ -192,13 +192,14 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
   return results;
 }
 
-// clang-format off
 /*
  *
  1) for the parameter `inputVals`
-
  The fp8 tensor `inputVals` is upcasted to a [b]f16 tensor in the same shape,
  as an operand of 16x16x32_[b]f16 WMMA instruction and the layout is:
+*/
+// clang-format off
+/*
  --------------------------------------------------------------------------------------------------------------
  \Row    0,1   2,3   4,5   6,7  |  8,9  10,11  12,13 14,15 | 16,17 18,19 20,21 22,23 | 24,25 26,27  28,29 30,31
  \__
@@ -208,12 +209,15 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
  ...                            |                           ...... .....
  15     t15r0 t15r1 t15r2 t15r3 | t31r0 t31r1  t31r2 t31r3 | t15r4 t15r5 t15r6 t15r7 | t31r4 t31r5  t31r6 t31r7
  --------------------------------------------------------------------------------------------------------------
+*/
+// clang-format on
+/*
  The points here are:
  Lane and lane+16 co-hold one row
  Input tensor of upcast `inputVals` is with same layout yet element type is fp8;
 
  2) for the parameter `scales`
-   For scale tensor, e.g. if input shape is (32, 4) and block mode is32,
+   For scale tensor, e.g. if input shape is (32, 4) and block mode is 32,
  it is already transformed via `reshape(broadcast_to(expand_dims(a_scale, 2),
  (32, 4, 32)), (32, 128))` and output layout in the wave is `register = [[0, 1],
  [0, 2], [0, 4], [0, 8], [0, 16]], lane = [[0, 32], [0, 64], [1, 0], [2, 0], [4,
@@ -234,7 +238,7 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
 
  In the end, `opSel` is zero.
 */
-// clang-format on
+
 template <typename ConvertOp>
 SmallVector<Value, 8> upcast8xMxfp8_HW(RewriterBase &rewriter, Location loc,
                                        ArrayRef<Value> inputVals, int idx,

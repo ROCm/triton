@@ -949,10 +949,10 @@ public:
 
 class DecomposeAMDScaledBlocked final : public ttg::DecomposeScaledBlocked {
 public:
-  DecomposeAMDScaledBlocked(MLIRContext *context, unsigned wmmaVersion,
+  DecomposeAMDScaledBlocked(MLIRContext *context,
+                            const AMD::TargetInfo &targetInfo,
                             PatternBenefit benefit = 1)
-      : ttg::DecomposeScaledBlocked(context, benefit),
-        wmmaVersion(wmmaVersion) {}
+      : ttg::DecomposeScaledBlocked(context, benefit), targetInfo(targetInfo) {}
   using TensorValue = TypedValue<RankedTensorType>;
 
   LogicalResult matchAndRewrite(tt::DotScaledOp dotOp,
@@ -1006,15 +1006,15 @@ public:
                                    BoolAttr::get(rewriter.getContext(), true));
 
     Value reshapeScale;
-    if (wmmaVersion != 3) {
+    if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA4) {
       // 3) Cast scale to bf16 if not GFX1250, broadcast it and convert the
       // layout
       FloatType bf16Type = rewriter.getBF16Type();
       reshapeScale = extendAndBroadcastScale(
           rewriter, dotOp, scale, bf16Type, scaleType16.clone(bf16Type), opIdx);
     } else {
-      // On GFX1250, the scale type is int32, required by hardware instruction
-      // so type should be converted.
+      // On GFX1250, the scale type is int8, required by hardware instruction
+      // so type should not be converted.
       if (opIdx == 1) {
         auto order = getTransposeOrder(rank);
         scale = TransOp::create(rewriter, loc, scale, order);
@@ -1039,7 +1039,7 @@ public:
   }
 
 private:
-  unsigned wmmaVersion;
+  const AMD::TargetInfo &targetInfo;
 };
 
 class ScaledBlockedToScaledMFMAF8F6F4 final
@@ -1821,8 +1821,8 @@ struct TritonAMDGPUAccelerateMatmulPass
     switch (auto isaFamily = triton::AMD::deduceISAFamily(archGenerationName)) {
     case ISAFamily::GFX1250:
       mfmaPatterns.add<ScaledBlockedToScaledWMMAF8F6F4>(context, wmmaVersion,
-                                                        /*benefit=*/3);
-      mfmaPatterns.add<::DecomposeAMDScaledBlocked>(context, wmmaVersion,
+                                                        /*benefit=*/4);
+      mfmaPatterns.add<::DecomposeAMDScaledBlocked>(context, ti,
                                                     /*benefit=*/3);
       mfmaPatterns.add<BlockedToWMMA>(context, wmmaVersion, 16, /*benefit=*/2);
       break;
@@ -1830,8 +1830,7 @@ struct TritonAMDGPUAccelerateMatmulPass
       mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize,
           /*benefit=*/4);
-      mfmaPatterns.add<::DecomposeAMDScaledBlocked>(
-          context, getMfmaVersion(isaFamily), /*benefit=*/3);
+      mfmaPatterns.add<::DecomposeAMDScaledBlocked>(context, ti, /*benefit=*/3);
       [[fallthrough]];
     case ISAFamily::CDNA3:
     case ISAFamily::CDNA2:

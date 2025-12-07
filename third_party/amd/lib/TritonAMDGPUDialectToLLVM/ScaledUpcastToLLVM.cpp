@@ -12,6 +12,7 @@ using mlir::LLVM::AMD::upcast4xMxfp8_HW;
 using mlir::LLVM::AMD::upcast8xMxfp4_HW;
 using mlir::LLVM::AMD::upcast8xMxfp8_HW;
 
+// TODO: using if-then-else to repalce ternary operator on template
 namespace {
 struct ScaledUpcastFp4OpPattern
     : ConvertOpToLLVMPattern<amdgpu::ScaledUpcastFp4Op> {
