@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches:
-      - shared/gfx1250-dev-*
+      - shared/gfx1250*
   pull_request:
     branches:
-      - shared/gfx1250-dev-*
+      - shared/gfx1250*
     types:
       - opened
       - reopened
