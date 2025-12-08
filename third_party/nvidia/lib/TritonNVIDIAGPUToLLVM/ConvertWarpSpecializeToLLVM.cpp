@@ -195,11 +195,6 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
   if (maxnreg)
     createRegRealloc(b, maxnreg.getInt(), defRegs);
 
-  // ^switchLoop:
-  //   barrier.sync 1
-  //   %state_ptr = getelementptr (ptr @shared), <offset>
-  //   %rel_tid = sub %tid, <default_warp_group_size>
-  //   %rel_wid = udiv %rel_tid, 32
   WarpSpecializeCallbacks callbacks;
   callbacks.createAllBarrier = [](TritonLLVMIRRewriter &b, unsigned barIdx) {
     createAllBarrier(b, barIdx);
@@ -234,6 +229,11 @@ static LogicalResult lowerWarpSpecialize(LLVM::LLVMFuncOp func,
     }
   };
 
+  // ^switchLoop:
+  //   barrier.sync 1
+  //   %state_ptr = getelementptr (ptr @shared), <offset>
+  //   %rel_tid = sub %tid, <default_warp_group_size>
+  //   %rel_wid = udiv %rel_tid, 32
   return lowerWarpSpecializeCommon(
       func, wsOps, entry, header, switchLoop, wid, ctx, defaultNumWarps,
       totalNumWarpsAttr.getInt(), targetInfo, callbacks, kSwitchLoopBarrierIdx);
