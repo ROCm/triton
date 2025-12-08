@@ -64,3 +64,38 @@ pytest -n 36 \
 
 pytest -n 36 \
     python/test/unit/language/test_matmul.py
+
+echo "=== Run Runtime Unit Tests ==="
+
+# Exclude patterns for runtime tests:
+#
+# Issue #1 (FFM hang):
+#   - test_async_compile_mock: hangs indefinitely in FFM (threading/async issues in simulation)
+#
+# Issue #3 (CAP FLOW double-compilation bug - local repo only, not in upstream):
+#   - test_async_compile: cache assertion fails due to duplicate compile call
+#   - test_compile_stats: listener called twice due to duplicate compile call
+#
+RUNTIME_EXCLUDE_PATTERNS=(
+    # Issue #1
+    "test_async_compile_mock"
+    # Issue #3
+    "test_async_compile"
+    "test_compile_stats"
+)
+
+# Build the -k expression for runtime tests
+RUNTIME_K_EXPR="not ("
+for i in "${!RUNTIME_EXCLUDE_PATTERNS[@]}"; do
+    if [ $i -gt 0 ]; then
+        RUNTIME_K_EXPR="$RUNTIME_K_EXPR or "
+    fi
+    RUNTIME_K_EXPR="$RUNTIME_K_EXPR${RUNTIME_EXCLUDE_PATTERNS[$i]}"
+done
+RUNTIME_K_EXPR="$RUNTIME_K_EXPR)"
+
+echo "Running runtime tests with filter: $RUNTIME_K_EXPR"
+
+pytest -n 36 \
+    -k "$RUNTIME_K_EXPR" \
+    python/test/unit/runtime/
