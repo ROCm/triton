@@ -790,31 +790,6 @@ class JITFunction(JITCallable, KernelInterface[T]):
             if kernel is None:
                 return None
 
-            # CAP FLOW CHANGES
-            fn_orig_name = self._fn_name
-            if "TRITON_ENABLE_CAP_FLOW" in os.environ:
-                self._update_fn_name(constexprs, bound_args, options)
-                if "TRITON_SAVETEMPS_AUX_TARGET" in os.environ:
-                    # compile the kernel
-                    aux_src = self.ASTSource(self, signature, constexprs, attrs)
-                    aux_target = self.get_aux_target()
-                    aux_options_dict = options.__dict__.copy()
-                    aux_options_dict['arch'] = os.getenv('TRITON_SAVETEMPS_AUX_TARGET')
-                    aux_kernel = self.compile(aux_src, target=aux_target, options=aux_options_dict)
-                    print("aux target shared size: ", aux_kernel.metadata.shared)
-                    self._save_temps(aux_kernel, aux_target)
-
-            # compile the kernel
-            src = self.ASTSource(self, signature, constexprs, attrs)
-            kernel = self.compile(src, target=target, options=options.__dict__)
-            # print("runtime target shared size: ", kernel.metadata.shared)
-            save_temp_files = os.environ.get("TRITON_SAVETEMPS", "0") == "1"
-            if save_temp_files:
-                self._save_temps(kernel, target)
-            kernel_cache[key] = kernel
-            self._fn_name = fn_orig_name
-            ## END CAP FLOW CHANGES
-
         # Check that used global values have not changed.
         not_present = object()
         for (name, _), (val, globals_dict) in self.used_global_vals.items():
