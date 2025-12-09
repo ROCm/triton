@@ -145,24 +145,64 @@ def generate_mxfp_attention_configs():
     base_configs = [
         # Tests for pipelined attention fwd kernel
         pytest.param({
-            "q_type": "e4m3", "kv_type": "e4m3",  #
+            "q_type": "e4m3",
+            "kv_type": "e4m3",  #
             "batch": 1,  #
-            "seqlen_q": 1024, "seqlen_k": 1024,  #
-            "num_q_heads": 1, "num_k_heads": 1,  #
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,  #
+            "num_q_heads": 1,
+            "num_k_heads": 1,  #
             "head_sz": 128,  #
-            "block_m": 128, "block_n": 128,  #
+            "block_m": 128,
+            "block_n": 128,  #
             "scale_type": "block",  #
             "p_k_width": 8,  #
+            "subtile": False,
         }),
         pytest.param({
-            "q_type": "e4m3", "kv_type": "e4m3",  #
+            "q_type": "e4m3",
+            "kv_type": "e4m3",  #
             "batch": 1,  #
-            "seqlen_q": 1024, "seqlen_k": 1024,  #
-            "num_q_heads": 1, "num_k_heads": 1,  #
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,  #
+            "num_q_heads": 1,
+            "num_k_heads": 1,  #
             "head_sz": 128,  #
-            "block_m": 128, "block_n": 128,  #
+            "block_m": 128,
+            "block_n": 128,  #
             "scale_type": "global",  #
             "p_k_width": 8,  #
+            "subtile": False,
+        }),
+        pytest.param({
+            "q_type": "e4m3",
+            "kv_type": "e4m3",  #
+            "batch": 1,  #
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,  #
+            "num_q_heads": 1,
+            "num_k_heads": 1,  #
+            "head_sz": 128,  #
+            "block_m": 256,
+            "block_n": 128,  #
+            "scale_type": "block",  #
+            "p_k_width": 8,  #
+            "subtile": True,
+        }),
+        pytest.param({
+            "q_type": "e4m3",
+            "kv_type": "e4m3",  #
+            "batch": 1,  #
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,  #
+            "num_q_heads": 1,
+            "num_k_heads": 1,  #
+            "head_sz": 128,  #
+            "block_m": 256,
+            "block_n": 128,  #
+            "scale_type": "global",  #
+            "p_k_width": 8,  #
+            "subtile": True,
         }),
     ]
     return base_configs
@@ -187,7 +227,12 @@ def test_mxfp_attention_kernel_metadata(config):
     BLOCK_N = config["block_n"]
     SCALE_TYPE = config["scale_type"]
     PKWIDTH = config["p_k_width"]
-    attn_fn = "mxfp_attn_fwd_pipelined_kernel"
+    SUBTILE = config["subtile"]
+    attn_fn = "mxfp_attn_fwd"
+    if SUBTILE:
+        attn_fn += "_subtile"
+    if config["pipelined"]:
+        attn_fn += "_pipelined"
 
     # Generate config name from pytest request
     config_name = f"{QT}x{KVT}_{SCALE_TYPE}_BATCH{BATCH}_SEQLENQ{SEQLEN_Q}_SEQLENK{SEQLEN_K}_QHEADS{NUM_Q_HEADS}_KVHEADS{NUM_K_HEADS}_HEADSZ{HEAD_SZ}_BM{BLOCK_M}_BN{BLOCK_N}_PKWIDTH{PKWIDTH}_{attn_fn}"
