@@ -134,7 +134,6 @@ def issue_wmma(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout:
 @gluon.jit
 def lds_load(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr,
              NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-    #ttgl.amd.gfx1250.tdm.async_wait(wait_producers_cnt)
 
     a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
     if not TRANSPOSE_B:
@@ -182,139 +181,6 @@ def create_shared_layouts(BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOC
 
 
 @gluon.jit
-def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
-                                         M, N, K,  #
-                                         stride_am, stride_ak,  #
-                                         stride_bk, stride_bn,  #
-                                         stride_cm, stride_cn,  #
-                                         BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
-                                         NUM_BUFFERS: ttgl.constexpr,  #
-                                         TRANSPOSE_B: ttgl.constexpr,  #
-                                         NUM_WARPS: ttgl.constexpr):
-    a_dtype: ttgl.constexpr = a_ptr.type.element_ty
-    b_dtype: ttgl.constexpr = b_ptr.type.element_ty
-    ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
-    ttgl.static_assert(b_dtype.is_fp16() or b_dtype.is_bf16(), "Only fp16/bf16 supported for B")
-    ttgl.static_assert(NUM_BUFFERS >= 2, "NUM_BUFFERS must be at least 2")
-
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [NUM_WARPS // 2, 2], [16, 16, 32])
-    shared_layouts: ttgl.constexpr = create_shared_layouts(BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B)
-    SHARED_LAYOUT_A: ttgl.constexpr = shared_layouts[0]
-    SHARED_LAYOUT_B: ttgl.constexpr = shared_layouts[1]
-    OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
-    OPERAND_LAYOUT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
-
-    a_desc, b_desc = create_tensor_descriptors(a_ptr, b_ptr, 0, 0, stride_am, stride_ak, stride_bn, stride_bk,
-                                               SHARED_LAYOUT_A, SHARED_LAYOUT_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
-                                               TRANSPOSE_B)
-    a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
-    b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
-
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
-
-    for tile_idx in range(scheduler.get_num_tiles()):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
-        off_am = pid_m * BLOCK_M
-        off_bn = pid_n * BLOCK_N
-
-        producer = 0
-        consumer = 0
-        accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
-
-        for _ in ttgl.static_range(NUM_BUFFERS - 1):
-            producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
-                                   TRANSPOSE_B)
-
-        for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
-            producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
-                                   TRANSPOSE_B)
-            consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
-                                               accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
-
-        for i in ttgl.static_range(NUM_BUFFERS - 1):
-            consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
-                                               accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
-
-        offs_cm = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-        offs_cn = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
-        offs_c = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
-
-
-@gluon.jit
-def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
-                                                      M, N, K,  #
-                                                      stride_am, stride_ak,  #
-                                                      stride_bk, stride_bn,  #
-                                                      stride_cm, stride_cn,  #
-                                                      BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                                                      BLOCK_K: ttgl.constexpr,  #
-                                                      NUM_BUFFERS: ttgl.constexpr,  #
-                                                      TRANSPOSE_B: ttgl.constexpr,  #
-                                                      NUM_WARPS: ttgl.constexpr):
-    a_dtype: ttgl.constexpr = a_ptr.type.element_ty
-    b_dtype: ttgl.constexpr = b_ptr.type.element_ty
-    ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
-    ttgl.static_assert(b_dtype.is_fp16() or b_dtype.is_bf16(), "Only fp16/bf16 supported for B")
-    ttgl.static_assert(NUM_BUFFERS >= 2, "NUM_BUFFERS must be at least 2")
-
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [NUM_WARPS // 2, 2], [16, 16, 32])
-    shared_layouts: ttgl.constexpr = create_shared_layouts(BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B)
-    SHARED_LAYOUT_A: ttgl.constexpr = shared_layouts[0]
-    SHARED_LAYOUT_B: ttgl.constexpr = shared_layouts[1]
-    OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
-    OPERAND_LAYOUT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
-
-    a_desc, b_desc = create_tensor_descriptors(a_ptr, b_ptr, 0, 0, stride_am, stride_ak, stride_bn, stride_bk,
-                                               SHARED_LAYOUT_A, SHARED_LAYOUT_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
-                                               TRANSPOSE_B)
-    a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
-    b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
-
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
-    num_tiles = scheduler.get_num_tiles()
-    producer = 0
-
-    pid_m, pid_n = scheduler.get_tile(0)
-    off_am = pid_m * BLOCK_M
-    off_bn = pid_n * BLOCK_N
-    for i in ttgl.static_range(NUM_BUFFERS - 1):
-        producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
-                               TRANSPOSE_B)
-
-    for tile_idx in range(num_tiles):
-        pid_m_next, pid_n_next = scheduler.get_tile(tile_idx + 1)
-        off_am_next = pid_m_next * BLOCK_M
-        off_bn_next = pid_n_next * BLOCK_N
-
-        consumer = 0
-        accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
-
-        for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
-            producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
-                                   TRANSPOSE_B)
-            consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
-                                               accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
-
-        producer = 0
-        for i in ttgl.static_range(NUM_BUFFERS - 1):
-            producer = issue_loads(producer, a_desc, b_desc, off_am_next, off_bn_next, a_buffer, b_buffer, BLOCK_K,
-                                   NUM_BUFFERS, TRANSPOSE_B, pred=tile_idx + 1 < num_tiles)
-            consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
-                                               accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
-
-        offs_cm = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-        offs_cn = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
-        offs_c = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
-
-        pid_m, pid_n = pid_m_next, pid_n_next
-        off_am, off_bn = off_am_next, off_bn_next
-
-
-@gluon.jit
 def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                               M, N, K,  #
                               stride_am, stride_ak,  #
@@ -352,13 +218,18 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     consumer = 0
     accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
 
-    for _ in ttgl.static_range(NUM_BUFFERS - 1):
+    # Triple buffering
+
+    # prefetch 3 first.
+    for _ in ttgl.static_range(2):
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
 
+    ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2) * 2)
     for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
         with ttgl.amd.warp_pipeline_stage("stage0"):
             consumer, a, b = lds_load(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B, NUM_BUFFERS,
                                       TRANSPOSE_B)
+
         ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2) * 2)
         with ttgl.amd.warp_pipeline_stage("stage1"):
             producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
@@ -420,27 +291,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
         # NOTE: Explicitly set num_sms to small number to ensure that each CU will compute multiple tiles.
         num_sms = 8
         grid = (min(num_sms, triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), 1)
-        if PREFETCH:
-            kernel = persistent_gemm_tdm_pipelined_lds_prefetch_kernel[grid](
-                a_device, b_device, c_device,  #
-                M, N, K,  #
-                stride_am, stride_ak,  #
-                stride_bk, stride_bn,  #
-                stride_cm, stride_cn,  #
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-                NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
-                num_warps=num_warps, waves_per_eu=num_warps // 4)
-            static_profile(kernel)
-        else:
-            kernel = persistent_gemm_tdm_pipelined_kernel[grid](
-                a_device, b_device, c_device,  #
-                M, N, K,  #
-                stride_am, stride_ak,  #
-                stride_bk, stride_bn,  #
-                stride_cm, stride_cn,  #
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-                NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
-                num_warps=num_warps, waves_per_eu=num_warps // 4)
+        assert 0, 'unsupported'
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))
