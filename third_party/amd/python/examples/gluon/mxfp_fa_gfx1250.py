@@ -777,64 +777,64 @@ class GlobalScaledAttentionProgram:
             p0 = ttgl.exp2(qk0_shifted)
             self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # ... iter i+3
 
-        # pipeline epilogue, iter end-2
-        qk0 = self.compute_qk(k0, k_scale, zero)  # ........................... iter end-1
-        self.async_wait(4)  # ................................................. iter end-1
-        k1 = self.shared_load_k(sub_idx=1, buf=1)
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        # pipeline epilogue iter end-2
+        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)
+        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)
+
+        p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
         acc0 = acc0 * alpha[:, None]
         acc1 = acc1 * alpha[:, None]
-        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)  # ................ iter end-1
 
-        qk1 = self.compute_qk(k1, k_scale, zero)  # ........................... iter end-1
-        self.async_wait(4)  # ................................................. iter end-2
-        v0 = self.shared_load_v(sub_idx=0, buf=0)
-        p = self.concat_subtile(p0, p1)  # .................................... iter end-2
+        p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
-        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)  # ................ iter end-1
 
-        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)  # .............. iter end-2
-        self.async_wait(4)  # ................................................. iter end-2
+        self.async_wait(2)
+        v0 = self.shared_load_v(sub_idx=0, buf=0)
         v1 = self.shared_load_v(sub_idx=1, buf=0)
-        qk = self.concat_subtile(qk0, qk1)  # ................................. iter end-1
+
+        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
+
+        # pipeline epilogue iter end-1
+        qk0 = self.compute_qk(k0, k_scale, zero)
+        k1 = self.shared_load_k(sub_idx=1, buf=1)
+        qk1 = self.compute_qk(k1, k_scale, zero)
+
+        qk = self.concat_subtile(qk0, qk1)
         m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-
-        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)  # .............. iter end-2
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter end-1
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
-
-        # pipeline epilogue, iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
         acc0 = acc0 * alpha[:, None]
         acc1 = acc1 * alpha[:, None]
 
-        self.async_wait(3)  # ................................................. iter end-1
-        v0 = self.shared_load_v(sub_idx=0, buf=1)
-        p = self.concat_subtile(p0, p1)  # .................................... iter end-1
+        p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
-        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)  # .............. iter end-1
-        self.async_wait(2)  # ................................................. iter end-1
+        self.async_wait(0)
+        v0 = self.shared_load_v(sub_idx=0, buf=1)
         v1 = self.shared_load_v(sub_idx=1, buf=1)
 
-        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)  # .............. iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
 
         # write output
         acc = self.concat_subtile(acc0, acc1)
-        acc = acc / l_i[:, None]
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
         self.store_output(acc)
 
 
@@ -1592,71 +1592,71 @@ class BlockScaledAttentionProgram:
             p0 = ttgl.exp2(qk0_shifted)
             self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # ... iter i+3
 
-        # pipeline epilogue, iter end-2
-        qk0 = self.compute_qk(k0, k0_scale, zero)  # .......................... iter end-1
-        self.async_wait(5)  # ................................................. iter end-1
-        k1 = self.shared_load_k(sub_idx=1, buf=1)
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        # pipeline epilogue iter end-2
+        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)
+        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)
+        self.issue_global_load_v_scale(end - 1, buf=1)
+
+        p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
         acc0 = acc0 * alpha[:, None]
         acc1 = acc1 * alpha[:, None]
-        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)  # ................ iter end-1
-        self.issue_global_load_v_scale(end - 1, buf=1)  # ..................... iter end-1
 
-        qk1 = self.compute_qk(k1, k1_scale, zero)  # .......................... iter end-1
-        self.async_wait(6)  # ................................................. iter end-2
-        v0 = self.shared_load_v(sub_idx=0, buf=0)
-        self.async_wait(5)  # ................................................. iter end-2
-        v_scale = self.shared_load_v_scale(buf=0)
-        v0_scale, v1_scale = self.split_scale(v_scale)
-        p = self.concat_subtile(p0, p1)  # .................................... iter end-2
+        p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
-        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)  # ................ iter end-1
 
-        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)  # ............. iter end-2
-        self.async_wait(5)  # ................................................. iter end-2
+        self.async_wait(3)
+        v0 = self.shared_load_v(sub_idx=0, buf=0)
         v1 = self.shared_load_v(sub_idx=1, buf=0)
-        qk = self.concat_subtile(qk0, qk1)  # ................................. iter end-1
+        v_scale = self.shared_load_v_scale(buf=0)
+        v0_scale, v1_scale = self.split_scale(v_scale)
+
+        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
+
+        # pipeline epilogue iter end-1
+        k1 = self.shared_load_k(sub_idx=1, buf=1)
+        qk0 = self.compute_qk(k0, k0_scale, zero)
+        qk1 = self.compute_qk(k1, k1_scale, zero)
+
+        qk = self.concat_subtile(qk0, qk1)
         m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
 
-        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)  # ............. iter end-2
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter end-1
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
 
-        # pipeline epilogue, iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
         acc0 = acc0 * alpha[:, None]
         acc1 = acc1 * alpha[:, None]
 
-        self.async_wait(4)  # ................................................. iter end-1
-        v0 = self.shared_load_v(sub_idx=0, buf=1)
-        self.async_wait(3)  # ................................................. iter end-1
-        v_scale = self.shared_load_v_scale(buf=1)
-        v0_scale, v1_scale = self.split_scale(v_scale)
-        p = self.concat_subtile(p0, p1)  # .................................... iter end-1
+        p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
-        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)  # ............. iter end-1
-        self.async_wait(2)  # ................................................. iter end-1
+        self.async_wait(0)
+        v0 = self.shared_load_v(sub_idx=0, buf=1)
         v1 = self.shared_load_v(sub_idx=1, buf=1)
+        v_scale = self.shared_load_v_scale(buf=1)
+        v0_scale, v1_scale = self.split_scale(v_scale)
 
-        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)  # ............. iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
 
         # write output
         acc = self.concat_subtile(acc0, acc1)
-        acc = acc / l_i[:, None]
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
         self.store_output(acc)
 
 
