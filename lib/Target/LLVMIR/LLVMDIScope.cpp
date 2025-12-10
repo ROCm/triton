@@ -38,6 +38,97 @@ FileLineColLoc extractFileLoc(Location loc) {
   return mlir::FileLineColLoc::get(unknownFile, 0, 0);
 }
 
+auto calcBitWidth(mlir::Type type) -> std::optional<unsigned> {
+  if (type.isIntOrFloat()) {
+    return type.getIntOrFloatBitWidth();
+  } else if (mlir::isa<mlir::VectorType>(type)) {
+    auto vectorType = dyn_cast<mlir::VectorType>(type);
+    llvm::ArrayRef<int64_t> shape = vectorType.getShape();
+    mlir::Type elementType = vectorType.getElementType();
+    llvm::ArrayRef<bool> scalableDims = vectorType.getScalableDims();
+    unsigned size = 1;
+    for (auto i : shape) {
+      size *= i;
+    }
+
+    if (auto elementTypeSize = calcBitWidth(elementType);
+        elementTypeSize.has_value()) {
+      return size * elementTypeSize.value();
+    }
+  }
+
+  return std::nullopt;
+}
+
+// Note: mlir does not provided any built-in conversion from mlir::Type to
+// mlir::LLVM::DITypeAttr
+LLVM::DITypeAttr convertType(MLIRContext *context, mlir::Type type) {
+  if (type.isInteger(1)) {
+    return LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
+                                      mlir::StringAttr::get(context, "bool"),
+                                      type.getIntOrFloatBitWidth(),
+                                      llvm::dwarf::DW_ATE_boolean);
+  }
+  if (type.isInteger()) {
+    return LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
+                                      mlir::StringAttr::get(context, "int"),
+                                      type.getIntOrFloatBitWidth(),
+                                      llvm::dwarf::DW_ATE_signed);
+  } else if (type.isF16()) {
+    return LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
+                                      mlir::StringAttr::get(context, "half"),
+                                      type.getIntOrFloatBitWidth(),
+                                      llvm::dwarf::DW_ATE_float);
+  } else if (type.isF32()) {
+    return LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
+                                      mlir::StringAttr::get(context, "float"),
+                                      type.getIntOrFloatBitWidth(),
+                                      llvm::dwarf::DW_ATE_float);
+  } else if (type.isF64()) {
+    return LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
+                                      mlir::StringAttr::get(context, "double"),
+                                      type.getIntOrFloatBitWidth(),
+                                      llvm::dwarf::DW_ATE_float);
+  } else if (mlir::isa<mlir::VectorType>(type)) {
+    if (auto vectorTypeSize = calcBitWidth(type); vectorTypeSize.has_value()) {
+      return LLVM::DIBasicTypeAttr::get(
+          context, llvm::dwarf::DW_TAG_base_type,
+          mlir::StringAttr::get(context, "vector"), vectorTypeSize.value(),
+          llvm::dwarf::DW_ATE_float);
+    } else {
+      // TODO: falling back to unknown_type, perhaps theres a better way to
+      // handle when element type size is not determined
+    }
+  }
+  return LLVM::DIBasicTypeAttr::get(
+      context, llvm::dwarf::DW_TAG_base_type,
+      mlir::StringAttr::get(context, "unknown_type"), 0,
+      llvm::dwarf::DW_ATE_signed);
+}
+
+LLVM::DITypeAttr convertPtrType(MLIRContext *context, mlir::Type pointerType,
+                                mlir::Type pointeeType, unsigned sizeInBits) {
+  // LLVMPointerType does not include pointee info, need to pass from external
+  // source
+  if (auto ptrType = dyn_cast<LLVM::LLVMPointerType>(pointerType)) {
+    unsigned addrSpace = ptrType.getAddressSpace();
+
+    LLVM::DITypeAttr diElTypeAttr = convertType(context, pointeeType);
+    LLVM::DITypeAttr diTypeAttr = mlir::LLVM::DIDerivedTypeAttr::get(
+        context, llvm::dwarf::DW_TAG_pointer_type,
+        mlir::StringAttr::get(context, ""), diElTypeAttr, sizeInBits,
+        /*alignInBits=*/0, /*offset=*/0,
+        /*optional<address space>=*/addrSpace, /*extra data=*/nullptr);
+    return diTypeAttr;
+  }
+  // Return unknown_type if fail to construct DIDerivedTypeAttr with
+  // WD_TAG_pointer_type.
+  return LLVM::DIBasicTypeAttr::get(
+      context, llvm::dwarf::DW_TAG_base_type,
+      mlir::StringAttr::get(context, "unknown_type"), 0,
+      llvm::dwarf::DW_ATE_signed);
+}
+
 } // anonymous namespace
 
 /// Add a debug info scope to LLVMFuncOp that are missing it.
@@ -76,21 +167,19 @@ struct LLVMDIScopePass : public impl::LLVMDIScopeBase<LLVMDIScopePass> {
           context, llvm::sys::path::filename(inputFilePath),
           llvm::sys::path::parent_path(inputFilePath));
     }
-    auto subroutineTypeAttr =
-        LLVM::DISubroutineTypeAttr::get(context, llvm::dwarf::DW_CC_normal, {});
 
     // Figure out debug information (`subprogramFlags` and `compileUnitAttr`) to
     // attach to the function definition / declaration. External functions are
     // declarations only, and are defined in a different compile unit, so mark
     // them appropriately in `subprogramFlags`, and set an empty
     // `compileUnitAttr`.
-    DistinctAttr distinctId;
+    DistinctAttr recId;
     auto subprogramFlags = LLVM::DISubprogramFlags::Optimized;
     if (!funcOp.isExternal()) {
-      distinctId = mlir::DistinctAttr::create(mlir::UnitAttr::get(context));
+      recId = mlir::DistinctAttr::create(mlir::UnitAttr::get(context));
       if (!compileUnitAttr) {
         compileUnitAttr = LLVM::DICompileUnitAttr::get(
-            distinctId, llvm::dwarf::DW_LANG_C, fileAttr,
+            recId, llvm::dwarf::DW_LANG_C, fileAttr,
             StringAttr::get(context, "triton"),
             /*isOptimized=*/true,
             triton::tools::getBoolEnv("LLVM_EXTRACT_DI_LOCAL_VARIABLES")
@@ -105,15 +194,98 @@ struct LLVMDIScopePass : public impl::LLVMDIScopeBase<LLVMDIScopePass> {
       compileUnitAttr = {};
     }
 
+    // TODO: support nested types
+    llvm::SmallVector<mlir::LLVM::DITypeAttr> types;
+    for (auto resTy : funcOp.getResultTypes()) {
+      LLVM::DITypeAttr tyAttr = convertType(context, resTy);
+      types.push_back(tyAttr);
+    }
+    // If no return type then add a null type as a place holder for that.
+    if (types.empty())
+      types.push_back(mlir::LLVM::DINullTypeAttr::get(context));
+    for (auto [idx, inTy] : llvm::enumerate(funcOp.getArgumentTypes())) {
+      if (auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(inTy)) {
+        auto pointeeTy =
+            funcOp.getArgAttrOfType<TypeAttr>(idx, "tt.pointee_type");
+        auto ptrRange =
+            funcOp.getArgAttrOfType<IntegerAttr>(idx, "tt.pointer_range");
+        if (pointeeTy && ptrRange) {
+          LLVM::DITypeAttr tyAttr = convertPtrType(
+              context, ptrTy, pointeeTy.getValue(), ptrRange.getInt());
+          types.push_back(tyAttr);
+        }
+
+      } else {
+        // Here assume remained inTy are only scalar types
+        LLVM::DITypeAttr tyAttr = convertType(context, inTy);
+        types.push_back(tyAttr);
+      }
+    }
+
+    auto subroutineTypeAttr = LLVM::DISubroutineTypeAttr::get(
+        context, llvm::dwarf::DW_CC_normal, types);
+
     StringAttr funcNameAttr = funcOp.getNameAttr();
     // Note that scopeline is set differently from LLVM's
     // DIScopeForLLVMFuncOpPass. I don't find reasons why scopeline should be
     // the column offset
+    auto id = mlir::DistinctAttr::create(mlir::UnitAttr::get(context));
     auto subprogramAttr = LLVM::DISubprogramAttr::get(
-        context, distinctId, compileUnitAttr, fileAttr, funcNameAttr,
-        funcNameAttr, fileAttr, /*line=*/line, /*scopeline=*/line,
-        subprogramFlags, subroutineTypeAttr, /*retainNodes=*/{},
-        /*annotations=*/{});
+        context, recId, /*isRecSelf=*/true, id, compileUnitAttr, fileAttr,
+        funcNameAttr, funcNameAttr, fileAttr,
+        /*line=*/line, /*scopeline=*/line, subprogramFlags, subroutineTypeAttr,
+        /*retainNodes=*/{}, /*annotations=*/{});
+
+    llvm::SmallVector<mlir::LLVM::DINodeAttr> retainedNodes;
+    // Handle function arguments and add them to retainedNodes:
+    // 1. Create DebugValueOp for each arg
+    // 2. Add each arg as DILocalVariableAttr to retainedNodes
+    for (auto [idx, argType] : llvm::enumerate(funcOp.getArgumentTypes())) {
+      LLVM::DITypeAttr argTypeAttr;
+      BlockArgument arg = funcOp.getArgument(idx);
+      if (auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(argType)) {
+        auto pointeeTy =
+            funcOp.getArgAttrOfType<TypeAttr>(idx, "tt.pointee_type");
+        auto ptrRange =
+            funcOp.getArgAttrOfType<IntegerAttr>(idx, "tt.pointer_range");
+        if (!pointeeTy || !ptrRange) {
+          continue;
+        }
+        argTypeAttr = convertPtrType(context, ptrTy, pointeeTy.getValue(),
+                                     ptrRange.getInt());
+      } else {
+        argTypeAttr = convertType(context, argType);
+      }
+
+      Location argLoc = arg.getLoc();
+      auto nameLoc = dyn_cast<NameLoc>(argLoc);
+      if (!nameLoc)
+        continue;
+      Location childLoc = nameLoc.getChildLoc();
+      StringAttr nameAttr = nameLoc.getName();
+
+      auto localScopeAttr = dyn_cast<LLVM::DILocalScopeAttr>(subprogramAttr);
+      auto diFlag = LLVM::DIFlags::Zero;
+      auto argVarAttr = LLVM::DILocalVariableAttr::get(
+          context, localScopeAttr, nameAttr, fileAttr, line, idx + 1, 0,
+          argTypeAttr, diFlag);
+
+      auto exprAttr = LLVM::DIExpressionAttr::get(context);
+      OpBuilder b(context);
+      b.setInsertionPointToStart(&funcOp.getBody().front());
+      Operation *dbgOp =
+          LLVM::DbgValueOp::create(b, childLoc, arg, argVarAttr, exprAttr);
+
+      retainedNodes.push_back(argVarAttr);
+    }
+
+    id = mlir::DistinctAttr::create(mlir::UnitAttr::get(context));
+    subprogramAttr = LLVM::DISubprogramAttr::get(
+        context, recId, /*isRecSelf=*/false, id, compileUnitAttr, fileAttr,
+        funcNameAttr, funcNameAttr, fileAttr,
+        line, line, subprogramFlags, subroutineTypeAttr,
+        retainedNodes, /*annotations=*/{});
+
     funcOp->setLoc(FusedLoc::get(context, {loc}, subprogramAttr));
   }
 

@@ -363,7 +363,8 @@ class HIPBackend(BaseBackend):
         # Set various control constants on the LLVM module so that device
         # libraries can resolve references to them.
         amd.set_isa_version(llvm_mod, options.arch)
-        amd.set_abi_version(llvm_mod, 500)
+        amd.set_abi_version(llvm_mod, 600)
+        amd.set_dwarf_version(llvm_mod, 5)
         amd.set_bool_control_constant(llvm_mod, "__oclc_finite_only_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_correctly_rounded_sqrt32", True)
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
@@ -418,6 +419,7 @@ class HIPBackend(BaseBackend):
                 llvm.link_extern_libs(llvm_mod, paths)
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        # llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O0, options.arch, '', [], options.enable_fp_fusion)
 
         # Architectures with architected SGPRs store the workgroup id in ttmp9 (X) and ttmp7 (Y[15:0], Z[31:16]).
         # These attributes are used to determine if Z should be masked out when loading Y. They are inferred during

@@ -1,3 +1,4 @@
+#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -150,7 +151,6 @@ struct LLVMDILocalVariablePass
         // handle when element type size is not determined
       }
     }
-
     return LLVM::DIBasicTypeAttr::get(
         context, llvm::dwarf::DW_TAG_base_type,
         mlir::StringAttr::get(context, "unknown_type"), 0,
@@ -257,7 +257,8 @@ struct LLVMDILocalVariablePass
 
     getOperation()->walk<WalkOrder::PreOrder>([&](Operation *op) -> void {
       if (isa<LLVM::LLVMFuncOp>(op)) {
-        diSubprogramAttr = getDISubprogramAttr(cast<LLVM::LLVMFuncOp>(op));
+        auto funcOp = cast<LLVM::LLVMFuncOp>(op);
+        diSubprogramAttr = getDISubprogramAttr(funcOp);
       } else {
         fuseDILocalVariable(op);
       }

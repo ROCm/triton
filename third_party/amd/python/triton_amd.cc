@@ -351,6 +351,10 @@ void init_triton_amd(py::module &&m) {
                            version.Stepping);
   });
 
+  m.def("set_dwarf_version", [](llvm::Module *module, const int dwarf_version = 4) {
+    module->addModuleFlag(llvm::Module::Warning, "Dwarf Version", dwarf_version);
+  });
+
   // Set boolean control constant
   m.def("set_bool_control_constant",
         [](llvm::Module *module, const std::string &name, bool enable) {
