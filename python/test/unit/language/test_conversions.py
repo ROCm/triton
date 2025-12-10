@@ -11,8 +11,9 @@ import torch
 import pytest
 import triton
 import triton.language as tl
+import random
 
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna2, is_hip_cdna3, is_hip_cdna4, is_hip_gfx12
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna2, is_hip_cdna3, is_hip_cdna4, is_hip_gfx12, is_hip_gfx1250
 
 
 def matching_int(dtype):
@@ -365,8 +366,14 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
         'float8e5b16': (5, 2, 16),
     }[dst_dtype]
 
-    for i in range(256):
+    if is_hip_gfx1250():
+        # Note, testing all 256 configurations is time consuming of the FFM simulator. Therefore, we are testing
+        # a randong configuration
+        i = random.randint(0, 255)
         downcast_test(getattr(tl, src_dtype), getattr(tl, dst_dtype), rounding, *stuff, max_repr, i, device=device)
+    else:
+        for i in range(256):
+            downcast_test(getattr(tl, src_dtype), getattr(tl, dst_dtype), rounding, *stuff, max_repr, i, device=device)
 
 @pytest.mark.parametrize("mode", [
     'max', 'min', 'inf', '-inf', 'nan'
