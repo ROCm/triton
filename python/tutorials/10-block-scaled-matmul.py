@@ -130,15 +130,17 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
+def is_hip():
+    return triton.runtime.driver.active.get_current_target().backend == 'hip'
 
 def is_hip_cdna4():
     target = triton.runtime.driver.active.get_current_target()
     return target is not None and target.backend == 'hip' and target.arch == 'gfx950'
 
-
 def supports_block_scaling():
-    return (is_cuda() and torch.cuda.get_device_capability()[0] == 10) or is_hip_cdna4()
-
+    target = triton.runtime.driver.active.get_current_target()
+    return (is_cuda() and torch.cuda.get_device_capability()[0] == 10) or \
+           (is_hip() and target.arch in ["gfx950", "gfx1250"])
 
 def _matmul_launch_metadata(grid, kernel, args):
     ret = {}
@@ -632,8 +634,9 @@ if __name__ == "__main__":
 
         if is_cuda():
             validate_block_scaled(8192, 8192, 8192, block_scale_type=args.format)
-        elif is_hip_cdna4():
-            assert args.format == "mxfp4", "AMD tutorial only supports mxpf4 format currently"
+        elif is_hip():
+            if is_hip_cdna4():
+                assert args.format == "mxfp4", "AMD tutorial only supports mxpf4 format currently"
             validate_block_scaled_amd(8192, 8192, 8192, block_scale_type=args.format, mfma_nonkdim=16)
             validate_block_scaled_amd(8192, 8192, 8192, block_scale_type=args.format, mfma_nonkdim=32)
 
