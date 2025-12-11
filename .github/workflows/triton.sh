@@ -92,3 +92,6 @@ echo "Running runtime tests with filter: $RUNTIME_K_EXPR"
 pytest -n 36 \
     -k "$RUNTIME_K_EXPR" \
     python/test/unit/runtime/
+
+echo "Running test_debug.py and skip the tests about s_trsp"
+pytest -n 36 python/test/unit/test_debug.py

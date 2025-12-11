@@ -2,6 +2,7 @@ import pytest
 import torch
 import triton.language as tl
 import triton
+from triton._internal_testing import is_hip_gfx1250
 
 
 @pytest.mark.parametrize('cond', [True, False])
@@ -11,6 +12,9 @@ import triton
 @pytest.mark.parametrize('jit_flag', [True, False])
 @pytest.mark.forked
 def test_device_assert(monkeypatch, cond, mask, opt_flag, env_var, jit_flag, device):
+    if is_hip_gfx1250():
+        pytest.skip("s_trap is not supported on FFM of GFX1250")
+
     monkeypatch.setenv("TRITON_DEBUG", str(int(env_var)))
     triton.knobs.refresh_knobs()
     torch.zeros([1], dtype=torch.int32, device=device)
@@ -96,6 +100,8 @@ def _test_overflow(x, y, x_dtype, y_dtype, debug, should_overflow, tri_func, ref
 ])
 @pytest.mark.forked
 def test_sanitize_int_add_overflow(x, y, x_dtype, y_dtype, debug, should_overflow, device):
+    if is_hip_gfx1250():
+        pytest.skip("s_trap is not supported on FFM of GFX1250")
 
     @triton.jit
     def _kernel_add(X, Y, Z):
@@ -117,6 +123,8 @@ def test_sanitize_int_add_overflow(x, y, x_dtype, y_dtype, debug, should_overflo
 ])
 @pytest.mark.forked
 def test_sanitize_int_mul_overflow(x, y, x_dtype, y_dtype, debug, should_overflow, device):
+    if is_hip_gfx1250():
+        pytest.skip("s_trap is not supported on FFM of GFX1250")
 
     @triton.jit
     def _kernel_mul(X, Y, Z):
@@ -137,6 +145,8 @@ def test_sanitize_int_mul_overflow(x, y, x_dtype, y_dtype, debug, should_overflo
 ])
 @pytest.mark.forked
 def test_sanitize_int_sub_overflow(x, y, x_dtype, y_dtype, debug, should_overflow, device):
+    if is_hip_gfx1250():
+        pytest.skip("s_trap is not supported on FFM of GFX1250")
 
     @triton.jit
     def _kernel_sub(X, Y, Z):
