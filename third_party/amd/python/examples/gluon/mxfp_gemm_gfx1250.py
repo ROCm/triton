@@ -35,35 +35,6 @@ def static_profile(kernel):
           f"- occupancy: {occupancy}\n")
 
 
-def generate_configs():
-    configs = []
-    # Add many small shapes.
-    dtypes = [['float8_e5m2', 'float4'], ['float4', 'float8_e4m3'], ['float8_e4m3', 'float8_e5m2'],
-              ['float4', 'float4']]
-    for dtypeA, dtypeB in dtypes:
-        for (M, N, K, BM, BN, BK) in [(1024, 1024, 128, 64, 64, 64), (1024, 1024, 128, 64, 64, 128),
-                                      (1024, 1024, 128, 128, 128, 128)]:
-            for b_trans in (True, False):
-                for num_buffers in (2, 4):
-                    for scale_preshuffle in (True, False):
-                        # For correctness, we need masking when not using exact tiles.
-                        # python3: /home/dtanner/repos/gfx_triton/third_party/amd/lib/TritonAMDGPUToLLVM/DotOpToLLVM/WMMA.cpp:233: mlir::Value mlir::triton::AMD::{anonymous}::generateScaledWMMAIntrinsic(mlir::ConversionPatternRewriter&, mlir::Location, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Value, mlir::Type, mlir::Type, mlir::Type, int): Assertion `scaleKWidth == 2 ||     scaleKWidth == 4 || scaleKWidth == 8' failed.
-                        if dtypeA == 'float4' and BK < K:
-                            continue
-
-                        # skip block sizes too small for preshuffling
-                        if scale_preshuffle and (BM < 128 or BN < 128 or BK < 128):
-                            continue
-
-                        configs.append({
-                            "M": M, "N": N, "K": K, "BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK, "NUM_WARPS": 4,
-                            "NUM_CTAS": 1, "SCALE_BLOCK": 32, "DTYPE_A": dtypeA, "DTYPE_B": dtypeB, "TRANSPOSE_B":
-                            b_trans, "NUM_BUFFERS": num_buffers, "SCALE_PRESHUFFLE": scale_preshuffle, 'WITH_A_SCALE':
-                            True
-                        })
-    return configs
-
-
 @aggregate
 class MXFPGEMMConfig:
     BLOCK_M: gl.constexpr
@@ -156,13 +127,9 @@ class MXFPGEMMConfig:
             self.shared_layout_b = gl.constexpr(
                 gl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K_PACKED_B, BLOCK_N], [1, 0]))
 
-        if WITH_A_SCALE:
-            self.shared_layout_a_scale = gl.constexpr(
-                gl.PaddedSharedLayout.with_identity_for([[256, 16]],
-                                                        [self.BLOCK_M_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED],
-                                                        [1, 0]))
-        else:
-            self.shared_layout_a_scale = None
+        self.shared_layout_a_scale = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for([[256, 16]],
+                                                    [self.BLOCK_M_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED], [1, 0]))
         self.shared_layout_b_scale = gl.constexpr(
             gl.PaddedSharedLayout.with_identity_for([[256, 16]],
                                                     [self.BLOCK_N_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED], [1, 0]))
@@ -202,7 +169,8 @@ def create_tensor_descriptor(cfg: MXFPGEMMConfig, a_ptr, a_offs, b_ptr, b_offs, 
             block_shape=(cfg.BLOCK_M // PRESHUFFLE_FACTOR, cfg.BLOCK_K_SCALE_PRESHUFFLED),  #
             layout=cfg.shared_layout_a_scale)
     else:
-        a_scale_desc = None
+        # Use a placeholder to make compiler happy
+        a_scale_desc = gl.constexpr(0)
 
     b_scale_desc = gl.amd.gfx1250.tdm.make_tensor_descriptor(
         base=b_scale_ptr + b_scale_offs,  #
@@ -273,7 +241,8 @@ def issue_local_loads(cfg: MXFPGEMMConfig, wmma_idx, a_buffer, b_buffer, a_scale
     if cfg.WITH_A_SCALE:
         scale_a = a_scale_buffer_slice.load(layout=cfg.layout_a_scale)
     else:
-        scale_a = None
+        # Use a placeholder to make compiler happy
+        scale_a = gl.constexpr(0)
     scale_b = b_scale_buffer_slice.load(layout=cfg.layout_b_scale)
 
     return a, b, scale_a, scale_b
@@ -429,6 +398,8 @@ def run(config):
         b_d = b.data.contiguous().cuda()
     if WITH_A_SCALE:
         a_scale_d = a_scale.cuda()
+    else:
+        a_scale_d = None
     b_scale_d = b_scale.cuda()
 
     stride_am, stride_ak = a_d.stride(0), a_d.stride(1)
@@ -468,43 +439,40 @@ def pack_scale(x):
     return x.view(NON_K // preshuffle_factor, K_SCALE * preshuffle_factor)
 
 
-@pytest.mark.parametrize("config", generate_configs())
-def test_runtime_mxgemm_tdm_pipelined(config):
-    print(config)
-    M = config["M"]
-    N = config["N"]
-    K = config["K"]
-    blockSizeM = config["BLOCK_M"]
-    blockSizeN = config["BLOCK_N"]
-    blockSizeK = config["BLOCK_K"]
-    numCtas = config['NUM_CTAS']
-    numWarps = config['NUM_WARPS']
-    dtype_a = config['DTYPE_A']
-    dtype_b = config['DTYPE_B']
-    scale_block = config['SCALE_BLOCK']
-    TRANSPOSE_B = config['TRANSPOSE_B']
-    NUM_BUFFERS = config['NUM_BUFFERS']
-    SCALE_PRESHUFFLE = config['SCALE_PRESHUFFLE']
-    WITH_A_SCALE = config['WITH_A_SCALE']
+@pytest.mark.parametrize(
+    "DTYPE_A, DTYPE_B",
+    [['float8_e5m2', 'float4'], ['float4', 'float8_e4m3'], ['float8_e4m3', 'float8_e5m2'], ['float4', 'float4']])
+@pytest.mark.parametrize("M,N,K", [(128, 128, 128), (256, 256, 512)])
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(64, 64, 64), (128, 128, 128)])
+@pytest.mark.parametrize("TRANSPOSE_B", [True, False])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("SCALE_PRESHUFFLE", [True, False])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B, NUM_BUFFERS,
+                                      SCALE_PRESHUFFLE, WITH_A_SCALE):
+    SCALE_BLOCK = 32
+    numWarps = 4
+    numCtas = 1
 
-    if not WITH_A_SCALE and dtype_a == "float4":
+    if SCALE_PRESHUFFLE and (BLOCK_M < 128 or BLOCK_N < 128):
+        pytest.skip("Skipping block sizes too small for preshuffling")
+
+    if not WITH_A_SCALE and DTYPE_A == "float4":
         pytest.skip("Skip fp4 x mxfp gemm to reduce test cases.")
 
     torch.manual_seed(0)
-    torch.set_printoptions(edgeitems=30, linewidth=100000)
-    np.set_printoptions(threshold=np.inf)
 
-    a = init_data(dtype_a, M, K)
-    b = init_data(dtype_b, K, N)
-    a_scale_size = (M, (K + scale_block - 1) // scale_block)
-    b_scale_size = (N, (K + scale_block - 1) // scale_block)
+    a = init_data(DTYPE_A, M, K)
+    b = init_data(DTYPE_B, K, N)
+    a_scale_size = (M, (K + SCALE_BLOCK - 1) // SCALE_BLOCK)
+    b_scale_size = (N, (K + SCALE_BLOCK - 1) // SCALE_BLOCK)
     if WITH_A_SCALE:
         a_scale = MXScaleTensor(size=a_scale_size).random(low=1.0, high=32.0)
     else:
         a_scale = None
     b_scale = MXScaleTensor(size=b_scale_size).random(low=1.0, high=32.0)
 
-    c_ref = torch_gemm_mxfp(a, b, a_scale, b_scale, scale_block, M, N, K)
+    c_ref = torch_gemm_mxfp(a, b, a_scale, b_scale, SCALE_BLOCK, M, N, K)
 
     if WITH_A_SCALE:
         a_scale = a_scale.data
@@ -515,9 +483,9 @@ def test_runtime_mxgemm_tdm_pipelined(config):
         b_scale = pack_scale(b_scale)
 
     # mxfp4 input needs packed along the k dim, i.e., two mxfp4 are packed in one uint8
-    if dtype_a in ['float4', 'float6_e2m3', 'float6_e3m2']:
+    if DTYPE_A in ['float4', 'float6_e2m3', 'float6_e3m2']:
         a = a.to_packed_tensor(dim=1)
-    if dtype_b in ['float4', 'float6_e2m3', 'float6_e3m2']:
+    if DTYPE_B in ['float4', 'float6_e2m3', 'float6_e3m2']:
         b = b.to_packed_tensor(dim=0)
 
     c_d = torch.zeros(M, N, dtype=torch.float32).cuda()
@@ -528,6 +496,8 @@ def test_runtime_mxgemm_tdm_pipelined(config):
         b_d = b.data.contiguous().cuda()
     if WITH_A_SCALE:
         a_scale_d = a_scale.cuda()
+    else:
+        a_scale_d = None
     b_scale_d = b_scale.cuda()
 
     stride_am, stride_ak = a_d.stride(0), a_d.stride(1)
@@ -538,18 +508,19 @@ def test_runtime_mxgemm_tdm_pipelined(config):
     stride_cm, stride_cn = c_d.stride(0), c_d.stride(1)
     stride_scale = b_scale_d.stride(0)
 
-    numBlocks = triton.cdiv(M, blockSizeM) * triton.cdiv(N, blockSizeN)
+    numBlocks = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
     grid = [numBlocks, 1, 1]
     group_size_m = 1
 
     dtype_converter = {'float8_e5m2': "e5m2", "float8_e4m3": "e4m3", "float4": "e2m1"}
 
     k = mxgemm_tdm_pipelined_kernel[grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk,
-                                          stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[dtype_a],
-                                          dtype_converter[dtype_b], scale_block, blockSizeM, blockSizeN, blockSizeK,
+                                          stride_bn, stride_cm, stride_cn, stride_scale, dtype_converter[DTYPE_A],
+                                          dtype_converter[DTYPE_B], SCALE_BLOCK, BLOCK_M, BLOCK_N, BLOCK_K,
                                           group_size_m, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, WITH_A_SCALE,
                                           num_warps=numWarps, num_ctas=numCtas, waves_per_eu=numWarps // 4)
     static_profile(k)
+
     if TRANSPOSE_B:
         assert 'ds_load_u8' not in k.asm['amdgcn']
 
