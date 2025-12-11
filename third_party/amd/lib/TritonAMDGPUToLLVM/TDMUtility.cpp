@@ -184,6 +184,25 @@ decodeTDMDescriptorFull(RewriterBase &rewriter, Location loc,
   return {srcPtr, tensorShape, tensorStride, blockShape};
 }
 
+// !!!! Do **NOT** upstream this comment, internal use only !!!
+//
+// NOTE that this function cite some document from ISA manual verbatim. The
+// convention used by the ISA manual is not consistent with Triton w.r.t
+// the index of dimension. e.g. Consider a tensor of shape A x B x C x D
+//  - in Triton, the dim0 refers to the outermost dim, i.e. A
+//  - in ISA manual, the dim0 about tensor/tile shape refers to *INNERMOST*
+//    dimension, i.e. D in this case.
+//  - in ISA manual, when it comes to stride, the dim0 refers to the 2nd
+//    innermost dimension, i.e. C in this case. FIXME: likely because it
+//    assumes stride of the innermost dimension is 1, and hence counting from
+//    the 2nd innermost dimension.
+//
+// TODO: Manipulating bitfield is intrinsically messy. Depositing bitfield to
+//    4-dword can be encapsulated into a class for two reasons
+//    *. Clarity
+//    *. Performance. I could be wrong, current generated code may not be
+//       optimized by InstCombine in LLVM.
+//
 TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
                                   const LLVMTypeConverter *typeConverter,
                                   Type elementType,
@@ -210,13 +229,11 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   }
 
   // Distribute block among warps
-  if (numDims >= 2) {
-    auto warps = getWarpDistribution(blockShape, numWarps);
-    blockShape[0] = ceil(blockShape[0], int64_t(warps[0]));
-    blockShape[1] = ceil(blockShape[1], int64_t(warps[1]));
-  } else {
-    // For 1D case, all warps work on the single dimension
-    blockShape[0] = ceil(blockShape[0], int64_t(numWarps));
+  {
+    int64_t blkShapePerWarp[5];
+    tdmGetAdjustedBlockShape(blockShape.data(), numDims, numWarps,
+                             &blkShapePerWarp[0]);
+    blockShape.assign(blkShapePerWarp, blkShapePerWarp + blockShape.size());
   }
 
   // group0 (128 bits / 4 dwords) effective bit encoding:
@@ -230,17 +247,48 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   group0[3] = b.trunc(i32_ty, b.lshr(globalAddr, b.i64_val(32)));
   group0[3] = b.or_(group0[3], b.i32_val(1 << 31));
 
-  // group1 (256 bits / 8 dwords) effective bit encoding:
-  // [15:0]:    multicast mask
-  // [17:16]:   data size - log2(element size in bytes)
-  // [20]:      enable padding
-  // [24:22]:   pad interval - log2(pad interval in dwords) - 1
-  // [31:25]:   pad amount - pad amount in dwords - 1
-  // [79:48]:   tensor shape dim inner
-  // [111:80]:  tensor shape dim outer
-  // [127:112]: block shape dim inner
-  // [143:128]: block shape dim outer
-  // [207:160]: tensor stride dim outer (we only use 32 bits)
+  /* group1 bit-field definition:
+
+    NOTE that in this chart
+    - {tensor|tile}-dim0 for means innermost dimension.
+    - stride-dim0 refers to the stride of the 2nd innermost dimension.
+      FIXME: Is the stride for innermost dimension always 1, and hence no
+      need to set in the descriptor
+
+    ================================================================
+     dword | dword     | bit-size | field
+           | -bit-ofst |
+     ------------------------------------------------
+      0      0          16         multicast mask
+             16         2          data size - log2(element size in bytes)
+             18         1          atomic barrier enable
+             19         1          iterate enable
+             20         1          pad enable
+             22         3          pad internval
+                                   (log2(pad interval in dwords) - 1)
+             25         7          pad amount - pad amount in dwords - 1
+                                   (pad amount in dwords - 1)
+     ---------------------------------------------------------
+     1       0          16         atomic barrier address
+             16         16         tensor_dim0 (low-16-bit)
+     --------------------------------------------------------
+     2       0           16        tensor_dim0 (high-16-bit)
+             16          16        tensor_dim1 (low-16-bit)
+     ----------------------------------------------------------
+     3       0           16        tensor_dim1 (high-16-bit)
+             16          16        tile_dim0
+     -------------------------------------------------------
+     4       0           16        tile_dim1
+             16          16        tile_dim2
+     -------------------------------------------------------
+     5       0           32        tensor_dim0_stride(low-32-bit)
+     -------------------------------------------------------
+     6       0           16        tensor_dim0_stride(high-16-bit)
+            16           16        tensor_dim1_stride(low-16-bit)
+     -------------------------------------------------------------
+     7       0           32        tensor_dim1_stride(high-16-bit)
+     ================================================================
+  */
   SmallVector<Value> group1(8, b.i32_val(0));
   int32_t dataSize = log2(elementSizeInBytes);
   unsigned dwordSize = 32;
@@ -254,7 +302,7 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     group1[0] = b.or_(group1[0], b.i32_val((log2PadInterval - 1) << 22));
     group1[0] = b.or_(group1[0], b.i32_val((padAmountInDwords - 1) << 25));
   }
-  // Encode tensor shapes using 48-bit encoding
+  // Encode 32-bit tensor shapes
   group1[1] = b.shl(tensorShape[numDims - 1], b.i32_val(16));
   group1[2] = b.lshr(tensorShape[numDims - 1], b.i32_val(16));
 
@@ -288,13 +336,19 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     return TDMDescriptor{group0, group1, std::nullopt, std::nullopt};
   }
 
-  // For 3D-5D tensors, fill group2 and group3
-  // group2 (128 bits / 4 dwords) effective bit encoding:
-  // [31:0]:    tensor_dim2 (3rd dimension from the end)
-  // [63:32]:   tensor_dim3 (4th dimension from the end) (or
-  // lds_addr_increment if iterate_enable) [111:64]:  tensor_dim2_stride (or
-  // global_addr_increment if iterate_enable) [127:112]: tile_dim3 (or
-  // iterate_count if iterate_enable)
+  /* For 3D-5D tensors, fill group2 and group3
+     group2 bit-field definition
+    ================================================================
+     dword | dword     | bit-size | field
+           | -bit-ofst |
+     ---------------------------------------------------------------
+          0           0         32 tensor_dim2 (3rd inner dimension)
+          1           0         32 tensor_dim3 (4th inner dimension)
+          2           0         32 tensor_dim2_stride low-32-bit
+          3           0         16 tensor_dim2_stride high-16-bit
+                     16         16 tile_dim3
+    ================================================================
+  */
   SmallVector<Value> group2(4, b.i32_val(0));
   if (numDims >= 3) {
     // tensor_dim2 (3rd dimension from the end)
@@ -315,11 +369,19 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     }
   }
 
-  // group3 (128 bits / 4 dwords) effective bit encoding:
-  // [47:0]:    tensor_dim3_stride (4th dimension from the end)
-  // [79:48]:   tensor_dim4 (5th dimension from the end)
-  // [95:80]:   tile_dim4
-  // [127:96]:  reserved
+  /* group3 bit-field definition
+    ================================================================
+     dword | dword     | bit-size | field
+           | -bit-ofst |
+     ---------------------------------------------------------------
+         0           0          32 tensor_dim3_stride LSB-32
+         1           0          16 tensor_dim3_stride MSB-16
+                    16          16 tensor_dim4 LSB-16
+         2          00          16 tensor_dim4 MSB-16
+                    16          16 tile_dim4
+         3           0          32 reserved
+    ================================================================
+  */
   SmallVector<Value> group3(4, b.i32_val(0));
   if (numDims >= 4) {
 

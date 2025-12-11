@@ -76,6 +76,42 @@ public:
   }
 };
 
+class TensorStoreLowering : public OpRewritePattern<DescriptorStoreOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(DescriptorStoreOp op,
+                                PatternRewriter &rewriter) const override {
+    MLIRContext *ctx = op.getContext();
+    Attribute sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+    auto loc = op.getLoc();
+    Value desc = op.getDesc();
+    mlir::TypedValue<RankedTensorType> src = op.getSrc();
+    auto tensorType = src.getType();
+
+    SmallVector<unsigned> order = getOrder(tensorType);
+    if (auto blockedLayout =
+            dyn_cast<BlockedEncodingAttr>(tensorType.getEncoding())) {
+      order = llvm::to_vector(blockedLayout.getOrder());
+    }
+
+    auto cgaLayout = getCGALayout(tensorType.getEncoding());
+    Attribute encoding = SwizzledSharedEncodingAttr::get(
+        tensorType.getContext(), 1, 1, 1, order, cgaLayout);
+
+    MemDescType memDescType =
+        MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                         encoding, sharedMemorySpace, /*mutableMemory=*/true);
+    Value alloc = LocalAllocOp::create(rewriter, loc, memDescType, op.getSrc());
+    amdgpu::AsyncTDMCopyLocalToGlobalOp::create(rewriter, loc, op.getDesc(),
+                                                op.getIndices(), alloc,
+                                                /*barrier=*/Value{});
+    amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct TritonAMDGPUConvertToTensorOps
     : impl::TritonAMDGPUConvertToTensorOpsBase<TritonAMDGPUConvertToTensorOps> {
 
@@ -85,7 +121,7 @@ struct TritonAMDGPUConvertToTensorOps
 
     mlir::RewritePatternSet patterns(context);
     // TODO: add the conversion passes
-    patterns.add<TensorLoadLowering>(context);
+    patterns.add<TensorLoadLowering, TensorStoreLowering>(context);
     if (applyPatternsGreedily(m, std::move(patterns)).failed())
       signalPassFailure();
   }
