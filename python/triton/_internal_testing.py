@@ -205,6 +205,25 @@ def supports_ws():
         return False
     return torch.cuda.get_device_capability()[0] >= 9
 
+arch_supports_dtypes = {
+    'gfx90a': [],
+    'gfx942': [],
+    'gfx950': ['fp16', 'bf16', 'mxfp8', 'mxfp8e5', 'mxfp8e4', 'mxfp4'],
+    'gfx1250': ['fp16', 'bf16', 'mxfp8', 'mxfp8e5', 'mxfp8e4', 'mxfp4'],
+}
+def arch_supports_dtype(arch, dtype):
+    if arch in arch_supports_dtypes:
+        supported_dtypes = arch_supports_dtypes[arch]
+        return dtype in supported_dtypes
+    # Error on the side of reporting dtype is support so that tests will run,
+    # then manually disable them by adding archs without support for data types.
+    return True
+
+
+def supports_dtype(dtype):
+    return arch_supports_dtype(get_arch(), dtype)
+
+
 
 def tma_skip_msg(byval_only=False):
     if byval_only:

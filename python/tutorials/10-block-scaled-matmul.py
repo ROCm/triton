@@ -130,15 +130,21 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
+def is_hip():
+    return triton.runtime.driver.active.get_current_target().backend == 'hip'
 
 def is_hip_cdna4():
     target = triton.runtime.driver.active.get_current_target()
-    return target is not None and target.backend == 'hip' and target.arch == 'gfx950'
+    return is_hip() and target.arch == 'gfx950'
 
+def is_hip_gfx1250():
+    target = triton.runtime.driver.active.get_current_target()
+    return is_hip() and target.arch == 'gfx1250'
 
 def supports_block_scaling():
-    return (is_cuda() and torch.cuda.get_device_capability()[0] == 10) or is_hip_cdna4()
-
+    target = triton.runtime.driver.active.get_current_target()
+    return (is_cuda() and torch.cuda.get_device_capability()[0] == 10) \
+            or (is_hip() and target.arch in ["gfx950", "gfx1250"])
 
 def _matmul_launch_metadata(grid, kernel, args):
     ret = {}
@@ -617,7 +623,7 @@ if __name__ == "__main__":
     parser.add_argument("-K", type=int, required=False, default=512)
     parser.add_argument("--K_range", type=int, nargs=2)
     parser.add_argument("--K_step", type=int, default=512)
-    parser.add_argument("--bench", action="store_true", default=True)
+    parser.add_argument("--bench", action="store_true", default=False)
     parser.add_argument("--format", type=str, choices=["mxfp4", "nvfp4", "mxfp8", "mixed"], default="nvfp4")
     args = parser.parse_args()
 
@@ -632,8 +638,11 @@ if __name__ == "__main__":
 
         if is_cuda():
             validate_block_scaled(8192, 8192, 8192, block_scale_type=args.format)
-        elif is_hip_cdna4():
-            assert args.format == "mxfp4", "AMD tutorial only supports mxpf4 format currently"
+        elif is_hip():
+            if is_hip_cdna4():
+                assert args.format == "mxfp4", "AMD tutorial only supports mxpf4 format currently"
+            if is_hip_gfx1250():
+                assert args.format in ["mxfp4", "mxfp8", "mixed"], "AMD tutorial only supports mxpf4 format currently"
             validate_block_scaled_amd(8192, 8192, 8192, block_scale_type=args.format, mfma_nonkdim=16)
             validate_block_scaled_amd(8192, 8192, 8192, block_scale_type=args.format, mfma_nonkdim=32)
 
@@ -643,7 +652,7 @@ if __name__ == "__main__":
             for K in range(args.K_range[0], args.K_range[1] + 1, args.K_step):
                 if is_cuda():
                     bench_block_scaled(K, reps=10000, block_scale_type=args.format)
-                elif is_hip_cdna4():
+                elif is_hip():
                     bench_block_scaled_amd(K, reps=10000, block_scale_type=args.format, mfma_nonkdim=16)
                     bench_block_scaled_amd(K, reps=10000, block_scale_type=args.format, mfma_nonkdim=32)
             proton.finalize()

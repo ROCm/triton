@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 from test_mxfp import MXFP4Tensor, MXScaleTensor
 import re
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_cdna, is_hip_gfx1250
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_cdna, is_hip_gfx1250, get_arch, supports_dtype
 
 
 def f8_to_f16(x, dtype):
@@ -361,10 +361,10 @@ def test_mxfp(BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, nonKDim, NUM_WARPS, device)
     if is_cuda() and torch.cuda.get_device_capability()[0] < 10:
         pytest.skip("Requires compute capability >= 10")
     elif is_hip():
-        if not is_hip_cdna4():
-            pytest.skip("Scaled mxfp8 matmul is only natively supported on CDNA4")
-        if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
-            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+        if not supports_dtype("mxfp8"):
+            pytest.skip(f"mxfp8 matmul is not supported on {get_arch()}")
+        if is_hip_cdna4() and (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
+            pytest.skip(f"{get_arch()} does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
 
     if BLOCK_N == 256 and BLOCK_K == 256:
         NUM_STAGES = min(NUM_STAGES, 2)
@@ -621,9 +621,12 @@ def _gemm_kernel_preshuffled_scales_cdna4(a_ptr, b_ptr, c_ptr, a_scales_ptr, b_s
 @pytest.mark.parametrize("mfma_nonkdim", [16, 32])
 @pytest.mark.parametrize("preshuffle", [True, False])
 @pytest.mark.skipif(is_cuda() and torch.cuda.get_device_capability()[0] == 10, reason="Compilation bug for GB200.")
-@pytest.mark.skipif(is_hip() and not is_hip_cdna4(), reason="Scaled dot is not emulated on other archs yet.")
 def test_preshuffle_scale_mxfp_cdna4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_A, DTYPE_B, FAST_MATH, mfma_nonkdim,
                                      preshuffle, device):
+    if is_hip():
+        if is_hip_cdna2() or is_hip_cdna3() or is_hip_gfx11() or is_hip_gfx12():
+            pytest.skip("mxfp not supported on earlier hip archs.")
+
     # For details about scale shuffling on AMD GPUs please take a look at documentation in 10-block-scaled-matmu.py.
     if preshuffle and (BLOCK_M < 32 or BLOCK_N < 32 or BLOCK_K < 256):
         pytest.skip("Minimal tile size for preshuffling is 32x32x256")
@@ -633,6 +636,11 @@ def test_preshuffle_scale_mxfp_cdna4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_A
 
     if is_cuda() and (DTYPE_A == "mxfp8e4" or DTYPE_B == "mxfp8e4"):
         pytest.skip("Skip fp8e4 on NV backend")
+
+    if not supports_dtype(DTYPE_A):
+        pytest.skip(f"{get_arch()} does not support {DTYPE_A}")
+    if not supports_dtype(DTYPE_B):
+        pytest.skip(f"{get_arch()} does not support {DTYPE_B}")
 
     def shuffle_scales_cdna4(scales: torch.Tensor):
         if not preshuffle:
@@ -746,8 +754,10 @@ def test_preshuffle_scale_mxfp_cdna4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_A
                                                        (128, 128, 256), (128, 256, 256)])
 @pytest.mark.parametrize("NUM_STAGES", [1, 2, 4])
 @pytest.mark.parametrize("USE_2D_SCALE_LOAD", [False, True])
-@pytest.mark.skipif(is_hip() or torch.cuda.get_device_capability()[0] != 10, reason="Requires compute capability == 10")
+@pytest.mark.skipif(torch.cuda.get_device_capability()[0] != 10, reason="Requires compute capability == 10")
 def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_2D_SCALE_LOAD, device):
+    if not supports_dtype("mxfp8e5"):
+        pytest.skip(f"{get_arch()} does not support mxfp8e5")
     if BLOCK_N == 256 and BLOCK_K == 256:
         NUM_STAGES = min(NUM_STAGES, 2)
     elif BLOCK_K == 256:
@@ -982,11 +992,11 @@ def block_scale_fp4_matmul(  #
 @pytest.mark.parametrize("with_a_scale", [True, False])
 @pytest.mark.parametrize("with_b_scale", [True, False])
 @pytest.mark.parametrize("pack_along_k", [True, False])
-@pytest.mark.parametrize(("scale_type", "VEC_SIZE"), [("float8_e8m0fnu", 32), ("float8_e4m3fn", 16)],
+@pytest.mark.parametrize(("scale_type", "VEC_SIZE", "dtype"), [("float8_e8m0fnu", 32, "mxfp4"), ("float8_e4m3fn", 16, "nvfp4")],
                          ids=["mxfp4", "nvfp4"])
 @pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
 def test_block_scale_fp4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, VEC_SIZE, with_a_scale, with_b_scale, pack_along_k,
-                         scale_type, nonKDim, device):
+                         scale_type, dtype, nonKDim, device):
     assert M % BLOCK_M == 0
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
@@ -1000,12 +1010,15 @@ def test_block_scale_fp4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, VEC_SIZE, with_a_sc
         if not (with_a_scale and with_b_scale):
             pytest.skip("None aScale/bScale is only tested on AMD backend for now")
     elif is_hip():
-        if not is_hip_cdna4():
-            pytest.skip("Scaled fp4 matmul is only natively supported on CDNA4")
-        if scale_type != 'float8_e8m0fnu':
-            pytest.skip("CDNA4 only supports E8M0 scale")
-        if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
-            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+        if not supports_dtype(dtype):
+            pytest.skip(f"{get_arch()} does not support {dtype}")
+        #if is_hip_cdna4():
+        #    pytest.skip("Scaled fp4 matmul is only natively supported on CDNA4")
+        #if scale_type != 'float8_e8m0fnu':
+        #    pytest.skip("CDNA4 only supports E8M0 scale")
+        if is_hip_cdna4():
+            if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
+                pytest.skip(f"{get_arch()} does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
 
     NUM_STAGES = 1
     torch.manual_seed(42)
@@ -1154,10 +1167,21 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
         if not (A_DATA_TYPE == "float8e5" and B_DATA_TYPE == "float4"):
             pytest.skip(f"(A: {A_DATA_TYPE}, B: {B_DATA_TYPE}) has not been tested on NV backend")
     elif is_hip():
-        if not is_hip_cdna4():
-            pytest.skip("Scaled mxfp4 & mxfp8 matmul is only natively supported on CDNA4")
-        if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
-            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+        dtypeA = "fp4" if A_DATA_TYPE=="float4" else "fp8e5" if A_DATA_TYPE=="float8e5" else "fp8e4"
+        if WITH_A_SCALE:
+            dtypeA = "mx" + dtypeA
+        dtypeB = "fp4" if B_DATA_TYPE=="float4" else "fp8e5" if B_DATA_TYPE=="float8e5" else "fp8e4"
+        if WITH_B_SCALE:
+            dtypeB = "mx" + dtypeB
+        if not supports_dtype(dtypeA):
+            pytest.skip(f"{get_arch()} does not support {dtypeA}")
+        if not supports_dtype(dtypeB):
+            pytest.skip(f"{get_arch()} does not support {dtypeB}")
+        #if not is_hip_cdna4():
+        #    pytest.skip("Scaled mxfp4 & mxfp8 matmul is only natively supported on CDNA4")
+        if is_hip_cdna4():
+            if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
+                pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
         if (A_DATA_TYPE == 'float4' and not WITH_A_SCALE) or (B_DATA_TYPE == 'float4' and not WITH_B_SCALE):
             pytest.skip("Float4 without scale is tested in test_block_scale_fp4")
     if not PACK_B_ALONG_K and B_DATA_TYPE != "float4":
