@@ -18,7 +18,7 @@ void populateConcatOpToLLVMPatterns(mlir::LLVMTypeConverter &typeConverter,
 
 void populateScaledUpcastOpToLLVMPatterns(
     mlir::LLVMTypeConverter &typeConverter, mlir::RewritePatternSet &patterns,
-    const AMD::TargetInfo &, mlir::PatternBenefit benefit);
+    const AMD::TargetInfo &targetInfo, mlir::PatternBenefit benefit);
 
 } // namespace mlir::triton::AMD
 

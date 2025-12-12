@@ -165,6 +165,18 @@ static void initProton(pybind11::module &&m) {
   m.def("get_context_depth", [](size_t sessionId) {
     return SessionManager::instance().getContextDepth(sessionId);
   });
+
+  m.def(
+      "get_data",
+      [](size_t sessionId) {
+        return SessionManager::instance().getData(sessionId);
+      },
+      pybind11::arg("sessionId"));
+
+  m.def(
+      "clear_data",
+      [](size_t sessionId) { SessionManager::instance().clearData(sessionId); },
+      pybind11::arg("sessionId"));
 }
 
 PYBIND11_MODULE(libproton, m) {

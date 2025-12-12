@@ -19,7 +19,6 @@ add_triton_library(TritonAMDGPUTransforms
   FoldTrueCmpIOp.cpp
   UpdateAsyncWaitCount.cpp
   Utility.cpp
-  # PlanCTA.cpp
   WarpPipeliner.cpp
 
   DEPENDS
