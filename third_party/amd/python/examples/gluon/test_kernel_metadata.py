@@ -212,7 +212,6 @@ def generate_mxfp_attention_configs():
 def test_mxfp_attention_kernel_metadata(config):
     config["pipelined"] = True
     config["disable_p_scaling"] = True
-    config["scale_preshuffled"] = (config["scale_type"] == "block")
     attn_kernel = run_mxfp_attention(**config)
 
     QT = config["q_type"]
