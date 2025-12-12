@@ -623,7 +623,8 @@ class GlobalScaledAttentionProgram:
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
 
         # write output
-        acc = acc / l_i[:, None]
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
         self.store_output(acc)
 
     @gluon.jit
@@ -1422,7 +1423,8 @@ class BlockScaledAttentionProgram:
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
 
         # write output
-        acc = acc / l_i[:, None]
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
         self.store_output(acc)
 
     @gluon.jit
