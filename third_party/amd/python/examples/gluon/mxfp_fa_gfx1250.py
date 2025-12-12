@@ -1827,26 +1827,23 @@ def attn_fwd_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
 
 def create_operand(dtype: str, b: int, s: int, h: int, d: int, pack_dim: int = -1):
     size = (b, s, h, d)
+    # Limit operand to an empirical range for accuracy
     if dtype == 'e4m3':
-        sig = torch.randint(0, 2, size, dtype=torch.uint8)
-        exp = torch.randint(0, 2**4, size, dtype=torch.uint8)
-        man = torch.randint(0, 2**3, size, dtype=torch.uint8)
-        v = ((sig << 7) | (exp << 3) | man).type(torch.uint8)
-        v[(exp << 3) | man == 0x7F] = 0x00  # avoid NaN
+        low, high = 0x38 - 15, 0x38 + 5  # [0.2812, 1.6250]
+        v = torch.randint(low, high + 1, size, dtype=torch.uint8)
         v = v.view(torch.float8_e4m3fn)
-        v_ref = v.view(torch.float8_e4m3fn).to(torch.float32)
+        v_ref = v.to(torch.float32)
     elif dtype == 'e5m2':
-        sig = torch.randint(0, 2, size, dtype=torch.uint8)
-        exp = torch.randint(0, 2**5, size, dtype=torch.uint8)
-        man = torch.randint(0, 2**2, size, dtype=torch.uint8)
-        v = ((sig << 7) | (exp << 2) | man).type(torch.uint8)
-        v[(exp << 2) | man >= 0x7C] = 0x00  # avoid NaN and Inf
+        low, high = 0x3C - 15, 0x3C + 5  # [0.0781, 2.500]
+        v = torch.randint(low, high + 1, size, dtype=torch.uint8)
         v = v.view(torch.float8_e5m2)
-        v_ref = v.view(torch.float8_e5m2).to(torch.float32)
+        v_ref = v.to(torch.float32)
     else:
         assert dtype == 'e2m1'
         assert pack_dim >= 0
-        v_mxfp4 = MXFP4Tensor(size=size).random()
+        low, high = 1 / 16, 16
+        v_data = (low - high) * torch.rand(size) + low
+        v_mxfp4 = MXFP4Tensor(v_data)
         v = v_mxfp4.to_packed_tensor(pack_dim)
         v_ref = v_mxfp4.to(torch.float32)
     return v, v_ref
