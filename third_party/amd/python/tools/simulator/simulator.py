@@ -12,6 +12,8 @@ Usage:
 
 import argparse
 import re
+import sys
+from collections import defaultdict
 
 # yapf: disable
 # -------------------------------
@@ -21,9 +23,8 @@ DELAY_REASONS = {
     0: "tri-exec",      ## 1
     1: "le V law",      ## 2
     2: "data dep",      ## 4
-    3: "ld_scale",      ## 8
-    4: "le dscnt",      ## 16
-    5: "trans op"       ## 32
+    3: "le dscnt",      ## 8
+    4: "trans op",      ## 16
 }
 
 # -------------------------------
@@ -32,10 +33,7 @@ DELAY_REASONS = {
 INSTR_TYPES = {
     'v_wmma_scale': 'wmma',
     'v_exp': 'exp',
-    'v_fma': 'valu',
-    'v_add': 'valu',
-    'v_sub': 'valu',
-    'v_mul': 'valu',
+    'v_cvt_scalef32_pk8': 'cvt_pk8',
     'ds_load': 'ds',
     'tensor_load': 'tdm',
     's_set_vgpr_msb': 'control',
@@ -46,20 +44,28 @@ INSTR_TYPES = {
     's_barrier_wait': 'internal',
     's_clause': 'internal',
     's_setprio': 'internal',
-    's_wait': 'internal'
+    's_wait': 'internal',
+    'ld_scale': 'valu'
 }
 
 DS_LATENCY = 70  # cycles for ds_load to complete
 
-CYCLES = {
+INSTR_LATENCY = {
     'wmma': 8,
-    'exp': 2,
-    'valu': 1,
-    'ds': 1,
+    'exp': 8,
+    'valu': 5,
+    'ds': 70,
     'tdm': 1,
     'control': 1,
     'salu': 1,
-    'internal': 1
+    'internal': 1,
+    'cvt_pk8': 8
+}
+
+INSTR_REPEAT = {
+    'cvt_pk8': 4,
+    'cvt_pk16': 8,
+    'cvt_pk32': 16,
 }
 
 CONTROL_INSTRUCTIONS = {'s_set_vgpr_msb', 's_delay_alu', 's_wait_alu'}
@@ -217,9 +223,6 @@ class Instruction:
         for sub in sub_insts:
             parse_one(sub, self.out_regs, self.deps)
 
-        # Remove outputs from deps (RAW rule)
-        self.deps = [d for d in self.deps if d not in self.out_regs]
-
 
 # -------------------------------
 # Simulator
@@ -260,16 +263,34 @@ class Simulator:
             return int(m.group(1))
         return 1  # default when no xN suffix
 
+    def count_bank_conflicts_max(self, regs, num_banks):
+        bank_counts = defaultdict(int)
+
+        for r in regs:
+            if r.startswith("s"):
+                continue
+            reg_id = int(r[1:])  # strip 'v'
+            bank = reg_id % num_banks
+            bank_counts[bank] += 1
+
+        # max conflict among all banks
+        max_conflict = 0
+        for count in bank_counts.values():
+            if count > 1:
+                max_conflict = max(max_conflict, count - 1)
+
+        return max_conflict
+
     def simulate(self):
         # yapf: disable
         wm_coexec_slots = {
-            1: ['ds','tdm','salu'],
-            2: ['ds','tdm','salu'],
-            3: ['ds','tdm','salu','valu','exp'],
-            4: ['ds','tdm','salu'],
-            5: ['ds','tdm','salu'],
-            6: ['ds','tdm','salu','valu','exp'],
-            7: ['ds','tdm','salu','valu','exp']
+            1: ['ds_wait','control','internal','ds','tdm','salu'],
+            2: ['ds_wait','control','internal','ds','tdm','salu'],
+            3: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8'],
+            4: ['ds_wait','control','internal','ds','tdm','salu'],
+            5: ['ds_wait','control','internal','ds','tdm','salu'],
+            6: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8'],
+            7: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8']
         }
         # yapf: enable
         wm_cycles = 8
@@ -295,19 +316,22 @@ class Simulator:
             # -----------------------
             max_dep = 0
             caused_by_ds = False
+            caused_by_wmma = False
             for dep in instr.deps:
                 if dep in self.register_ready:
                     ready_cycle, source_type = self.register_ready[dep]
                     if ready_cycle > max_dep:
                         max_dep = ready_cycle
                         caused_by_ds = (source_type == 'ds')
+                        caused_by_wmma = (source_type == 'wmma')
                     elif ready_cycle == max_dep and source_type == 'ds':
                         caused_by_ds = True
 
             if max_dep > cycle:
-                reason = 4 if caused_by_ds else 2
-                instr.delay_reason.add(reason)
-                self.delay_cycles[reason] += (max_dep - cycle)
+                reason = 3 if caused_by_ds else 2
+                if not caused_by_wmma:
+                    instr.delay_reason.add(reason)
+                    self.delay_cycles[reason] += (max_dep - cycle)
             cycle = max(cycle, max_dep)
 
             # -----------------------
@@ -317,14 +341,14 @@ class Simulator:
                 if cycle <= self.last_exp_cycle:
                     stall = self.last_exp_cycle + 1 - cycle
                     cycle = self.last_exp_cycle + 1
-                    instr.delay_reason.add(5)
-                    self.delay_cycles[5] += stall
+                    instr.delay_reason.add(4)
+                    self.delay_cycles[4] += stall
                 self.last_exp_cycle = cycle + 1  # EXP takes 2 cycles
 
             # -----------------------
             # 3. WMMA co-execution
             # -----------------------
-            if self.last_wmma and instr.type in ['ds', 'tdm', 'salu', 'valu', 'exp']:
+            if self.last_wmma and instr.type != 'wmma':
                 wm_issue = self.last_wmma.issue_cycle
                 if cycle < wm_issue + wm_cycles:
                     slot_found = False
@@ -336,7 +360,7 @@ class Simulator:
                                 cycle = wm_issue + slot
                                 slot_found = True
                                 break
-                    if slot_found is False and instr.type not in CONTROL_INSTRUCTIONS:
+                    if slot_found is False:
                         cycle = wm_issue + wm_cycles
 
             # ----------------------
@@ -354,7 +378,7 @@ class Simulator:
                 ##   cycle 10: exp <-- this is delayed by exp + V rule.
                 ##                     But it's no longer co-executing with wmma
                 if instr.wmma_coexec_cycle != '-':
-                    instr.delay_reason.discard(5)
+                    instr.delay_reason.discard(4)
 
             # -----------------------
             # 5. Control co-issue
@@ -364,9 +388,10 @@ class Simulator:
                 if prev.type == 'other':
                     cycle = 0
                     instr.co_issued = 'n'
-                elif prev.type != 'control' and prev.type != 'ds_wait' and prev.type != 'internal':
+                elif prev.type != 'control' and prev.type != 'ds_wait' and prev.type != 'internal' and prev.type != 'ds':
                     instr.co_issued = 'y'
                     cycle = prev.issue_cycle
+                    instr.wmma_coexec_cycle = prev.wmma_coexec_cycle
                 else:
                     instr.co_issued = 'n'
 
@@ -389,9 +414,9 @@ class Simulator:
                         wait_until = sorted_queue[num_to_complete - 1][1]
                         if wait_until > cycle:
                             stall_cycles = wait_until - cycle
-                            instr.delay_reason.add(4)
+                            instr.delay_reason.add(3)
                             cycle = wait_until
-                            self.delay_cycles[4] += stall_cycles
+                            self.delay_cycles[3] += stall_cycles
                         # Remove completed loads
                         self.ds_load_queue = [(issue, ready) for issue, ready in self.ds_load_queue if ready > cycle]
                     self.ds_wait_stalls.append((wait_cnt, stall_cycles, cycle))
@@ -403,11 +428,11 @@ class Simulator:
                 ## wmma cannot take exp coExec slots
                 if instr.type == 'wmma':
                     cycle += 1
-                    instr.delay_reason.add(5)
+                    instr.delay_reason.add(4)
                 ## wmma+exp+valu cannot co-exec together
                 elif instr.wmma_coexec_cycle != '-' and instr.type == 'valu':
                     cycle += 1
-                    instr.wmma_coexec_cycle == '-'
+                    instr.wmma_coexec_cycle = '-'
                     instr.delay_reason.add(0)
                 else:
                     instr.coexec_with_exp = 'y'
@@ -429,16 +454,11 @@ class Simulator:
             # 9. Update last WMMA
             # -----------------------
             if instr.type == 'wmma':
+                instr.wmma_coexec_cycle = 0
                 if self.last_wmma:
                     self.wasted_wmma_slots += (7 - len(self.current_wmma_used_slots))
                     self.current_wmma_used_slots = set()
                     cycle = max(cycle, self.last_wmma.issue_cycle + wm_cycles)
-                    ## scale wmma back to back rule
-                    prev = self.prev_exec_instr(idx)
-                    if prev and prev.type == 'valu' and prev.wmma_coexec_cycle == 7:
-                        cycle += 1
-                        instr.delay_reason.add(3)
-                        self.delay_cycles[3] += 1
                 self.last_wmma = instr
 
             # -----------------------
@@ -449,17 +469,12 @@ class Simulator:
             # -----------------------
             # 11. Update register ready times
             # -----------------------
+            reg_bank_conflicts = self.count_bank_conflicts_max(instr.deps, 8)
             for reg in instr.out_regs:
-                if instr.type == 'wmma':
-                    self.register_ready[reg] = (instr.issue_cycle + 8, 'wmma')
-                elif instr.type == 'exp':
-                    self.register_ready[reg] = (instr.issue_cycle + 7, 'exp')
-                elif instr.type == 'valu':
-                    self.register_ready[reg] = (instr.issue_cycle + 5, 'valu')
-                elif instr.type == 'ds':
-                    self.register_ready[reg] = (instr.issue_cycle + DS_LATENCY, 'ds')
-                else:
-                    self.register_ready[reg] = (instr.issue_cycle + 1, instr.type)
+                latency = INSTR_LATENCY[instr.type]
+                if instr.type != 'wmma':
+                    latency += reg_bank_conflicts
+                self.register_ready[reg] = (instr.issue_cycle + latency, instr.type)
 
             # -----------------------
             # 12. Track ds_load in queue
@@ -471,7 +486,10 @@ class Simulator:
             # -----------------------
             # 13. Next cycle
             # -----------------------
-            cycle += 1
+            if 'cvt' in instr.type:
+                cycle += INSTR_REPEAT[instr.type]
+            else:
+                cycle += 1
 
         if self.last_wmma:
             self.wasted_wmma_slots += (7 - len(self.current_wmma_used_slots))
@@ -479,31 +497,34 @@ class Simulator:
     # -------------------------------
     # Output annotations
     # -------------------------------
-    def output_annotations(self, out_file):
+    def output_annotations(self, out_file=None):
         # Get summary lines first
         summary_lines = self.analyze()
 
-        with open(out_file, 'w') as f:
+        out = open(out_file, 'w') if out_file else sys.stdout
+        try:
             # Write summary at top as comments
             for line in summary_lines:
-                f.write(f"; {line}\n")
-            f.write(";\n")
+                out.write(f"; {line}\n")
+            out.write(";\n")
 
             # Write annotated instructions
             for instr in self.instructions:
-                if instr.type == 'other':
-                    f.write(f"{instr.line}\n")
+                if '//' in instr.line:
+                    continue
+                elif instr.type == 'other':
+                    out.write(f"{instr.line}\n")
                 else:
                     issue = f'{instr.issue_cycle:04d}'
                     co = instr.co_issued
                     wmma = f'{instr.wmma_coexec_cycle}' if instr.wmma_coexec_cycle != '-' else '-'
                     coexp = instr.coexec_with_exp
-                    delay_val = 0
-                    if instr.delay_reason:
-                        for reason in instr.delay_reason:
-                            delay_val += 2**reason
+                    delay_val = sum(2**r for r in instr.delay_reason) if instr.delay_reason else 0
                     delay = f'{delay_val:2d}' if delay_val else '--'
-                    f.write(f"{issue}:{co}:{wmma}:{coexp}:{delay}   {instr.line}\n")
+                    out.write(f"{issue}:{co}:{wmma}:{coexp}:{delay}   {instr.line}\n")
+        finally:
+            if out_file:
+                out.close()
 
     def num_control_coissued(self):
         cnt = 0
@@ -516,15 +537,15 @@ class Simulator:
         ## instr histogram
         INSTR_CNT = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0
+            'other': 0, 'cvt_pk8': 0
         }
         COEXEC_WMMA = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0
+            'other': 0, 'cvt_pk8': 0
         }
         COEXEC_EXP = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0
+            'other': 0, 'cvt_pk8': 0
         }
         DELAY_CNT = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
         vnop_cnt = 0
@@ -561,15 +582,17 @@ class Simulator:
         else:
             lines.append("wmma eff (#wmma * 8 / total_cycle): N/A")
         lines.append("======================= Co-Exec with wmma ================")
-        lines.append(f"valu ( / total #valu): {COEXEC_WMMA['valu']:3d} / {INSTR_CNT['valu']}")
-        lines.append(f"exp  ( / total #exp):  {COEXEC_WMMA['exp']:3d} / {INSTR_CNT['exp']}")
-        lines.append(f"salu ( / total #salu): {COEXEC_WMMA['salu']:3d} / {INSTR_CNT['salu']}")
-        lines.append(f"ds   ( / total #ds):   {COEXEC_WMMA['ds']:3d} / {INSTR_CNT['ds']}")
+        lines.append(f"valu    ( / total #valu): {COEXEC_WMMA['valu']:3d} / {INSTR_CNT['valu']}")
+        lines.append(f"cvt_pk8 ( / total #cvt):  {COEXEC_WMMA['cvt_pk8']:3d} / {INSTR_CNT['cvt_pk8']}")
+        lines.append(f"exp     ( / total #exp):  {COEXEC_WMMA['exp']:3d} / {INSTR_CNT['exp']}")
+        lines.append(f"salu    ( / total #salu): {COEXEC_WMMA['salu']:3d} / {INSTR_CNT['salu']}")
+        lines.append(f"ds      ( / total #ds):   {COEXEC_WMMA['ds']:3d} / {INSTR_CNT['ds']}")
         lines.append("======================= Co-Exec with exp ================")
-        lines.append(f"wmma ( / total #wmma): {COEXEC_EXP['wmma']:3d} / {INSTR_CNT['wmma']}")
-        lines.append(f"valu ( / total #valu): {COEXEC_EXP['valu']:3d} / {INSTR_CNT['valu']}")
-        lines.append(f"salu ( / total #salu): {COEXEC_EXP['salu']:3d} / {INSTR_CNT['salu']}")
-        lines.append(f"ds   ( / total #ds):   {COEXEC_EXP['ds']:3d} / {INSTR_CNT['ds']}")
+        lines.append(f"wmma    ( / total #wmma): {COEXEC_EXP['wmma']:3d} / {INSTR_CNT['wmma']}")
+        lines.append(f"valu    ( / total #valu): {COEXEC_EXP['valu']:3d} / {INSTR_CNT['valu']}")
+        lines.append(f"cvt_pk8 ( / total #cvt):  {COEXEC_EXP['cvt_pk8']:3d} / {INSTR_CNT['cvt_pk8']}")
+        lines.append(f"salu    ( / total #salu): {COEXEC_EXP['salu']:3d} / {INSTR_CNT['salu']}")
+        lines.append(f"ds      ( / total #ds):   {COEXEC_EXP['ds']:3d} / {INSTR_CNT['ds']}")
         lines.append("======================= Co-Issue =========================")
         lines.append(f"co-issued / total #control: {control_coissued} / {INSTR_CNT['control']}")
         lines.append("===================== s_wait_dscnt =======================")
@@ -582,17 +605,16 @@ class Simulator:
         lines.append(f"{'-'*14} {'-'*6} {'-'*8}")
         lines.append(f"{'le V law':<14} {DELAY_CNT[1]:>6} {self.delay_cycles[1]:>8}")
         lines.append(f"{'data dep':<14} {DELAY_CNT[2]:>6} {self.delay_cycles[2]:>8}")
-        lines.append(f"{'ld_scale':<14} {DELAY_CNT[3]:>6} {self.delay_cycles[3]:>8}")
-        lines.append(f"{'ds latency':<14} {DELAY_CNT[4]:>6} {self.delay_cycles[4]:>8}")
-        lines.append(f"{'exp stall':<14} {DELAY_CNT[5]:>6} {self.delay_cycles[5]:>8}")
+        lines.append(f"{'ds latency':<14} {DELAY_CNT[4]:>6} {self.delay_cycles[3]:>8}")
+        lines.append(f"{'exp stall':<14} {DELAY_CNT[5]:>6} {self.delay_cycles[4]:>8}")
         lines.append(f"{'wasted wmma':<14} {'-':>6} {self.wasted_wmma_slots:>8}")
         lines.append(f"#v_nop: {vnop_cnt}")
         lines.append("======================= VGPR Spills =======================")
         lines.append(f"VGPR Spills:   {self.vgpr_spills} stores ({self.vgpr_spills * 4} bytes)")
         lines.append(f"VGPR Reloads:  {self.vgpr_reloads} loads ({self.vgpr_reloads * 4} bytes)")
 
-        total_coexec_stalls = self.delay_cycles[1] + self.delay_cycles[3] + self.delay_cycles[5]
-        total_ds_stalls = self.delay_cycles[4]
+        total_coexec_stalls = self.delay_cycles[1] + self.delay_cycles[4]
+        total_ds_stalls = self.delay_cycles[3]
         total_data_dep_stalls = self.delay_cycles[2]
         total_stalls = sum(self.delay_cycles.values()) + self.wasted_wmma_slots
 
@@ -615,10 +637,30 @@ class Simulator:
 # -------------------------------
 # Main
 # -------------------------------
+
+
+def insert_ld_scale(instr_lines):
+    """
+    Insert a synthetic 'ld_scale' instruction before each v_wmma_scale.
+    """
+    new_lines = []
+
+    for line in instr_lines:
+        stripped = line.lstrip()
+
+        if stripped.startswith('v_wmma_scale'):
+            # synthetic instruction
+            new_lines.append('ld_scale\n')
+
+        new_lines.append(line)
+
+    return new_lines
+
+
 def main():
     parser = argparse.ArgumentParser(description="Simulate instruction cycles with annotations")
     parser.add_argument('input_file', help='Input assembly file path')
-    parser.add_argument('output_file', help='Output annotated file path')
+    parser.add_argument('output_file', nargs='?', default=None, help='Output annotated file path (stdout if omitted)')
     parser.add_argument('--loop-only', action='store_true', help='Only analyze the loop body (.LBB0_1 to s_cbranch)')
     args = parser.parse_args()
 
@@ -642,6 +684,7 @@ def main():
         else:
             print("Warning: Could not find loop markers (.LBB0_1), processing entire file")
 
+    instr_lines = insert_ld_scale(instr_lines)
     instructions = [Instruction(line) for line in instr_lines if line.strip()]
 
     # Simulate
@@ -649,7 +692,8 @@ def main():
     sim.simulate()
     sim.output_annotations(args.output_file)
 
-    print(f"Annotated file saved to {args.output_file}")
+    if args.output_file:
+        print(f"Annotated file saved to {args.output_file}")
 
 
 if __name__ == "__main__":

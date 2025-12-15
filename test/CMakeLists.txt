@@ -18,6 +18,10 @@ set(TRITON_TEST_DEPENDS
   triton-llvm-opt
 )
 
+set(AMD_SIMULATOR_TEST_DEPENDS
+  amd-simulator
+)
+
 set(FILECHECK_PATH "${LLVM_LIBRARY_DIR}/../bin/FileCheck")
 set(LIT_ARGS "-Dfilecheck=${FILECHECK_PATH}")
 
@@ -26,6 +30,12 @@ add_lit_testsuite(check-triton-lit-tests "Running the triton regression tests"
   ARGS ${LIT_ARGS}
   DEPENDS ${TRITON_TEST_DEPENDS}
   )
+
+add_lit_testsuite(check-amd-simulator
+  "Running AMD simulator tests"
+  ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${AMD_SIMULATOR_TEST_DEPENDS}
+)
 
 set_target_properties(check-triton-lit-tests PROPERTIES FOLDER "Tests")
 

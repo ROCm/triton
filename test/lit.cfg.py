@@ -17,7 +17,7 @@ config.name = 'TRITON'
 config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = ['.mlir', '.ll']
+config.suffixes = ['.mlir', '.ll', '.s']
 
 # test_source_root: The root path where tests are located.
 config.test_source_root = os.path.dirname(__file__)
@@ -56,11 +56,8 @@ tool_dirs = [config.triton_tools_dir, config.llvm_tools_dir, config.filecheck_di
 for d in tool_dirs:
     llvm_config.with_environment('PATH', d, append_path=True)
 tools = [
-    'triton-opt',
-    'triton-llvm-opt',
-    'mlir-translate',
-    'llc',
-    ToolSubst('%PYTHON', config.python_executable, unresolved='ignore'),
+    'triton-opt', 'triton-llvm-opt', 'mlir-translate', 'llc',
+    ToolSubst('%PYTHON', config.python_executable, unresolved='ignore'), 'simulator.py'
 ]
 
 # Static libraries are not built if LLVM_BUILD_SHARED_LIBS is ON.

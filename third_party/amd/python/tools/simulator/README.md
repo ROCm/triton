@@ -12,6 +12,8 @@ In the output file, `annot_bb.s`, each instruction is annotated with a compact
 string representing cycle and delay related information.
 It also contains various metrics of the given basic block.
 
+If output file is not provided, the annotated output will write to stdout.
+
 ## **✔ Instruction Annotation**
 
 Fixed-width annotation prefix: IIII:C:W:E:D   <instruction>
@@ -31,9 +33,8 @@ The simulator encodes all delay causes into a single integer using a bitmask.
 | 0   | `1`   | `tri-exec` |
 | 1   | `2`   | `le V law` |
 | 2   | `4`   | `data dep` |
-| 3   | `8`   | `ld_scale` |
-| 4   | `16`  | `le dscnt` |
-| 5   | `32`  | `trans op` |
+| 3   | `8`  | `le dscnt` |
+| 4   | `16`  | `trans op` |
 
 - Each delay reason corresponds to a bit position.
 - When an instruction is delayed for multiple reasons, the simulator sets multiple bits.
@@ -58,18 +59,6 @@ The simulator encodes all delay causes into a single integer using a bitmask.
   Note that in this case, the valu is delayed by both "wmma+exp+valu" and "le V law".
   Therefore, its delay value is 3.
 - "data dep": RAW data dependency.
-- "ld scale": For scaled wmma instruction, it breaks into `ld_scale` and `wmma`
-  at hw execution.
-  The `ld_scale` acts like a valu except that it is not affected by "le V law".
-  Therefore, we cannot have the following flow
-  ```asm
-  0: wmma
-  7: valu
-  8: wmma_scaled
-  ```
-  The `wmma_scaled` instruction need to do `ld_scale` first, which happens at cycle 8.
-  Then the `wmma_scaled` is issued at cycle 9.
-  It's better to schedule a non-valu instruction between 2 consecutive wmma instructions.
 - "le dscnt": delay due to LDS data latency.
   Note that the data latency is set to 70, which is just an estimate.
   In the optimal schedule, we should have enough instructions to hide the LDS latency.
@@ -90,7 +79,7 @@ The simulator encodes all delay causes into a single integer using a bitmask.
 
 * Computes issue cycle for each instruction based on:
 
-  * Register hazards (RAW, WAW, WAR)
+  * Register hazards (RAW)
   * Functional unit availability (WMMA, VALU, LDS, SALU, EXP)
   * Custom FU slot rules (e.g., LDS taking WMMA slot 4)
 * Tracks completion cycles and pipeline latency.
