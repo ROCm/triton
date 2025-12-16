@@ -31,7 +31,8 @@ DELAY_REASONS = {
 # Instruction type mapping
 # -------------------------------
 INSTR_TYPES = {
-    'v_wmma_scale': 'wmma',
+    'v_wmma_scale_f32_16x16x128_f8f6f4': 'wmma_scale',
+    'v_wmma_f32_16x16x32': 'wmma',
     'v_exp': 'exp',
     'v_cvt_scalef32_pk8': 'cvt_pk8',
     'ds_load': 'ds',
@@ -52,6 +53,7 @@ DS_LATENCY = 70  # cycles for ds_load to complete
 
 INSTR_LATENCY = {
     'wmma': 8,
+    'wmma_scale': 8,
     'exp': 8,
     'valu': 5,
     'ds': 70,
@@ -284,13 +286,28 @@ class Simulator:
     def simulate(self):
         # yapf: disable
         wm_coexec_slots = {
-            1: ['ds_wait','control','internal','ds','tdm','salu'],
-            2: ['ds_wait','control','internal','ds','tdm','salu'],
-            3: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8'],
-            4: ['ds_wait','control','internal','ds','tdm','salu'],
-            5: ['ds_wait','control','internal','ds','tdm','salu'],
-            6: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8'],
-            7: ['ds_wait','control','internal','ds','tdm','salu','valu','exp','cvt_pk8']
+            "wmma_scale": {
+                1: ['ds_wait','control','internal','ds','tdm','salu'],
+                2: ['ds_wait','control','internal','ds','tdm','salu'],
+                3: ['ds_wait','control','internal','ds','tdm','salu','valu','exp'],
+                4: ['ds_wait','control','internal','ds','tdm','salu'],
+                5: ['ds_wait','control','internal','ds','tdm','salu'],
+                6: ['ds_wait','control','internal','ds','tdm','salu','valu','exp'],
+                7: ['ds_wait','control','internal','ds','tdm','salu','valu','exp']
+            },
+            "wmma": {
+                1: ['ds_wait','control','internal','ds','tdm','salu'],
+                2: ['ds_wait','control','internal','ds','tdm','salu','valu','exp'],
+                3: ['ds_wait','control','internal','ds','tdm','salu','valu','exp'],
+                4: ['ds_wait','control','internal','ds','tdm','salu'],
+                5: ['ds_wait','control','internal','ds','tdm','salu'],
+                6: ['ds_wait','control','internal','ds','tdm','salu','valu','exp'],
+                7: ['ds_wait','control','internal','ds','tdm','salu','valu','exp']
+            }
+        }
+        num_v_blocks = {
+            "wmma_scale": 2,
+            "wmma": 1
         }
         # yapf: enable
         wm_cycles = 8
@@ -323,7 +340,7 @@ class Simulator:
                     if ready_cycle > max_dep:
                         max_dep = ready_cycle
                         caused_by_ds = (source_type == 'ds')
-                        caused_by_wmma = (source_type == 'wmma')
+                        caused_by_wmma = (source_type == 'wmma' or source_type == 'wmma_scale')
                     elif ready_cycle == max_dep and source_type == 'ds':
                         caused_by_ds = True
 
@@ -348,13 +365,20 @@ class Simulator:
             # -----------------------
             # 3. WMMA co-execution
             # -----------------------
-            if self.last_wmma and instr.type != 'wmma':
+            if self.last_wmma and instr.type != 'wmma' and instr.type != 'wmma_scale':
                 wm_issue = self.last_wmma.issue_cycle
                 if cycle < wm_issue + wm_cycles:
                     slot_found = False
                     for slot in range(1, wm_cycles):
-                        if instr.type in wm_coexec_slots[slot]:
-                            if cycle <= wm_issue + slot:
+                        if instr.type in wm_coexec_slots[self.last_wmma.type][slot] and cycle <= wm_issue + slot:
+                            ## Found a potential coExec slot at wm_issue + slot
+                            ## Need to check tri-exec
+                            prev = self.prev_instr(idx)
+                            prev_slot = prev.wmma_coexec_cycle
+                            if instr.type == 'valu' and prev.type == 'exp' and prev_slot == (slot - 1):
+                                cycle += 1
+                                instr.delay_reason.add(0)
+                            else:
                                 instr.wmma_coexec_cycle = slot
                                 self.current_wmma_used_slots.add(slot)
                                 cycle = wm_issue + slot
@@ -424,16 +448,13 @@ class Simulator:
             # ----------------------
             # 7. Co-execute with exp
             # ---------------------
-            if instr.type != 'exp' and cycle == self.last_exp_cycle:
-                ## wmma cannot take exp coExec slots
-                if instr.type == 'wmma':
+            if cycle == self.last_exp_cycle:
+                ## We already checked back to back exp and tri-exec of wmma+exp+valu
+                ## Now we only need to rule out cvt_pk8
+                ## wmma+exp+valu cannot co-exec together
+                if instr.type == 'cvt_pk8':
                     cycle += 1
                     instr.delay_reason.add(4)
-                ## wmma+exp+valu cannot co-exec together
-                elif instr.wmma_coexec_cycle != '-' and instr.type == 'valu':
-                    cycle += 1
-                    instr.wmma_coexec_cycle = '-'
-                    instr.delay_reason.add(0)
                 else:
                     instr.coexec_with_exp = 'y'
 
@@ -442,9 +463,10 @@ class Simulator:
             # -----------------------
             if (instr.type == 'valu' or instr.type == 'exp') and self.last_wmma:
                 diff = cycle - self.last_wmma.issue_cycle
-                if diff >= wm_cycles and diff < wm_cycles + 2:
-                    stall = (self.last_wmma.issue_cycle + wm_cycles + 2) - cycle
-                    cycle = self.last_wmma.issue_cycle + wm_cycles + 2
+                v_blocks = num_v_blocks[self.last_wmma.type]
+                if diff >= wm_cycles and diff < wm_cycles + v_blocks:
+                    stall = (self.last_wmma.issue_cycle + wm_cycles + v_blocks) - cycle
+                    cycle = self.last_wmma.issue_cycle + wm_cycles + v_blocks
                     instr.delay_reason.add(1)
                     self.delay_cycles[1] += stall
                     if instr.type == 'exp':
@@ -453,7 +475,7 @@ class Simulator:
             # -----------------------
             # 9. Update last WMMA
             # -----------------------
-            if instr.type == 'wmma':
+            if instr.type == 'wmma' or instr.type == 'wmma_scale':
                 instr.wmma_coexec_cycle = 0
                 if self.last_wmma:
                     self.wasted_wmma_slots += (7 - len(self.current_wmma_used_slots))
@@ -472,7 +494,7 @@ class Simulator:
             reg_bank_conflicts = self.count_bank_conflicts_max(instr.deps, 8)
             for reg in instr.out_regs:
                 latency = INSTR_LATENCY[instr.type]
-                if instr.type != 'wmma':
+                if instr.type != 'wmma' and instr.type != 'wmma_scale':
                     latency += reg_bank_conflicts
                 self.register_ready[reg] = (instr.issue_cycle + latency, instr.type)
 
@@ -533,22 +555,35 @@ class Simulator:
                 cnt += 1
         return cnt
 
+    def get_wmma_type(self):
+        wmma_type = 'other'
+        for idx, instr in enumerate(self.instructions):
+            if instr.type == 'wmma' or instr.type == 'wmma_scale':
+                wmma_type = instr.type
+                break
+        return wmma_type
+
     def analyze(self):
         ## instr histogram
         INSTR_CNT = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0, 'cvt_pk8': 0
+            'other': 0, 'cvt_pk8': 0, 'wmma_scale': 0
         }
         COEXEC_WMMA = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0, 'cvt_pk8': 0
+            'other': 0, 'cvt_pk8': 0, 'wmma_scale': 0
         }
         COEXEC_EXP = {
             'wmma': 0, 'exp': 0, 'valu': 0, 'ds': 0, 'ds_wait': 0, 'tdm': 0, 'control': 0, 'salu': 0, 'internal': 0,
-            'other': 0, 'cvt_pk8': 0
+            'other': 0, 'cvt_pk8': 0, 'wmma_scale': 0
         }
         DELAY_CNT = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
         vnop_cnt = 0
+
+        wmma_type = self.get_wmma_type()
+        if wmma_type == 'other':
+            wmma_type = 'wmma'
+
         for idx, instr in enumerate(self.instructions):
             INSTR_CNT[get_instr_type(instr.opcode)] += 1
             if instr.wmma_coexec_cycle != '-':
@@ -578,7 +613,7 @@ class Simulator:
         lines.append("======================= Overall ==========================")
         lines.append(f"total cycle: {total_cycle}")
         if total_cycle > 0:
-            lines.append(f"wmma eff (#wmma * 8 / total_cycle): {8 * INSTR_CNT['wmma'] / total_cycle * 100:.1f}%")
+            lines.append(f"wmma eff (#wmma * 8 / total_cycle): {8 * INSTR_CNT[wmma_type] / total_cycle * 100:.1f}%")
         else:
             lines.append("wmma eff (#wmma * 8 / total_cycle): N/A")
         lines.append("======================= Co-Exec with wmma ================")
@@ -588,7 +623,7 @@ class Simulator:
         lines.append(f"salu    ( / total #salu): {COEXEC_WMMA['salu']:3d} / {INSTR_CNT['salu']}")
         lines.append(f"ds      ( / total #ds):   {COEXEC_WMMA['ds']:3d} / {INSTR_CNT['ds']}")
         lines.append("======================= Co-Exec with exp ================")
-        lines.append(f"wmma    ( / total #wmma): {COEXEC_EXP['wmma']:3d} / {INSTR_CNT['wmma']}")
+        lines.append(f"wmma    ( / total #wmma): {COEXEC_EXP[wmma_type]:3d} / {INSTR_CNT[wmma_type]}")
         lines.append(f"valu    ( / total #valu): {COEXEC_EXP['valu']:3d} / {INSTR_CNT['valu']}")
         lines.append(f"cvt_pk8 ( / total #cvt):  {COEXEC_EXP['cvt_pk8']:3d} / {INSTR_CNT['cvt_pk8']}")
         lines.append(f"salu    ( / total #salu): {COEXEC_EXP['salu']:3d} / {INSTR_CNT['salu']}")
