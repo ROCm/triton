@@ -319,7 +319,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
 
     int vecBits = vectorSize * dstTy.getElementTypeBitWidth();
     if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
-      LDBG(op << " results in unsupported load bitwidth: " << vecBits);
+      LDBG(*op << " results in unsupported load bitwidth: " << vecBits);
       return failure();
     }
     // Compute the blocked -> shared linear layout to check preconditions
@@ -341,9 +341,14 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       return failure();
     }
 
+<<<<<<< ours
     if (requiresSrcPtrSwizzling &&
         !LLVM::AMD::doesSwizzleInsideWarp(rewriter, srcToSharedLayout,
                                           threadsPerWarp)) {
+=======
+    if (hasSwizzling && !LLVM::AMD::doesSwizzleInsideWarp(
+                            rewriter, srcToSharedLayout, threadsPerWarp)) {
+>>>>>>> theirs
       LDBG(*op << " does swizzle across warp boundaries");
       return failure();
     }

@@ -23,8 +23,12 @@ void lowerLoops(ModuleOp moduleOp, bool useAsyncCopy, bool usePingpong);
 
 struct LoadInfo {
   // Shared layout is used for loads feeding into dot ops.
+<<<<<<< ours
   triton::gpu::SwizzledSharedEncodingAttr swizzledEncoding = nullptr;
   triton::gpu::PaddedSharedEncodingAttr paddedEncoding = nullptr;
+=======
+  triton::gpu::SharedEncodingTrait sharedEncoding = nullptr;
+>>>>>>> theirs
   // The distance of this load's stage to its use' stage.
   int distToUse = 0;
   Operation *use = nullptr;

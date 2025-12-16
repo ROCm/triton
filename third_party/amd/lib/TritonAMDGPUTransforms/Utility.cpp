@@ -1,13 +1,21 @@
 #include "Utility.h"
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+<<<<<<< ours
 #include "triton/Dialect/Triton/IR/Utility.h"
+=======
+>>>>>>> theirs
 #include "triton/Tools/LayoutUtils.h"
 
 #include <limits>
 
+<<<<<<< ours
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
+=======
+namespace tt = triton;
+namespace ttg = triton::gpu;
+>>>>>>> theirs
 
 namespace deduceMin {
 int deduceMinCountInBlock(Block &block,
@@ -160,7 +168,11 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
     return {};
   }
 
+<<<<<<< ours
   unsigned bitWidth = getIntOrFloatOrPtrBitWidth(srcTy.getElementType());
+=======
+  unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
+>>>>>>> theirs
   unsigned elemByteWidth = std::max(bitWidth / 8u, 1u);
   auto loadBytes = shape[0] * shape[1] * elemByteWidth;
   if (loadBytes < 16384) {
@@ -172,8 +184,13 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
     return {};
   }
 
+<<<<<<< ours
   // NYI: requires different stride factor since we stride by 16 rows
   if (std::min(shape[0], shape[1]) < 16) {
+=======
+  // NYI: requires different stride factor
+  if (std::min(shape[0], shape[1]) < 32) {
+>>>>>>> theirs
     return {};
   }
 
@@ -201,9 +218,15 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
   // Determine row(contig) size
   unsigned contigDim = isKContig ? kDim : nonKDim;
 
+<<<<<<< ours
   // Clamp contigSize to 1024 bytes to have space for at least 16 rows per sub
   // tile (16KB) and simply repeat the tile to the full tensor size.
   contigDim = std::min(1024 / elemByteWidth, contigDim);
+=======
+  // We clamp contigSize to 512 bytes (to reduce the number of cases handled
+  // below) and simply repeat the tile to the full tensor size.
+  contigDim = std::min(512U / elemByteWidth, contigDim);
+>>>>>>> theirs
 
   // We create linear bases mapping from [contigDim, nonContigDim] -> offset,
   // representing the row reordering as described above
@@ -288,19 +311,31 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
       std::swap(p[0], p[1]);
   }
 
+<<<<<<< ours
   auto cgaLayout = ttg::getCGALayout(srcTy.getEncoding());
+=======
+  auto ctaLayout = ttg::getCTALayout(srcTy.getEncoding());
+>>>>>>> theirs
   triton::LinearLayout linearComponent(
       {
           {StringAttr::get(ctx, "offset"), bases},
       },
       triton::standardOutDimNames(ctx, rank));
   linearComponent = triton::gpu::combineCtaCgaWithShape(
+<<<<<<< ours
       linearComponent, cgaLayout, srcTy.getShape());
+=======
+      linearComponent, ctaLayout, srcTy.getShape());
+>>>>>>> theirs
 
   unsigned paddingInterval = 1024 / elemByteWidth;
   unsigned paddingInElems = paddingBytes / elemByteWidth;
   return ttg::PaddedSharedEncodingAttr::get(
+<<<<<<< ours
       ctx, {{paddingInterval, paddingInElems}}, std::move(linearComponent));
+=======
+      ctx, {{paddingInterval, paddingInElems}}, linearComponent);
+>>>>>>> theirs
 }
 
 ttg::PaddedSharedEncodingAttr
