@@ -584,7 +584,13 @@ class Simulator:
         if wmma_type == 'other':
             wmma_type = 'wmma'
 
+        valu_histogram = defaultdict(int)
+        salu_histogram = defaultdict(int)
         for idx, instr in enumerate(self.instructions):
+            if get_instr_type(instr.opcode) == "valu":
+                valu_histogram[instr.opcode] += 1
+            if get_instr_type(instr.opcode) == "salu":
+                salu_histogram[instr.opcode] += 1
             INSTR_CNT[get_instr_type(instr.opcode)] += 1
             if instr.wmma_coexec_cycle != '-':
                 COEXEC_WMMA[get_instr_type(instr.opcode)] += 1
@@ -660,6 +666,21 @@ class Simulator:
         lines.append(f"Total Wasted WMMA Slots: {self.wasted_wmma_slots:>8} cycles")
         lines.append(f"{'-'*30}")
         lines.append(f"Total Estimated Stalls:  {total_stalls:>8} cycles")
+        lines.append("=================== VALU Instr Mix =======================")
+        sorted_valu_histogram = [(k, valu_histogram[k]) for k in valu_histogram]
+        sorted_valu_histogram.sort(key=lambda x: x[1], reverse=True)
+        total = sum([entry[1] for entry in sorted_valu_histogram])
+        for valu_entry in sorted_valu_histogram:
+            lines.append(valu_entry)
+        lines.append(f"VALU Sum: {total}")
+
+        lines.append("=================== SALU Instr Mix =======================")
+        sorted_salu_histogram = [(k, salu_histogram[k]) for k in salu_histogram]
+        sorted_salu_histogram.sort(key=lambda x: x[1], reverse=True)
+        total = sum([entry[1] for entry in sorted_salu_histogram])
+        for salu_entry in sorted_salu_histogram:
+            lines.append(salu_entry)
+        lines.append(f"SALU Sum: {total}")
         lines.append("==========================================================")
 
         # Print to stdout
