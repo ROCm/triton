@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 from test_mxfp import MXFP4Tensor, MXScaleTensor
 import re
-from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_cdna, is_hip_gfx1250
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_cdna
 
 
 def f8_to_f16(x, dtype):
@@ -122,10 +122,6 @@ def test_simple_matmul(dtype_src_str, dtype_dst_str, BLOCK_M, BLOCK_N, BLOCK_K, 
         pytest.skip("creates convert layout too big to fit in smem")
     if LAYOUT_16x256 and (not is_cuda() or torch.cuda.get_device_capability()[0] < 10):
         pytest.skip("skip forcing tmem layout on non blackwell targets.")
-
-    if is_hip_gfx1250() and dtype_dst_str == "float64":
-        pytest.skip("skip float64 on gfx1250 for now.")
-
     M, N, K = 1024, 512, 256
     torch.manual_seed(42)
     precision = "tf32" if dtype_src_str == "tensorfloat32" else "ieee"

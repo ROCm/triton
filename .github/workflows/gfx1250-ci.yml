@@ -49,7 +49,7 @@ jobs:
   gfx1250-triton:
     name: Triton
     runs-on: ['self-hosted', 'ffm', 'pytorch']
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
