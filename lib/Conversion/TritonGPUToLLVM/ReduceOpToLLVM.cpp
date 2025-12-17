@@ -13,6 +13,28 @@ using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getThreadOrder;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
+enum class ReduceKind { Add, Max, Mul, Unknown };
+
+ReduceKind getReduceKind(triton::ReduceOp op) {
+  auto *combine = &op.getCombineOp();
+  Block &block = combine->front();
+
+  for (Operation &inner : block.getOperations()) {
+    if (isa<scf::YieldOp>(inner))
+      continue;
+
+    if (isa<mlir::arith::AddFOp>(inner))
+      return ReduceKind::Add;
+    if (isa<mlir::arith::MaxNumFOp>(inner))
+      return ReduceKind::Max;
+    if (isa<mlir::arith::MulFOp>(inner))
+      return ReduceKind::Mul;
+    return ReduceKind::Unknown;
+  }
+
+  return ReduceKind::Unknown;
+}
+
 namespace {
 struct ReduceOpConversion
     : public ConvertTritonGPUReduceScanToLLVMPattern<triton::ReduceOp> {
@@ -139,14 +161,67 @@ private:
     auto *combineOp = &op.getCombineOp();
     auto srcIndices = emitIndices(op.getLoc(), rewriter, targetInfo,
                                   helper.getSrcLayout(), operandType, true);
+
     // reduce within threads
+    if (ReduceKind::Max == getReduceKind(op)) {
+      for (const auto &[_, i] : uniqueOffsets) {
+        SmallVector<unsigned> key = offsets[i];
+        key[op.getAxis()] = 0;
+        bool isFirst = accs.find(key) == accs.end();
+        accumulate(op.getLoc(), rewriter, *combineOp, accs[key], srcValues[i]);
+        if (isFirst)
+          indices[key] = srcIndices[i];
+      }
+      return;
+    }
+
+    // --- First pass: group indices by bucket key ---
+    llvm::SmallMapVector<SmallVector<unsigned>, SmallVector<int>, 8> perKeyIdxs;
+
     for (const auto &[_, i] : uniqueOffsets) {
       SmallVector<unsigned> key = offsets[i];
       key[op.getAxis()] = 0;
-      bool isFirst = accs.find(key) == accs.end();
-      accumulate(op.getLoc(), rewriter, *combineOp, accs[key], srcValues[i]);
-      if (isFirst)
-        indices[key] = srcIndices[i];
+
+      if (perKeyIdxs.find(key) == perKeyIdxs.end()) {
+        indices[key] = srcIndices[i]; // first-seen logic preserved
+      }
+
+      perKeyIdxs[key].push_back(i);
+    }
+    // --- Second pass: even/odd pairwise accumulation inside each bucket ---
+    for (auto &entry : perKeyIdxs) {
+      const SmallVector<unsigned> &key = entry.first;
+      const SmallVector<int> &idxs = entry.second;
+
+      if (idxs.empty())
+        continue;
+
+      SmallVector<Value> acc_even; // same arity as srcValues[*]
+      SmallVector<Value> acc_odd;
+
+      // Split elements by position within bucket
+      for (size_t pos = 0; pos < idxs.size(); ++pos) {
+        int i = idxs[pos];
+        ValueRange vals = srcValues[i]; // vector of all slot values
+
+        if ((pos & 1) == 0) {
+          // even position
+          accumulate(op.getLoc(), rewriter, *combineOp, acc_even, vals);
+        } else {
+          // odd position
+          accumulate(op.getLoc(), rewriter, *combineOp, acc_odd, vals);
+        }
+      }
+
+      // Merge odd partial accumulator into even
+      if (acc_even.empty()) {
+        accs[key] = acc_odd;
+      } else if (acc_odd.empty()) {
+        accs[key] = acc_even;
+      } else {
+        accumulate(op.getLoc(), rewriter, *combineOp, acc_even, acc_odd);
+        accs[key] = acc_even;
+      }
     }
   }
 

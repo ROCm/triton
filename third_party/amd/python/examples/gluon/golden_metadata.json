@@ -2,46 +2,46 @@
   "e4m3xe4m3_block_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_PKWIDTH8_mxfp_attn_fwd_pipelined": {
     "sgpr_count": 78,
     "sgpr_spill_count": 0,
-    "vgpr_count": 732,
+    "vgpr_count": 733,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 21916,
+    "code_len_in_byte": 20764,
     "occupancy": 1
   },
   "e4m3xe4m3_global_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_PKWIDTH8_mxfp_attn_fwd_pipelined": {
     "sgpr_count": 54,
     "sgpr_spill_count": 0,
-    "vgpr_count": 712,
+    "vgpr_count": 698,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 21316,
+    "code_len_in_byte": 20340,
     "occupancy": 1
   },
   "e4m3xe4m3_block_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_PKWIDTH8_mxfp_attn_fwd_subtile_pipelined": {
-    "sgpr_count": 102,
+    "sgpr_count": 100,
     "sgpr_spill_count": 0,
-    "vgpr_count": 1000,
+    "vgpr_count": 1001,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 37892,
+    "code_len_in_byte": 36780,
     "occupancy": 1
   },
   "e4m3xe4m3_global_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_PKWIDTH8_mxfp_attn_fwd_subtile_pipelined": {
-    "sgpr_count": 79,
+    "sgpr_count": 78,
     "sgpr_spill_count": 0,
     "vgpr_count": 1024,
-    "vgpr_spill_count": 55,
-    "scratch_size": 224,
-    "code_len_in_byte": 38076,
+    "vgpr_spill_count": 19,
+    "scratch_size": 80,
+    "code_len_in_byte": 36536,
     "occupancy": 1
   },
   "BATCH8_SEQLENQ512_SEQLENK512_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN64_f16_attn_fwd_pipelined_kernel": {
     "sgpr_count": 97,
     "sgpr_spill_count": 0,
-    "vgpr_count": 692,
+    "vgpr_count": 694,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 27540,
+    "code_len_in_byte": 26180,
     "occupancy": 1
   },
   "BATCH8_SEQLENQ1024_SEQLENK1024_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN128_f16_attn_fwd_pipelined_kernel": {
@@ -50,7 +50,7 @@
     "vgpr_count": 932,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 50084,
+    "code_len_in_byte": 47376,
     "occupancy": 1
   }
 }
