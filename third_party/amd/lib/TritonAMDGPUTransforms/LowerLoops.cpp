@@ -51,7 +51,6 @@ using StreamOpVariant =
     std::variant<StreamCopyChainOps, AsyncCopyChainOps, TDMCopyChainOps>;
 using LoadToStreamOpMap = llvm::MapVector<Operation *, StreamOpVariant>;
 
-<<<<<<< ours
 TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
                                    Value extractIdx, int globalPrefetch) {
   OpBuilder builder(loadOp);
@@ -81,12 +80,11 @@ TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
 
   return {copyOp, prefetchOp, commitOp, waitOp, maybeSharedLoad};
 }
-=======
+
 bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
                                ttg::SharedEncodingTrait sharedEnc,
                                tt::ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                const tt::AMD::TargetInfo &targetInfo);
->>>>>>> theirs
 
 AsyncCopyChainOps createAsyncCopy(tt::LoadOp loadOp, Value alloc,
                                   Value extractIdx, int contiguity) {
@@ -281,11 +279,6 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
 
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
-<<<<<<< ours
-        tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-            loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-            cgaLayout, bitWidth, /*needTrans=*/false);
-=======
         // Determine if we can use padded layouts and fallback to swizzled
         // layouts if not
         bool canUseAsyncCopy = false;
@@ -300,9 +293,8 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
         if (!tempAttr) {
           tempAttr = ttg::SwizzledSharedEncodingAttr::get(
               loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-              ctaLayout, bitWidth, /*needTrans=*/false);
+              cgaLayout, bitWidth, /*needTrans=*/false);
         }
->>>>>>> theirs
         LDBG("Deduced shared encoding candidate from dot layout: " << tempAttr);
         sharedEncs.push_back(tempAttr);
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
@@ -462,7 +454,7 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
     return false;
 
   using tt::AMD::ISAFamily;
-  if (sharedEnc && llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
+  if (sharedEnc && llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::GFX1250},
                                       targetInfo.getISAFamily())) {
     // Compute the final vecSize we can use for the combination of
     // sourceEncoding and sharedEncoding. We can only use AsyncCopy if the
@@ -549,23 +541,16 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
     triton::AMD::TargetInfo targetInfo(arch ? arch->str() : "");
 
     // Replace the old load with multi-buffered loads
-<<<<<<< ours
     if (useAsyncCopy && descLoadOp) {
       loadToStreamOp[descLoadOp] = createTDMAsyncCopy(
           descLoadOp, alloc, extractIdx, info.globalPrefetch);
-    } else if (useAsyncCopy &&
-               canBeConvertedToAsyncLoad(numBuffers, loadOp, alloc,
-                                         axisInfoAnalysis, targetInfo)) {
+    } else if (useAsyncCopy && canBeConvertedToAsyncLoad(
+                                   numBuffers, loadOp, info.sharedEncoding,
+                                   axisInfoAnalysis, targetInfo)) {
       unsigned vec = axisInfoAnalysis.getContiguity(loadOp.getPtr());
       if (auto mask = loadOp.getMask())
         vec = std::min<unsigned>(vec, axisInfoAnalysis.getMaskAlignment(mask));
       loadToStreamOp[loadOp] = createAsyncCopy(loadOp, alloc, extractIdx, vec);
-=======
-    if (useAsyncCopy &&
-        canBeConvertedToAsyncLoad(numBuffers, loadOp, info.sharedEncoding,
-                                  axisInfoAnalysis, targetInfo)) {
-      loadToStreamOp[loadOp] = createAsyncCopy(loadOp, alloc, extractIdx);
->>>>>>> theirs
     } else {
       loadToStreamOp[loadOp] = createStreamCopy(loadOp, alloc, extractIdx);
     }
@@ -1005,33 +990,23 @@ void lowerLoop(scf::ForOp forOp,
     auto [distance, use] = info;
     if (load->hasAttrOfType<BoolAttr>(AttrBypassLDS)) {
       load->removeAttr(AttrBypassLDS);
-      loadToInfo[load] = {nullptr, nullptr, distance, use};
+      loadToInfo[load] = {nullptr, distance, use};
     } else {
-<<<<<<< ours
       auto useTDM = isa<tt::DescriptorLoadOp>(load);
       if (useTDM) {
         auto paddedEncoding =
             getSharedEncIfAllUsersAreDotEncPadded(load->getResult(0))
                 .value_or(nullptr);
-        loadToInfo[load] = {nullptr, paddedEncoding, distance, use,
-                            globalPrefetch};
+        loadToInfo[load] = {paddedEncoding, distance, use, globalPrefetch};
       } else {
         LDBG("Deduce shared encoding for: " << *load);
         auto sharedEncoding =
-            getSharedEncIfAllUsersAreDotEnc(load->getResult(0))
+            getSharedEncIfAllUsersAreDotEnc(load, axisInfoAnalysis, targetInfo,
+                                            useAsyncCopy)
                 .value_or(nullptr);
-        loadToInfo[load] = {sharedEncoding, nullptr, distance, use};
+        loadToInfo[load] = {sharedEncoding, distance, use};
         LDBG("Populate loadInfo with shared encoding: " << sharedEncoding);
       }
-=======
-      LDBG("Deduce shared encoding for: " << *load);
-      auto sharedEncoding =
-          getSharedEncIfAllUsersAreDotEnc(load, axisInfoAnalysis, targetInfo,
-                                          useAsyncCopy)
-              .value_or(nullptr);
-      loadToInfo[load] = {sharedEncoding, distance, use};
-      LDBG("Populate loadInfo with shared encoding: " << sharedEncoding);
->>>>>>> theirs
     }
   }
 

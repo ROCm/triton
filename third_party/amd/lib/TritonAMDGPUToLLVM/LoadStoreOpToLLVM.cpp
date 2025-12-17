@@ -341,14 +341,9 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       return failure();
     }
 
-<<<<<<< ours
     if (requiresSrcPtrSwizzling &&
         !LLVM::AMD::doesSwizzleInsideWarp(rewriter, srcToSharedLayout,
                                           threadsPerWarp)) {
-=======
-    if (hasSwizzling && !LLVM::AMD::doesSwizzleInsideWarp(
-                            rewriter, srcToSharedLayout, threadsPerWarp)) {
->>>>>>> theirs
       LDBG(*op << " does swizzle across warp boundaries");
       return failure();
     }
