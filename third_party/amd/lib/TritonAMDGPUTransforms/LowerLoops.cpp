@@ -454,8 +454,9 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
     return false;
 
   using tt::AMD::ISAFamily;
-  if (sharedEnc && llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::GFX1250},
-                                      targetInfo.getISAFamily())) {
+  if (sharedEnc && llvm::is_contained(
+                       {ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::GFX1250},
+                       targetInfo.getISAFamily())) {
     // Compute the final vecSize we can use for the combination of
     // sourceEncoding and sharedEncoding. We can only use AsyncCopy if the
     // target supports the requested or a smaller vecSize because we cannot
