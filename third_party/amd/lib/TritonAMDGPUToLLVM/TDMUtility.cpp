@@ -264,7 +264,7 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
              18         1          atomic barrier enable
              19         1          iterate enable
              20         1          pad enable
-             22         3          pad internval
+             22         3          pad interval
                                    (log2(pad interval in dwords) - 1)
              25         7          pad amount - pad amount in dwords - 1
                                    (pad amount in dwords - 1)

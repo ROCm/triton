@@ -167,7 +167,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // Each thread stores 8 elements with 32-bit stores
     // CHECK-COUNT-8: llvm.amdgcn.global.store.async.from.lds.b32
     // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
-    %2 = ttg.async_copy_local_to_global %arg1, %1 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %2 = amdg.async_copy_local_to_global %arg1, %1 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }
@@ -185,7 +185,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // Each thread stores 8 elements (256 bits), split into 2 128-bit stores
     // CHECK-COUNT-2: llvm.amdgcn.global.store.async.from.lds.b128
     // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
-    %2 = ttg.async_copy_local_to_global %arg1, %arg0 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }
@@ -223,7 +223,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // Each thread stores 8 elements with 32-bit stores
     // CHECK-COUNT-8: llvm.amdgcn.global.store.async.from.lds.b32
     // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
-    %2 = ttg.async_copy_local_to_global %arg1, %1 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %2 = amdg.async_copy_local_to_global %arg1, %1 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }
@@ -269,7 +269,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // Each thread handles 8 elements -> 4 x 64-bit stores
     // CHECK-COUNT-4: llvm.amdgcn.global.store.async.from.lds.b64
     // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
-    %2 = ttg.async_copy_local_to_global %arg1, %arg0 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }
