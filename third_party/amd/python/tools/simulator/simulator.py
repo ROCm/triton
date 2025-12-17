@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Instruction Scheduler Simulator
-Developed by: Lixun Zhang, Austin Kerbow
+Contributors: Lixun Zhang, Austin Kerbow, Stanley Winata
 Copyright (c) 2025
 This script simulates WMMA/VALU/EXP/DS scheduling behavior and annotates
 per-instruction delays for analysis.
@@ -532,7 +532,7 @@ class Simulator:
 
             # Write annotated instructions
             for instr in self.instructions:
-                if '//' in instr.line:
+                if instr.line.startswith("//"):
                     continue
                 elif instr.type == 'other':
                     out.write(f"{instr.line}\n")
