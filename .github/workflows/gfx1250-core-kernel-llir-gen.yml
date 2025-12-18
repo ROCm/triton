@@ -1,0 +1,50 @@
+name: Core Kernels LLIR Generator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gfx1250:
+    name: gfx1250
+    runs-on: ['self-hosted', 'ffm']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.ref }}   # prevent merge
+      - name: Set environment variables
+        run: |
+          COMMIT=$(git rev-parse --short=8 HEAD)
+          RUN_ID=${{ github.run_id }}
+          DIRNAME="commit-${COMMIT}-run-${RUN_ID}"
+          echo "DIRNAME=${DIRNAME}" >> $GITHUB_ENV
+      - name: Generating LLIR
+        run: |
+          set -xeo pipefail
+          RENDER_GID=$(getent group render | cut -d: -f3)
+          echo "Render group ID: ${RENDER_GID}"
+          DIRNAME=${{ env.DIRNAME }}
+          mkdir /data/ci/llir/${DIRNAME}
+          docker run --pull=never --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v /data/ci/actions-runner/_work/triton/triton:/code \
+            -v /data/ci/llvm/a992f294-debug:/llvm \
+            -v /data/ci/ffm/rocm-ffmlite-mi450-eaafd2da-rel-20251205:/ffm \
+            -v /data/ci/triton-cache:/home/mirror/.triton \
+            -v /data/ci/ccache:/home/mirror/.ccache \
+            -v /data/ci/llir/${DIRNAME}:/llir \
+            -w /code \
+            --entrypoint bash \
+            ci/gfx1250-llir -lc "/code/.github/workflows/core_kernel_llir_gen.sh"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: core-llir-kernels-${{ env.DIRNAME }}
+          path: /data/ci/llir/${{ env.DIRNAME }}/llir_kernels
+          retention-days: 7

@@ -181,15 +181,16 @@ def create_shared_layouts(BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOC
 
 
 @gluon.jit
-def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
-                              M, N, K,  #
-                              stride_am, stride_ak,  #
-                              stride_bk, stride_bn,  #
-                              stride_cm, stride_cn,  #
-                              BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
-                              NUM_BUFFERS: ttgl.constexpr,  #
-                              TRANSPOSE_B: ttgl.constexpr,  #
-                              NUM_WARPS: ttgl.constexpr):
+def gemm_tdm_pipelined_warp_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
+                                             M, N, K,  #
+                                             stride_am, stride_ak,  #
+                                             stride_bk, stride_bn,  #
+                                             stride_cm, stride_cn,  #
+                                             BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                                             BLOCK_K: ttgl.constexpr,  #
+                                             NUM_BUFFERS: ttgl.constexpr,  #
+                                             TRANSPOSE_B: ttgl.constexpr,  #
+                                             NUM_WARPS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -276,7 +277,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
 
     if not PERSISTENT:
         grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-        kernel = gemm_tdm_pipelined_kernel[grid](
+        kernel = gemm_tdm_pipelined_warp_pipelined_kernel[grid](
             a_device, b_device, c_device,  #
             M, N, K,  #
             stride_am, stride_ak,  #

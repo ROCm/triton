@@ -1639,7 +1639,7 @@ class BlockScaledAttentionProgram:
 
 
 @gluon.jit
-def attn_fwd_kernel(  #
+def mxfp_attn_fwd_kernel(  #
         q_ptr, k_ptr, v_ptr,  #
         q_scale_ptr, k_scale_ptr, v_scale_ptr,  #
         o_ptr,  #
@@ -1755,7 +1755,7 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
         block_scaling, subtile, pipelined, p_scaling, p_k_width
     ]
     kwargs = {"num_warps": num_warps, "waves_per_eu": 1}
-    kernel = attn_fwd_kernel[grid](*args, **kwargs)
+    kernel = mxfp_attn_fwd_kernel[grid](*args, **kwargs)
 
     return o.cpu().permute(0, 2, 1, 3), kernel
 
