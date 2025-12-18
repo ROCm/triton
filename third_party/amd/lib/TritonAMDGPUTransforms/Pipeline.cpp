@@ -39,7 +39,7 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
                                        copyOp.getPred(), pred);
     copyOp.getPredMutable().assign(mask);
     return op;
-  } else if (auto copyOp = dyn_cast<triton::amdgpu::GlobalTDMPrefetchOp>(op)) {
+  } else if (auto copyOp = dyn_cast<triton::amdgpu::TDMPrefetchOp>(op)) {
     rewriter.setInsertionPoint(copyOp);
     Value mask = arith::AndIOp::create(rewriter, copyOp->getLoc(),
                                        copyOp.getPred(), pred);

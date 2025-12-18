@@ -2259,124 +2259,56 @@ struct AsyncCopyMbarrierArriveOpConversion
   }
 };
 
-struct TDMGlobalPrefetchConversion
-    : public ConvertOpToLLVMPattern<triton::amdgpu::GlobalTDMPrefetchOp> {
-  TDMGlobalPrefetchConversion(LLVMTypeConverter &converter,
-                              const AMD::TargetInfo &targetInfo,
-                              PatternBenefit benefit)
+struct TDMPrefetchConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::TDMPrefetchOp> {
+  TDMPrefetchConversion(LLVMTypeConverter &converter,
+                        const AMD::TargetInfo &targetInfo,
+                        PatternBenefit benefit)
       : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(triton::amdgpu::GlobalTDMPrefetchOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::amdgpu::TDMPrefetchOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-    auto makeBlockPtr =
-        cast<triton::MakeTensorDescOp>(op.getDescPtr().getDefiningOp());
-    TensorDescType tdescType = makeBlockPtr.getResult().getType();
-    RankedTensorType tensorType = tdescType.getBlockType();
-    int bytesPerElement = tensorType.getElementTypeBitWidth() / 8;
-    SmallVector<Value> descriptorFields =
-        unpackLLElements(loc, adaptor.getDescPtr(), rewriter);
-    SmallVector<int64_t> blockShape =
-        llvm::to_vector(makeBlockPtr.getTensorShape());
-    auto basePtr = descriptorFields[0];
-    SmallVector<Value> tensorShape{descriptorFields[1], descriptorFields[2]};
-    SmallVector<Value> tensorStride{descriptorFields[3], descriptorFields[4]};
-    SmallVector<Value, 2> offset = adaptor.getIndices();
-    tensorStride[0] = b.trunc(i32_ty, tensorStride[0]);
-    tensorStride[1] = b.trunc(i32_ty, tensorStride[1]);
-
-    auto tid = getThreadId(rewriter, loc);
-    auto waveId = getLaneAndWarpId(rewriter, loc).second;
-    auto encoding =
-        cast<PaddedSharedEncodingAttr>(op.getResult().getType().getEncoding())
-            .getCGALayout();
+    auto tdescType = op.getDesc().getType();
+    auto tensorType = tdescType.getBlockType();
+    SmallVector<int64_t> blockShape = llvm::to_vector(tensorType.getShape());
+    Type elementType =
+        getTypeConverter()->convertType(tensorType.getElementType());
+    SmallVector<Value> desc =
+        unpackLLElements(loc, adaptor.getDesc(), rewriter);
+    SmallVector<Value> offset = adaptor.getIndices();
 
     auto mod = op->getParentOfType<ModuleOp>();
-    int numCTAs = TritonGPUDialect::getNumCTAs(mod);
+    int threadsPerWarp = TritonGPUDialect::getThreadsPerWarp(mod);
+    int numWarps = lookupNumWarps(op);
+    int numCTAs = lookupNumCTAs(op);
 
-    Value clusterCTAId =
-        numCTAs > 1 ? targetInfo.getClusterCTAId(rewriter, loc) : b.i32_val(0);
-    // Is the cta order enough? Or do we need more?
-    auto order = encoding.getCTAOrder();
-    unsigned dimIdxToSplit = order.back();
-    unsigned dimIdxToNotSplit = 1 - dimIdxToSplit;
-    unsigned dimToSplit = blockShape[dimIdxToSplit];
-    unsigned dimToNotSplit = blockShape[dimIdxToNotSplit];
-    unsigned tilePerCTA = dimToSplit;
-    // Cooperatively load from multiple ctas if numCTAs > 1. We need to take
-    // into account the shape/cta
-    if (numCTAs > 1) {
-      unsigned numCooperativeCTAs = encoding.getCTAsPerCGA()[dimIdxToNotSplit];
-      tilePerCTA = (dimToSplit + numCooperativeCTAs - 1) / numCooperativeCTAs;
-      auto multiDimClusterCTAId =
-          delinearize(rewriter, loc, clusterCTAId, encoding.getCTAsPerCGA(),
-                      encoding.getCTAOrder());
-      offset[dimIdxToSplit] = b.add(
-          offset[dimIdxToSplit],
-          b.mul(multiDimClusterCTAId[dimIdxToSplit], b.i32_val(tilePerCTA)));
+    auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+    auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
+
+    auto offsets = mlir::LLVM::AMD::emitTDMPrefetch(
+        rewriter, loc, desc, blockShape, threadsPerWarp, numWarps, numCTAs,
+        offset, op.getPred(), elementType, laneId, warpId, ctaId,
+        op.getSpeculative());
+
+    // If the op has no results, just erase it
+    if (op->getNumResults() == 0) {
+      // No results to return - just erase the op
+      rewriter.eraseOp(op);
+      return success();
     }
 
-    // Load cooperatively from a set of waves
-    int numWaves = cast<IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
-    unsigned tilePerWave = (tilePerCTA + numWaves - 1) / numWaves;
-    offset[dimIdxToSplit] =
-        b.add(offset[dimIdxToSplit], b.mul(waveId, b.i32_val(tilePerWave)));
-
-    // Load cooperatively from a set of threads
-    unsigned numThreads = 32;
-    if (tilePerWave < numThreads)
-      tid = b.urem(tid, b.i32_val(tilePerWave));
-    offset[dimIdxToSplit] = b.add(offset[dimIdxToSplit], tid);
-
-    // Is this ok? Probably for A0 needs to be changed
-    int prefetchSizeBytes = 256;
-    int prefetchSizeElements = prefetchSizeBytes / bytesPerElement;
-    int prefetchesPerRow =
-        (dimToNotSplit + prefetchSizeElements - 1) / prefetchSizeElements;
-    int tilePerThread = (tilePerWave + numThreads - 1) / numThreads;
-    for (int i = 0; i < tilePerThread; i += numThreads) {
-      offset[dimIdxToNotSplit] = b.add(offset[dimIdxToNotSplit], b.i32_val(i));
-      for (int j = 0; j < prefetchesPerRow; j++) {
-        offset[dimIdxToNotSplit] =
-            b.add(offset[dimIdxToNotSplit],
-                  b.i32_val(j * (prefetchSizeBytes / bytesPerElement)));
-        Value linearOffset = b.add(
-            b.mul(offset[dimIdxToNotSplit], tensorStride[dimIdxToNotSplit]),
-            b.mul(offset[dimIdxToSplit], tensorStride[dimIdxToSplit]));
-
-        // Compute the predicate
-        Value cond1 =
-            b.icmp_sle(linearOffset, b.mul(tensorShape[0], tensorShape[1]));
-        Value cond2 = op.getPred();
-        Value cond = b.and_(cond1, cond2);
-
-        // Issue the (predicated) prefetch
-        Block *currentBlock = rewriter.getInsertionBlock();
-        Block *afterPrefetch =
-            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-        Block *prefetchBlock = rewriter.createBlock(afterPrefetch);
-        rewriter.setInsertionPointToEnd(currentBlock);
-        LLVM::CondBrOp::create(rewriter, loc, cond, prefetchBlock,
-                               afterPrefetch);
-        rewriter.setInsertionPointToStart(prefetchBlock);
-        Type elemPtrTy1 = ptr_ty(rewriter.getContext(), 1);
-        auto addr = b.gep(elemPtrTy1, i8_ty, basePtr, linearOffset);
-        Value scope = LLVM::ConstantOp::create(
-            rewriter, op.getLoc(), IntegerType::get(op.getContext(), 32),
-            rewriter.getI32IntegerAttr(8));
-        auto p = LLVM::createLLVMIntrinsicCallOp(
-            rewriter, loc, "llvm.amdgcn.global.prefetch", {}, {addr, scope});
-
-        LLVM::BrOp::create(rewriter, loc, afterPrefetch);
-        rewriter.setInsertionPointToStart(afterPrefetch);
-      }
-    }
-
-    rewriter.eraseOp(op);
+    // Return offsets
+    Type llvmResultStructTy = getTypeConverter()->convertType(op.getType(0));
+    auto structType = dyn_cast<LLVM::LLVMStructType>(
+        getTypeConverter()->convertType(op.getType(0)));
+    Value resultStruct = packLLElements(loc, getTypeConverter(), offsets,
+                                        rewriter, llvmResultStructTy);
+    rewriter.replaceOp(op, {resultStruct});
     return success();
   }
 
@@ -2400,7 +2332,7 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                AsyncTDMCopyLocalToGlobalOpConversion>(
       typeConverter, targetInfo, axisInfoAnalysis, benefit);
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
-  patterns.add<TDMGlobalPrefetchConversion>(typeConverter, targetInfo, benefit);
+  patterns.add<TDMPrefetchConversion>(typeConverter, targetInfo, benefit);
   patterns.add<AsyncTDMWaitConversion>(typeConverter, benefit);
   patterns.add<AsyncCommitGroupOpConversion>(typeConverter, benefit);
   patterns.add<AsyncCopyMbarrierArriveOpConversion>(typeConverter, benefit);

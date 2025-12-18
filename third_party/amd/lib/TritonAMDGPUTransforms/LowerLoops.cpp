@@ -41,7 +41,7 @@ struct AsyncCopyChainOps {
 
 struct TDMCopyChainOps {
   triton::amdgpu::AsyncTDMCopyGlobalToLocalOp copyOp;
-  triton::amdgpu::GlobalTDMPrefetchOp prefetchOp;
+  triton::amdgpu::TDMPrefetchOp prefetchOp;
   ttg::AsyncCommitGroupOp commitOp;
   triton::amdgpu::AsyncTDMWait waitOp;
   ttg::LocalLoadOp maybeLocalLoadOp;
@@ -62,10 +62,11 @@ TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
   auto viewLoad = triton::createSingleBufferView(builder, alloc, extractIdx)
                       .getDefiningOp<ttg::MemDescIndexOp>();
 
-  triton::amdgpu::GlobalTDMPrefetchOp prefetchOp;
+  triton::amdgpu::TDMPrefetchOp prefetchOp;
   if (globalPrefetch > 0)
-    prefetchOp = triton::amdgpu::GlobalTDMPrefetchOp::create(
-        builder, loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
+    prefetchOp = triton::amdgpu::TDMPrefetchOp::create(
+        builder, loc, loadOp.getDesc(), loadOp.getIndices(), pred,
+        /*speculative=*/false, /*returnOffsets=*/nullptr);
 
   auto copyOp = triton::amdgpu::AsyncTDMCopyGlobalToLocalOp::create(
       builder, loc, loadOp.getDesc(), loadOp.getIndices(), viewLoad, pred);
