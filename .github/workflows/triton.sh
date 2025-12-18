@@ -38,11 +38,12 @@ echo "=== Run Triton Unit Tests ==="
 
 # Array of test patterns to exclude
 EXCLUDE_PATTERNS=(
-    "test_dot"
-    "test_load_scope_sem_coop_grid_cta_one"
-    "test_propagate_nan"
-    "test_ptx_cast"
+    # Exclude pattern for test_core.py
+    "test_dot" # Failing 8 test cases
+    "test_load_scope_sem_coop_grid_cta_one" # coop group not supported in FFM
     "test_load_store_same_ptr" # takes >60 mins
+    # Exclude patterns for runtime tests:
+    "test_async_compile_mock" # hangs indefinitely in FFM (threading/async issues in simulation)
 )
 
 # Build the -k expression: "not (pattern1 or pattern2 or ...)"
@@ -57,40 +58,10 @@ K_EXPR="$K_EXPR)"
 
 echo "Running pytest with filter: $K_EXPR"
 
-pytest -n 36 \
+pytest -n 64 \
+    --durations=20 \
     -k "$K_EXPR" \
-    python/test/unit/language/test_core.py
-
-pytest -n 36 \
-    python/test/unit/language/test_matmul.py
-
-echo "=== Run Runtime Unit Tests ==="
-
-# Exclude patterns for runtime tests:
-#
-# Issue #1 (FFM hang):
-#   - test_async_compile_mock: hangs indefinitely in FFM (threading/async issues in simulation)
-#
-RUNTIME_EXCLUDE_PATTERNS=(
-    # Issue #1
-    "test_async_compile_mock"
-)
-
-# Build the -k expression for runtime tests
-RUNTIME_K_EXPR="not ("
-for i in "${!RUNTIME_EXCLUDE_PATTERNS[@]}"; do
-    if [ $i -gt 0 ]; then
-        RUNTIME_K_EXPR="$RUNTIME_K_EXPR or "
-    fi
-    RUNTIME_K_EXPR="$RUNTIME_K_EXPR${RUNTIME_EXCLUDE_PATTERNS[$i]}"
-done
-RUNTIME_K_EXPR="$RUNTIME_K_EXPR)"
-
-echo "Running runtime tests with filter: $RUNTIME_K_EXPR"
-
-pytest -n 36 \
-    -k "$RUNTIME_K_EXPR" \
-    python/test/unit/runtime/
-
-echo "Running test_debug.py and skip the tests about s_trsp"
-pytest -n 36 python/test/unit/test_debug.py
+    python/test/unit/language/test_core.py \
+    python/test/unit/language/test_matmul.py \
+    python/test/unit/runtime \
+    python/test/unit/test_debug.py
