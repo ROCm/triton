@@ -50,6 +50,7 @@ pytest --count=1 -n 16 python/test/gluon/test_frontend.py
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
 
 # TODO: Fix failures in mxfp variants when ffm_enable_time_slicing is enabled.

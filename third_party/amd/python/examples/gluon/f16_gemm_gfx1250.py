@@ -4,7 +4,6 @@ import hip
 # Needed for internal dev flow for now; will remove later
 hip.hip.hipInit(0)
 
-import re
 import pytest
 import torch
 
@@ -13,151 +12,27 @@ from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
 
-
-def static_profile(kernel):
-    amdgcn = kernel.asm['amdgcn']
-
-    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
-    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
-    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
-    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
-    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
-
-    print(f"- sgpr_count: {sgpr_count}\n"
-          f"- sgpr_spill_count: {sgpr_spill_count}\n"
-          f"- vgpr_count: {vgpr_count}\n"
-          f"- vgpr_spill_count: {vgpr_spill_count}\n"
-          f"- scratch_size: {scratch_size}\n"
-          f"- code_len_in_byte: {code_len_in_byte}\n"
-          f"- occupancy: {occupancy}\n")
-
-
-@aggregate
-class PersistentTileScheduler:
-    pid_start: ttgl.tensor
-    pid_end: ttgl.tensor
-    num_pid_m: ttgl.tensor
-
-    @gluon.constexpr_function
-    def __init__(self, pid_start, pid_end, num_pid_m):
-        self.pid_start = pid_start
-        self.pid_end = pid_end
-        self.num_pid_m = num_pid_m
-
-    @gluon.jit
-    def initialize(M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr):
-        kernel_id = ttgl.program_id(axis=0)
-        num_kernels = ttgl.num_programs(axis=0)
-        num_pid_m = ttgl.cdiv(M, BLOCK_M)
-        num_pid_n = ttgl.cdiv(N, BLOCK_N)
-        num_pid = num_pid_m * num_pid_n
-        pid_per_kernel = ttgl.cdiv(num_pid, num_kernels)
-        pid_start = kernel_id * pid_per_kernel
-        pid_end = min(pid_start + pid_per_kernel, num_pid)
-        return PersistentTileScheduler(pid_start, pid_end, num_pid_m)
-
-    @gluon.jit
-    def get_num_tiles(self):
-        return self.pid_end - self.pid_start
-
-    @gluon.jit
-    def get_tile(self, idx):
-        # Delinearize the tile ID along M.
-        pid = self.pid_start + idx
-        pid_m = pid % self.num_pid_m
-        pid_n = pid // self.num_pid_m
-        return pid_m, pid_n
-
-
-@gluon.jit
-def create_tensor_descriptors(a_ptr, b_ptr, off_am, off_bn, stride_am, stride_ak, stride_bn, stride_bk,
-                              shared_layout_a: ttgl.constexpr, shared_layout_b: ttgl.constexpr, M: ttgl.constexpr,
-                              N: ttgl.constexpr, K: ttgl.constexpr, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                              BLOCK_K: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-        base=a_ptr + off_am,  #
-        shape=(M, K),  #
-        strides=(stride_am, stride_ak),  #
-        block_shape=(BLOCK_M, BLOCK_K),  #
-        layout=shared_layout_a)
-    if not TRANSPOSE_B:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-            base=b_ptr + off_bn,  #
-            shape=(K, N),  #
-            strides=(stride_bk, stride_bn),  #
-            block_shape=(BLOCK_K, BLOCK_N),  #
-            layout=shared_layout_b)
-    else:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-            base=b_ptr + off_bn,  #
-            shape=(N, K),  #
-            strides=(stride_bn, stride_bk),  #
-            block_shape=(BLOCK_N, BLOCK_K),  #
-            layout=shared_layout_b)
-
-    return a_desc, b_desc
-
-
-@gluon.jit
-def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
-                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
-    ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K],  #
-                                    a_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    if not TRANSPOSE_B:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn],  #
-                                        b_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    else:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K],  #
-                                        b_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    producer += 1
-    return producer
-
-
-@gluon.jit
-def issue_wmma(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr, accumulator,
-               wait_producers_cnt, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-    ttgl.amd.gfx1250.tdm.async_wait(wait_producers_cnt)
-
-    a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
-    if not TRANSPOSE_B:
-        b = b_buffer.index(consumer % NUM_BUFFERS).load(layout=b_layout)
-    else:
-        b = b_buffer.index(consumer % NUM_BUFFERS).permute([1, 0]).load(layout=b_layout)
-
-    accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
-    consumer += 1
-    return consumer, accumulator
-
-
-@gluon.jit
-def lds_subtile_load(consumer, start, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr,
-                     NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, SUBTILE_LEN: ttgl.constexpr):
-    # Create subtile by slicing along K dimension
-    index = consumer % NUM_BUFFERS
-    a = a_buffer.index(index).slice(start, SUBTILE_LEN, 1).load(layout=a_layout)
-    if not TRANSPOSE_B:
-        b = b_buffer.index(index).slice(start, SUBTILE_LEN, 0).load(layout=b_layout)
-    else:
-        b = b_buffer.index(index).slice(start, SUBTILE_LEN, 1).permute([1, 0]).load(layout=b_layout)
-
-    return a, b
-
-
-@gluon.constexpr_function
-def create_shared_layouts(BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
-                          TRANSPOSE_B: ttgl.constexpr):
-    SHARED_LAYOUT_A: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_M, BLOCK_K],
-                                                                                [1, 0])
-    if not TRANSPOSE_B:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K, BLOCK_N],
-                                                                                    [1, 0])
-    else:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_N, BLOCK_K],
-                                                                                    [1, 0])
-
-    return (SHARED_LAYOUT_A, SHARED_LAYOUT_B)
+# Handle imports for both pytest (module context) and direct execution
+try:
+    from .f16_gemm_common_gfx1250 import (
+        static_profile,
+        create_shared_layouts,
+        create_tensor_descriptors,
+        issue_loads,
+        issue_wmma,
+        lds_subtile_load,
+        TileScheduler,
+    )
+except ImportError:
+    from f16_gemm_common_gfx1250 import (
+        static_profile,
+        create_shared_layouts,
+        create_tensor_descriptors,
+        issue_loads,
+        issue_wmma,
+        lds_subtile_load,
+        TileScheduler,
+    )
 
 
 @gluon.jit
@@ -189,10 +64,10 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
+    scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
 
     for tile_idx in range(scheduler.get_num_tiles()):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
+        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
@@ -251,11 +126,11 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
+    scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
     num_tiles = scheduler.get_num_tiles()
     producer = 0
 
-    pid_m, pid_n = scheduler.get_tile(0)
+    pid_m, pid_n = scheduler.get_linear_tile_coords(0)
     off_am = pid_m * BLOCK_M
     off_bn = pid_n * BLOCK_N
     for i in ttgl.static_range(NUM_BUFFERS - 1):
@@ -263,7 +138,7 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
                                TRANSPOSE_B)
 
     for tile_idx in range(num_tiles):
-        pid_m_next, pid_n_next = scheduler.get_tile(tile_idx + 1)
+        pid_m_next, pid_n_next = scheduler.get_linear_tile_coords(tile_idx + 1)
         off_am_next = pid_m_next * BLOCK_M
         off_bn_next = pid_n_next * BLOCK_N
 
@@ -1006,7 +881,7 @@ def persistent_producer_partition(args, scheduler):
     load_empty_phase_counter = PhaseCounter.create(args.NUM_BUFFERS, args.NUM_BUFFERS)
 
     for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
+        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
@@ -1099,7 +974,7 @@ def persistent_epilogue_partition(args, c_ptr, M, N, stride_cm, stride_cn, sched
     acc_ready_phase_counter = PhaseCounter.create(0, args.NUM_ACC_BUFFERS)
 
     for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
+        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
         acc_buffer_idx = tile_idx % args.NUM_ACC_BUFFERS
         acc_ready_bar = args.acc_ready_bars.index(acc_buffer_idx)
         acc_empty_bar = args.acc_empty_bars.index(acc_buffer_idx)
@@ -1133,7 +1008,7 @@ def persistent_producer_subtiled_partition(args, scheduler):
     load_empty_phase_counter = PhaseCounter.create(args.NUM_BUFFERS, args.NUM_BUFFERS)
 
     for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
+        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
 
         for quad_idx in ttgl.static_range(NUM_QUADS):
             quad_m = quad_idx // NUM_QUADS_N
@@ -1243,7 +1118,7 @@ def persistent_epilogue_subtiled_partition(args, scheduler):
     acc_ready_phase_counter = PhaseCounter.create(0, args.NUM_ACC_BUFFERS)
 
     for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_tile(tile_idx)
+        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
 
         for quad_idx in ttgl.static_range(NUM_QUADS):
             quad_m = quad_idx // NUM_QUADS_N
@@ -1314,7 +1189,7 @@ def persistent_gemm_tdm_warp_specialized_kernel(a_ptr, b_ptr, c_ptr,  #
     c_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
                                                          block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT_ACC)
 
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
+    scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
 
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
@@ -1411,7 +1286,7 @@ def persistent_gemm_tdm_warp_specialized_subtiled_kernel(a_ptr, b_ptr, c_ptr,  #
                                                          block_shape=(ACC_SUBTILE_M, ACC_SUBTILE_N),
                                                          layout=SHARED_LAYOUT_ACC)
 
-    scheduler = PersistentTileScheduler.initialize(M, N, BLOCK_M, BLOCK_N)
+    scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
 
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
