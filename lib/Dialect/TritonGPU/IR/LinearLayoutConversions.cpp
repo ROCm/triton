@@ -1406,8 +1406,9 @@ LinearLayout chooseScaledWmmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   LinearLayout ctaLayout = tileLayout.transposeOuts(outDimNames) *
                            warpLayout.transposeOuts(outDimNames);
 
-  return combineCtaCgaWithShape(
-      ctaLayout, CGAEncodingAttr::getDefault(ctx, /*rank=*/2), dotOperandShape);
+  return combineCtaCgaWithShape(ctaLayout,
+                                CGAEncodingAttr::get1CTALayout(ctx, /*rank=*/2),
+                                dotOperandShape);
 }
 
 LinearLayout chooseDotDsReadTrLayoutWmma(DotOperandEncodingAttr dotWmmaLayout,
@@ -1670,7 +1671,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
   LinearLayout ctaLayout = tileLayout.transposeOuts(outDimNames) *
                            warpLayout.transposeOuts(outDimNames);
 
-  auto cgaLayout = CGAEncodingAttr::getDefault(ctx, 2);
+  auto cgaLayout = CGAEncodingAttr::get1CTALayout(ctx, 2);
   auto finalLay = combineCtaCgaWithShape(ctaLayout, cgaLayout, dotOperandShape);
   return finalLay;
 }
