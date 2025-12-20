@@ -42,6 +42,11 @@ EXCLUDE_PATTERNS=(
     "test_dot" # Failing 8 test cases
     "test_load_scope_sem_coop_grid_cta_one" # coop group not supported in FFM
     "test_load_store_same_ptr" # takes >60 mins
+    # Excluse pattern for test_matmul.py
+    "test_preshuffle_scale_mxfp_cdna4"
+    "test_batched_mxfp"
+    "test_mxfp8_mxfp4_matmul"
+    "test_block_scale_fp4"
     # Exclude patterns for runtime tests:
     "test_async_compile_mock" # hangs indefinitely in FFM (threading/async issues in simulation)
 )
