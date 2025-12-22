@@ -113,16 +113,10 @@ If needing to update LLVM, compile LLVM from the SHA you need, say `abcd1234`.
 Note that this needs to be in a Ubuntu 24.04 environment, which is what the
 CI docker expects.
 
-When configuring, make sure setting `CMAKE_INSTALL_PREFIX` to somewhere, say
-`build/install`. Then `ninja install` to compile and copy over two binaries:
-
-```sh
-cd build/
-cp bin/FileCheck install/bin/
-cp bin/split-file install/bin/
-```
-
-Then mv the whole `install/` directory:
+Please follow [`llvm-build.yml` workflow](https://github.com/triton-lang/triton/blob/63867d83218903ff6c53e14feb9c418c2e39b3ec/.github/workflows/llvm-build.yml#L101)
+to configure MLIR. Also make sure setting `CMAKE_INSTALL_PREFIX` to somewhere,
+say `build/install`. Then `ninja install`. Then mv the whole `install/`
+directory:
 
 ```sh
 mv install/ /data/ci/llvm/abcd1234-debug

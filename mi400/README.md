@@ -1,5 +1,7 @@
-## MI400 kernels
-The idea of this folder is to write specific kernels to show off new MI400 features (e.g., TDM) or to play with performance optimizations for a specific kernel
+## Interal MI450 specific resources
 
-Note: You may need to manually add this folder to PYTHONPATH for the kernels directory to be recognized.
-export PYTHONPATH=${PYTHONPATH}:/path/to/triton/mi400
+
+This directory contains mi450 related resources that we use internally and will
+not upstream by default without scrutiny.
+
+It contains how to set up CI, and tools, and some early prototype kernels.

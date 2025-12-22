@@ -1,6 +1,9 @@
-
-
 # Setup Multithreaded MI450 FFM with Triton
+
+> [!CAUTION]
+> This document is out of date and only kept here for records. Please follow
+> https://amd.atlassian.net/wiki/spaces/MLSE/pages/1181562650/Triton+FFM-Lite+on+MI450
+> as the latest setup flow.
 
 **Workflow**: Linux Host Machine → MI450 FFM Docker Container → Triton through FFM Driver override
 
