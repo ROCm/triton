@@ -35,8 +35,11 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
   } else if (auto copyOp =
                  dyn_cast<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op)) {
     rewriter.setInsertionPoint(copyOp);
+    // TDM requires the mask as I32
+    auto predI32 = arith::ExtUIOp::create(rewriter, copyOp->getLoc(),
+                                          copyOp.getPred().getType(), pred);
     Value mask = arith::AndIOp::create(rewriter, copyOp->getLoc(),
-                                       copyOp.getPred(), pred);
+                                       copyOp.getPred(), predI32);
     copyOp.getPredMutable().assign(mask);
     return op;
   } else if (auto copyOp = dyn_cast<triton::amdgpu::TDMPrefetchOp>(op)) {

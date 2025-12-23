@@ -102,7 +102,7 @@ def create_tensor_descriptors(a_ptr, b_ptr, off_am, off_bn, stride_am, stride_ak
 
 @gluon.jit
 def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
-                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
+                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=1):
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K],  #
                                     a_buffer.index(producer % NUM_BUFFERS), pred=pred)
     if not TRANSPOSE_B:

@@ -65,7 +65,7 @@ public:
         MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
                          encoding, sharedMemorySpace, /*mutableMemory=*/true);
     Value alloc = LocalAllocOp::create(rewriter, loc, memDescType);
-    Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
     // amdgpu::GlobalTDMPrefetch::create(rewriter,
     //     loc, op.getDesc(), op.getIndices(), pred, waveId, cgaLayout);
     amdgpu::AsyncTDMCopyGlobalToLocalOp::create(rewriter, loc, op.getDesc(),

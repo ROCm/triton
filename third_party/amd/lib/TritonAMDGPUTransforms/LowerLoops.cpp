@@ -56,7 +56,7 @@ TDMCopyChainOps createTDMAsyncCopy(tt::DescriptorLoadOp loadOp, Value alloc,
   OpBuilder builder(loadOp);
   Location loc = loadOp.getLoc();
 
-  Value pred = arith::ConstantIntOp::create(builder, loc, 1, 1);
+  Value pred = arith::ConstantIntOp::create(builder, loc, 1, 32);
 
   // Extract local subview from shared allocation
   auto viewLoad = triton::createSingleBufferView(builder, alloc, extractIdx)
