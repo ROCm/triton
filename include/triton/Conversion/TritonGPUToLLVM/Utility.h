@@ -668,6 +668,14 @@ void finalizeTensorAtomicResults(Operation *op, RankedTensorType tensorTy,
                                  const TargetInfoBase &targetInfo,
                                  const LLVMTypeConverter *typeConverter);
 
+// -----------------------------------------------------------------------
+// FuncOp conversion utilities
+// -----------------------------------------------------------------------
+void filterFuncAttributes(triton::FuncOp op, bool filterArgAttrs,
+                          SmallVectorImpl<NamedAttribute> &result);
+triton::FuncOp amendFuncOp(triton::FuncOp funcOp,
+                           ConversionPatternRewriter &rewriter,
+                           const TargetInfoBase &targetInfo);
 } // namespace mlir
 
 #endif
