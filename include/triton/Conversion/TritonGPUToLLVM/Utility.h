@@ -531,7 +531,10 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
 Value emitPadding(Location loc, RewriterBase &rewriter,
                   triton::gpu::PaddedSharedEncodingAttr layout,
                   unsigned bitwidth, Value smemOffset, bool offsetInBytes);
-
+// integer version of the above function
+unsigned emitPadding(triton::gpu::PaddedSharedEncodingAttr layout,
+                     unsigned bitwidth, unsigned smemOffset,
+                     bool offsetInBytes);
 // Close cousin of lowerLdStMatrix in MemoryOpToLLVM.cpp
 // We might want to merge them at some point, but having to support
 // ldmatrix.trans makes the code in lowerLdStMatrix a bit specific
@@ -545,6 +548,7 @@ lowerLdStShared(Location loc, MLIRContext *ctx, LinearLayout cvt,
                 ArrayRef<Value> valsArray, // Input for store, output for load
                 Type llvmElemTy, Value smemBase,
                 std::function<Value(Value)> calcPaddedOffset,
+                std::function<unsigned(unsigned)> calcPaddedOffseti8,
                 Value affineOffset, uint64_t maskSpanAffineOffset,
                 RewriterBase &rewriter, const TargetInfoBase &targetInfo,
                 std::optional<int> maybeMaxVecElems = {},
@@ -560,7 +564,8 @@ SmallVector<Value> lowerLdSt(
     Location loc, MLIRContext *ctx, LinearLayout cvt,
     ArrayRef<Value> valsArray, // Input for store, output for load
     Type llvmElemTy, Value smemBase,
-    std::function<Value(Value)> calcPaddedOffset, Value affineOffset,
+    std::function<Value(Value)> calcPaddedOffset,
+    std::function<unsigned(unsigned)> calcPaddedOffseti8, Value affineOffset,
     uint64_t maskSpanAffineOffset, Value laneId, Value warpId,
     RewriterBase &rewriter, const TargetInfoBase &targetInfo,
     std::optional<int> maybeMaxVecElems,

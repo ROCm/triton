@@ -201,6 +201,7 @@ struct ConvertLayoutOpConversion
     auto affineOffset = b.i32_val(0);
     auto maskSpanAffineOffset = 0;
     auto noPaddingOffset = [](Value v) { return v; };
+    auto noPaddingOffseti8 = [](unsigned v) { return v; };
 
     bool isWarpSync = mlir::isCvtWarpSync(srcLayout, dstLayout);
     for (int i = 0; i < nReps; ++i) {
@@ -211,13 +212,14 @@ struct ConvertLayoutOpConversion
           ArrayRef<Value>(permutedInVals).slice(i * tileSize, tileSize);
       // Store
       lowerLdStShared(loc, ctx, storeCvt, tileInVals, llvmElemTy, smemBase,
-                      noPaddingOffset, affineOffset, maskSpanAffineOffset,
-                      rewriter, targetInfo);
+                      noPaddingOffset, noPaddingOffseti8, affineOffset,
+                      maskSpanAffineOffset, rewriter, targetInfo);
       targetInfo.barrier(loc, rewriter, isWarpSync);
       // Load
-      SmallVector<Value> tileOutVals = lowerLdStShared(
-          loc, ctx, loadCvt, {}, llvmElemTy, smemBase, noPaddingOffset,
-          affineOffset, maskSpanAffineOffset, rewriter, targetInfo);
+      SmallVector<Value> tileOutVals =
+          lowerLdStShared(loc, ctx, loadCvt, {}, llvmElemTy, smemBase,
+                          noPaddingOffset, noPaddingOffseti8, affineOffset,
+                          maskSpanAffineOffset, rewriter, targetInfo);
       llvm::append_range(outVals, tileOutVals);
     }
 

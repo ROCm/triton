@@ -502,6 +502,18 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       return smemOffset;
     };
 
+    auto calcPaddedOffseti8 = [&](unsigned smemOffset) {
+      auto bitwidth = sharedTy.getElementTypeBitWidth();
+      if (auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+              sharedTy.getEncoding())) {
+        // Apply the offset needed for padding.
+        unsigned padOffset = emitPadding(paddedEnc, bitwidth, smemOffset,
+                                         /*offsetInBytes=*/true);
+        smemOffset += padOffset;
+      }
+      return smemOffset;
+    };
+
     auto lowerInstForwardMulticastMask =
         [&](RewriterBase &rewriter, Location loc, ArrayRef<Value> vals,
             Value shmemAddr, int idx, VectorType vecTy) {
@@ -516,8 +528,9 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     }
 
     lowerLdSt(loc, ctx, cvt, vals, resElemTy, smemObj.getBase(),
-              calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
-              warpId, rewriter, targetInfo, vec, lowerInstForwardMulticastMask);
+              calcPaddedOffset, calcPaddedOffseti8, affineOffset,
+              maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo, vec,
+              lowerInstForwardMulticastMask);
     return success();
   }
 

@@ -172,6 +172,7 @@ struct ConvertLayoutOpSwizzlingConversion
     auto affineOffset = b.i32_val(0);
     auto maskSpanAffineOffset = 0;
     auto noPaddingOffset = [](Value v) { return v; };
+    auto noPaddingOffseti8 = [](unsigned v) { return v; };
     bool isWarpSync = mlir::isCvtWarpSync(srcLayout, dstLayout);
     for (int i = 0; i < nReps; ++i) {
       if (i > 0)
@@ -183,8 +184,8 @@ struct ConvertLayoutOpSwizzlingConversion
       // idxSrc 0: st.shared, idxSrc 1: stmatrix, idxSrc 2: stmatrix.trans
       if (idxSrc == 0) {
         lowerLdStShared(loc, ctx, storeCvt, tileInVals, llvmElemTy, smemBase,
-                        noPaddingOffset, affineOffset, maskSpanAffineOffset,
-                        rewriter, targetInfo);
+                        noPaddingOffset, noPaddingOffseti8, affineOffset,
+                        maskSpanAffineOffset, rewriter, targetInfo);
       } else {
         assert(idxSrc == 1 || idxSrc == 2);
         bool transpose = idxSrc == 2;
@@ -198,9 +199,10 @@ struct ConvertLayoutOpSwizzlingConversion
       SmallVector<Value> tileOutVals;
       // idxDst 0: ld.shared, idxDst 1: ldmatrix, idxDst 2: ldmatrix.trans
       if (idxDst == 0) {
-        tileOutVals = lowerLdStShared(
-            loc, ctx, loadCvt, {}, llvmElemTy, smemBase, noPaddingOffset,
-            affineOffset, maskSpanAffineOffset, rewriter, targetInfo);
+        tileOutVals =
+            lowerLdStShared(loc, ctx, loadCvt, {}, llvmElemTy, smemBase,
+                            noPaddingOffset, noPaddingOffseti8, affineOffset,
+                            maskSpanAffineOffset, rewriter, targetInfo);
       } else {
         assert(idxDst == 1 || idxDst == 2);
         bool transpose = idxDst == 2;
