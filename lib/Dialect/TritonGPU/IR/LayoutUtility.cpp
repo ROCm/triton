@@ -2,7 +2,6 @@
 
 #include <llvm/ADT/SmallVector.h>
 #include <triton/Dialect/Triton/IR/Utility.h>
-#include <triton/Tools/LayoutUtils.h>
 
 namespace mlir::triton::gpu {
 

@@ -141,9 +141,8 @@ static bool isConvertLayoutTrivial(RankedTensorType dstTy, Value value) {
   return dims.empty() || (dims.size() == 1 && dims.front() == "register");
 }
 
-template <typename R>
-std::vector<llvm::ValueTypeFromRangeType<R>> toStdVector(R &&range) {
-  return {range.begin(), range.end()};
+template <typename T> std::vector<T> toStdVector(llvm::ArrayRef<T> array) {
+  return std::vector<T>(array.begin(), array.end());
 }
 
 py::object layoutToGluon(Attribute layout) {
@@ -161,7 +160,7 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.SliceLayout(sliced.getDim(),
                                layoutToGluon(sliced.getParent()));
   } else if (auto linear = dyn_cast<ttg::LinearEncodingAttr>(layout)) {
-    const auto &ll = linear.getLinearLayout();
+    auto ll = linear.getLinearLayout();
     auto ctx = layout.getContext();
     auto kReg = mlir::StringAttr::get(ctx, "register");
     auto kLane = mlir::StringAttr::get(ctx, "lane");
@@ -170,7 +169,7 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.DistributedLinearLayout(
         ll.getBases().lookup(kReg), ll.getBases().lookup(kLane),
         ll.getBases().lookup(kWarp), ll.getBases().lookup(kBlock),
-        toStdVector(ll.getOutDimSizes()));
+        toStdVector(ArrayRef(llvm::to_vector(ll.getOutDimSizes()))));
   } else if (auto dotOp = dyn_cast<ttg::DotOperandEncodingAttr>(layout)) {
     return layouts.DotOperandLayout(
         dotOp.getOpIdx(), layoutToGluon(dotOp.getParent()), dotOp.getKWidth());
@@ -227,19 +226,17 @@ py::object layoutToGluon(Attribute layout) {
         toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
-    auto *ctx = paddedShared.getContext();
+    auto ctaLayout = paddedShared.getCTALayout();
     std::vector<std::pair<unsigned, unsigned>> intervalPaddingPairs;
     for (auto [interval, padding] :
          llvm::zip(paddedShared.getIntervals(), paddedShared.getPaddings())) {
       intervalPaddingPairs.push_back({interval, padding});
     }
-    auto kOffset = mlir::StringAttr::get(ctx, "offset");
-    auto kBlock = mlir::StringAttr::get(ctx, "block");
-    const auto &ll = paddedShared.getLinearComponent();
-    auto shape = toStdVector(ll.getOutDimSizes());
     return layouts.PaddedSharedLayout(intervalPaddingPairs,
-                                      ll.getBases().lookup(kOffset),
-                                      ll.getBases().lookup(kBlock), shape);
+                                      toStdVector(paddedShared.getOrder()),
+                                      toStdVector(ctaLayout.getCTAsPerCGA()),
+                                      toStdVector(ctaLayout.getCTASplitNum()),
+                                      toStdVector(ctaLayout.getCTAOrder()));
   }
 
   throw py::value_error("Unhandled encoding encountered");
@@ -358,19 +355,15 @@ void init_gluon_ir(py::module &&m) {
            })
       .def("get_padded_shared_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &intervals,
-              std::vector<unsigned> &paddings,
-              std::vector<std::vector<int>> &offsetBases,
-              std::vector<std::vector<int>> &blockBases,
-              std::vector<int64_t> &shape) -> Attribute {
+              std::vector<unsigned> &paddings, std::vector<unsigned> &order,
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             auto rank = shape.size();
-             auto kOffset = mlir::StringAttr::get(ctx, "offset");
-             auto kBlock = mlir::StringAttr::get(ctx, "block");
-             auto ll = tt::LinearLayout(
-                 {{kOffset, offsetBases}, {kBlock, blockBases}},
-                 tt::standardOutDimNames(ctx, rank));
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return ttg::PaddedSharedEncodingAttr::get(ctx, intervals, paddings,
-                                                       ll);
+                                                       order, ctaLayout);
            })
       .def("get_nvmma_shared_layout",
            [](GluonOpBuilder &self, unsigned swizzleByteWidth,

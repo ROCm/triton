@@ -5,4 +5,8 @@ namespace mlir::triton::gpu {
 
 CTALayoutAttr permuteCTALayout(MLIRContext *ctx, CTALayoutAttr layout,
                                ArrayRef<int> order);
+
+LinearLayout getPaddedRegToSharedLayout(const LinearLayout &regLayout,
+                                        PaddedSharedEncodingAttr paddedEnc);
+
 } // namespace mlir::triton::gpu
