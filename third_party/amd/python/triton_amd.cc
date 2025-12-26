@@ -550,6 +550,10 @@ void init_triton_amd(py::module &&m) {
     mlir::triton::AMD::runScalarizePackedFOpsPass(*fn);
   });
 
+  m.def("add_pre_RA_llir_schedule_pass", [](llvm::Function *fn) {
+    mlir::triton::AMD::runPreRALLIRSchedulePass(*fn);
+  });
+
   auto hipBlas = m.def_submodule("hipblas");
   // For ROCm installed via TheRock wheels: Preload hipblaslt library via
   // rocm_sdk if available. When using TheRock wheel installs, libhipblaslt
