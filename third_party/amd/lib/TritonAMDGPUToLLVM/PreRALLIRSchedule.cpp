@@ -1,8 +1,9 @@
 #include "TritonAMDGPUToLLVM/Passes.h"
-
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
@@ -415,6 +416,25 @@ static void collectAnchorsInOrder(Loop *L, SmallVectorImpl<AnchorInst> &Anchors,
   }
 }
 
+static void insertSchedBarrier(Instruction *IP) {
+  Function *F = IP->getFunction();
+  Module *M = F->getParent();
+
+  Function *BarrierFn =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_sched_barrier);
+
+  IRBuilder<> Builder(F->getContext());
+
+  // Insert BEFORE IP
+  Builder.SetInsertPoint(IP);
+
+  Value *Zero = Builder.getInt32(0);
+  CallInst *CI = Builder.CreateCall(BarrierFn, {Zero});
+
+  // Mark as tail call (matches your example)
+  CI->setTailCallKind(CallInst::TCK_Tail);
+}
+
 static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
                                     SmallVectorImpl<Instruction *> &MFMAInsts,
                                     unsigned X, unsigned Y) {
@@ -433,6 +453,7 @@ static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
       MFMAInsts[MFMAIdx]->moveAfter(InsertPt);
       MFMAIdx--;
     }
+    insertSchedBarrier(InsertPt);
   }
 }
 
