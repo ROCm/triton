@@ -1,0 +1,469 @@
+import triton
+import triton.language as tl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language.amd.cdna4 import async_copy as cdna4_async_copy
+
+
+@gluon.jit
+def get_pids(M, N, BM, BN):
+    pid = gl.program_id(axis=0)
+    num_pid_m = gl.cdiv(M, BM)
+    num_pid_n = gl.cdiv(N, BN)
+
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    return pid_m, pid_n
+
+
+@gluon.jit
+def get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak,  #
+                        stride_bk, stride_bn,  #
+                        BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr, pid_m, pid_n,
+                        num_warps: gl.constexpr, isLLGR: gl.constexpr = False):
+    if isLLGR:
+        if num_warps == 8:
+            gLoadLayoutA: gl.constexpr = gl.DistributedLinearLayout(
+                reg_bases=[[0, 1], [0, 2], [0, 4], [8, 0], [128, 0]], lane_bases=[[0, 8], [0, 16], [0, 32], [16, 0],
+                                                                                  [32, 0], [64, 0]],
+                warp_bases=[[1, 0], [2, 0], [4, 0]], block_bases=[], shape=[BLOCK_M, BLOCK_K])
+            gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
+                reg_bases=[[1, 0], [2, 0], [4, 0], [0, 8], [0, 128]], lane_bases=[[8, 0], [16, 0], [32, 0], [0, 16],
+                                                                                  [0, 32], [0, 64]],
+                warp_bases=[[0, 1], [0, 2], [0, 4]], block_bases=[], shape=[BLOCK_K, BLOCK_N])
+        elif num_warps == 4:
+            gLoadLayoutA: gl.constexpr = gl.DistributedLinearLayout(
+                reg_bases=[[0, 1], [0, 2], [0, 4], [4, 0], [8, 0], [128, 0]], lane_bases=[[0, 8], [0, 16], [0, 32],
+                                                                                          [16, 0], [32, 0], [64, 0]],
+                warp_bases=[[1, 0], [2, 0]], block_bases=[], shape=[BLOCK_M, BLOCK_K])
+            gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
+                reg_bases=[[1, 0], [2, 0], [4, 0], [0, 4], [0, 8], [0, 128]], lane_bases=[[8, 0], [16, 0], [32, 0],
+                                                                                          [0, 16], [0, 32], [0, 64]],
+                warp_bases=[[0, 1], [0, 2]], block_bases=[], shape=[BLOCK_K, BLOCK_N])
+    else:
+        gLoadLayoutA: gl.constexpr = gl.BlockedLayout([1, 8], [512 // BLOCK_K, BLOCK_K // 8], [8, 1], [1, 0])
+        gLoadLayoutB: gl.constexpr = gl.BlockedLayout([8, 1], [BLOCK_K // 8, 512 // BLOCK_K], [1, 8], [0, 1])
+
+    offs_am = gl.arange(0, BLOCK_M, gl.SliceLayout(1, gLoadLayoutA))
+    offs_ak = gl.arange(0, BLOCK_K, gl.SliceLayout(0, gLoadLayoutA))
+
+    offs_bn = gl.arange(0, BLOCK_N, gl.SliceLayout(0, gLoadLayoutB))
+    offs_bk = gl.arange(0, BLOCK_K, gl.SliceLayout(1, gLoadLayoutB))
+
+    a_base = a_ptr + pid_m * BLOCK_M * stride_am
+    b_base = b_ptr + pid_n * BLOCK_N * stride_bn
+
+    a_offsets = offs_am[:, None] * stride_am + offs_ak[None, :] * stride_ak
+    b_offsets = offs_bk[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+
+    return a_base, b_base, a_offsets, b_offsets
+
+
+@gluon.jit
+def store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn, mfmaLayout):
+    if mfmaLayout is None:
+        gStoreLayoutC: gl.constexpr = gl.BlockedLayout([1, 8], [512 // BLOCK_N, BLOCK_N // 8], [8, 1], [1, 0])
+    else:
+        gStoreLayoutC: gl.constexpr = mfmaLayout
+    c = gl.convert_layout(c, layout=gStoreLayoutC)
+    offs_cm = gl.arange(0, BLOCK_M, gl.SliceLayout(1, gStoreLayoutC))
+    offs_cn = gl.arange(0, BLOCK_N, gl.SliceLayout(0, gStoreLayoutC))
+    c_base = c_ptr + pid_m * BLOCK_M * stride_cm + pid_n * BLOCK_N * stride_cn
+    c_offsets = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    gl.amd.cdna3.buffer_store(stored_value=c, ptr=c_base, offsets=c_offsets)
+
+
+@gluon.jit
+def v0(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 4])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    for k in range(0, gl.cdiv(K, BLOCK_K)):
+        ga = gl.amd.cdna4.buffer_load(a_base, a_offsets)
+        gb = gl.amd.cdna4.buffer_load(b_base, b_offsets)
+        a = gl.convert_layout(ga, layout=dotOpLayoutA)
+        b = gl.convert_layout(gb, layout=dotOpLayoutB)
+
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn)
+
+
+## Replace buffer_load with AsyncCopy
+@gluon.jit
+def v1(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 4])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    #sharedLayoutA: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, order=[1, 0])
+    #sharedLayoutB: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, order=[0, 1])
+
+    sharedLayoutA: gl.constexpr = gl.SwizzledSharedLayout(8, 2, 8, order=[1, 0])
+    sharedLayoutB: gl.constexpr = gl.SwizzledSharedLayout(8, 2, 8, order=[0, 1])
+
+    smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [BLOCK_M, BLOCK_K], sharedLayoutA)
+    smemB = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [BLOCK_K, BLOCK_N], sharedLayoutB)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    iterMax = gl.cdiv(K, BLOCK_K)
+    for k in range(0, iterMax):
+        ga = cdna4_async_copy.buffer_load_to_shared(smemA, a_base, a_offsets)
+        gb = cdna4_async_copy.buffer_load_to_shared(smemB, b_base, b_offsets)
+        cdna4_async_copy.async_wait(0)
+
+        a = cdna4_async_copy.load_shared_relaxed(smemA, dotOpLayoutA)
+        b = cdna4_async_copy.load_shared_relaxed(smemB, dotOpLayoutB)
+
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn)
+
+
+## Replace swizzledSharedLayout with paddedSharedLayout
+@gluon.jit
+def v2(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n, True)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 4])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [16, 0],
+                                                         [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+                                                        [], [BLOCK_M, BLOCK_K])
+    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16],
+                                                         [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8], [0, 128]],
+                                                        [], [BLOCK_K, BLOCK_N])
+
+    smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [BLOCK_M, BLOCK_K], sharedLayoutA)
+    smemB = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [BLOCK_K, BLOCK_N], sharedLayoutB)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    iterMax = gl.cdiv(K, BLOCK_K)
+    for k in range(0, iterMax):
+        ga = cdna4_async_copy.buffer_load_to_shared(smemA, a_base, a_offsets)
+        gb = cdna4_async_copy.buffer_load_to_shared(smemB, b_base, b_offsets)
+        cdna4_async_copy.commit_group()
+        cdna4_async_copy.wait_group(0)
+
+        a = cdna4_async_copy.load_shared_relaxed(smemA, dotOpLayoutA)
+        b = cdna4_async_copy.load_shared_relaxed(smemB, dotOpLayoutB)
+
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn)
+
+
+# 4 waves
+@gluon.jit
+def v3(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+    num_warps: gl.constexpr = 4
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n, num_warps, True)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 2])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [16, 0],
+                                                         [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+                                                        [], [BLOCK_M, BLOCK_K])
+    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16],
+                                                         [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8], [0, 128]],
+                                                        [], [BLOCK_K, BLOCK_N])
+
+    smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [BLOCK_M, BLOCK_K], sharedLayoutA)
+    smemB = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [BLOCK_K, BLOCK_N], sharedLayoutB)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    iterMax = gl.cdiv(K, BLOCK_K)
+    for k in range(0, iterMax):
+        ga = cdna4_async_copy.buffer_load_to_shared(smemA, a_base, a_offsets)
+        gb = cdna4_async_copy.buffer_load_to_shared(smemB, b_base, b_offsets)
+        cdna4_async_copy.commit_group()
+        cdna4_async_copy.wait_group(0)
+
+        a = cdna4_async_copy.load_shared_relaxed(smemA, dotOpLayoutA)
+        b = cdna4_async_copy.load_shared_relaxed(smemB, dotOpLayoutB)
+
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn, mfmaLayout)
+
+
+@gluon.jit
+def v4(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    '''
+    v4
+    2 stage pipeline
+    stage0: AC A,B
+    stage1: LR A,B + DOT(A,B)
+    '''
+
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+    num_warps: gl.constexpr = 4
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n, num_warps, True)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 2])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [16, 0],
+                                                         [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+                                                        [], [BLOCK_M, BLOCK_K])
+    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16],
+                                                         [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8], [0, 128]],
+                                                        [], [BLOCK_K, BLOCK_N])
+
+    nBuffers: gl.constexpr = 2
+    smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [nBuffers, BLOCK_M, BLOCK_K], sharedLayoutA)
+    smemB = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [nBuffers, BLOCK_K, BLOCK_N], sharedLayoutB)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    iterMax = gl.cdiv(K, BLOCK_K)
+
+    ## Prologue
+    ##
+    ## AC A0, B0 --> buffer 0
+    ##
+    ## InLoop
+    ##
+    ## AC A1, B1 --> buffer 1
+    ## async_wait buffer 0
+    ## local_load A0, B0 <-- buffer 0
+    ## DOT(A0, B0)
+    ##
+    ## Epilogue
+    ##
+    ## async_wait buffer 0
+    ## local_load A0, B0 <-- buffer 0
+    ## DOT(A0, B0)
+    ## store(acc)
+
+    ## Prologue
+    g_idx = 0
+    cdna4_async_copy.buffer_load_to_shared(smemA.index(g_idx), a_base, a_offsets)
+    cdna4_async_copy.buffer_load_to_shared(smemB.index(g_idx), b_base, b_offsets)
+    cdna4_async_copy.commit_group()
+    a_base += BLOCK_K * stride_ak
+    b_base += BLOCK_K * stride_bk
+
+    for k in range(0, iterMax - 1):
+        l_idx = k % 2
+        g_idx = 1 - l_idx
+        cdna4_async_copy.buffer_load_to_shared(smemA.index(g_idx), a_base, a_offsets)
+        cdna4_async_copy.buffer_load_to_shared(smemB.index(g_idx), b_base, b_offsets)
+        cdna4_async_copy.commit_group()
+
+        cdna4_async_copy.wait_group(1)
+
+        a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
+        b = cdna4_async_copy.load_shared_relaxed(smemB.index(l_idx), dotOpLayoutB)
+
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    ## Epilogue
+    cdna4_async_copy.wait_group(0)
+    l_idx = (iterMax - 1) % 2
+    a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
+    b = cdna4_async_copy.load_shared_relaxed(smemB.index(l_idx), dotOpLayoutB)
+
+    acc = gl.amd.cdna3.mfma(a, b, acc)
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn, mfmaLayout)
+
+
+@gluon.jit
+def v5(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+       stride_bk, stride_bn,  #
+       stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+       ):
+    '''
+    v5
+    3 stage pipeline
+    stage0: AC A,B
+    stage1: LR A,B
+    stage2: DOT(A,B)
+    '''
+
+    pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N)
+    num_warps: gl.constexpr = 4
+
+    a_base, b_base, a_offsets, b_offsets = get_ab_base_offsets(a_ptr, b_ptr, stride_am, stride_ak, stride_bk, stride_bn,
+                                                               BLOCK_M, BLOCK_N, BLOCK_K, pid_m, pid_n, num_warps, True)
+
+    mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 32], transposed=True,
+                                                    warps_per_cta=[2, 2])
+    dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=8)
+    dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=8)
+
+    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [16, 0],
+                                                         [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+                                                        [], [BLOCK_M, BLOCK_K])
+    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[512, 16]],
+                                                        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [0, 16],
+                                                         [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8], [0, 128]],
+                                                        [], [BLOCK_K, BLOCK_N])
+
+    nBuffers: gl.constexpr = 2
+    smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [nBuffers, BLOCK_M, BLOCK_K], sharedLayoutA)
+    smemB = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [nBuffers, BLOCK_K, BLOCK_N], sharedLayoutB)
+
+    acc = gl.zeros((BLOCK_M, BLOCK_N), gl.float32, mfmaLayout)
+
+    iterMax = gl.cdiv(K, BLOCK_K)
+
+    ## Prologue
+    ##
+    ## AC A0, B0 --> buffer 0
+    ## AC A1, B1 --> buffer 1
+    ## async_wait buffer 0
+    ## local_load A0, B0 <-- buffer 0
+    ##
+    ## InLoop
+    ##
+    ## DOT(A0, B0)
+    ## async_wait buffer 1
+    ## local_load A1, B1 <-- buffer 1
+    ## AC A2, B2 --> buffer 0
+    ##
+    ## Epilogue
+    ##
+    ## DOT(A{n-1}, B{n-1})
+    ## store(acc)
+
+    ## Prologue
+    g_idx = 0
+    cdna4_async_copy.buffer_load_to_shared(smemA.index(g_idx), a_base, a_offsets)
+    cdna4_async_copy.buffer_load_to_shared(smemB.index(g_idx), b_base, b_offsets)
+    cdna4_async_copy.commit_group()
+    a_base += BLOCK_K * stride_ak
+    b_base += BLOCK_K * stride_bk
+
+    g_idx = 1
+    cdna4_async_copy.buffer_load_to_shared(smemA.index(g_idx), a_base, a_offsets)
+    cdna4_async_copy.buffer_load_to_shared(smemB.index(g_idx), b_base, b_offsets)
+    cdna4_async_copy.commit_group()
+    a_base += BLOCK_K * stride_ak
+    b_base += BLOCK_K * stride_bk
+
+    cdna4_async_copy.wait_group(1)
+    l_idx = 0
+    a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
+    b = cdna4_async_copy.load_shared_relaxed(smemB.index(l_idx), dotOpLayoutB)
+
+    for k in range(0, iterMax - 1):
+        g_idx = k % 2
+        l_idx = 1 - g_idx
+        acc = gl.amd.cdna3.mfma(a, b, acc)
+
+        cdna4_async_copy.buffer_load_to_shared(smemA.index(g_idx), a_base, a_offsets, mask=(k != (iterMax - 2)))
+        cdna4_async_copy.buffer_load_to_shared(smemB.index(g_idx), b_base, b_offsets, mask=(k != (iterMax - 2)))
+        cdna4_async_copy.commit_group()
+
+        cdna4_async_copy.wait_group(1)
+        a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
+        b = cdna4_async_copy.load_shared_relaxed(smemB.index(l_idx), dotOpLayoutB)
+
+        a_base += BLOCK_K * stride_ak
+        b_base += BLOCK_K * stride_bk
+
+    ## Epilogue
+    ## iterMax - 2
+    #l_idx = (iterMax - 1) % 2
+    #acc = gl.amd.cdna3.mfma(a, b, acc)
+
+    #cdna4_async_copy.wait_group(0)
+    #a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
+    #b = cdna4_async_copy.load_shared_relaxed(smemB.index(l_idx), dotOpLayoutB)
+
+    ## iterMax - 1
+    acc = gl.amd.cdna3.mfma(a, b, acc)
+
+    c = acc.to(tl.float16)
+
+    # C: BLOCK_M x BLOCK_N (256x256)
+    store_c(c_ptr, pid_m, pid_n, BLOCK_M, BLOCK_N, c, stride_cm, stride_cn, mfmaLayout)
