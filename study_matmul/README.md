@@ -85,7 +85,7 @@ However, the backend does not respect the scheduling at llir level
 - gluon kernel version: v5
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v5_pred_llirSchedV1`
 - vgpr: 510
-- perf: 1150 tflops
+- perf: 1120 tflops
 
 Same kernel is used as v0.
 This version of the llir scheduler further inserts `sched.barrier` before
@@ -109,3 +109,13 @@ Next steps:
 | prologue | 6256   | 3%      |
 | loop     | 164316 | 85%     |
 | epilogue | 21784  | 12%     |
+
+
+### llir sched v2
+
+We can actually achieve the same thing by disabling `misched` and `post-misched`.
+- Commit: `a9ac373e8b`
+- gluon kernel version: v5
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v5_pred_llirSchedV2`
+- vgpr: 512
+- perf: 1120 tflops
