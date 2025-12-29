@@ -7,6 +7,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import re
+import os
 import functools
 import warnings
 from pathlib import Path
@@ -268,6 +269,26 @@ class HIPBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         pm.run(mod, 'make_ttgir')
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
+        '''
+        if '_gemm_a16' in str(mod):
+            print("compiling gemm_a16 kernel")
+            tname = "/var/lib/jenkins/OAI-triton/study_matmul/triton/uniformWarpId/hack.ttgir"
+            outname = "./tempout.ir"
+            with open(outname, 'wb') as fd_out:
+                fd_out.write(str(mod).encode())
+                fd_out.close()
+            if os.path.isfile(tname) is False:
+                tname = outname
+                print("cannot find the ttgir")
+            mod2 = ir.parse_mlir_module(tname, mod.context)
+            mod2.context = mod.context
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            mod = mod2
+        else:
+            print("compiling other kernel")
+        '''
+
         return mod
 
     @staticmethod
@@ -469,6 +490,15 @@ class HIPBackend(BaseBackend):
                             dump_file_id)
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
                                        False)
+
+        if "AMD_INSERT_AMDGCN" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            amdgcn = ''.join(file_content)
+
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
