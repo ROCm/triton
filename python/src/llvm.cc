@@ -326,6 +326,24 @@ std::string translateLLVMIRToASM(llvm::Module &module,
     }
   }
 
+  { // Disable pre-RA misched
+    auto optIt = options.find("enable-misched");
+    if (optIt != options.end()) {
+      auto optPtr = static_cast<llvm::cl::opt<bool> *>(optIt->second);
+      optPtr->setValue(false);
+      optPtr->addOccurrence(0, "EnableMachineSched", "false", false);
+    }
+  }
+
+  { // Disable post-RA misched
+    auto optIt = options.find("enable-post-misched");
+    if (optIt != options.end()) {
+      auto optPtr = static_cast<llvm::cl::opt<bool> *>(optIt->second);
+      optPtr->setValue(false);
+      optPtr->addOccurrence(0, "EnableMachineSched", "false", false);
+    }
+  }
+
   // inline everything
   for (llvm::Function &f : module.functions())
     if (!f.hasFnAttribute(llvm::Attribute::NoInline))

@@ -453,7 +453,7 @@ static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
       MFMAInsts[MFMAIdx]->moveAfter(InsertPt);
       MFMAIdx--;
     }
-    insertSchedBarrier(InsertPt);
+    // insertSchedBarrier(InsertPt);
   }
 }
 
