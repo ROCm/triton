@@ -62,6 +62,10 @@ IR Dump: `/var/lib/jenkins/OAI-triton/study_matmul/triton/4waves_orig`
 ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att_matmul.json -d ./study_matmul/gluon/v4/att_output -- python study_matmul/gluon/gl_matmul.py
 ```
 
+```
+TRITON_LLVM_DEBUG_ONLY="tritonamdgpu-prera-llir-schedule" python study_matmul/gluon/gl_matmul.py
+```
+
 ### llir sched v0
 
 - Commit: `3e3966a173`
@@ -119,3 +123,16 @@ We can actually achieve the same thing by disabling `misched` and `post-misched`
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v5_pred_llirSchedV2`
 - vgpr: 512
 - perf: 1120 tflops
+
+### v6
+
+The same llir scheduler happens to work with the v6 version of the kernel, which does
+- 3 stage pipeline with partial LDS prefetch
+- Set `tiles_per_warp`=[2,2]
+- Select a better layout for `buffer_store` to enable `buffer_store_dwordx4`
+
+Result
+- gluon kernel version: v6
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v6`
+- vgpr: 478
+- perf: 1150 tflops
