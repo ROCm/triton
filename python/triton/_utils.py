@@ -64,6 +64,7 @@ type_canonicalisation_dict = {
     "uint1": "u1",
     "i1": "u1",
     # floating-point dtypes:
+    "float4_e2m1fn_x2": "u8",
     "float8e4nv": "fp8e4nv",
     "float8e5": "fp8e5",
     "float8e4b15": "fp8e4b15",
@@ -73,6 +74,7 @@ type_canonicalisation_dict = {
     "float8_e5m2": "fp8e5",
     "float8e5b16": "fp8e5b16",
     "float8_e5m2fnuz": "fp8e5b16",
+    "float8_e8m0fnu":"u8",
     "half": "fp16",
     "float16": "fp16",
     "bfloat16": "bf16",
