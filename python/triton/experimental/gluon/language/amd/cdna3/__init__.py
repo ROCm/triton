@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "buffer_atomic_add", "buffer_atomic_and", "buffer_atomic_min", "buffer_atomic_max", "buffer_atomic_or",
-    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma"
+    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma", "sched_barrier"
 ]
 
 _atomic_op_str_to_op = {
@@ -166,6 +166,17 @@ def mfma(a, b, acc, _semantic: GluonSemantic = None):
     handle = _semantic.dot(a, b, acc, input_precision=knobs.language.fp32_default, max_num_imprecise_acc=None,
                            out_dtype=acc.dtype).handle
     return ttgl.tensor(handle, ret_type)
+
+
+@builtin
+def sched_barrier(mask, _semantic: GluonSemantic = None):
+    """
+    sched_barrier to help instruction scheduling
+    Args:
+        mask (i32): mask for the types of instructions that may be allowed to cross the SCHED_BARRIER during scheduling
+    """
+    mask = ttgl._unwrap_if_constexpr(mask)
+    _semantic.builder.create_sched_barrier(mask)
 
 
 """

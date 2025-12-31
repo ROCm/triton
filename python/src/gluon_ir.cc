@@ -31,6 +31,7 @@ namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
 namespace gluon = mlir::triton::gluon;
 namespace ttag = mlir::triton::amdgpu;
+namespace rocdl = mlir::ROCDL;
 
 static ttg::CGAEncodingAttr
 buildCgaLayoutAttr(MLIRContext *ctx,
@@ -923,7 +924,10 @@ void init_gluon_ir(py::module &&m) {
              auto ctx = self.getContext();
              border->setAttr("triton.warp_pipeline.border",
                              StringAttr::get(ctx, marker));
-           });
+           })
+      .def("create_sched_barrier", [](GluonOpBuilder &self, unsigned mask) {
+        self.create<rocdl::SchedBarrier>(mask);
+      });
 
   m.def(
       "compute_tmem_reg_layout",
