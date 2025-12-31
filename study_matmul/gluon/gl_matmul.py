@@ -35,7 +35,9 @@ import triton
 ## 4 waves with 3-stage pipelining
 #from matmul_kernels.matmul_kernel import v5 as matmul_kernel
 
-from matmul_kernels.matmul_kernel import v6 as matmul_kernel
+#from matmul_kernels.matmul_kernel import v6 as matmul_kernel
+
+from matmul_kernels.matmul_kernel import v7 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
