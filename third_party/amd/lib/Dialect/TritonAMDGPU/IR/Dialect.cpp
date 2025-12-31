@@ -802,7 +802,7 @@ LogicalResult AsyncCopyMbarrierArriveOp::verify() {
 }
 
 // -- TDMPrefetchOp --
-// This op optionally returns the prefetch offsets (testint-only). When
+// This op optionally returns the prefetch offsets (testing-only). When
 // `returnOffsets` is absent, it produces no results. When present, it yields an
 // int64 tensor of the prefetch addresses relative to the tensor base. The
 // tensor shape is:
@@ -828,40 +828,40 @@ LogicalResult TDMPrefetchOp::inferReturnTypes(
 
   // Lookup the module to get the number of threads per warp, number of warps
   // and number of CTAs
-  ModuleOp module;
+  ModuleOp mod;
   for (auto operand : operands) {
     if (auto op = operand.getDefiningOp()) {
-      module = op->getParentOfType<ModuleOp>();
+      mod = op->getParentOfType<ModuleOp>();
       break;
     } else if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
       auto parentOp = blockArg.getOwner()->getParentOp();
       if (parentOp) {
-        module = parentOp->getParentOfType<ModuleOp>();
+        mod = parentOp->getParentOfType<ModuleOp>();
         break;
       }
     }
   }
-  assert(module);
+  assert(mod);
 
-  auto threadsPerWarp =
-      triton::gpu::TritonGPUDialect::getThreadsPerWarp(module);
-  auto numWarps = triton::gpu::lookupNumWarps(module);
-  auto numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(module);
+  auto threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
+  auto numWarps = triton::gpu::lookupNumWarps(mod);
+  auto numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
 
-  // Compute the linear layout to get the number of registers
-  auto ll = mlir::LLVM::AMD::computeTDMPrefetchLinearLayout(
-      context, blockShape, threadsPerWarp, numWarps, numCTAs,
-      elementType.getIntOrFloatBitWidth());
+  // Prefetches 256 bytes into L2
+  const int bytesPerPrefetch = 256;
+  int elemPerPrefetch =
+      (bytesPerPrefetch * 8) / elementType.getIntOrFloatBitWidth();
 
-  auto outShape = ll.getOutDimSizes();
-  SmallVector<int64_t> outShapeI64(outShape.begin(), outShape.end());
+  // Scale the block shape by the number of elements per prefetch
+  SmallVector<int64_t> scaledBlockShape(blockShape.begin(), blockShape.end());
+  scaledBlockShape.back() =
+      ceil<int64_t>(scaledBlockShape.back(), elemPerPrefetch);
 
-  // The expected shape for the return tensor is scaled by the elements per
-  // prefetch here, we assume scaling by the last dimension (elements per
-  // prefetch)
-  auto llEnc = triton::gpu::LinearEncodingAttr::get(context, ll);
+  // Use the default blocked encoding to unroll the TDM tile
+  auto enc = triton::gpu::getDefaultBlockedEncoding(
+      context, scaledBlockShape, numWarps, threadsPerWarp, numCTAs);
   IntegerType i64Type = IntegerType::get(context, 64);
-  auto tensorTy = RankedTensorType::get(outShapeI64, i64Type, llEnc);
+  auto tensorTy = RankedTensorType::get(scaledBlockShape, i64Type, enc);
 
   inferredReturnTypes.push_back(tensorTy);
 

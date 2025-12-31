@@ -307,6 +307,9 @@ def BufferLoadOp : TT_AMDGPU_Op<"buffer_load", [
       the first elements of each row in bytes. Compiler tries to obtain the `stride`
       when it converts to the buffer ops because it is important for optimizing
       the cache memory access.
+      Contiguity is the maximum number of elements that can be loaded in a single vector
+      with the given layout and mask.
+      This allows to use buffer_load even if the alignment cannot be proven based on IR.
     }];
     let arguments = (ins
       Arg<TT_Ptr, "Global memory scalar base pointer to load from", [MemRead<GlobalMemory>]>:$ptr,
@@ -314,7 +317,8 @@ def BufferLoadOp : TT_AMDGPU_Op<"buffer_load", [
       Optional<I32>:$stride,
       DefaultValuedAttr<TT_CacheModifierAttr, "::mlir::triton::CacheModifier::NONE">:$cache,
       Optional<TT_BoolTensor>:$mask,
-      Optional<TT_Tensor>:$other
+      Optional<TT_Tensor>:$other,
+      DefaultValuedAttr<I32Attr, "1">:$contiguity
     );
     let results = (outs TT_Tensor:$result);
 
@@ -482,6 +486,9 @@ def BufferStoreOp : TT_AMDGPU_Op<"buffer_store", [
       the first elements of each row in bytes. Compiler tries to obtain the `stride`
       when it converts to the buffer ops because it is important for optimizing
       the cache memory access.
+      Contiguity is the maximum number of elements that can be loaded in a single vector
+      with the given layout and mask.
+      This allows to use buffer_store even if the alignment cannot be proven based on IR.
     }];
     let arguments = (ins
       TT_Tensor:$value,
@@ -489,7 +496,8 @@ def BufferStoreOp : TT_AMDGPU_Op<"buffer_store", [
       I32Tensor:$offsets,
       Optional<I32>:$stride,
       DefaultValuedAttr<TT_CacheModifierAttr, "mlir::triton::CacheModifier::NONE">:$cache,
-      Optional<TT_BoolTensor>:$mask
+      Optional<TT_BoolTensor>:$mask,
+      DefaultValuedAttr<I32Attr, "1">:$contiguity
     );
 
     let assemblyFormat = [{
@@ -852,7 +860,7 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
 
   let description = [{
     This operation prefetches data from global memory to L2. It is analogous to the AsyncTDMCopyGlobalToLocalOp,
-    but it does not copy the data to local memory and instead only prefetches the data in L2.
+    but it does not copy the data to local memory and instead only prefetches the data into the L2 cache.
     Speculative prefetches can generate more efficient assembly because they do not require out of bounds checks.
     However, they are dropped by the hardware in case the virtual address translation is not already cached at CU level.
   }];
@@ -877,6 +885,7 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
     (`->` type($maybeOffsets)^)?
   }];
 }
+
 
 
 //===----------------------------------------------------------------------===//

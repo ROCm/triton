@@ -758,36 +758,49 @@ SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
   // Calculate maximum allowed offset from tilePtr before going out of bounds
   Value maxOffsetFromTile = b.sub(linearTensorSize, tileOffset);
 
-  // GFX1250 prefetches 256 bytes into L2
-  int bytesPerPrefetch = 256;
-
-  // Calculate how many elements fit into a prefetch
+  // Prefetches 256 bytes into L2
+  const int bytesPerPrefetch = 256;
   int elemPerPrefetch =
       (bytesPerPrefetch * 8) / elementType.getIntOrFloatBitWidth();
 
-  // Compute LL to map from reg, lane, warp, block to the prefetch locations.
-  auto ll = computeTDMPrefetchLinearLayout(loc.getContext(), blockShape,
-                                           numLanes, numWarps, numCTAs,
-                                           elementType.getIntOrFloatBitWidth());
+  // Scale the block shape by the number of elements per prefetch
+  SmallVector<int64_t> scaledBlockShape(blockShape.begin(), blockShape.end());
+  scaledBlockShape.back() =
+      ceil<int64_t>(scaledBlockShape.back(), elemPerPrefetch);
 
-  SmallVector<unsigned> order(numDims);
-  std::iota(order.begin(), order.end(), 0);
+  // Use the default blocked encoding to unroll the TDM tile
+  auto blockedEnc = triton::gpu::getDefaultBlockedEncoding(
+      loc.getContext(), scaledBlockShape, numWarps, numLanes, numCTAs);
+  auto ll = triton::gpu::toLinearLayout(scaledBlockShape, blockedEnc);
 
   auto kRegister = rewriter.getStringAttr("register");
   auto kLane = rewriter.getStringAttr("lane");
   auto kWarp = rewriter.getStringAttr("warp");
   auto kBlock = rewriter.getStringAttr("block");
 
-  // Iterate over each register in the final LL and emit a prefetch intrinsic
-  SmallVector<Value> offsets(ll.getInDimSize(kRegister));
+  // Adjust the inner stride (always 1) to the number of elements per prefetch
   auto scaledStride = tensorStride;
   scaledStride.back() = b.i32_val(elemPerPrefetch);
+
+  auto baseIndices = applyLinearLayout(loc, rewriter, ll,
+                                       {{kRegister, b.i32_val(0)},
+                                        {kLane, laneId},
+                                        {kWarp, warpId},
+                                        {kBlock, ctaId}});
+  // Iterate over each register and emit a prefetch intrinsic
+  SmallVector<Value> offsets(ll.getInDimSize(kRegister));
   for (int reg = 0; reg < ll.getInDimSize(kRegister); reg++) {
-    auto indices = applyLinearLayout(loc, rewriter, ll,
-                                     {{kRegister, b.i32_val(reg)},
-                                      {kLane, laneId},
-                                      {kWarp, warpId},
-                                      {kBlock, ctaId}});
+    auto regIndices =
+        ll.apply({{kRegister, reg}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+
+    // XOR the base indices with the register specific indices
+    SmallVector<std::pair<StringAttr, Value>> indices;
+    for (auto [base, regIdx] : llvm::zip(baseIndices, regIndices)) {
+      assert(base.first == regIdx.first);
+      Value combined = b.xor_(base.second, b.i32_val(regIdx.second));
+      indices.emplace_back(base.first, combined);
+    }
+
     // Compute the local offset from tile ptr for this prefetch based on the
     // computed indices
     Value localOffset =
@@ -814,7 +827,7 @@ SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
     int llvmTemporalHint = cache_scope | speculative;
     Value scope = LLVM::ConstantOp::create(
         rewriter, loc, i32_ty, rewriter.getI32IntegerAttr(llvmTemporalHint));
-    auto p = LLVM::createLLVMIntrinsicCallOp(
+    LLVM::createLLVMIntrinsicCallOp(
         rewriter, loc, "llvm.amdgcn.global.prefetch", {}, {prefetchPtr, scope});
 
     rewriter.setInsertionPointToEnd(prefetchBlock);
