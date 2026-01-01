@@ -44,29 +44,29 @@ make test-nogpu
 
 echo "=== Run Gluon Unit Tests ==="
 
-pytest --count=1 -n 32 third_party/amd/python/test/test_gluon_gfx1250.py
-pytest --count=1 -n 16 python/test/gluon/test_frontend.py
+pytest --count=1 -n 32 --durations=10 third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=1 -n 16 --durations=10 python/test/gluon/test_frontend.py
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
 
 # TODO: Fix failures in mxfp variants when ffm_enable_time_slicing is enabled.
 unset HSA_MODEL_ARGS
-HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
-HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
-HSA_MODEL_NUM_THREADS=8 pytest --count=1 -n 4 third_party/amd/python/examples/gluon/test_kernel_metadata.py
+HSA_MODEL_NUM_THREADS=8 pytest --count=1 -n 4 --durations=10 third_party/amd/python/examples/gluon/test_kernel_metadata.py
 
 echo "=== Run E2E Upstream Tests ==="
 
-pytest --count=1 -n 16 python/test/unit/language/test_conversions.py
+pytest --count=1 -n 16 --durations=10 python/test/unit/language/test_conversions.py
 
 echo "=== Run Triton GEMM/Attention Tests ==="
 
-PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 \
+PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
     mi400/test_gemm_hipdriver.py \
     mi400/test_mxgemm_hipdriver.py \
     mi400/test_mxfa_hipdriver.py \
