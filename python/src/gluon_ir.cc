@@ -257,14 +257,11 @@ py::object layoutToGluon(Attribute layout) {
         cgaBases);
   } else if (auto amdWmma = dyn_cast<ttg::AMDWmmaEncodingAttr>(layout)) {
     auto cgaBases = getCgaLayoutBases(amdWmma.getCGALayout());
-    const auto &ctaLayout = amdWmma.getCtaLayout();
-    auto ctx = layout.getContext();
-    auto kReg = mlir::StringAttr::get(ctx, "register");
-    auto kWarp = mlir::StringAttr::get(ctx, "warp");
     return layouts.AMDWMMALayout(
         amdWmma.getVersion(), amdWmma.getIsTransposed(),
-        ctaLayout.getBases().lookup(kWarp), ctaLayout.getBases().lookup(kReg),
-        toStdVector(amdWmma.getInstrShape()), cgaBases);
+        toStdVector(amdWmma.getWarpsPerCTA()),
+        toStdVector(amdWmma.getInstrShape()),
+        toStdVector(amdWmma.getTilesPerWarp()), cgaBases);
   } else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
     auto *ctx = paddedShared.getContext();
@@ -455,19 +452,16 @@ void init_gluon_ir(py::module &&m) {
            })
       .def("get_amd_wmma_layout",
            [](GluonOpBuilder &self, unsigned version, bool transposed,
-              std::vector<std::vector<int32_t>> &warpBases,
-              std::vector<std::vector<int32_t>> &regBases,
+              std::vector<unsigned> &warpsPerCta,
+              std::vector<unsigned> &tilesPerWarp,
               std::vector<std::vector<int32_t>> &cgaBases,
-              std::vector<unsigned> &instrShape, unsigned rank) -> Attribute {
+              std::vector<unsigned> &instrShape) -> Attribute {
              auto ctx = self.getContext();
-             auto kReg = mlir::StringAttr::get(ctx, "register");
-             auto kWarp = mlir::StringAttr::get(ctx, "warp");
-             auto ctaLayout =
-                 tt::LinearLayout({{kReg, regBases}, {kWarp, warpBases}},
-                                  tt::standardOutDimNames(ctx, rank));
+             unsigned rank = warpsPerCta.size();
              auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
-             return ttg::AMDWmmaEncodingAttr::get(
-                 ctx, version, ctaLayout, transposed, cgaLayout, instrShape);
+             return ttg::AMDWmmaEncodingAttr::get(ctx, version, transposed,
+                                                  warpsPerCta, tilesPerWarp,
+                                                  cgaLayout, instrShape);
            })
       .def("get_padded_shared_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &intervals,
@@ -1034,8 +1028,8 @@ void init_gluon_ir(py::module &&m) {
 
   m.def("get_amd_wmma_scale_layout",
         [](unsigned opIdx, std::vector<int64_t> &shape, unsigned wmmaMDim,
-           std::vector<std::vector<int32_t>> &regBases,
-           std::vector<std::vector<int32_t>> &warpBases) -> py::object {
+           std::vector<unsigned> &tilesPerWarp,
+           std::vector<unsigned> &warpsPerCTA) -> py::object {
           DialectRegistry registry;
           registry.insert<triton::TritonDialect, ttg::TritonGPUDialect,
                           ttng::TritonNvidiaGPUDialect, gluon::GluonDialect>();
@@ -1043,15 +1037,9 @@ void init_gluon_ir(py::module &&m) {
           ctx.appendDialectRegistry(registry);
           ctx.loadAllAvailableDialects();
 
-          auto rank = shape.size();
-          auto kReg = mlir::StringAttr::get(&ctx, "register");
-          auto kWarp = mlir::StringAttr::get(&ctx, "warp");
-          auto ctaLayout =
-              tt::LinearLayout({{kReg, regBases}, {kWarp, warpBases}},
-                               tt::standardOutDimNames(&ctx, rank));
-          auto ll = ttg::chooseScaledWmmaScaleLayout(&ctx, opIdx, shape,
-                                                     wmmaMDim, ctaLayout);
-          auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
+          auto ll = ttg::chooseScaledWmmaScaleLayout(
+              &ctx, opIdx, shape, wmmaMDim, tilesPerWarp, warpsPerCTA);
+          auto attr = ttg::LinearEncodingAttr::get(&ctx, std::move(ll));
           return layoutToGluon(attr);
         });
 

@@ -82,9 +82,6 @@ LinearLayout combineCtaCgaWithShape(LinearLayout ctaLayout,
                                     CGAEncodingAttr cgaLayoutAttr,
                                     ArrayRef<int64_t> shape);
 
-LinearLayout chooseWmmaCTALinearLayout(MLIRContext *ctx, unsigned rank,
-                                       ArrayRef<unsigned> warpsPerCTA,
-                                       ArrayRef<unsigned> tilesPerWarp);
 // In this function, we construct a linear layout representing the
 // <shared memory offset, iteration, block> -> <tensor element index> mapping
 // for entire `src` and `dst` tensors.  We determine the shape of the
@@ -130,7 +127,8 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
 LinearLayout chooseScaledWmmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          ArrayRef<int64_t> dotOperandShape,
                                          unsigned wmmaMDim,
-                                         LinearLayout ctaLayout);
+                                         ArrayRef<unsigned> tilesPerWarp,
+                                         ArrayRef<unsigned> warpsPerCTA);
 
 LinearLayout getSM120DotScaledScaleLayout(MLIRContext *ctx,
                                           ArrayRef<int64_t> shape, int opIdx,

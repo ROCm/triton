@@ -1327,15 +1327,12 @@ public:
 
     auto warpsPerTile =
         warpsPerTileWMMA(dotOp, oldShape, numWarps, {mDim, nDim});
-    // TODO: Select tilesPerWarp in Triton
-    SmallVector<unsigned> tilesPerWarp(rank, 1u);
 
-    auto ctaLayout =
-        ttg::chooseWmmaCTALinearLayout(ctx, rank, warpsPerTile, tilesPerWarp);
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, wmmaVersion, ctaLayout, true, cgaLayout, {mDim, nDim, kDim});
-    auto wmmaPackedEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, wmmaVersion, ctaLayout, true, cgaLayout, {mDim, nDim, kDim / 2});
+        ctx, wmmaVersion, true, warpsPerTile, cgaLayout, {mDim, nDim, kDim});
+    auto wmmaPackedEnc =
+        ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, true, warpsPerTile,
+                                      cgaLayout, {mDim, nDim, kDim / 2});
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), wmmaEnc);
@@ -1387,9 +1384,13 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL =
-          ttg::chooseScaledWmmaScaleLayout(ctx, idx, shape, mDim, ctaLayout);
-      Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
+      // TODO: Select tilesPerWarp in Triton
+      SmallVector<unsigned> tilesPerWarp = {1, 1};
+
+      LinearLayout newLL = ttg::chooseScaledWmmaScaleLayout(
+          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile);
+      Attribute newScaleEncoding =
+          ttg::LinearEncodingAttr::get(ctx, std::move(newLL));
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
 
@@ -1589,13 +1590,9 @@ public:
     // Use transposed wmma layout to enable larger vectorization for global
     // store instructions.
     bool isTransposed = true;
-    SmallVector<unsigned> tilesPerWarp(retShape.size(), 1u);
-    auto ctaLayout = ttg::chooseWmmaCTALinearLayout(ctx, retShape.size(),
-                                                    warpsPerTile, tilesPerWarp);
-
-    wmmaEnc =
-        ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, ctaLayout, isTransposed,
-                                      CGALayout, {mDim, nDim, kDim});
+    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed,
+                                            warpsPerTile, CGALayout,
+                                            {mDim, nDim, kDim});
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 
