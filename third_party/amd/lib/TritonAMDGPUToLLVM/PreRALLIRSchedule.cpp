@@ -43,6 +43,7 @@ enum class InstClass {
   sWaitCnt,
   schedGroupBarrier,
   bufferLoadLDS,
+  bufferStore,
   OtherIntrinsic,
   Load,
   Store,
@@ -53,7 +54,7 @@ enum class InstClass {
   Other
 };
 
-enum class MFMAInputSource { SameIterationLoad, PrefetchedFromPHI, Unknown };
+enum class MFMAInputSource { FullyPrefetched, SameRegionLoad, Unknown };
 
 struct MFMAStats {
   unsigned Total = 0;
@@ -62,7 +63,7 @@ struct MFMAStats {
   unsigned Mixed = 0;
 };
 
-enum class SchedKind { MFMA, BufferLoadLDS, LDSLoad, Other };
+enum class SchedKind { MFMA, BufferLoadLDS, BufferStore, LDSLoad, Other };
 
 struct AnchorInst {
   Instruction *I;
@@ -89,6 +90,8 @@ static InstClass classifyInstruction(const Instruction &I) {
             return InstClass::sBarrier;
           if (Name.contains("llvm.amdgcn.raw.ptr.buffer.load.lds"))
             return InstClass::bufferLoadLDS;
+          if (Name.contains("llvm.amdgcn.raw.ptr.buffer.store"))
+            return InstClass::bufferStore;
           return InstClass::OtherIntrinsic;
         }
       }
@@ -129,6 +132,8 @@ static StringRef instClassName(InstClass C) {
     return "waitcnt";
   case InstClass::bufferLoadLDS:
     return "buffer_load_lds";
+  case InstClass::bufferStore:
+    return "buffer_store";
   case InstClass::OtherIntrinsic:
     return "OtherIntrinsic";
   case InstClass::Load:
@@ -146,6 +151,45 @@ static StringRef instClassName(InstClass C) {
   }
   llvm_unreachable("unknown InstClass");
 }
+
+struct MFMARegionInfo {
+  Instruction *Barrier = nullptr; // sched.barrier starting this region
+  unsigned TotalMFMA = 0;
+  unsigned FullyPrefetchedMFMA = 0;
+
+  bool hasOnlyPrefetchedMFMA() const {
+    return (TotalMFMA != 0) && (TotalMFMA == FullyPrefetchedMFMA);
+  }
+};
+
+using MFMARegionList = SmallVector<MFMARegionInfo, 8>;
+
+using BBMFMAAnalysisMap = DenseMap<const BasicBlock *, MFMARegionList>;
+
+struct BBRegion {
+  BasicBlock *BB;
+  Instruction *Begin; // sched.barrier starting the region (exclusive)
+  Instruction *End;   // next sched.barrier or nullptr (exclusive)
+};
+
+static iterator_range<BasicBlock::iterator>
+instructionsInRegion(const BBRegion &R) {
+  BasicBlock *BB = R.BB;
+
+  auto ItBegin = R.Begin ? std::next(R.Begin->getIterator()) : BB->begin();
+
+  auto ItEnd = R.End ? R.End->getIterator() : BB->end();
+
+  return make_range(ItBegin, ItEnd);
+}
+
+struct MFMARegionCollectResult {
+  SmallVector<Instruction *, 16> Hoist;
+  SmallVector<Instruction *, 16> Sink;
+  Instruction *LastAnchor = nullptr;
+  SmallVector<AnchorInst, 32> Anchors;
+  SmallVector<Instruction *, 32> MFMAInsts;
+};
 
 /// Emit a histogram of instruction opcodes inside the loop.
 static void dumpInstructionHistogram(Loop *L) {
@@ -181,7 +225,35 @@ static bool isTransparentInst(const Instruction *I) {
          isa<AddrSpaceCastInst>(I);
 }
 
-static MFMAInputSource traceMFMAOperandSource(Value *StartV, Loop *L) {
+static bool isSchedBarrier(const Instruction &I) {
+  return InstClass::schedBarrier == classifyInstruction(I);
+}
+
+using InstRegionMap = DenseMap<const Instruction *, unsigned>;
+
+static unsigned assignRegions(BasicBlock *BB, InstRegionMap &RegionMap) {
+  unsigned CurRegion = 0;
+  bool SeenFirstBarrier = false;
+
+  for (Instruction &I : *BB) {
+    if (isSchedBarrier(I)) {
+      SeenFirstBarrier = true;
+      CurRegion++;
+      continue;
+    }
+
+    if (!SeenFirstBarrier)
+      continue; // ignore prologue
+
+    RegionMap[&I] = CurRegion;
+  }
+
+  return CurRegion; // number of regions
+}
+
+static MFMAInputSource traceMFMAOperandSource(Value *StartV,
+                                              unsigned MFMARegion,
+                                              const InstRegionMap &RegionMap) {
   SmallVector<Value *, 8> Worklist;
   SmallPtrSet<Value *, 16> Visited;
 
@@ -189,52 +261,40 @@ static MFMAInputSource traceMFMAOperandSource(Value *StartV, Loop *L) {
 
   while (!Worklist.empty()) {
     Value *V = Worklist.pop_back_val();
-
     if (!Visited.insert(V).second)
       continue;
 
-    // PHI → prefetched from previous iteration
-    if (auto *PN = dyn_cast<PHINode>(V)) {
-      if (L->contains(PN->getParent()))
-        return MFMAInputSource::PrefetchedFromPHI;
+    // PHI => prefetched
+    if (isa<PHINode>(V))
+      return MFMAInputSource::FullyPrefetched;
+
+    auto *I = dyn_cast<Instruction>(V);
+    if (!I)
+      continue;
+
+    // LDS load
+    if (isLDSLoadInst(I)) {
+      auto It = RegionMap.find(I);
+      if (It == RegionMap.end())
+        return MFMAInputSource::FullyPrefetched;
+
+      unsigned LoadRegion = It->second;
+      if (LoadRegion == MFMARegion)
+        return MFMAInputSource::SameRegionLoad;
+      else
+        return MFMAInputSource::FullyPrefetched;
     }
 
-    if (auto *I = dyn_cast<Instruction>(V)) {
-
-      // ONLY real LDS loads count
-      if (isLDSLoadInst(I))
-        return MFMAInputSource::SameIterationLoad;
-
-      // Walk through data-movement instructions
-      if (isTransparentInst(I)) {
-        for (Value *Op : I->operands())
-          Worklist.push_back(Op);
-        continue;
-      }
-
-      // Any other instruction stops the walk
+    // Transparent ops
+    if (isa<ShuffleVectorInst>(I) || isa<InsertElementInst>(I) ||
+        isa<ExtractElementInst>(I)) {
+      for (Value *Op : I->operands())
+        Worklist.push_back(Op);
       continue;
     }
   }
 
   return MFMAInputSource::Unknown;
-}
-
-static void analyzeMFMA(CallInst &CI, Loop *L, MFMAStats &Stats) {
-  MFMAInputSource Src0 = traceMFMAOperandSource(CI.getArgOperand(0), L);
-  MFMAInputSource Src1 = traceMFMAOperandSource(CI.getArgOperand(1), L);
-
-  Stats.Total++;
-
-  if (Src0 == MFMAInputSource::SameIterationLoad ||
-      Src1 == MFMAInputSource::SameIterationLoad) {
-    Stats.SameIter++;
-  } else if (Src0 == MFMAInputSource::PrefetchedFromPHI &&
-             Src1 == MFMAInputSource::PrefetchedFromPHI) {
-    Stats.Prefetched++;
-  } else {
-    Stats.Mixed++;
-  }
 }
 
 static bool isMFMAorWMMA(const Instruction &I) {
@@ -269,26 +329,54 @@ static SchedKind classifySchedInst(Instruction &I) {
   return SchedKind::Other;
 }
 
-static void analyzeMainLoopMFMA(Loop *L) {
-  MFMAStats Stats;
+void analyzeBBMFMA(BasicBlock *BB, BBMFMAAnalysisMap &Out) {
+  InstRegionMap RegionMap;
+  unsigned NumRegions = assignRegions(BB, RegionMap);
+  if (NumRegions == 0)
+    return;
 
-  for (BasicBlock *BB : L->blocks()) {
-    for (Instruction &I : *BB) {
-      if (auto *CI = dyn_cast<CallInst>(&I)) {
-        if (isMFMAorWMMA(I))
-          analyzeMFMA(*CI, L, Stats);
-      }
+  MFMARegionList Regions;
+  Regions.resize(NumRegions + 1);
+
+  // Identify region barriers
+  unsigned RegionID = 0;
+  for (Instruction &I : *BB) {
+    if (!isSchedBarrier(I))
+      continue;
+
+    // Barrier starts *next* region
+    if (RegionID + 1 < Regions.size()) {
+      Regions[RegionID + 1].Barrier = &I;
+      RegionID++;
     }
   }
 
-  LLVM_DEBUG({
-    dbgs() << "=== MFMA Operand Source Analysis ===\n";
-    dbgs() << "Total MFMA: " << Stats.Total << "\n";
-    dbgs() << "MFMA with same-iteration loads: " << Stats.SameIter << "\n";
-    dbgs() << "MFMA fully prefetched (PHI): " << Stats.Prefetched << "\n";
-    dbgs() << "MFMA mixed inputs: " << Stats.Mixed << "\n";
-    dbgs() << "===================================\n";
-  });
+  // Count MFMA
+  for (Instruction &I : *BB) {
+    if (!isMFMAorWMMA(I))
+      continue;
+
+    auto It = RegionMap.find(&I);
+    if (It == RegionMap.end())
+      continue;
+
+    unsigned R = It->second;
+    Regions[R].TotalMFMA++;
+
+    CallInst *CI = cast<CallInst>(&I);
+    Value *Op0 = CI->getArgOperand(0);
+    Value *Op1 = CI->getArgOperand(1);
+
+    auto S0 = traceMFMAOperandSource(Op0, R, RegionMap);
+    auto S1 = traceMFMAOperandSource(Op1, R, RegionMap);
+
+    if (S0 != MFMAInputSource::SameRegionLoad &&
+        S1 != MFMAInputSource::SameRegionLoad) {
+      Regions[R].FullyPrefetchedMFMA++;
+    }
+  }
+
+  Out[BB] = std::move(Regions);
 }
 
 static bool isHoistTransparentInst(const Instruction &I) {
@@ -348,32 +436,41 @@ static bool definedByMFMA(Instruction *I) {
   return false;
 }
 
-static void collectMFMAAndTransparentInsts(
-    Loop *L, SmallVectorImpl<Instruction *> &HoistInsts,
-    SmallVectorImpl<Instruction *> &SinkInsts, Instruction *&LastAnchor) {
+MFMARegionCollectResult
+collectMFMAAndTransparentInstsInRegion(const BBRegion &R) {
+  MFMARegionCollectResult Res;
 
-  LastAnchor = nullptr;
+  for (Instruction &I : instructionsInRegion(R)) {
+    SchedKind K = classifySchedInst(I);
+    if (K == SchedKind::BufferLoadLDS || K == SchedKind::LDSLoad ||
+        K == SchedKind::BufferStore) {
+      Res.LastAnchor = &I;
+      Res.Anchors.push_back({&I, K});
+      continue;
+    }
 
-  for (BasicBlock *BB : L->blocks()) {
-    for (Instruction &I : *BB) {
+    if (K == SchedKind::MFMA) {
+      Res.MFMAInsts.push_back(&I);
+      continue;
+    }
 
-      SchedKind K = classifySchedInst(I);
-      if (K == SchedKind::BufferLoadLDS || K == SchedKind::LDSLoad)
-        LastAnchor = &I;
+    // Hoist candidates:
+    //  shufflevector / insertelement
+    if (isa<ShuffleVectorInst>(&I) || isa<InsertElementInst>(&I)) {
+      if (feedsMFMA(&I))
+        Res.Hoist.push_back(&I);
+      continue;
+    }
 
-      if (isHoistTransparentInst(I)) {
-        if (feedsMFMA(&I))
-          HoistInsts.push_back(&I);
-        continue;
-      }
-
-      if (isSinkTransparentInst(I)) {
-        if (definedByMFMA(&I))
-          SinkInsts.push_back(&I);
-        continue;
-      }
+    // Sink candidates:
+    //  extractelement fed by mfma
+    if (auto *EI = dyn_cast<ExtractElementInst>(&I)) {
+      if (definedByMFMA(&I))
+        Res.Sink.push_back(&I);
     }
   }
+
+  return Res;
 }
 
 static Instruction *getLoopHoistInsertPoint(Loop *L) {
@@ -381,39 +478,30 @@ static Instruction *getLoopHoistInsertPoint(Loop *L) {
   return &*Header->getFirstInsertionPt();
 }
 
-static bool preprocessMFMAInsts(Loop *L) {
-  SmallVector<Instruction *, 32> HoistInsts;
-  SmallVector<Instruction *, 32> SinkInsts;
-  Instruction *LastAnchor = nullptr;
+MFMARegionCollectResult preprocessMFMAInstsInRegion(const BBRegion &R) {
+  auto Res = collectMFMAAndTransparentInstsInRegion(R);
 
-  collectMFMAAndTransparentInsts(L, HoistInsts, SinkInsts, LastAnchor);
+  if (Res.Hoist.empty() && Res.Sink.empty())
+    return Res;
 
-  if (!LastAnchor && HoistInsts.empty() && SinkInsts.empty())
-    return false;
+  // llvm::outs() << "hoist has " << Res.Hoist.size() << " insts \n";
+  // llvm::outs() << "sink has " << Res.Sink.size() << " insts \n";
 
-  Instruction *HoistIP = getLoopHoistInsertPoint(L);
+  // Hoist target: the first instruction in the region, i.e. sched.barrier
+  Instruction *HoistPos = R.Begin;
 
-  for (Instruction *I : llvm::reverse(HoistInsts))
-    I->moveAfter(HoistIP);
-  for (Instruction *I : llvm::reverse(SinkInsts))
-    I->moveAfter(LastAnchor);
+  // Sink target: last anchor instruction in the region
+  Instruction *SinkPos = Res.LastAnchor;
 
-  return true;
-}
+  // Hoist
+  for (Instruction *I : llvm::reverse(Res.Hoist))
+    I->moveAfter(HoistPos);
 
-static void collectAnchorsInOrder(Loop *L, SmallVectorImpl<AnchorInst> &Anchors,
-                                  SmallVectorImpl<Instruction *> &MFMAInsts) {
+  // Sink
+  for (Instruction *I : llvm::reverse(Res.Sink))
+    I->moveAfter(SinkPos);
 
-  for (BasicBlock *BB : L->blocks()) {
-    for (Instruction &I : *BB) {
-      SchedKind K = classifySchedInst(I);
-      if (K == SchedKind::MFMA) {
-        MFMAInsts.push_back(&I);
-      } else if (K == SchedKind::BufferLoadLDS || K == SchedKind::LDSLoad) {
-        Anchors.push_back({&I, K});
-      }
-    }
-  }
+  return Res;
 }
 
 static void insertSchedBarrier(Instruction *IP) {
@@ -457,6 +545,87 @@ static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
   }
 }
 
+static bool containsMFMAAndBufferStore(const BasicBlock *BB) {
+  bool HasMFMA = false;
+  bool HasStore = false;
+
+  for (const Instruction &I : *BB) {
+    HasMFMA |= (InstClass::MFMA == classifyInstruction(I));
+    HasStore |= (InstClass::bufferStore == classifyInstruction(I));
+
+    if (HasMFMA && HasStore)
+      return true;
+  }
+  return false;
+}
+
+static BasicBlock *findEpilogueBlock(Loop *MainLoop, LoopInfo &LI) {
+  SmallVector<BasicBlock *, 4> ExitBlocks;
+  MainLoop->getExitBlocks(ExitBlocks);
+
+  for (BasicBlock *ExitBB : ExitBlocks) {
+    // Must not be part of the loop
+    if (MainLoop->contains(ExitBB))
+      continue;
+
+    if (containsMFMAAndBufferStore(ExitBB))
+      return ExitBB;
+  }
+
+  return nullptr;
+}
+
+void scheduleBB(BasicBlock *BB, const BBMFMAAnalysisMap &Analysis) {
+  auto It = Analysis.find(BB);
+  if (It == Analysis.end())
+    return;
+
+  const MFMARegionList &Regions = It->second;
+  llvm::outs() << "total regions: " << Regions.size() << "\n";
+
+  unsigned X = /* tunable: mfma between buffer.load.lds */ 4;
+  unsigned Y = /* tunable: mfma between lds load */ 1;
+
+  for (unsigned i = 1; i < Regions.size(); ++i) {
+    const MFMARegionInfo &R = Regions[i];
+
+    if (!R.Barrier)
+      continue;
+
+    LLVM_DEBUG(dbgs() << i << ": total MFMA: " << R.TotalMFMA
+                      << ", fully prefetch: " << R.FullyPrefetchedMFMA << "\n");
+
+    if (R.hasOnlyPrefetchedMFMA()) {
+      BBRegion bbR;
+      bbR.BB = BB;
+      bbR.Begin = Regions[i].Barrier;
+      bbR.End = (i + 1 < Regions.size()) ? Regions[i + 1].Barrier : nullptr;
+
+      auto Res = preprocessMFMAInstsInRegion(bbR);
+      scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, X, Y);
+    }
+  }
+}
+
+void scheduleEp(BasicBlock *BB, const BBMFMAAnalysisMap &Analysis) {
+  auto It = Analysis.find(BB);
+  if (It == Analysis.end())
+    return;
+
+  const MFMARegionList &Regions = It->second;
+  llvm::outs() << "total regions: " << Regions.size() << "\n";
+
+  for (unsigned i = 1; i < Regions.size(); ++i) {
+    const MFMARegionInfo &R = Regions[i];
+
+    if (!R.Barrier)
+      continue;
+
+    LLVM_DEBUG(dbgs() << i << ": total MFMA: " << R.TotalMFMA
+                      << ", fully prefetch: " << R.FullyPrefetchedMFMA << "\n");
+  }
+}
+
 struct PreRALLIRSchedulePass : FunctionPass {
   static char ID;
 
@@ -484,17 +653,23 @@ struct PreRALLIRSchedulePass : FunctionPass {
 
     dumpInstructionHistogram(mainLoop);
 
-    analyzeMainLoopMFMA(mainLoop);
+    BBMFMAAnalysisMap BBMFMAMap;
 
-    if (!preprocessMFMAInsts(mainLoop))
-      llvm::outs() << "preprocessMFMAInsts failed!!\n";
+    for (BasicBlock *BB : mainLoop->blocks()) {
+      LLVM_DEBUG(dbgs() << "BB: " << BB->getName() << "\n");
+      analyzeBBMFMA(BB, BBMFMAMap);
+      scheduleBB(BB, BBMFMAMap);
+    }
 
-    unsigned X = /* tunable: mfma between buffer.load.lds */ 4;
-    unsigned Y = /* tunable: mfma between lds load */ 1;
-    SmallVector<AnchorInst, 32> Anchors;
-    SmallVector<Instruction *, 32> MFMAInsts;
-    collectAnchorsInOrder(mainLoop, Anchors, MFMAInsts);
-    scheduleMFMAWithSpacing(Anchors, MFMAInsts, X, Y);
+    LLVM_DEBUG(dbgs() << "============================================\n");
+
+    BasicBlock *epilogue = findEpilogueBlock(mainLoop, LI);
+    if (epilogue) {
+      LLVM_DEBUG(dbgs() << "Found epilogue block: " << epilogue->getName()
+                        << "\n");
+      analyzeBBMFMA(epilogue, BBMFMAMap);
+      scheduleEp(epilogue, BBMFMAMap);
+    }
 
     // Analysis-only pass
     return false;
