@@ -61,6 +61,10 @@ def _parse_llvm_fn_attrs(attrs):
     return tuple(parsed)
 
 
+def is_lds_prefetch_enabled():
+    return bool(knobs.amd.use_lds_prefetch)
+
+
 @dataclass(frozen=True)
 class HIPOptions:
     num_warps: int = 4
@@ -275,6 +279,9 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_optimize_descriptor_encoding(pm)
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
         amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
+        if is_lds_prefetch_enabled():
+            amd.passes.ttgpuir.add_lds_prefetch(pm)
+
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         amd.passes.ttgpuir.add_convert_to_tensor_ops(pm)
