@@ -34,7 +34,10 @@ def TritonAMDGPUPipeline : Pass<"tritonamdgpu-pipeline", "mlir::ModuleOp"> {
            "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
     Option<"usePingpong", "use_pingpong",
            "bool", /*default*/"false",
-           "Use schedules to enable block ping-pong">
+           "Use schedules to enable block ping-pong">,
+    Option<"useLdsPrefetch", "use_lds_prefetch",
+           "bool", /*default*/"false",
+           "Use schedules to enable lds prefetching.">
   ];
 }
 
@@ -351,6 +354,31 @@ def TritonAMDGPUFpSanitizer : Pass<"tritonamdgpu-fp-sanitizer", "mlir::ModuleOp"
     Extends the main FP sanitizer with patterns for AMD-specific ops.
   }];
   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
+
+def TritonAMDGPULdsPrefetch : Pass<"tritonamdgpu-lds-prefetch", "mlir::ModuleOp"> {
+  let summary = "lds prefetch";
+
+  let description = [{
+    This pass attempts to prefetch from shared memory the operands (A and B)
+    of a `tt.dot`, when this operation is located in a loop.
+    Decompose `DotOp` instructions in loops into several finer-grained `DotOp`
+    that may have their operands constructed at the end of the previous
+    iteration.
+    Transformations are performed in five different places:
+      1. The pass emits a prologue to the loop where the data for the first
+         loop iteration are prefetched.
+      2. The loop arguments are extended with the new prefetched values.
+      3. The dotOp parameters is updated with the new args.
+      4. The prefetch operations for the next iteration are added to the loop.
+      5. The yieldOp is updated by adding the prefetched values for the next
+         iteration.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::ROCDL::ROCDLDialect"];
 }
 
 #endif
