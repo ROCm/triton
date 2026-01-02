@@ -136,3 +136,27 @@ Result
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v6`
 - vgpr: 478
 - perf: 1150 tflops
+
+### v7
+
+Unroll the loop
+
+next step
+- RA. Since `v_cvt` only works with vgprs, we want acc to be in vgprs ideally.
+  However, acc needs 256 vgprs, which leaves 0 for anything else requiring vgprs
+  such as `ds_read` addr and `buffer_load` addr.
+
+### llir sched v3
+
+Region based llvm ir scheduler.
+
+By enabling `sched.barrier`, the loop can be partitioned into several scheduling regions.
+The scheduler only moves instructions within its own region.
+this version shows the key idea of the llvm ir scheduler: The gluon kernel handles
+op scheduling at region scope. Then the llir scheduler does fine grained interleaving
+within each region.
+
+- gluon kernel version: v7
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7`
+- vgpr: 512
+- perf: 1190 tflops
