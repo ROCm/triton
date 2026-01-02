@@ -352,6 +352,7 @@ class MXFPGEMMPipelinedProgram:
 
         accumulator = gl.zeros((cfg.BLOCK_M, cfg.BLOCK_N), dtype=gl.float32, layout=self.cfg.acc_layout)
         loop_ub = gl.cdiv(K, cfg.BLOCK_K)
+        gl.assume(loop_ub > 0)
         epilogue_lb = loop_ub - (cfg.NUM_BUFFERS - 1)
         for i in range(0, loop_ub):
             pred = i - epilogue_lb
@@ -637,6 +638,7 @@ class MXFPGEMMSliceNKProgram:
                       layout=cfg.acc_layout)
 
         loop_ub = gl.cdiv(K, cfg.BLOCK_K)
+        gl.assume(loop_ub > 0)
         epilogue_lb = loop_ub - (cfg.NUM_BUFFERS - 1)
         for i in range(0, loop_ub):
             pred = i - epilogue_lb
