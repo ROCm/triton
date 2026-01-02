@@ -3,6 +3,7 @@ import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.amd.cdna4 import async_copy as cdna4_async_copy
+from triton.experimental.gluon.language.amd.cdna3 import sched_barrier
 
 
 @gluon.jit
@@ -641,7 +642,7 @@ def v6(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
 
 
 @gluon.jit
-def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
+def v7(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
        stride_bk, stride_bn,  #
        stride_cm, stride_cn, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
        ):
@@ -697,7 +698,7 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
     acc0 = gl.zeros((BLOCK_M, BLOCK_N // 2), gl.float32, mfmaLayout)
     acc1 = gl.zeros((BLOCK_M, BLOCK_N // 2), gl.float32, mfmaLayout)
 
-    iterMax = gl.cdiv(K, BLOCK_K)
+    iterMax: gl.constexpr = gl.cdiv(K, BLOCK_K)
 
     ## Prologue
     ##
@@ -757,6 +758,8 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
         g_idx = k % 2  ## 0
         l_idx = 1 - g_idx  ## 1
 
+        sched_barrier(0)
+
         ## DOT(A, B0)[0]
         ## LR B1[0]
         ## AC (A+B0)[2]
@@ -768,6 +771,8 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
         cdna4_async_copy.buffer_load_to_shared(smemA.index(0), a_base, a_offsets, mask=(k != (iterMax - 2)))
         cdna4_async_copy.buffer_load_to_shared(smemB0.index(0), b_base, b0_offsets, mask=(k != (iterMax - 2)))
         cdna4_async_copy.commit_group()
+
+        sched_barrier(0)
 
         ## DOT(A, B1)[0]
         ## LR (A+B0)[1]
@@ -784,6 +789,8 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
         a_base += BLOCK_K * stride_ak
         b_base += BLOCK_K * stride_bk
 
+        sched_barrier(0)
+
         ## ---------------------------------------------------------------------
         ## Loop unroll separator
         ## ---------------------------------------------------------------------
@@ -798,6 +805,8 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
         cdna4_async_copy.buffer_load_to_shared(smemA.index(1), a_base, a_offsets, mask=(k != (iterMax - 2)))
         cdna4_async_copy.buffer_load_to_shared(smemB0.index(1), b_base, b0_offsets, mask=(k != (iterMax - 2)))
         cdna4_async_copy.commit_group()
+
+        sched_barrier(0)
 
         ## DOT(A, B1)[1]
         ## LR (A+B0)[1]
@@ -814,6 +823,8 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
         a_base += BLOCK_K * stride_ak
         b_base += BLOCK_K * stride_bk
 
+        sched_barrier(0)
+
     gStoreLayoutC: gl.constexpr = gl.DistributedLinearLayout(
         reg_bases=[[0, 1], [0, 2], [0, 4], [16, 0], [0, 64], [64, 0], [128, 0]], lane_bases=[[1, 0], [2, 0], [4, 0],
                                                                                              [8, 0], [0, 16], [0, 8]],
@@ -827,12 +838,16 @@ def v7(a_ptr, b_ptr, c_ptr, M, N, K, stride_am, stride_ak,  #
 
     l_idx = (iterMax - 1) % 2
 
+    sched_barrier(0)
+
     acc0 = gl.amd.cdna3.mfma(a, b0, acc0)
 
     cdna4_async_copy.wait_group(0)
     b1 = cdna4_async_copy.load_shared_relaxed(smemB1.index(l_idx), dotOpLayoutB)
     c0 = acc0.to(tl.float16)
     c0 = gl.convert_layout(c0, layout=gStoreLayoutC)
+
+    sched_barrier(0)
 
     acc1 = gl.amd.cdna3.mfma(a, b1, acc1)
     gl.amd.cdna3.buffer_store(stored_value=c0, ptr=c0_base, offsets=c_offsets)
