@@ -355,7 +355,6 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
         warp_bases.append((1 << i, 0))
     warp_bases = tuple(warp_bases)
 
-    warp_bases = tuple(warp_bases)
     if not PERSISTENT:
         grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
         kernel = gemm_tdm_pipelined_kernel[grid](
@@ -686,6 +685,7 @@ def gemm_tdm_warp_specialized_kernel(a_ptr, b_ptr, c_ptr,  #
                                      BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
                                      NUM_BUFFERS: ttgl.constexpr,  #
                                      TRANSPOSE_B: ttgl.constexpr,  #
+                                     NUM_WARPS: ttgl.constexpr,  #
                                      WARP_BASES: ttgl.constexpr):
     """Warp specialized GEMM kernel with TDM pipelining."""
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
@@ -693,9 +693,6 @@ def gemm_tdm_warp_specialized_kernel(a_ptr, b_ptr, c_ptr,  #
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
     ttgl.static_assert(b_dtype.is_fp16() or b_dtype.is_bf16(), "Only fp16/bf16 supported for B")
     ttgl.static_assert(NUM_BUFFERS >= 2, "NUM_BUFFERS must be at least 2")
-
-    NUM_WARPS: ttgl.constexpr = ttgl.num_warps()
-    ttgl.static_assert(2**len(WARP_BASES) == NUM_WARPS)
 
     PRODUCER_WARPS: ttgl.constexpr = NUM_WARPS // 2
     CONSUMER_WARPS: ttgl.constexpr = NUM_WARPS // 2
@@ -787,6 +784,7 @@ def test_runtime_gemm_tdm_warp_specialized(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFER
             stride_cm, stride_cn,  #
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
             NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
+            NUM_WARPS=NUM_TOTAL_WARPS,  #
             WARP_BASES=tuple(warp_bases),  #
             num_warps=NUM_TOTAL_WARPS // 2)
     else:
@@ -1409,27 +1407,28 @@ if __name__ == "__main__":
     PREFETCH = args.prefetch_lds
 
     if args.warp_specialized:
+        pass
         # For warp specialized, allow larger blocks with subtiled variant
-        if args.subtiled:
-            BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
-            kernel_type = "persistent" if PERSISTENT else "non-persistent"
-            print(f"Running {kernel_type} warp specialized GEMM kernel (subtiled):")
-            print(
-                f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, NUM_TOTAL_WARPS={NUM_WARPS}, {NUM_BUFFERS=}, {PERSISTENT=}"
-            )
-            test_runtime_gemm_tdm_warp_specialized_subtiled(BLOCK_M, BLOCK_N, BLOCK_K,  #
-                                                            NUM_BUFFERS, TRANSPOSE_B, PERSISTENT,  #
-                                                            M, N, K, NUM_WARPS)
-        else:
-            BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
-            kernel_type = "persistent" if PERSISTENT else "non-persistent"
-            print(f"Running {kernel_type} warp specialized GEMM kernel:")
-            print(
-                f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, NUM_TOTAL_WARPS={NUM_WARPS}, {NUM_BUFFERS=}, {PERSISTENT=}"
-            )
-            test_runtime_gemm_tdm_warp_specialized(BLOCK_M, BLOCK_N, BLOCK_K,  #
-                                                   NUM_BUFFERS, TRANSPOSE_B, PERSISTENT,  #
-                                                   M, N, K, NUM_WARPS)
+        # if args.subtiled:
+        #     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
+        #     kernel_type = "persistent" if PERSISTENT else "non-persistent"
+        #     print(f"Running {kernel_type} warp specialized GEMM kernel (subtiled):")
+        #     print(
+        #         f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, NUM_TOTAL_WARPS={NUM_WARPS}, {NUM_BUFFERS=}, {PERSISTENT=}"
+        #     )
+        #     test_runtime_gemm_tdm_warp_specialized_subtiled(BLOCK_M, BLOCK_N, BLOCK_K,  #
+        #                                                     NUM_BUFFERS, TRANSPOSE_B, PERSISTENT,  #
+        #                                                     M, N, K, NUM_WARPS)
+        # else:
+        #     BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
+        #     kernel_type = "persistent" if PERSISTENT else "non-persistent"
+        #     print(f"Running {kernel_type} warp specialized GEMM kernel:")
+        #     print(
+        #         f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, NUM_TOTAL_WARPS={NUM_WARPS}, {NUM_BUFFERS=}, {PERSISTENT=}"
+        #     )
+        #     test_runtime_gemm_tdm_warp_specialized(BLOCK_M, BLOCK_N, BLOCK_K,  #
+        #                                            NUM_BUFFERS, TRANSPOSE_B, PERSISTENT,  #
+        #                                            M, N, K, NUM_WARPS)
     elif args.single_warp_schedule:
         print(
             f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"

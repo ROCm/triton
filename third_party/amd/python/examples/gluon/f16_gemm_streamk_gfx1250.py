@@ -6,7 +6,7 @@ hip.hip.hipInit(0)
 
 import pytest
 import torch
-
+import math
 import triton
 from triton.experimental import gluon
 import triton.experimental.gluon.language as ttgl
@@ -36,8 +36,8 @@ except ImportError:
 def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, N, K, stride_am, stride_ak, stride_bk,
                                       stride_bn, stride_cm, stride_cn, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
                                       BLOCK_K: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr,
-                                      NUM_WARPS: ttgl.constexpr, STREAMK_TILES: ttgl.constexpr,
-                                      GROUP_SIZE_M: ttgl.constexpr = 8):
+                                      NUM_WARPS: ttgl.constexpr, WARP_BASES: ttgl.constexpr,
+                                      STREAMK_TILES: ttgl.constexpr, GROUP_SIZE_M: ttgl.constexpr = 8):
     """
     StreamK GEMM kernel with TDM and software pipelining.
     When STREAMK_TILES=0: Behaves exactly like persistent_gemm_tdm_pipelined_kernel
@@ -49,7 +49,7 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     ttgl.static_assert(b_dtype.is_fp16() or b_dtype.is_bf16(), "Only fp16/bf16 supported for B")
     ttgl.static_assert(NUM_BUFFERS >= 2, "NUM_BUFFERS must be at least 2")
 
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [NUM_WARPS // 2, 2], [16, 16, 32])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, WARP_BASES, [], [16, 16, 32])
     shared_layouts: ttgl.constexpr = create_shared_layouts(BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B)
     SHARED_LAYOUT_A: ttgl.constexpr = shared_layouts[0]
     SHARED_LAYOUT_B: ttgl.constexpr = shared_layouts[1]
@@ -263,11 +263,16 @@ def run_streamk_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANS
     print(f"\nTesting StreamK kernel with STREAMK_TILES={STREAMK_TILES}")
     print(f"Grid: {grid}, Total tiles: {total_tiles}")
 
+    warp_bases = [(0, 1)]
+    for i in range(int(math.log2(num_warps // 2))):
+        warp_bases.append((1 << i, 0))
+    warp_bases = tuple(warp_bases)
+
     kernel = streamk_gemm_tdm_pipelined_kernel[grid](
         a_device, b_device, c_device,  #
         p_device, locks_device, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-        NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps,  #
+        NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, NUM_WARPS=num_warps, WARP_BASES=warp_bases,  #
         STREAMK_TILES=STREAMK_TILES, num_warps=num_warps, waves_per_eu=num_warps // 4)
     static_profile(kernel)
 
