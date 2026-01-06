@@ -533,13 +533,27 @@ static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
     return (K == SchedKind::BufferLoadLDS) ? X : Y;
   };
 
+  // Put 2 extra mfma after the last anchor inst
+  Instruction *InsertPt = Anchors[Anchors.size() - 1].I;
+  MFMAInsts[MFMAIdx--]->moveAfter(InsertPt);
+  MFMAInsts[MFMAIdx--]->moveAfter(InsertPt);
+
+  SchedKind kind = Anchors[Anchors.size() - 1].Kind;
+
   for (int i = Anchors.size() - 1; i >= 0; --i) {
     Instruction *InsertPt = Anchors[i].I;
     unsigned Count = spacingFor(Anchors[i].Kind);
 
+    // If changing Kind, put 2 extra mfma here
+    if (kind != Anchors[i].Kind) {
+      MFMAInsts[MFMAIdx--]->moveAfter(InsertPt);
+      MFMAInsts[MFMAIdx--]->moveAfter(InsertPt);
+    }
+
+    kind = Anchors[i].Kind;
+
     for (int j = 0; j < Count && MFMAIdx >= 0; ++j) {
-      MFMAInsts[MFMAIdx]->moveAfter(InsertPt);
-      MFMAIdx--;
+      MFMAInsts[MFMAIdx--]->moveAfter(InsertPt);
     }
     // insertSchedBarrier(InsertPt);
   }
