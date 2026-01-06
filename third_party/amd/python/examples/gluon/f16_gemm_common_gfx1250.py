@@ -12,6 +12,68 @@ from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
 
 
+@gluon.jit
+def chiplet_transform(pid, num_workgroups, num_xcds: ttgl.constexpr):
+    """
+    Basic chiplet transformation for multi-XCD AMD GPUs.
+
+    Transforms program ID to distribute work evenly across chiplets (XCDs).
+    Each XCD gets a contiguous range of work items.
+    """
+    xcd = pid % num_xcds
+    pos_in_xcd = pid // num_xcds
+    min_per_xcd = num_workgroups // num_xcds
+    extra_sms = num_workgroups % num_xcds
+    offset = xcd * min_per_xcd + min(xcd, extra_sms)
+    return offset + pos_in_xcd
+
+
+@gluon.jit
+def chiplet_transform_chunked(pid, num_workgroups, num_xcds: ttgl.constexpr, chunk_size: ttgl.constexpr):
+    """
+    Chunked chiplet transformation for improved memory locality.
+
+    Groups work items into chunks of size `chunk_size` per XCD, ensuring
+    adjacent work items within a chunk are on the same chiplet for better
+    cache utilization and memory bandwidth.
+    """
+    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
+        # Outside of the contiguous chunked region, leave unchanged
+        return pid
+
+    local_pid = pid // num_xcds
+    # Calculate chunk index and position within chunk
+    chunk_idx = local_pid // chunk_size
+    pos_in_chunk = local_pid % chunk_size
+
+    # Calculate new PID
+    xcd = pid % num_xcds
+    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
+    return new_pid
+
+
+@gluon.jit
+def remap_xcd_chunked(pid, grid_mn, num_xcds: ttgl.constexpr = 8, chunk_size: ttgl.constexpr = 2):
+    """
+    XCD remapping with chunked distribution (alternative implementation).
+
+    Similar to chiplet_transform_chunked but with default parameters
+    optimized for AMD MI300 series (8 XCDs).
+    """
+    # Compute current XCD and local PID
+    xcd = pid % num_xcds
+    # Distribute the modulo pids in round robin
+    if pid > (grid_mn // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
+        return pid
+    local_pid = pid // num_xcds
+    # Calculate chunk index and position within chunk
+    chunk_idx = local_pid // chunk_size
+    pos_in_chunk = local_pid % chunk_size
+    # Calculate new PID
+    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
+    return new_pid
+
+
 def static_profile(kernel):
     amdgcn = kernel.asm['amdgcn']
 
@@ -71,16 +133,16 @@ def create_tensor_descriptors(a_ptr, b_ptr, off_am, off_bn, stride_am, stride_ak
 
 @gluon.jit
 def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
-                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=1):
-
-    ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K], a_buffer.index(producer % NUM_BUFFERS),
-                                    pred=pred)
-    if not TRANSPOSE_B:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn], b_buffer.index(producer % NUM_BUFFERS),
-                                        pred=pred)
-    else:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K], b_buffer.index(producer % NUM_BUFFERS),
-                                        pred=pred)
+                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
+    # Note: pred parameter is for conditional execution via if-statements, not passed to async_load
+    if pred:
+        ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K], a_buffer.index(producer % NUM_BUFFERS))
+        if not TRANSPOSE_B:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn],
+                                            b_buffer.index(producer % NUM_BUFFERS))
+        else:
+            ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K],
+                                            b_buffer.index(producer % NUM_BUFFERS))
     producer += 1
     return producer
 
@@ -123,14 +185,17 @@ class TileScheduler:
 
     Persistent Mode (STREAMK_TILES=0):
     - All tiles are processed as full tiles
-    - Each CU processes tiles from [pid_start, pid_end)
+    - Each CU processes tiles in a strided pattern: pid, pid+num_sms, pid+2*num_sms, ...
+    - Optionally applies chiplet transformation for multi-XCD GPUs
 
     StreamK Mode (STREAMK_TILES>0):
-    - Full tiles: processed normally, one complete tile per iteration
+    - Full tiles: processed normally using strided persistent pattern
     - StreamK tiles: last STREAMK_TILES use K-dimension splitting for load balancing
+
+    Chiplet Optimization:
+    - Use apply_chiplet_transform() to remap PIDs for better memory locality on MI300
+    - Recommended for kernels with tile swizzling and smaller block sizes
     """
-    pid_start: ttgl.tensor
-    pid_end: ttgl.tensor
     num_pid_m: ttgl.tensor
     num_pid_n: ttgl.tensor
     total_tiles: ttgl.tensor
@@ -138,9 +203,7 @@ class TileScheduler:
     iters_per_tile: ttgl.tensor
 
     @gluon.constexpr_function
-    def __init__(self, pid_start, pid_end, num_pid_m, num_pid_n, total_tiles, total_full_tiles, iters_per_tile):
-        self.pid_start = pid_start
-        self.pid_end = pid_end
+    def __init__(self, num_pid_m, num_pid_n, total_tiles, total_full_tiles, iters_per_tile):
         self.num_pid_m = num_pid_m
         self.num_pid_n = num_pid_n
         self.total_tiles = total_tiles
@@ -151,8 +214,6 @@ class TileScheduler:
     def initialize(M, N, K, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
                    STREAMK_TILES: ttgl.constexpr):
         """Initialize unified scheduler for both Persistent and StreamK modes."""
-        kernel_id = ttgl.program_id(axis=0)
-        num_kernels = ttgl.num_programs(axis=0)
         num_pid_m = ttgl.cdiv(M, BLOCK_M)
         num_pid_n = ttgl.cdiv(N, BLOCK_N)
         total_tiles = num_pid_m * num_pid_n
@@ -162,15 +223,12 @@ class TileScheduler:
         total_full_tiles = total_tiles - STREAMK_TILES
         iters_per_tile = ttgl.cdiv(K, BLOCK_K)
 
-        pid_per_kernel = ttgl.cdiv(total_full_tiles, num_kernels)
-        pid_start = kernel_id * pid_per_kernel
-        pid_end = min(pid_start + pid_per_kernel, total_full_tiles)
-
-        return TileScheduler(pid_start, pid_end, num_pid_m, num_pid_n, total_tiles, total_full_tiles, iters_per_tile)
+        return TileScheduler(num_pid_m, num_pid_n, total_tiles, total_full_tiles, iters_per_tile)
 
     @gluon.jit
     def get_num_tiles(self):
-        return self.pid_end - self.pid_start
+        """Return total number of full tiles for persistent loop."""
+        return self.total_full_tiles
 
     @gluon.jit
     def get_num_full_tiles(self):
@@ -185,10 +243,20 @@ class TileScheduler:
         return self.iters_per_tile
 
     @gluon.jit
-    def get_linear_tile_coords(self, idx):
-        pid = self.pid_start + idx
-        pid_m = pid % self.num_pid_m
-        pid_n = pid // self.num_pid_m
+    def get_pid(self):
+        """Return current program ID."""
+        return ttgl.program_id(axis=0)
+
+    @gluon.jit
+    def get_num_sms(self):
+        """Return total number of SMs/CUs available."""
+        return ttgl.num_programs(axis=0)
+
+    @gluon.jit
+    def get_linear_tile_coords(self, tile_id):
+        """Convert global tile ID to (pid_m, pid_n) coordinates using linear ordering."""
+        pid_m = tile_id % self.num_pid_m
+        pid_n = tile_id // self.num_pid_m
         return pid_m, pid_n
 
     @gluon.jit
@@ -203,7 +271,7 @@ class TileScheduler:
 
     @gluon.jit
     def get_streamk_params(self):
-        num_sms = ttgl.num_programs(axis=0)
+        num_sms = self.get_num_sms()
         total_streamk_iters = self.get_num_streamk_tiles() * self.iters_per_tile
         streamk_iters_pcu = total_streamk_iters // num_sms
         streamk_remainder_iters = total_streamk_iters % num_sms
@@ -211,8 +279,8 @@ class TileScheduler:
 
     @gluon.jit
     def get_streamk_iteration_range(self):
-        pid = ttgl.program_id(axis=0)
-        num_sms = ttgl.num_programs(axis=0)
+        pid = self.get_pid()
+        num_sms = self.get_num_sms()
 
         # Get StreamK distribution parameters
         total_streamk_iters = self.get_num_streamk_tiles() * self.iters_per_tile
@@ -226,3 +294,49 @@ class TileScheduler:
         last_iter = base_offset + (pid + 1) * streamk_iters_pcu + min(pid + 1, streamk_remainder_iters)
 
         return start_iter, last_iter
+
+    @gluon.jit
+    def apply_chiplet_transform(self, pid, num_sms, num_xcds: ttgl.constexpr):
+        """
+        Apply basic chiplet transformation to a program ID.
+
+        Redistributes work so each XCD gets a contiguous range, improving
+        memory locality when tiles are processed in order.
+
+        Args:
+            pid: Current program ID
+            num_sms: Total number of SMs/CUs
+            num_xcds: Number of chiplets (XCDs), typically 8 for MI300
+
+        Returns:
+            Transformed PID optimized for multi-chiplet architecture
+        """
+        return chiplet_transform(pid, num_sms, num_xcds)
+
+    @gluon.jit
+    def apply_chiplet_transform_chunked(self, pid, num_sms, num_xcds: ttgl.constexpr, chunk_size: ttgl.constexpr):
+        """
+        Apply chunked chiplet transformation for improved cache locality.
+
+        Creates small contiguous chunks on each XCD instead of large blocks.
+        Recommended for GEMM kernels with tile swizzling.
+
+        Args:
+            pid: Current program ID
+            num_sms: Total number of SMs/CUs
+            num_xcds: Number of chiplets (XCDs), typically 8 for MI300
+            chunk_size: Size of contiguous chunks per XCD (recommended: 2-4)
+
+        Returns:
+            Transformed PID optimized for memory locality
+
+        Example:
+            pid = ttgl.program_id(axis=0)
+            num_sms = ttgl.num_programs(axis=0)
+            transformed_pid = scheduler.apply_chiplet_transform_chunked(
+                pid, num_sms, num_xcds=8, chunk_size=2
+            )
+            for tile_idx in range(transformed_pid, scheduler.get_num_tiles(), num_sms):
+                # Process tiles with improved locality
+        """
+        return chiplet_transform_chunked(pid, num_sms, num_xcds, chunk_size)

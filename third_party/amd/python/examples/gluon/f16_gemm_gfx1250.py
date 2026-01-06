@@ -46,6 +46,7 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                                          NUM_BUFFERS: ttgl.constexpr,  #
                                          TRANSPOSE_B: ttgl.constexpr,  #
                                          WARP_BASES: ttgl.constexpr):
+
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -66,9 +67,13 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
     scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
 
-    for tile_idx in range(scheduler.get_num_tiles()):
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
+    pid = scheduler.apply_chiplet_transform_chunked(pid, num_sms, num_xcds=8, chunk_size=2)
+
+    for tile_idx in range(pid, scheduler.get_num_tiles(), num_sms):
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
@@ -128,20 +133,26 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
     scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES=0)
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_tiles = scheduler.get_num_tiles()
-    producer = 0
 
-    pid_m, pid_n = scheduler.get_linear_tile_coords(0)
-    off_am = pid_m * BLOCK_M
-    off_bn = pid_n * BLOCK_N
-    for i in ttgl.static_range(NUM_BUFFERS - 1):
-        producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
-                               TRANSPOSE_B)
+    for tile_idx in range(pid, num_tiles, num_sms):
+        # Calculate current tile coordinates
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
+        off_am = pid_m * BLOCK_M
+        off_bn = pid_n * BLOCK_N
 
-    for tile_idx in range(num_tiles):
-        pid_m_next, pid_n_next = scheduler.get_linear_tile_coords(tile_idx + 1)
+        # Calculate next tile coordinates for prefetching
+        pid_m_next, pid_n_next = scheduler.get_swizzled_tile_coords(tile_idx + num_sms, GROUP_SIZE_M=8)
         off_am_next = pid_m_next * BLOCK_M
         off_bn_next = pid_n_next * BLOCK_N
+
+        producer = 0
+        # Initial prefetch for first NUM_BUFFERS - 1 tiles
+        for i in ttgl.static_range(NUM_BUFFERS - 1):
+            producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
+                                   TRANSPOSE_B)
 
         consumer = 0
         accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
@@ -153,11 +164,9 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
                                                accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
         producer = 0
-        pred = tile_idx + 1 - num_tiles
-        pred = (pred >> 31) & 1
         for i in ttgl.static_range(NUM_BUFFERS - 1):
             producer = issue_loads(producer, a_desc, b_desc, off_am_next, off_bn_next, a_buffer, b_buffer, BLOCK_K,
-                                   NUM_BUFFERS, TRANSPOSE_B, pred=pred)
+                                   NUM_BUFFERS, TRANSPOSE_B, pred=tile_idx + num_sms < num_tiles)
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                                accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -281,8 +290,6 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
     loop_ub = ttgl.cdiv(K, BLOCK_K)
     epilogue_lb = loop_ub - (NUM_BUFFERS - 1)
     for i in range(0, loop_ub):
-        pred = i - epilogue_lb
-        pred = (pred >> 31) & 1
         # SubIteration0
         # LDS load SubIteration1
         a1, b1 = lds_subtile_load(consumer, SUBTILE_LEN, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
@@ -294,7 +301,7 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
         # TDM load for next tile
         # If we are in epilogue, we have already issued our tile loads
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B,
-                               pred=pred)
+                               pred=i < epilogue_lb)
         # LDS load SubIteration2
         a2, b2 = lds_subtile_load(consumer, 2 * SUBTILE_LEN, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                   NUM_BUFFERS, TRANSPOSE_B, SUBTILE_LEN)
@@ -910,14 +917,16 @@ def persistent_producer_partition(args, scheduler):
     BLOCK_M: ttgl.constexpr = args.a_desc.block_shape[0]
     BLOCK_N: ttgl.constexpr = args.b_desc.block_shape[0] if args.TRANSPOSE_B else args.b_desc.block_shape[1]
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_k_tiles = ttgl.cdiv(K, args.BLOCK_K)
     num_tiles = scheduler.get_num_tiles()
 
     # Assume phase 0 is already completed as the buffers are initially empty; start from phase 1
     load_empty_phase_counter = PhaseCounter.create(args.NUM_BUFFERS, args.NUM_BUFFERS)
 
-    for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
+    for tile_idx in range(pid, num_tiles, num_sms):
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
@@ -953,6 +962,8 @@ def persistent_compute_partition(args, scheduler):
     BLOCK_M: ttgl.constexpr = args.a_desc.block_shape[0]
     BLOCK_N: ttgl.constexpr = args.b_desc.block_shape[0] if args.TRANSPOSE_B else args.b_desc.block_shape[1]
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_k_tiles = ttgl.cdiv(K, args.BLOCK_K)
     num_tiles = scheduler.get_num_tiles()
 
@@ -960,8 +971,9 @@ def persistent_compute_partition(args, scheduler):
     # Assume phase 0 is already completed as the buffers are initially empty; start from phase 1
     acc_empty_phase_counter = PhaseCounter.create(args.NUM_ACC_BUFFERS, args.NUM_ACC_BUFFERS)
 
-    for tile_idx in range(num_tiles):
-        acc_buffer_idx = tile_idx % args.NUM_ACC_BUFFERS
+    local_tile_counter = 0
+    for tile_idx in range(pid, num_tiles, num_sms):
+        acc_buffer_idx = local_tile_counter % args.NUM_ACC_BUFFERS
         acc_empty_bar = args.acc_empty_bars.index(acc_buffer_idx)
         acc_ready_bar = args.acc_ready_bars.index(acc_buffer_idx)
 
@@ -997,6 +1009,7 @@ def persistent_compute_partition(args, scheduler):
         # Signal epilogue partition that accumulator is ready to be consumed
         ttgl.amd.gfx1250.mbarrier.arrive(acc_ready_bar, count=1)
         acc_empty_phase_counter = acc_empty_phase_counter.next()
+        local_tile_counter += 1
 
 
 @gluon.jit
@@ -1005,13 +1018,16 @@ def persistent_epilogue_partition(args, c_ptr, M, N, stride_cm, stride_cn, sched
     BLOCK_M: ttgl.constexpr = args.a_desc.block_shape[0]
     BLOCK_N: ttgl.constexpr = args.b_desc.block_shape[0] if args.TRANSPOSE_B else args.b_desc.block_shape[1]
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_tiles = scheduler.get_num_tiles()
 
     acc_ready_phase_counter = PhaseCounter.create(0, args.NUM_ACC_BUFFERS)
 
-    for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
-        acc_buffer_idx = tile_idx % args.NUM_ACC_BUFFERS
+    local_tile_counter = 0
+    for tile_idx in range(pid, num_tiles, num_sms):
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
+        acc_buffer_idx = local_tile_counter % args.NUM_ACC_BUFFERS
         acc_ready_bar = args.acc_ready_bars.index(acc_buffer_idx)
         acc_empty_bar = args.acc_empty_bars.index(acc_buffer_idx)
 
@@ -1022,6 +1038,7 @@ def persistent_epilogue_partition(args, c_ptr, M, N, stride_cm, stride_cn, sched
                                          args.acc_buffer.index(acc_buffer_idx), mbarrier=acc_empty_bar)
 
         acc_ready_phase_counter = acc_ready_phase_counter.next()
+        local_tile_counter += 1
 
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
@@ -1037,14 +1054,16 @@ def persistent_producer_subtiled_partition(args, scheduler):
     NUM_QUADS: ttgl.constexpr = args.NUM_QUADS
     NUM_QUADS_N: ttgl.constexpr = args.NUM_QUADS_N
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_k_tiles = ttgl.cdiv(K, args.BLOCK_K)
     num_tiles = scheduler.get_num_tiles()
 
     # Assume phase 0 is already completed as the buffers are initially empty; start from phase 1
     load_empty_phase_counter = PhaseCounter.create(args.NUM_BUFFERS, args.NUM_BUFFERS)
 
-    for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
+    for tile_idx in range(pid, num_tiles, num_sms):
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
 
         for quad_idx in ttgl.static_range(NUM_QUADS):
             quad_m = quad_idx // NUM_QUADS_N
@@ -1087,6 +1106,8 @@ def persistent_compute_subtiled_partition(args, scheduler):
     NUM_QUADS: ttgl.constexpr = args.NUM_QUADS
     SUBTILES_PER_ACC: ttgl.constexpr = 4
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_k_tiles = ttgl.cdiv(K, args.BLOCK_K)
     num_tiles = scheduler.get_num_tiles()
 
@@ -1094,7 +1115,7 @@ def persistent_compute_subtiled_partition(args, scheduler):
     # Assume phase 0 is already completed as the buffers are initially empty; start from phase 1
     acc_empty_phase_counter = PhaseCounter.create(args.NUM_ACC_BUFFERS, args.NUM_ACC_BUFFERS)
 
-    for tile_idx in range(num_tiles):
+    for tile_idx in range(pid, num_tiles, num_sms):
         for quad_idx in ttgl.static_range(NUM_QUADS):
             # Process accumulator quadrants (1/4 of full accumulator tile) to avoid register spilling
             accumulator = ttgl.zeros((QUADRANT_M, QUADRANT_N), dtype=args.c_dtype, layout=args.WMMA_LAYOUT)
@@ -1149,12 +1170,14 @@ def persistent_epilogue_subtiled_partition(args, scheduler):
     ACC_SUBTILE: ttgl.constexpr = 64  # Each subtile is 64x64
     SUBTILES_PER_QUAD: ttgl.constexpr = 4
 
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
     num_tiles = scheduler.get_num_tiles()
 
     acc_ready_phase_counter = PhaseCounter.create(0, args.NUM_ACC_BUFFERS)
 
-    for tile_idx in range(num_tiles):
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
+    for tile_idx in range(pid, num_tiles, num_sms):
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M=8)
 
         for quad_idx in ttgl.static_range(NUM_QUADS):
             quad_m = quad_idx // NUM_QUADS_N

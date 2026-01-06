@@ -42,6 +42,7 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     StreamK GEMM kernel with TDM and software pipelining.
     When STREAMK_TILES=0: Behaves exactly like persistent_gemm_tdm_pipelined_kernel
     When STREAMK_TILES>0: Adds StreamK processing after full tiles
+
     """
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
@@ -68,12 +69,17 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     # ============================================================================
     # Phase 1: Process full tiles (persistent scheduling - same as f16_gemm_gfx1250.py)
     # ============================================================================
-    pid = ttgl.program_id(axis=0)
-    num_sms = ttgl.num_programs(axis=0)
+    pid = scheduler.get_pid()
+    num_sms = scheduler.get_num_sms()
+    num_full_tiles = scheduler.get_num_full_tiles()
 
-    for tile_idx in range(scheduler.get_num_tiles()):
-        # get_linear_tile_coords: local tile index -> global (pid_m, pid_n)
-        pid_m, pid_n = scheduler.get_linear_tile_coords(tile_idx)
+    # Enable chiplet transformation (8 XCDs) to improve l2 reuse
+    pid = scheduler.apply_chiplet_transform_chunked(pid, num_sms, num_xcds=8, chunk_size=2)
+
+    # Persistent loop: each CU processes its assigned tiles with stride NUM_SMS
+    for tile_idx in range(pid, num_full_tiles, num_sms):
+        # get_swizzled_tile_coords: local tile index -> global (pid_m, pid_n) with swizzling
+        pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_idx, GROUP_SIZE_M)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
@@ -190,7 +196,6 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
             next_pid = pid + 1
             tile_iter_end = tile_iter + iters_per_tile
             end = end_iter
-            num_sms = ttgl.num_programs(axis=0)
 
             while (end < tile_iter_end and next_pid < num_sms):
                 while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
