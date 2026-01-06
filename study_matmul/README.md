@@ -9,7 +9,7 @@ TRITON_LLVM_DEBUG_ONLY="tritonamdgpu-prera-llir-schedule" python bench_gemm_a16w
 
 ## Triton path
 
-orig
+orig (81%)
 
 - Triton compiler: base
 - aiter: 707b9fca3aa68ae86aa (PR#1715)
@@ -18,7 +18,7 @@ orig
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/triton/orig`
 
 
-uniformWarpId
+uniformWarpId (69%)
 
 - triton compiler: https://github.com/triton-lang/triton/pull/9073 rebased on top of 77e7a7b74f0731
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/triton/uniformWarpId`
@@ -30,6 +30,7 @@ This PR is necessary to remove the `readfirstlane` before `buffer_load_lds`.
 
 - Branch: `matmul_4waves`
 - Commit: `813f6f4fe8`
+- 58%
 
 Config:
 ```json
@@ -63,6 +64,10 @@ ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/li
 ```
 
 ```
+AMD_INSERT_AMDGCN=/var/lib/jenkins/OAI-triton/study_matmul/asm_tool/new_asm.s
+```
+
+```
 TRITON_LLVM_DEBUG_ONLY="tritonamdgpu-prera-llir-schedule" python study_matmul/gluon/gl_matmul.py
 ```
 
@@ -73,6 +78,7 @@ TRITON_LLVM_DEBUG_ONLY="tritonamdgpu-prera-llir-schedule" python study_matmul/gl
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v5_pred_llirSchedV0`
 - vgpr: 510
 - perf: 950 tflops
+- 53%
 
 The `v5_pred` version of the kernel implements a 3-stage pipeline and full LDS buffer
 prefetch for both A and B.
@@ -90,6 +96,7 @@ However, the backend does not respect the scheduling at llir level
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v5_pred_llirSchedV1`
 - vgpr: 510
 - perf: 1120 tflops
+- 77%
 
 Same kernel is used as v0.
 This version of the llir scheduler further inserts `sched.barrier` before
@@ -136,6 +143,7 @@ Result
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v6`
 - vgpr: 478
 - perf: 1150 tflops
+- 74%
 
 ### v7
 
@@ -157,6 +165,32 @@ op scheduling at region scope. Then the llir scheduler does fine grained interle
 within each region.
 
 - gluon kernel version: v7
+  - Note that we also set K as `gl.constexpr` since this cleans up the basic block
+    structure in the final assembly code.
 - IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7`
 - vgpr: 512
 - perf: 1190 tflops
+- 81%
+
+#### amdgcn v0
+
+Use the python assembler to further compile the generated amdgcn file from v7.
+This version removes `v_accvgpr_` and related `s_nop` instructions inside the loop.
+
+- att:  `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7/att_output_amdgcnasV0`
+- new assembly: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7/new_asm.s`
+- 87%
+
+Next steps
+- [ ] `s_nop` and `v_accvgpr` before `buffer_load`
+- [ ] The loop starts and ends with a number of `s_xx` instructions
+- [ ] The following pattern to compute `ds_read` addr
+      ```
+      v_accvgpr_read_b32 v1, a174
+      v_add_u32_e32 v254, 0, v1
+      v_add_u32_e32 v6, 0x18bc0, v254
+      ```
+- [ ] the first `buffer_load` always takes longer? 
+- [ ] `s_mov_b32 m0, s25` We should be able to compute m0 directly
+- [ ] There are a few salu and valu instructions between `ds_read` and `buffer_load`
+      regions. And we see DIDT issue after that. We need more mfma between them.
