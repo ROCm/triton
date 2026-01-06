@@ -1,10 +1,13 @@
 from collections import defaultdict, Counter, deque
+from typing import Set, Tuple, Optional
 import re
 
+
 class Register:
+
     def __init__(self, kind, ids):
-        self.kind = kind    # 's', 'v', 'a'
-        self.ids = ids      # set of ints
+        self.kind = kind  # 's', 'v', 'a'
+        self.ids = ids  # list of ints
 
         if len(self.ids) > 1:
             expected = list(range(self.ids[0], self.ids[0] + len(self.ids)))
@@ -53,6 +56,7 @@ class Register:
 
 
 class Instruction:
+
     def __init__(self, opcode, operands, regs_by_operand, loc, raw_line):
         self.opcode = opcode
         self.operands = operands
@@ -60,11 +64,13 @@ class Instruction:
         self.loc = loc
         self.raw_line = raw_line
 
-        self.defs = set()  # filled later
+        self.defs = set()  # set[(kind, id)]
         self.uses = set()
 
         self.users = set()  # instructions that read registers produced by this instruction
         self.producers = set()  # instructions that write registers used by this instruction
+
+        self.lds_chain: LDSReadChain = None
 
     def emit(self):
         if not self.operands:
@@ -83,34 +89,26 @@ class Instruction:
         return regs
 
     def defines(self, reg) -> bool:
-        #return any(r.overlaps(reg) for r in self.defs)
-        #print(f"In defines: reg = {reg=}")
         if self.regs_by_operand:
-            #print(f"{self.regs_by_operand[0]=}")
-            #print(f"{self.regs_by_operand[1]=}")
             return self.regs_by_operand[0].overlaps(reg)
         else:
             return False
 
     def uses_regs(self, reg) -> bool:
-        #return any(r.overlaps(reg) for r in self.uses)
-        if len(self.uses) > 0:
-            #print(f"{self.regs_by_operand[1]=}")
-            return any(r.overlaps(reg) for r in self.uses)
+        if len(self.regs_by_operand) > 1:
+            return any(r.overlaps(reg) for r in self.regs_by_operand[1:])
         else:
             return False
 
-    def replace_reg(self, old: Register, new: Register):
+    def replace_dst(self, reg: Register):
+        assert len(self.regs_by_operand) > 0
+        self.operands[0] = reg.emit()
+        self.update_regs_by_operand()
+
+    def update_regs_by_operand(self):
+        self.regs_by_operand = []
         for op in self.operands:
-            op.replace_reg(old, new)
-
-        if old in self.defs:
-            self.defs.remove(old)
-            self.defs.add(new)
-
-        if old in self.uses:
-            self.uses.remove(old)
-            self.uses.add(new)
+            self.regs_by_operand.extend(extract_registers(op))
 
     # MFMA-only helpers
     def is_mfma(self) -> bool:
@@ -131,18 +129,37 @@ class Instruction:
     def replace_mfma_dst(self, reg: Register):
         assert self.is_mfma()
         self.operands[0] = reg.emit()
-        self.defs = reg
+        self.update_regs_by_operand()
 
     def replace_mfma_acc(self, reg: Register):
         assert self.is_mfma()
         self.operands[-1] = reg.emit()
+        self.update_regs_by_operand()
+
+    def replace_mfma_operand(self, reg: Register, opIdx: int):
+        assert self.is_mfma()
+        assert (opIdx == 1) or (opIdx == 2)
+        self.operands[opIdx] = reg.emit()
+        self.update_regs_by_operand()
+
+    def get_op_idx(self, reg: Register):
+        assert self.is_mfma()
+        op1 = extract_registers(self.operands[1])[0]
+        op2 = extract_registers(self.operands[2])[0]
+        if op1.overlaps(reg):
+            return 1
+        elif op2.overlaps(reg):
+            return 2
+        else:
+            return 0
 
 
 class BasicBlock:
+
     def __init__(self, name):
         self.name = name
         self.instructions = []
-        self.succs = []   # filled later
+        self.succs = []  # filled later
         self.preds = []
 
         self.defs = set()
@@ -150,6 +167,8 @@ class BasicBlock:
 
         self.live_in = set()
         self.live_out = set()
+
+        self.free_regs = set()  # all_reg - (defs | uses | live_in)
 
     def add_inst(self, inst):
         self.instructions.append(inst)
@@ -165,13 +184,22 @@ class BasicBlock:
         if idx_a >= idx_b:
             return []
 
-        return self.instructions[idx_a + 1 : idx_b]
+        return self.instructions[idx_a + 1:idx_b]
 
-    def instructions_before(self, inst):
+    def instructions_before(self, inst, including=False):
         idx = self.instructions.index(inst)
-        return self.instructions[:idx]
+        if including:
+            return self.instructions[:idx + 1]
+        else:
+            return self.instructions[:idx]
 
-    def get_reaching_defs(self, inst, reg):
+    def next_instruction(self, inst):
+        if inst == self.instructions[-1]:
+            return None
+        idx = self.instructions.index(inst)
+        return self.instructions[idx + 1]
+
+    def get_reaching_defs(self, inst, reg, including=False):
         """
         reg: Register (possibly a range)
         Returns: set of Instructions
@@ -179,7 +207,7 @@ class BasicBlock:
         needed = set(reg.ids)
         reaching_defs = set()
 
-        for prev in reversed(self.instructions_before(inst)):
+        for prev in reversed(self.instructions_before(inst, including)):
             for dreg in prev.get_dst_regs():
                 if dreg.kind != reg.kind:
                     continue
@@ -201,13 +229,17 @@ class BasicBlock:
             lines.append(inst.emit())
         return "\n".join(lines)
 
+
 class Program:
+
     def __init__(self):
-        self.header_lines = []     # before first BB
-        self.blocks = []           # parsed basic blocks
-        self.tail_lines = []       # after s_endpgm
+        self.header_lines = []  # before first BB
+        self.blocks = []  # parsed basic blocks
+        self.tail_lines = []  # after s_endpgm
+
 
 class set_queue:
+
     def __init__(self):
         self.worklist = deque()
         self.in_worklist = set()
@@ -225,18 +257,54 @@ class set_queue:
     def isNotEmpty(self):
         return self.in_worklist
 
+
 class AccumulatorChain:
+
     def __init__(self, root_mfma: Instruction):
         self.root = root_mfma
         self.mfmas: list[Instruction] = []
         self.copy_instrs: list[Instruction] = []
+        self.nops: list[Instruction] = []
         self.acc_regs: set[Register] = set()
         self.canonical: Register | None = None
         self.entry_acc: Register = None
         self.exit_acc: Register = None
+        self.zero_init: set[Instruction] = None
+        self.use_acc: set[Instruction] = set()  # Other instructions that uses acc
+
+    def rewrite(self):
+        canon = self.canonical
+        assert canon is not None
+
+        for mfma in self.mfmas:
+            mfma.replace_mfma_dst(canon)
+            mfma.replace_mfma_acc(canon)
+
+        for inst in self.copy_instrs:
+            inst.mark_dead = True
+
+    def set_canon(self, reg):
+        self.canonical = reg
+
+    def get_zero_init(self, prologue: BasicBlock):
+        self.zero_init = prologue.get_reaching_defs(prologue.instructions[-1], self.entry_acc, True)
+        return self.zero_init
+
+
+class LDSReadChain:
+
+    def __init__(self, root_ds: Instruction):
+        self.ds = root_ds
+        self.users: set[Instruction] = []
+        self.opIdx: Int = 0
+        self.data: Register = None
+        self.addr: Register = None
+        self.loc: Int = 0
+        self.isLiveAcrossBB: bool = False
+
 
 REG_SINGLE = re.compile(r'([sva])(\d+)')
-REG_RANGE  = re.compile(r'([sva])\[(\d+):(\d+)\]')
+REG_RANGE = re.compile(r'([sva])\[(\d+):(\d+)\]')
 REG_PATTERNS = [
     r's\d+',
     r'v\d+',
@@ -247,16 +315,26 @@ REG_PATTERNS = [
     r'a\[\d+:\d+\]',
 ]
 
+
+def count_regs(regs: list[Register]):
+    num_regs = Counter()
+    for flattened in flatten_regs(regs):
+        num_regs[flattened[0]] += 1
+
+    return num_regs['a'], num_regs['v']
+
+
 def parse_register(text):
     if text == 'm0':
         return Register('m', [0])
 
     kind = text[0]
     if '[' in text:
-        lo, hi = map(int, text[text.find('[')+1:text.find(']')].split(':'))
+        lo, hi = map(int, text[text.find('[') + 1:text.find(']')].split(':'))
         return Register(kind, list(range(lo, hi + 1)))
     else:
         return Register(kind, [int(text[1:])])
+
 
 def split_operands(text):
     if not text:
@@ -271,6 +349,7 @@ def split_operands(text):
         operands.extend(part.split())
 
     return operands
+
 
 def extract_registers(op):
     regs = []
@@ -300,6 +379,7 @@ def parse_instruction(line, loc):
 
     return Instruction(opcode, operands, regs_by_operand, loc, line)
 
+
 def extract_label(line):
     """
     Extract the label at the start of the line, before the first ':'.
@@ -311,6 +391,7 @@ def extract_label(line):
     # Split at the first colon
     label = line.split(':', 1)[0]
     return label.strip()
+
 
 def parse_asm(text):
     program = Program()
@@ -385,6 +466,7 @@ def parse_asm(text):
 
     return program
 
+
 def emit_blocks(blocks):
     out = []
     for bb in blocks:
@@ -393,6 +475,7 @@ def emit_blocks(blocks):
             out.append(inst.emit())
     return out
 
+
 def emit_program(program):
     out = []
     out.extend(program.header_lines)
@@ -400,13 +483,17 @@ def emit_program(program):
     out.extend(program.tail_lines)
     return "\n".join(out)
 
+
 ############################
 ## Start def-use utilities
 ############################
 
 NO_DEF_OPS = {
-    's_waitcnt', 's_nop',
-    's_branch', 's_cbranch_scc0', 's_cbranch_scc1',
+    's_waitcnt',
+    's_nop',
+    's_branch',
+    's_cbranch_scc0',
+    's_cbranch_scc1',
 }
 
 CMP_PREFIXES = ('s_cmp_', 'v_cmp_')
@@ -416,6 +503,7 @@ CMP_PREFIXES = ('s_cmp_', 'v_cmp_')
 ALL_USERS = ('s_cmp_', 'v_cmp_', 'v_permlane', 'buffer_store', 'buffer_load')
 ALL_DEFS = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov')
+
 
 def flatten_regs(regs):
     """
@@ -434,6 +522,7 @@ def flatten_regs(regs):
             out.add((r.kind, rid))
 
     return out
+
 
 def coalesce_regs(flat_regs):
     """
@@ -469,6 +558,7 @@ def coalesce_regs(flat_regs):
 
     return regs
 
+
 def compute_inst_def_use(inst):
     inst.defs.clear()
     inst.uses.clear()
@@ -478,18 +568,19 @@ def compute_inst_def_use(inst):
 
     if inst.opcode.startswith(ALL_USERS):
         for reg in inst.regs_by_operand:
-            inst.uses.add(reg)
+            inst.uses |= flatten_regs(reg)
 
     if inst.opcode.startswith(ALL_DEFS):
         for reg in inst.regs_by_operand:
-            inst.defs.add(reg)
+            inst.defs |= flatten_regs(reg)
         return
 
     # Normal case
     if inst.regs_by_operand:
-        inst.defs.add(inst.regs_by_operand[0])
+        inst.defs |= flatten_regs(inst.regs_by_operand[0])
         for reg in inst.regs_by_operand[1:]:
-            inst.uses.add(reg)
+            inst.uses |= flatten_regs(reg)
+
 
 def compute_bb_def_use(bb):
     bb.defs.clear()
@@ -503,6 +594,7 @@ def compute_bb_def_use(bb):
                 bb.uses.add(u)
 
         bb.defs |= inst.defs
+
 
 def build_cfg(blocks):
     label_map = {bb.name: bb for bb in blocks}
@@ -532,6 +624,7 @@ def build_cfg(blocks):
         for s in bb.succs:
             s.preds.append(bb)
 
+
 def compute_liveness(blocks):
     changed = True
     while changed:
@@ -548,6 +641,7 @@ def compute_liveness(blocks):
                 bb.live_out = new_out
                 bb.live_in = new_in
                 changed = True
+
 
 def collapse_ranges(ids):
     """
@@ -574,6 +668,7 @@ def collapse_ranges(ids):
 
     return [fmt(lo, hi) for lo, hi in ranges]
 
+
 def build_def_use_chains_linear(blocks):
     """
     Correct reaching-definition-based def-use chains.
@@ -584,13 +679,11 @@ def build_def_use_chains_linear(blocks):
 
     for bb in blocks:
         for inst in bb.instructions:
+            inst.users.clear()
+            inst.producers.clear()
             # ---------
             # Uses: find producers
             # ---------
-            #if 'v_permlane' in inst.opcode:
-            #    print(inst.emit())
-            #    print(f"  defs: {inst.defs}")
-            #    print(f"  uses: {inst.uses}")
             for reg in inst.uses:
                 if reg in current_def:
                     prod = current_def[reg]
@@ -602,6 +695,7 @@ def build_def_use_chains_linear(blocks):
             # ---------
             for reg in inst.defs:
                 current_def[reg] = inst
+
 
 def analyze_blocks(blocks):
     print("")
@@ -649,7 +743,6 @@ def analyze_blocks(blocks):
                 ranges = collapse_ranges(sorted(ids))
                 print(f"    {kind}: {', '.join(ranges)}")
 
-
         print("  Register usage:")
         dump_regs('s', "SGPR")
         dump_regs('v', "VGPR")
@@ -665,38 +758,70 @@ def analyze_blocks(blocks):
 
         print("--------------------------------------------------------")
 
-def adjust_regs(blocks):
-    loop = None
-    for bb in blocks:
-        if bb.name == '.LBB0_1':
-            loop = bb
 
-    if loop is None:
-        return
+def analyze_block(bb, mfmaChainsInBB, LDSChains):
 
-    worklist = set_queue()
+    all_regs = set()
+    live_in = bb.live_in
+    entry_acc = set()
+    entry_lds_data = set()
 
-    for inst in loop.instructions:
-        if 'mfma' in inst.opcode:
-            if inst.loc[1] == 766:
-                acc_new = inst.regs_by_operand[0]
-                acc_old = inst.regs_by_operand[3]
-                print(f"{acc_new} <-- {acc_old}")
-                #print(inst.emit())
-                #for prod in inst.producers:
-                #    print(f"{prod.opcode} " + ", ".join(prod.operands))
+    for i in range(512):
+        if i > 255:
+            kind = 'a'
+            id = i - 256
+            all_regs.add((kind, id))
+        else:
+            kind = 'v'
+            id = i
+            all_regs.add((kind, id))
 
-                worklist.push(inst)
-                while worklist.isNotEmpty():
-                    cur_inst = worklist.pop()
-                    print(cur_inst.emit())
-                    for user in cur_inst.users:
-                        worklist.push(user)
+    for chain in mfmaChainsInBB:
+        entry_acc |= flatten_regs(chain.entry_acc)
 
-                break
+    for chain in LDSChains:
+        ds_read_inst = chain.ds
+        if (not ds_read_inst in bb.instructions) and (next(iter(chain.users), None) in bb.instructions):
+            entry_lds_data |= flatten_regs(ds_read_inst.get_dst_regs()[0])
+
+    if entry_acc.issubset(live_in):
+        print(f"live-in contains entry_acc")
+    if entry_lds_data.issubset(live_in):
+        print(f"live-in contains lds_data_acc")
+
+    remaining = live_in - entry_acc - entry_lds_data
+
+    live_in_a, live_in_v = count_regs(coalesce_regs(live_in))
+    print(f"live_in: a={live_in_a} v={live_in_v} {coalesce_regs(live_in)}")
+    acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
+    print(f"acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
+    lds_a, lds_v = count_regs(coalesce_regs(entry_lds_data))
+    print(f"lds data: a={lds_a} v={lds_v} {coalesce_regs(entry_lds_data)}")
+
+    re_a, re_v = count_regs(coalesce_regs(remaining))
+    print(f"live-in remaining: a={re_a} v={re_v} {coalesce_regs(remaining)}")
+
+    bb_uses = bb.defs | bb.uses
+    if live_in.issubset(bb_uses):
+        print(f"bb_uses contains live_in")
+    #bb_uses = bb_uses - live_in
+    bb_a, bb_v = count_regs(coalesce_regs(bb_uses))
+    print(f"BB uses: a={bb_a} v={bb_v} {coalesce_regs(bb_uses)}")
+
+    live_through = live_in - bb_uses
+    th_a, th_v = count_regs(coalesce_regs(live_through))
+    print(f"live through: a={th_a} v={th_v} {coalesce_regs(live_through)}")
+
+    free_regs = all_regs - bb_uses - live_through
+    free_a, free_v = count_regs(coalesce_regs(free_regs))
+    print(f"free: a={free_a} v={free_v} {coalesce_regs(free_regs)}")
+
+    bb.free_regs = free_regs
+
 
 def regs_overlap(a, b):
     return a.overlaps(b)
+
 
 def collect_mfma_chains(bb):
     visited = set()
@@ -723,6 +848,9 @@ def collect_mfma_chains(bb):
 
             if cur.is_mfma():
                 chain.mfmas.append(cur)
+                next = bb.next_instruction(cur)
+                if next and 'nop' in next.opcode:
+                    chain.nops.append(next)
                 chain.acc_regs.add(cur.get_mfma_dst())
 
                 acc = cur.get_mfma_acc()
@@ -766,59 +894,43 @@ def collect_mfma_chains(bb):
                 if user in bb.instructions:
                     worklist.append(user)
 
+        get_entry_exit_acc_reg(bb, chain)
+
     return chains
 
+
 def choose_canonical_acc(chain, bb):
-    candidate = chain.mfmas[-1].get_mfma_acc()
+    candidate = chain.exit_acc
 
-    print(f"Choose canon acc!! {candidate=} between:")
-    print(f"    {chain.mfmas[-1].emit()}")
-    print(f"    {chain.mfmas[0].emit()}")
+    print(f"Need optimize copy inst on the chain!! Use {candidate=} while {chain.entry_acc=}", end="")
+    print(f"  number of nops: {len(chain.nops)}")
+    if chain.entry_acc != chain.exit_acc:
+        print(f"    mismatch acc")
+        mfma = chain.mfmas[-1]
+        reach_defs = bb.get_reaching_defs(mfma, mfma.get_mfma_acc())
+        for reaching_def in reach_defs:
+            print(f"    {reaching_def.emit()}")
 
-    for inst in bb.instructions_between(
-        chain.mfmas[-1], chain.mfmas[0]
-    ):
-        #print(f"{inst.emit()=}   ", end="")
+    for inst in bb.instructions_between(chain.mfmas[-1], chain.mfmas[0]):
         if inst in chain.mfmas or inst in chain.copy_instrs:
-            #print("on the chain, continue")
             continue
-        #if inst.defines(candidate) or inst.uses(candidate):
-        
         if inst.defines(candidate):
-            #print("liveness interleave, return none")
-            #print(f"    oops, {inst.emit()} defines {candidate}")
+            chain.use_acc.add(inst)
+            print(f"    oops, {inst.emit()} defines {candidate}")
+            if 'ds_read_b128' in inst.opcode:
+                for user in inst.users:
+                    print(f"      {user.emit()} {user in bb.instructions}")
             return None
         if inst.uses_regs(candidate):
-            #print("liveness interleave, return none")
-            #print(f"    oops, {inst.emit()} uses {candidate}")
+            print(f"    oops, {inst.emit()} uses {candidate}")
             return None
 
-        #print("un-related, continue")
-
-    chain.canonical = candidate
     return candidate
 
-def rewrite_chain(chain):
-    canon = chain.canonical
-    assert canon is not None
-
-    #print(f"need to rewrite a chain with {canon=}")
-
-    for mfma in chain.mfmas:
-        #print(f"before: {mfma.emit()=}  {mfma.operands=}")
-        mfma.replace_mfma_dst(canon)
-        #print(f"after: {mfma.emit()=}")
-        mfma.replace_mfma_acc(canon)
-        #print(f"after: {mfma.emit()=}")
-
-    for inst in chain.copy_instrs:
-        inst.mark_dead = True
 
 def cleanup_bb(bb):
-    bb.instructions = [
-        inst for inst in bb.instructions
-        if not getattr(inst, "mark_dead", False)
-    ]
+    bb.instructions = [inst for inst in bb.instructions if not getattr(inst, "mark_dead", False)]
+
 
 def get_entry_exit_acc_reg(bb, chain):
     ## entry acc is the reaching definition of the acc regs of chain.mfmas[-1]
@@ -831,7 +943,7 @@ def get_entry_exit_acc_reg(bb, chain):
 
     while worklist:
         cur = worklist.pop()
-        reaching_defs = bb.get_reaching_defs(cur, cur.get_dst_regs()[0])
+        reaching_defs = bb.get_reaching_defs(cur, cur.get_src_regs()[0])
         if reaching_defs:
             for reaching_def in reaching_defs:
                 worklist.append(reaching_def)
@@ -845,49 +957,307 @@ def get_entry_exit_acc_reg(bb, chain):
     else:
         entry_acc_regs |= flatten_regs(mfma.get_mfma_acc())
 
-    return coalesce_regs(entry_acc_regs)
-
+    chain.entry_acc = coalesce_regs(entry_acc_regs)[0]
 
     ## exit acc is the last user of the dst reg of chain.mfmas[0]
+    mfma = chain.mfmas[0]
+    worklist = []
+    for user in mfma.users:
+        if user in bb.instructions:
+            worklist.append(user)
 
-    
+    final_users = []
 
-def optimize_mfma_accumulators(bb):
-    chains = collect_mfma_chains(bb)
+    while worklist:
+        cur = worklist.pop()
+        all_in_ep = True
+        for user in cur.users:
+            if user in bb.instructions:
+                worklist.append(user)
+                all_in_ep = False
+        if all_in_ep:
+            final_users.append(cur)
 
-    print(f"how many chains: {len(chains)}")
+    exit_acc_regs = set()
+    if final_users:
+        for inst in final_users:
+            exit_acc_regs |= flatten_regs(inst.get_dst_regs()[0])
+    else:
+        exit_acc_regs |= flatten_regs(mfma.get_mfma_dst())
+
+    chain.exit_acc = coalesce_regs(exit_acc_regs)[0]
+
+
+def optimize_mfma_accumulators(bb, chains):
+
+    print(f"===================================================================")
+    print(f"Optimizing {len(chains)} mfma chains")
 
     entry_regs = []
+    exit_regs = []
+    entry_hist = Counter()
+    exit_hist = Counter()
     for chain in chains:
-        entry_reg = get_entry_exit_acc_reg(bb, chain)
-        entry_regs.append(entry_reg[0])
-        print(f"{entry_reg=}")
-        if len(chain.copy_instrs) == 0:
-            continue
-        if choose_canonical_acc(chain, bb) is None:
+        entry_reg, exit_reg = chain.entry_acc, chain.exit_acc
+        entry_hist[entry_reg] += 1
+        exit_hist[exit_reg] += 1
+        entry_regs.append(entry_reg)
+        exit_regs.append(exit_reg)
+        #if len(chain.copy_instrs) == 0:
+        #    continue
+        canon = choose_canonical_acc(chain, bb)
+        if canon is None:
             continue
 
-        rewrite_chain(chain)
+        chain.set_canon(canon)
+        chain.rewrite()
 
     entry_acc_flatten = flatten_regs(entry_regs)
+    exit_acc_flatten = flatten_regs(exit_regs)
     entry_acc = coalesce_regs(entry_acc_flatten)
-    print(f"{len(entry_acc_flatten)}: {entry_acc=}")
+    exit_acc = coalesce_regs(exit_acc_flatten)
+    a_num, v_num = count_regs(entry_regs)
+    print(f"{a_num=} {v_num=}: {entry_acc=}")
+    #for reg, cnt in entry_hist.most_common():
+    #    print(f"    {reg}: {cnt}")
+
+    print(f"{len(exit_acc_flatten)}: {exit_acc=}")
+    #for reg, cnt in exit_hist.most_common():
+    #    print(f"    {reg}: {cnt}")
+
+    cleanup_bb(bb)
+
+    print(f"=========================== done ====================================")
+
+
+def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int) -> Optional[Set[Tuple[str, int]]]:
+    if x <= 0:
+        raise ValueError("x must be positive")
+
+    # Group register ids by kind
+    by_kind = defaultdict(list)
+    for kind, rid in reg_pool:
+        by_kind[kind].append(rid)
+
+    for kind, ids in by_kind.items():
+        ids = sorted(ids)
+        id_set = set(ids)
+
+        # Try every possible contiguous window
+        for start in ids:
+            end = start + x - 1
+
+            # Alignment constraint
+            if x > 1 and start % 2 != 0:
+                continue
+
+            # Check contiguous existence
+            window = list(range(start, start + x))
+            if all(i in id_set for i in window):
+                chosen = {(kind, i) for i in window}
+
+                # Remove from original pool (in place)
+                reg_pool.difference_update(chosen)
+
+                return chosen
+
+    return None
+
+
+def clear_optimize_mfma_obstacles(bb, chains):
+    print(f"========== clear obstacles ==========")
+
+    x = 4
+    for chain in chains:
+        for inst in chain.use_acc:
+            print(f"{inst.emit()}")
+            avai_regs = pick_and_remove_contiguous_regs(bb.free_regs, x)
+            if avai_regs is None:
+                print(f"Not enough free registers")
+                return
+            print(f"free regs: {coalesce_regs(avai_regs)}, remaining: {coalesce_regs(bb.free_regs)}")
+            free_reg = coalesce_regs(avai_regs)[0]
+            if 'ds_read' in inst.opcode:
+                lds_chain = inst.lds_chain
+                inst.replace_dst(free_reg)
+                opIdx = lds_chain.opIdx
+                for user in lds_chain.users:
+                    user.replace_mfma_operand(free_reg, opIdx)
+
+    print(f"========== done clear obstacles ==========")
+
+
+def collect_ds_chains(blocks):
+
+    print(f"========== Collecting lds chains ==========")
+    chains = []
+
+    for bb in blocks:
+        for inst in bb.instructions:
+            if 'ds_read_b128' in inst.opcode:
+                chain = LDSReadChain(inst)
+                chain.users = inst.users
+                #print(f"lds users: {len(chain.users)}  {inst.get_dst_regs()[0]}")
+                data_reg = inst.get_dst_regs()[0]
+                assert chain.opIdx == 0
+                chain.loc = inst.loc[1]
+                chain.addr = inst.get_src_regs()[0]
+                #print(f"{inst.emit()}")
+                for user in chain.users:
+                    assert user.is_mfma()
+                    opIdx = user.get_op_idx(data_reg)
+                    #print(f"    {opIdx=}: {user.emit()}")
+                    assert opIdx == 1 or opIdx == 2
+                    if chain.opIdx != 0 and chain.opIdx != opIdx:
+                        print(f"mismatch opIdx!!!")
+                    chain.opIdx = opIdx
+
+                    if not user in bb.instructions:
+                        chain.isLiveAcrossBB = True
+                inst.lds_chain = chain
+                chains.append(chain)
+
+    total_lds_regs = []
+    lds_regs_by_loc = {}
+    for chain in chains:
+        total_lds_regs.append(chain.ds.get_dst_regs()[0])
+        #print(f"{chain.loc=}")
+        lds_regs_by_loc.setdefault(chain.loc, list()).append(chain.ds.get_dst_regs()[0])
+
+    #for loc, regs in lds_regs_by_loc.items():
+    #    reg_list = coalesce_regs(flatten_regs(regs))
+    #    print(f"{loc=}: {len(regs)} {reg_list}")
+
+    a_num, v_num = count_regs(total_lds_regs)
+    print(f"total LDS regs: {a_num=}  {v_num=} {coalesce_regs(flatten_regs(total_lds_regs))}")
+
+    print(f"========== Done Collecting lds chains ==========")
+    return chains
+
+
+def print_map(map, loc):
+    print(f"{loc}: ", end="")
+    for regs in map[loc]:
+        print(f"{regs} ", end="")
+    print("")
+
+
+def construct_lds_reg_map():
+    '''
+    loc  tensor  regs
+    754  A       a[0:63]
+    755  B0      a[64:95]
+    769  B1      a[96:127]
+    783  A'      a[128:191]
+    784  B0      a[64:95]
+    803  B1      a[96:127]
+    817  A       a[0:63]
+    818  B0      a[64:95]
+    846  B1      a[96:127]
+    '''
+
+    lds_reg_assignment = {}  # loc --> list[Register]
+    regs_A = []
+    for i in range(0, 64, 4):
+        ids = [i + x for x in range(4)]
+        kind = 'a'
+        regs_A.append(Register(kind, ids))
+
+    regs_B0 = []
+    for i in range(64, 96, 4):
+        ids = [i + x for x in range(4)]
+        kind = 'a'
+        regs_B0.append(Register(kind, ids))
+
+    regs_B1 = []
+    for i in range(96, 128, 4):
+        ids = [i + x for x in range(4)]
+        kind = 'a'
+        regs_B1.append(Register(kind, ids))
+
+    regs_A1 = []
+    for i in range(128, 192, 4):
+        ids = [i + x for x in range(4)]
+        kind = 'a'
+        regs_A1.append(Register(kind, ids))
+
+    lds_reg_assignment[754] = regs_A
+    lds_reg_assignment[755] = regs_B0
+    lds_reg_assignment[769] = regs_B1
+    lds_reg_assignment[783] = regs_A1
+    lds_reg_assignment[784] = regs_B0
+    lds_reg_assignment[803] = regs_B1
+    lds_reg_assignment[817] = regs_A
+    lds_reg_assignment[818] = regs_B0
+    lds_reg_assignment[846] = regs_B1
+
+    #print_map(lds_reg_assignment, 754)
+    #print_map(lds_reg_assignment, 755)
+    #print_map(lds_reg_assignment, 769)
+    #print_map(lds_reg_assignment, 783)
+    #print_map(lds_reg_assignment, 784)
+    #print_map(lds_reg_assignment, 803)
+    #print_map(lds_reg_assignment, 817)
+    #print_map(lds_reg_assignment, 818)
+    #print_map(lds_reg_assignment, 846)
+
+    return lds_reg_assignment
+
+
+def reassign_lds_regs(chains: list[LDSReadChain]):
+
+    map = construct_lds_reg_map()
+
+
+def optimize_nops(bb):
+
+    for inst in bb.instructions:
+        if 'nop' in inst.opcode:
+            idx = bb.instructions.index(inst)
+            ## The only allowed nop is the one between set m0 abd buffer_load
+            if idx == 0:
+                inst.mark_dead = True
+                continue
+            if inst == bb.instructions[-1]:
+                inst.mark_dead = True
+                continue
+            prev = bb.instructions[idx - 1]
+            prev_dst_reg = prev.get_dst_regs()
+            if len(prev_dst_reg) == 0:
+                inst.mark_dead = True
+                continue
+            if prev_dst_reg[0].kind != 'm':
+                inst.mark_dead = True
+                continue
+            suc = bb.instructions[idx + 1]
+            if 'buffer_load' in suc.opcode:
+                continue
+            else:
+                inst.mark_dead = True
 
     cleanup_bb(bb)
 
 
 if __name__ == "__main__":
     with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7/v7.amdgcn") as f:
+        #with open("./v7/v7.amdgcn") as f:
         text = f.read()
 
     program = parse_asm(text)
 
     blocks = program.blocks
     loop = None
+    prologue = None
+
+    #########################################################
+    ## 1st round
+    #########################################################
     for bb in blocks:
         compute_bb_def_use(bb)
         if bb.name == '.LBB0_1':
             loop = bb
+        if bb.name == '.LBB0_0':
+            prologue = bb
 
     build_def_use_chains_linear(blocks)
 
@@ -895,13 +1265,49 @@ if __name__ == "__main__":
     compute_liveness(blocks)
     #analyze_blocks(blocks)
 
-    optimize_mfma_accumulators(loop)
+    LDSChains = collect_ds_chains(blocks)
+    reassign_lds_regs(LDSChains)
+
+    mfmaChainsInLoop = collect_mfma_chains(loop)
+
+    print(f"========== Analyze loop ==========")
+    analyze_block(loop, mfmaChainsInLoop, LDSChains)
+    print(f"========== Done Analyze loop ==========")
+
+    optimize_mfma_accumulators(loop, mfmaChainsInLoop)
+
+    clear_optimize_mfma_obstacles(loop, mfmaChainsInLoop)
+
+    #########################################################
+    ## 2nd round
+    #########################################################
+    print("")
+    print("")
+    for bb in blocks:
+        compute_bb_def_use(bb)
+    build_def_use_chains_linear(blocks)
+
+    compute_liveness(blocks)
+
+    mfmaChainsInLoop = collect_mfma_chains(loop)
+    LDSChains = collect_ds_chains(blocks)
+
+    optimize_mfma_accumulators(loop, mfmaChainsInLoop)
+
+    for chain in mfmaChainsInLoop:
+        zero_init = chain.get_zero_init(prologue)
+
+    print(f"========== Analyze loop ==========")
+    analyze_block(loop, mfmaChainsInLoop, LDSChains)
+    print(f"========== Done Analyze loop ==========")
+
+    optimize_nops(loop)
 
     # Suppose emit_program(program) returns a string of the assembly
     emitted_text = emit_program(program)
 
     # Write to a file
-    output_file = "/var/lib/jenkins/OAI-triton/study_matmul/asm_tool/new_asm.s"  # or whatever you want
+    output_file = "./new_asm.s"  # or whatever you want
     with open(output_file, "w") as f:
         f.write(emitted_text)
 
