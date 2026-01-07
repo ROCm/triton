@@ -57,7 +57,7 @@ class Register:
 
 class Instruction:
 
-    def __init__(self, opcode, operands, regs_by_operand, loc, raw_line):
+    def __init__(self, opcode, operands, regs_by_operand, loc, raw_line, bb):
         self.opcode = opcode
         self.operands = operands
         self.regs_by_operand = regs_by_operand  # List[List[Register]]
@@ -72,20 +72,24 @@ class Instruction:
 
         self.lds_chain: LDSReadChain = None
 
+        self.parent_bb = bb
+        self.index = None  # position inside BB
+
     def emit(self):
         if not self.operands:
             return self.opcode
         return f"{self.opcode} " + ", ".join(self.operands)
 
-    def get_dst_regs(self) -> list[Register]:
-        if not self.operands:
-            return []
-        return [op for op in extract_registers(self.operands[0])]
+    def get_dst_regs(self) -> Register:
+        if (not self.operands) or (not self.regs_by_operand):
+            return None
+        return parse_register(self.operands[0])
 
     def get_src_regs(self) -> list[Register]:
         regs = []
-        for op in self.operands[1:]:
-            regs.extend(extract_registers(op))
+        if len(self.regs_by_operand) > 1:
+            for op in self.operands[1:]:
+                regs.extend(extract_registers(op))
         return regs
 
     def defines(self, reg) -> bool:
@@ -110,6 +114,31 @@ class Instruction:
         for op in self.operands:
             self.regs_by_operand.extend(extract_registers(op))
 
+    ## Replace old_reg with new_reg in this instruction
+    def replace_reg(self, old_reg: Register, new_reg: Register):
+        for i, op in enumerate(self.operands):
+            if op == old_reg.emit():
+                self.operands[i] = new_reg.emit()
+                break
+        self.update_regs_by_operand()
+
+    ## Replace the uses of this inst.def with reg
+    def replace_users_with(self, reg: Register):
+        #def_reg = coalesce_regs(self.defs)[0]
+        def_reg = self.get_dst_regs()
+        for user in self.users:
+            user.replace_reg(def_reg, reg)
+
+    # ---------- classification ----------
+    def is_memory(self):
+        return (self.opcode.startswith("ds_") or self.opcode.startswith("buffer_"))
+
+    def is_control(self):
+        return self.opcode.startswith("s_branch") or self.opcode.startswith("s_cbranch")
+
+    def is_pure(self):
+        return not (self.is_memory() or self.is_control())
+
     # MFMA-only helpers
     def is_mfma(self) -> bool:
         return self.opcode.startswith("v_mfma")
@@ -117,8 +146,8 @@ class Instruction:
     def get_mfma_dst(self) -> Register:
         assert self.is_mfma()
         regs = self.get_dst_regs()
-        assert len(regs) == 1
-        return regs[0]
+        assert regs
+        return regs
 
     def get_mfma_acc(self) -> Register:
         assert self.is_mfma()
@@ -171,6 +200,8 @@ class BasicBlock:
         self.free_regs = set()  # all_reg - (defs | uses | live_in)
 
     def add_inst(self, inst):
+        inst.parent_bb = self
+        inst.index = len(self.instructions)
         self.instructions.append(inst)
 
     def instructions_between(self, inst_a, inst_b):
@@ -208,14 +239,16 @@ class BasicBlock:
         reaching_defs = set()
 
         for prev in reversed(self.instructions_before(inst, including)):
-            for dreg in prev.get_dst_regs():
-                if dreg.kind != reg.kind:
-                    continue
+            dreg = prev.get_dst_regs()
+            if not dreg:
+                continue
+            if dreg.kind != reg.kind:
+                continue
 
-                overlap = needed & set(dreg.ids)
-                if overlap:
-                    reaching_defs.add(prev)
-                    needed -= overlap
+            overlap = needed & set(dreg.ids)
+            if overlap:
+                reaching_defs.add(prev)
+                needed -= overlap
 
             if not needed:
                 break
@@ -368,7 +401,7 @@ def extract_registers(op):
     return regs
 
 
-def parse_instruction(line, loc):
+def parse_instruction(line, loc, bb):
     line = line.strip()
     if not line or line.startswith(';'):
         return None
@@ -386,7 +419,7 @@ def parse_instruction(line, loc):
     for op in operands:
         regs_by_operand.extend(extract_registers(op))
 
-    return Instruction(opcode, operands, regs_by_operand, loc, line)
+    return Instruction(opcode, operands, regs_by_operand, loc, line, bb)
 
 
 def extract_label(line):
@@ -422,7 +455,7 @@ def parse_asm(text):
         # Detect program end
         if 's_endpgm' in line:
             if cur_block:
-                inst = parse_instruction(line, cur_loc)
+                inst = parse_instruction(line, cur_loc, cur_block)
                 if inst:
                     cur_block.add_inst(inst)
             program.tail_lines.append(line)
@@ -469,7 +502,7 @@ def parse_asm(text):
             continue
 
         # instruction
-        inst = parse_instruction(line, cur_loc)
+        inst = parse_instruction(line, cur_loc, cur_block)
         if inst:
             cur_block.add_inst(inst)
 
@@ -720,6 +753,7 @@ def analyze_blocks(blocks):
         inst_hist = Counter()
         for inst in bb.instructions:
             inst_hist[(inst.opcode, inst.loc[1])] += 1
+            inst.index = bb.instructions.index(inst)
 
         print("  Instruction histogram:")
         for op, cnt in inst_hist.most_common():
@@ -793,21 +827,19 @@ def analyze_block(bb, mfmaChainsInBB, LDSChains):
     for chain in LDSChains:
         ds_read_inst = chain.ds
         if (not ds_read_inst in bb.instructions) and (next(iter(chain.users), None) in bb.instructions):
-            entry_lds_data |= flatten_regs(ds_read_inst.get_dst_regs()[0])
+            entry_lds_data |= flatten_regs(ds_read_inst.get_dst_regs())
 
-    if entry_acc.issubset(live_in):
-        print(f"live-in contains entry_acc")
-    if entry_lds_data.issubset(live_in):
-        print(f"live-in contains lds_data_acc")
+    assert entry_acc.issubset(live_in)
+    assert entry_lds_data.issubset(live_in)
 
     remaining = live_in - entry_acc - entry_lds_data
 
     live_in_a, live_in_v = count_regs(coalesce_regs(live_in))
     print(f"live_in: a={live_in_a} v={live_in_v} {coalesce_regs(live_in)}")
     acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
-    print(f"acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
+    print(f"live-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
     lds_a, lds_v = count_regs(coalesce_regs(entry_lds_data))
-    print(f"lds data: a={lds_a} v={lds_v} {coalesce_regs(entry_lds_data)}")
+    print(f"live-in lds data: a={lds_a} v={lds_v} {coalesce_regs(entry_lds_data)}")
 
     re_a, re_v = count_regs(coalesce_regs(remaining))
     print(f"live-in remaining: a={re_a} v={re_v} {coalesce_regs(remaining)}")
@@ -992,7 +1024,7 @@ def get_entry_exit_acc_reg(bb, chain):
     exit_acc_regs = set()
     if final_users:
         for inst in final_users:
-            exit_acc_regs |= flatten_regs(inst.get_dst_regs()[0])
+            exit_acc_regs |= flatten_regs(inst.get_dst_regs())
     else:
         exit_acc_regs |= flatten_regs(mfma.get_mfma_dst())
 
@@ -1112,7 +1144,7 @@ def collect_ds_chains(blocks):
                 chain = LDSReadChain(inst)
                 chain.users = inst.users
                 #print(f"lds users: {len(chain.users)}  {inst.get_dst_regs()[0]}")
-                data_reg = inst.get_dst_regs()[0]
+                data_reg = inst.get_dst_regs()
                 assert chain.opIdx == 0
                 chain.loc = inst.loc[1]
                 chain.addr = inst.get_src_regs()[0]
@@ -1134,9 +1166,9 @@ def collect_ds_chains(blocks):
     total_lds_regs = []
     lds_regs_by_loc = {}
     for chain in chains:
-        total_lds_regs.append(chain.ds.get_dst_regs()[0])
+        total_lds_regs.append(chain.ds.get_dst_regs())
         #print(f"{chain.loc=}")
-        lds_regs_by_loc.setdefault(chain.loc, list()).append(chain.ds.get_dst_regs()[0])
+        lds_regs_by_loc.setdefault(chain.loc, list()).append(chain.ds.get_dst_regs())
 
     #for loc, regs in lds_regs_by_loc.items():
     #    reg_list = coalesce_regs(flatten_regs(regs))
@@ -1241,7 +1273,7 @@ def optimize_buffer_load_voff(bb, chains):
         assert old_reg and old_reg.kind == 'a'
         inst_str = f'v_accvgpr_read_b32 {free_reg.emit()} {old_reg.emit()}'
         #print(f"writing {inst_str} in the prologue")
-        prologue.add_inst(parse_instruction(inst_str, 0))
+        prologue.add_inst(parse_instruction(inst_str, 0, prologue))
 
     cleanup_bb(bb)
 
@@ -1350,10 +1382,10 @@ def optimize_nops(bb):
                 continue
             prev = bb.instructions[idx - 1]
             prev_dst_reg = prev.get_dst_regs()
-            if len(prev_dst_reg) == 0:
+            if prev_dst_reg is None:
                 inst.mark_dead = True
                 continue
-            if prev_dst_reg[0].kind != 'm':
+            if prev_dst_reg.kind != 'm':
                 inst.mark_dead = True
                 continue
             suc = bb.instructions[idx + 1]
@@ -1363,6 +1395,112 @@ def optimize_nops(bb):
                 inst.mark_dead = True
 
     cleanup_bb(bb)
+
+
+def find_loop_invariants(bb: BasicBlock):
+    invariant_regs = set()
+    invariant_insts = set()
+
+    # Collect defs inside loop
+    defs_in_loop = {}
+    for inst in bb.instructions:
+        for r in inst.defs:
+            defs_in_loop.setdefault(r, set()).add(inst)
+
+    # Step 1: live-in registers
+    for inst in bb.instructions:
+        for r in inst.uses:
+            if r not in defs_in_loop:
+                invariant_regs.add(r)
+
+    changed = True
+    while changed:
+        changed = False
+        for inst in bb.instructions:
+            if inst in invariant_insts:
+                continue
+            if not inst.is_pure():
+                continue
+            if not inst.regs_by_operand:
+                continue
+            if inst.get_dst_regs() and inst.get_dst_regs().kind == 'm':
+                continue
+
+            if all(r in invariant_regs for r in inst.uses):
+                invariant_insts.add(inst)
+                for r in inst.defs:
+                    if r not in invariant_regs:
+                        invariant_regs.add(r)
+                        changed = True
+
+    return invariant_insts, invariant_regs
+
+
+def can_hoist(inst, bb, invariant_regs):
+    # Must be pure
+    if not inst.is_pure():
+        return False
+
+    # Each dest reg must:
+    # 1. Have exactly one reaching def inside loop (itself)
+    reg = inst.get_dst_regs()
+    assert reg
+    reaching = bb.get_reaching_defs(inst, reg, True)
+    if len(reaching) != 1 or inst not in reaching:
+        return False
+
+    # 2. No redefinition after inst
+    redef = False
+    for later in bb.instructions[inst.index + 1:]:
+        if later.get_dst_regs():
+            if flatten_regs(later.get_dst_regs()) & flatten_regs(reg):
+                redef = True
+                break
+                #return False
+    if redef:
+        ## Try to use a different reg
+        def_reg = coalesce_regs(inst.defs)[0]
+        print(f"  inst redefined, trying to rewrite {def_reg.emit()}")
+        kind, ids = def_reg.kind, def_reg.ids
+        num = len(ids)
+        free_reg = pick_and_remove_contiguous_regs(bb.free_regs, num, kind)
+        if not free_reg:
+            print(f"Not enough free regs")
+            return False
+        free_reg = coalesce_regs(free_reg)[0]
+        print(f"  found free reg: {free_reg.emit()}")
+        inst.replace_users_with(free_reg)
+        #for user in inst.users:
+        #    print(f"    {user.emit()}")
+        inst.replace_reg(def_reg, free_reg)
+        print(f"  new inst: {inst.emit()}")
+
+    return True
+
+
+def hoist_loop_invariants(bb: BasicBlock):
+    invariant_insts, invariant_regs = find_loop_invariants(bb)
+
+    hoistable = []
+    for inst in invariant_insts:
+        print(f"{inst.emit()=}")
+        if can_hoist(inst, bb, invariant_regs):
+            hoistable.append(inst)
+            print(f"  can hoist!!")
+
+    if not hoistable:
+        return [], bb.instructions
+
+    hoistable.sort(key=lambda i: i.index)
+
+    new_loop = []
+    hoisted_set = set(hoistable)
+
+    for inst in bb.instructions:
+        if inst not in hoisted_set:
+            new_loop.append(inst)
+
+    return hoistable, new_loop
 
 
 if __name__ == "__main__":
@@ -1447,6 +1585,22 @@ if __name__ == "__main__":
     print(f"========== Done Analyze loop ==========")
 
     optimize_buffer_load_m0(loop, bufferLoadChains)
+
+    for bb in blocks:
+        compute_bb_def_use(bb)
+    build_def_use_chains_linear(blocks)
+
+    compute_liveness(blocks)
+
+    print(f"========== LICM ==========")
+    hoisted, new_loop = hoist_loop_invariants(loop)
+    loop.instructions = new_loop
+
+    #print(f"Hoisting the following before the loop:")
+    for inst in hoisted:
+        print(f"{inst.emit()}")
+        prologue.add_inst(inst)
+    print(f"========== Done LICM ==========")
 
     # Suppose emit_program(program) returns a string of the assembly
     emitted_text = emit_program(program)
