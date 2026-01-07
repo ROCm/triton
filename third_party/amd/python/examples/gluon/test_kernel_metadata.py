@@ -143,66 +143,110 @@ def test_f16_attention_kernel_metadata(config):
 
 def generate_mxfp_attention_configs():
     base_configs = [
-        # Tests for pipelined attention fwd kernel
+        # Pipelined kernel
         pytest.param({
             "q_type": "e4m3",
-            "kv_type": "e4m3",  #
-            "batch": 1,  #
+            "kv_type": "e4m3",
+            "batch": 1,
             "seqlen_q": 1024,
-            "seqlen_k": 1024,  #
+            "seqlen_k": 1024,
             "num_q_heads": 1,
-            "num_k_heads": 1,  #
-            "head_sz": 128,  #
+            "num_k_heads": 1,
+            "head_sz": 128,
             "block_m": 128,
-            "block_n": 128,  #
-            "scale_type": "block",  #
-            "p_k_width": 8,  #
+            "block_n": 128,
+            "scale_type": "block",
+            "pingpong": False,
             "subtile": False,
+            "num_warps": 4,
+            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
-            "kv_type": "e4m3",  #
-            "batch": 1,  #
+            "kv_type": "e4m3",
+            "batch": 1,
             "seqlen_q": 1024,
-            "seqlen_k": 1024,  #
+            "seqlen_k": 1024,
             "num_q_heads": 1,
-            "num_k_heads": 1,  #
-            "head_sz": 128,  #
+            "num_k_heads": 1,
+            "head_sz": 128,
             "block_m": 128,
-            "block_n": 128,  #
-            "scale_type": "global",  #
-            "p_k_width": 8,  #
+            "block_n": 128,
+            "scale_type": "global",
+            "pingpong": False,
             "subtile": False,
+            "num_warps": 4,
+            "p_k_width": 8,
+        }),
+        # 4-warp subtile pipelined kernel with block size 256x128
+        pytest.param({
+            "q_type": "e4m3",
+            "kv_type": "e4m3",
+            "batch": 1,
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,
+            "num_q_heads": 1,
+            "num_k_heads": 1,
+            "head_sz": 128,
+            "block_m": 256,
+            "block_n": 128,
+            "scale_type": "block",
+            "pingpong": False,
+            "subtile": True,
+            "num_warps": 4,
+            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
-            "kv_type": "e4m3",  #
-            "batch": 1,  #
+            "kv_type": "e4m3",
+            "batch": 1,
             "seqlen_q": 1024,
-            "seqlen_k": 1024,  #
+            "seqlen_k": 1024,
             "num_q_heads": 1,
-            "num_k_heads": 1,  #
-            "head_sz": 128,  #
+            "num_k_heads": 1,
+            "head_sz": 128,
             "block_m": 256,
-            "block_n": 128,  #
-            "scale_type": "block",  #
-            "p_k_width": 8,  #
+            "block_n": 128,
+            "scale_type": "global",
+            "pingpong": False,
             "subtile": True,
+            "num_warps": 4,
+            "p_k_width": 8,
+        }),
+        # 8-warp pingpong pipelined kernel with block size 128x128
+        pytest.param({
+            "q_type": "e4m3",
+            "kv_type": "e4m3",
+            "batch": 1,
+            "seqlen_q": 1024,
+            "seqlen_k": 1024,
+            "num_q_heads": 1,
+            "num_k_heads": 1,
+            "head_sz": 128,
+            "block_m": 128,
+            "block_n": 128,
+            "scale_type": "block",
+            "pingpong": True,
+            "subtile": False,
+            "num_warps": 8,
+            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
-            "kv_type": "e4m3",  #
-            "batch": 1,  #
+            "kv_type": "e4m3",
+            "batch": 1,
             "seqlen_q": 1024,
-            "seqlen_k": 1024,  #
+            "seqlen_k": 1024,
             "num_q_heads": 1,
-            "num_k_heads": 1,  #
-            "head_sz": 128,  #
-            "block_m": 256,
-            "block_n": 128,  #
-            "scale_type": "global",  #
-            "p_k_width": 8,  #
-            "subtile": True,
+            "num_k_heads": 1,
+            "head_sz": 128,
+            "block_m": 128,
+            "block_n": 128,
+            "scale_type": "global",
+            "pingpong": True,
+            "subtile": False,
+            "num_warps": 8,
+            "p_k_width": 8,
         }),
     ]
     return base_configs
@@ -214,25 +258,22 @@ def test_mxfp_attention_kernel_metadata(config):
     config["disable_p_scaling"] = True
     attn_kernel = run_mxfp_attention(**config)
 
-    QT = config["q_type"]
-    KVT = config["kv_type"]
-    BATCH = config["batch"]
-    SEQLEN_Q = config["seqlen_q"]
-    SEQLEN_K = config["seqlen_k"]
-    NUM_Q_HEADS = config["num_q_heads"]
-    NUM_K_HEADS = config["num_k_heads"]
-    HEAD_SZ = config["head_sz"]
-    BLOCK_M = config["block_m"]
-    BLOCK_N = config["block_n"]
-    SCALE_TYPE = config["scale_type"]
-    PKWIDTH = config["p_k_width"]
-    SUBTILE = config["subtile"]
-    attn_fn = "mxfp_attn_fwd"
-    if SUBTILE:
-        attn_fn += "_subtile"
-    if config["pipelined"]:
-        attn_fn += "_pipelined"
+    config_name = "mxfp_attn_fwd_"
+    config_name += f"{config['scale_type']}_"
+    config_name += f"{config['q_type']}x{config['kv_type']}_"
+    config_name += f"BATCH{config['batch']}_"
+    config_name += f"SEQLENQ{config['seqlen_q']}_"
+    config_name += f"SEQLENK{config['seqlen_k']}_"
+    config_name += f"QHEADS{config['num_q_heads']}_"
+    config_name += f"KVHEADS{config['num_k_heads']}_"
+    config_name += f"HEADSZ{config['head_sz']}_"
+    config_name += f"BM{config['block_m']}_"
+    config_name += f"BN{config['block_n']}_"
+    if config["pingpong"]:
+        config_name += "PINGPONG_"
+    if config["subtile"]:
+        config_name += "SUBTILE_"
+    config_name += f"PKWIDTH{config['p_k_width']}_"
+    config_name += f"WARPS{config['num_warps']}"
 
-    # Generate config name from pytest request
-    config_name = f"{QT}x{KVT}_{SCALE_TYPE}_BATCH{BATCH}_SEQLENQ{SEQLEN_Q}_SEQLENK{SEQLEN_K}_QHEADS{NUM_Q_HEADS}_KVHEADS{NUM_K_HEADS}_HEADSZ{HEAD_SZ}_BM{BLOCK_M}_BN{BLOCK_N}_PKWIDTH{PKWIDTH}_{attn_fn}"
     static_metadata_check(attn_kernel, config_name)

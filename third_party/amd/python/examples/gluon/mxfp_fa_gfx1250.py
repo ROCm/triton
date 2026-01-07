@@ -22,6 +22,7 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 from triton.experimental import gluon
 import triton.experimental.gluon.language as ttgl
 
+from triton.experimental.gluon.language.amd import warp_pipeline_stage
 from triton.experimental.gluon.language.amd.gfx1250 import wmma_scaled
 from triton.experimental.gluon.language.amd.gfx1250 import tdm
 from triton.experimental.gluon.language.amd.gfx1250 import buffer_load, buffer_store
@@ -85,6 +86,31 @@ def get_load_layout(shape, num_warps):
         return ttgl.BlockedLayout([1, 4], [1, 32], [num_warps, 1], [1, 0])
     else:
         return ttgl.BlockedLayout([1, 4], [2, 16], [num_warps, 1], [1, 0])
+
+
+@gluon.constexpr_function
+def get_wmma_layout(num_warps, packed=False, preshuffled=False):
+    assert num_warps == 4 or num_warps == 8
+
+    reg_bases = []
+    tiles_m = 1
+    # For preshuffled case, each warp will handle 2 tiles along the M dim
+    # and 2 tiles along the N dim.
+    if preshuffled:
+        reg_bases = [[0, 1], [1, 0]]
+        tiles_m = 2
+
+    warp_bases = []
+    warps = 1
+    # Distribute all warps along the M dim
+    while warps < num_warps:
+        warp_bases.append([tiles_m, 0])
+        warps <<= 1
+        tiles_m <<= 1
+
+    instr_shape = [16, 16, 128] if not packed else [16, 16, 64]
+
+    return ttgl.amd.AMDWMMALayout(3, True, warp_bases, reg_bases, instr_shape)
 
 
 @aggregate
@@ -272,24 +298,21 @@ class GlobalScaledAttentionConfig:
     # Whether the layout convert between QK and P is trivial - no data movement. This can happen when we use
     # k_width=8 for P and V, which effectively makes QK and P have the same layout.
     CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
-    # Whether to subtile K and V
+    # Whether to subtile K and V.
     SUBTILE: ttgl.constexpr
 
     @gluon.constexpr_function
     def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 P_K_WIDTH, SUBTILE, NUM_BUFFERS, WARP_BASES):
+                 SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
         assert Q_TYPE in ['e5m2', 'e4m3']
         assert KV_TYPE in ['e5m2', 'e4m3']
-
-        NUM_WARPS: ttgl.constexpr = 2**len(WARP_BASES)
         assert NUM_WARPS == 4 or NUM_WARPS == 8
         assert P_K_WIDTH == 16 or P_K_WIDTH == 8
 
         self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
-        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warp_bases=WARP_BASES, instr_shape=[16, 16, 128])
+        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS)
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
         self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
         self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, P_K_WIDTH))
@@ -469,6 +492,14 @@ class GlobalScaledAttentionProgram:
         return a
 
     @gluon.jit
+    def split_subtile(self, x):
+        layout: ttgl.constexpr = x.type.layout
+        a0, a1 = x.reshape([x.shape[0], 2, x.shape[1] // 2]).permute(0, 2, 1).split()
+        a0 = ttgl.convert_layout(a0, layout, assert_trivial=True)
+        a1 = ttgl.convert_layout(a1, layout, assert_trivial=True)
+        return a0, a1
+
+    @gluon.jit
     def async_wait(self, count):
         tdm.async_wait(count)
 
@@ -519,7 +550,7 @@ class GlobalScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_loop_pipeline(self):
+    def fwd_pipeline(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -632,67 +663,9 @@ class GlobalScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_subtile(self):
+    def fwd_4warp_subtile_pipeline(self):
         cfg = self.cfg
-
-        m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N // 2], 0.0, ttgl.float32, cfg.acc_layout)
-        acc0 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
-        acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
-
-        sm_scale = self.sm_scale
-        k_scale = self.k_scale
-        v_scale = self.v_scale
-        p_scale = 0x7F
-
-        end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
-        for i in range(0, end):
-            self.issue_global_load_k(i, sub_idx=0)
-            self.issue_global_load_k(i, sub_idx=1)
-
-            self.async_wait(0)
-            k0 = self.shared_load_k(sub_idx=0)
-            k1 = self.shared_load_k(sub_idx=1)
-
-            qk0 = self.compute_qk(k0, k_scale, zero)
-            qk1 = self.compute_qk(k1, k_scale, zero)
-
-            qk = self.concat_subtile(qk0, qk1)
-            m = ttgl.max(qk, 1)
-            m_ij = ttgl.maximum(m_i, m)
-            m_ij_scaled = m_ij * sm_scale
-            qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-            qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
-            p0 = ttgl.exp2(qk0_shifted)
-            p1 = ttgl.exp2(qk1_shifted)
-            m_diff = m_i * sm_scale - m_ij_scaled
-            m_i = m_ij
-            alpha = ttgl.exp2(m_diff)
-            acc0 = acc0 * alpha[:, None]
-            acc1 = acc1 * alpha[:, None]
-            p = self.concat_subtile(p0, p1)
-            l_ij = ttgl.sum(p, 1)
-            l_i = l_i * alpha + l_ij
-            p = self.downcast_p(p)
-
-            self.issue_global_load_v(i, sub_idx=0)
-            self.issue_global_load_v(i, sub_idx=1)
-
-            self.async_wait(0)
-            v0 = self.shared_load_v(sub_idx=0)
-            v1 = self.shared_load_v(sub_idx=1)
-
-            acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)
-            acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
-
-        acc = self.concat_subtile(acc0, acc1)
-        acc = acc / l_i[:, None]
-        self.store_output(acc)
-
-    @gluon.jit
-    def fwd_subtile_pipeline(self):
-        cfg = self.cfg
+        ttgl.static_assert(cfg.NUM_WARPS == 4 and cfg.HEAD_SZ == 128)
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
         l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -843,6 +816,133 @@ class GlobalScaledAttentionProgram:
         acc = acc * l_recip[:, None]
         self.store_output(acc)
 
+    @gluon.jit
+    def fwd_8warp_pingpong_pipeline(self):
+        cfg = self.cfg
+        ttgl.static_assert(cfg.NUM_WARPS == 8)
+
+        m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+        l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N], 0.0, ttgl.float32, cfg.acc_layout)
+        acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+
+        sm_scale = self.sm_scale
+        k_scale = self.k_scale
+        v_scale = self.v_scale
+        p_scale = 0x7F
+
+        # pipeline prologue, iter -3
+        self.issue_global_load_k(0, buf=0)  # ................................. iter 0
+
+        # pipeline prologue, iter -2
+        self.issue_global_load_k(1, buf=1)  # ................................. iter 1
+
+        self.async_wait(1)  # ................................................. iter 0
+        k = self.shared_load_k(buf=0)
+        self.issue_global_load_v(0, buf=0)  # ................................. iter 0
+
+        # pipeline prologue, iter -1
+        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+
+        self.issue_global_load_k(2, buf=0)  # ................................. iter 2
+
+        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m_ij = ttgl.maximum(m_i, m)
+        m_ij_scaled = m_ij * sm_scale
+        qk0, qk1 = self.split_subtile(qk)
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        p0 = ttgl.exp2(qk0_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        alpha = ttgl.exp2(m_diff)
+        m_i = m_ij
+
+        self.async_wait(2)  # ................................................. iter 0
+        k = self.shared_load_k(buf=1)
+        self.issue_global_load_v(1, buf=1)  # ................................. iter 1
+
+        # main loop from 0 to end-3
+        end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
+        for i in range(0, end - 2):
+            a = i % 2
+            b = 1 - a
+            pred = i - end + 3
+            pred = (pred >> 31) & 1
+
+            with warp_pipeline_stage("stage0"):
+                qk = self.compute_qk(k, k_scale, zero)  # ..................... iter i+1
+                p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
+                p = self.concat_subtile(p0, p1)
+                l_ij = ttgl.sum(p, 1)
+                acc = acc * alpha[:, None]
+                l_i = l_i * alpha + l_ij
+                p = self.downcast_p(p)
+
+            self.async_wait(2)
+            with warp_pipeline_stage("stage1"):
+                v = self.shared_load_v(buf=a)  # .............................. iter i
+                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .. iter i+3
+
+            with warp_pipeline_stage("stage2"):
+                acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ......... iter i
+                m = ttgl.max(qk, 1)  # ........................................ iter i+1
+                m_ij = ttgl.maximum(m_i, m)
+                m_ij_scaled = m_ij * sm_scale
+                qk0, qk1 = self.split_subtile(qk)
+                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+                qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+                p0 = ttgl.exp2(qk0_shifted)
+                m_diff = m_i * sm_scale - m_ij_scaled
+                alpha = ttgl.exp2(m_diff)
+                m_i = m_ij
+
+            self.async_wait(2)
+            with warp_pipeline_stage("stage3"):
+                k = self.shared_load_k(buf=a)  # .............................. iter i+2
+                self.issue_global_load_v(i + 2, buf=a)  # ..................... iter i+2
+
+        # pipeline epilogue, iter end-2
+        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        p = self.concat_subtile(p0, p1)
+        l_ij = ttgl.sum(p, 1)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        p = self.downcast_p(p)
+
+        self.async_wait(2)  # ................................................. iter end-2
+        v = self.shared_load_v(buf=0)
+
+        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
+        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m_ij = ttgl.maximum(m_i, m)
+        m_ij_scaled = m_ij * sm_scale
+        qk0, qk1 = self.split_subtile(qk)
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        p0 = ttgl.exp2(qk0_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        alpha = ttgl.exp2(m_diff)
+        m_i = m_ij
+
+        # pipeline epilogue, iter end-1
+        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p = self.concat_subtile(p0, p1)
+        l_ij = ttgl.sum(p, 1)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        p = self.downcast_p(p)
+
+        self.async_wait(0)  # ................................................. iter end-1
+        v = self.shared_load_v(buf=1)
+
+        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
+
+        # write output
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
+        self.store_output(acc)
+
 
 # ===-----------------------------------------------------------------------===#
 # Block Scaled Attention Program
@@ -880,27 +980,23 @@ class BlockScaledAttentionConfig:
     # k_width=8 for P and V, which effectively makes QK and P have the same layout. But note we can use k_width=8 for
     # V when it is a mxfp4, so this only applies when KV_TYPE is not 'e2m1'.
     CONVERT_LAYOUT_TRIVIAL: ttgl.constexpr
-    # Whether to subtile K and V
+    # Whether to subtile K and V.
     SUBTILE: ttgl.constexpr
 
     @gluon.constexpr_function
     def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 P_SCALING, P_K_WIDTH, SUBTILE, NUM_BUFFERS, WARP_BASES):
+                 P_SCALING, SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
         assert Q_TYPE in ['e5m2', 'e4m3']
         assert KV_TYPE in ['e5m2', 'e4m3', 'e2m1']
-
-        NUM_WARPS: ttgl.constexpr = 2**len(WARP_BASES)
         assert NUM_WARPS == 4 or NUM_WARPS == 8
         assert P_K_WIDTH == 16 or (KV_TYPE != 'e2m1' and P_K_WIDTH == 8)
-        KV_PACK_DIV: ttgl.constexpr = 2 if KV_TYPE == 'e2m1' else 1
 
+        KV_PACK_DIV: ttgl.constexpr = 2 if KV_TYPE == 'e2m1' else 1
         self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
-        wmma_layout: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warp_bases=WARP_BASES, instr_shape=[16, 16, 128])
-        wmma_layout_packed: ttgl.constexpr = ttgl.amd.AMDWMMALayout(  #
-            version=3, transposed=True, warp_bases=WARP_BASES, instr_shape=[16, 16, 64])
+        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS, preshuffled=True)
+        wmma_layout_packed: ttgl.constexpr = get_wmma_layout(NUM_WARPS, packed=True, preshuffled=True)
 
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
         if KV_TYPE == 'e2m1':
@@ -1047,7 +1143,8 @@ class BlockScaledAttentionProgram:
             block_shape=[BLOCK_N // KV_PACK_DIV, HEAD_SZ],  #
             layout=cfg.v_layout,  #
             smem_layout=cfg.v_smem_layout,  #
-            num_buffers=NUM_BUFFERS, sub_axis=1 if SUBTILE else None)
+            num_buffers=NUM_BUFFERS,  #
+            sub_axis=1 if SUBTILE else None)
 
         V_SCALE_DIV: ttgl.constexpr = 128 if HEAD_SZ == 128 else 64
         v_scale_off = (SEQLEN_K // 32 * V_SCALE_DIV) * (HEAD_SZ // V_SCALE_DIV) * (NUM_K_HEADS * off_z + off_hk)
@@ -1226,6 +1323,14 @@ class BlockScaledAttentionProgram:
         return a
 
     @gluon.jit
+    def split_subtile(self, x):
+        layout: ttgl.constexpr = x.type.layout
+        a0, a1 = x.reshape([x.shape[0], 2, x.shape[1] // 2]).permute(0, 2, 1).split()
+        a0 = ttgl.convert_layout(a0, layout, assert_trivial=True)
+        a1 = ttgl.convert_layout(a1, layout, assert_trivial=True)
+        return a0, a1
+
+    @gluon.jit
     def split_scale(self, x):
         layout: ttgl.constexpr = x.type.layout
         a0, a1 = x.reshape([2, x.shape[0] // 2, x.shape[1]]).permute(1, 2, 0).split()
@@ -1280,7 +1385,7 @@ class BlockScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_loop_pipeline(self):
+    def fwd_pipeline(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -1297,7 +1402,7 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_k(1, buf=1)  # ................................. iter 1
         self.issue_global_load_k_scale(1, buf=1)  # ........................... iter 1
 
-        self.async_wait(1 * 2)  # ............................................. iter 0
+        self.async_wait(2)  # ................................................. iter 0
         k = self.shared_load_k(buf=0)
         k_scale = self.shared_load_k_scale(buf=0)
         self.issue_global_load_v(0, buf=0)  # ................................. iter 0
@@ -1318,7 +1423,7 @@ class BlockScaledAttentionProgram:
         alpha = ttgl.exp2(m_diff)
         m_i = m_ij
 
-        self.async_wait(2 * 2)  # ............................................. iter 0
+        self.async_wait(4)  # ................................................. iter 0
         k = self.shared_load_k(buf=1)
         k_scale = self.shared_load_k_scale(buf=1)
         self.issue_global_load_v(1, buf=1)  # ................................. iter 1
@@ -1341,7 +1446,7 @@ class BlockScaledAttentionProgram:
             l_i = l_i * alpha + l_ij
             p, p_scale = self.downcast_p(p)
 
-            self.async_wait(2 * 2)  # ......................................... iter i
+            self.async_wait(4)  # ............................................. iter i
             v = self.shared_load_v(buf=a)
             v_scale = self.shared_load_v_scale(buf=a)
             self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .............. iter i+3
@@ -1357,7 +1462,7 @@ class BlockScaledAttentionProgram:
             alpha = ttgl.exp2(m_diff)
             m_i = m_ij
 
-            self.async_wait(2 * 2)  # ......................................... iter i+2
+            self.async_wait(4)  # ............................................. iter i+2
             k = self.shared_load_k(buf=a)
             k_scale = self.shared_load_k_scale(buf=a)
             self.issue_global_load_v(i + 2, buf=a)  # ......................... iter i+2
@@ -1370,7 +1475,7 @@ class BlockScaledAttentionProgram:
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
-        self.async_wait(2 * 2)  # ............................................. iter end-2
+        self.async_wait(4)  # ................................................. iter end-2
         v = self.shared_load_v(buf=0)
         v_scale = self.shared_load_v_scale(buf=0)
 
@@ -1402,68 +1507,7 @@ class BlockScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_subtile(self):
-        cfg = self.cfg
-
-        m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N // 2], 0.0, ttgl.float32, cfg.acc_layout)
-        acc0 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
-        acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
-        sm_scale = self.sm_scale
-
-        end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
-        for i in range(0, end):
-            self.issue_global_load_k(i, sub_idx=0)
-            self.issue_global_load_k(i, sub_idx=1)
-            self.issue_global_load_k_scale(i)
-
-            self.async_wait(0)
-            k0 = self.shared_load_k(sub_idx=0)
-            k1 = self.shared_load_k(sub_idx=1)
-            k_scale = self.shared_load_k_scale()
-            k0_scale, k1_scale = self.split_scale(k_scale)
-
-            qk0 = self.compute_qk(k0, k0_scale, zero)
-            qk1 = self.compute_qk(k1, k1_scale, zero)
-
-            qk = self.concat_subtile(qk0, qk1)
-            m = ttgl.max(qk, 1)
-            m_ij = ttgl.maximum(m_i, m)
-            m_ij_scaled = m_ij * sm_scale
-            qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-            qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
-            p0 = ttgl.exp2(qk0_shifted)
-            p1 = ttgl.exp2(qk1_shifted)
-            m_diff = m_i * sm_scale - m_ij_scaled
-            m_i = m_ij
-            alpha = ttgl.exp2(m_diff)
-            acc0 = acc0 * alpha[:, None]
-            acc1 = acc1 * alpha[:, None]
-            p = self.concat_subtile(p0, p1)
-            l_ij = ttgl.sum(p, 1)
-            l_i = l_i * alpha + l_ij
-            p, p_scale = self.downcast_p(p)
-
-            self.issue_global_load_v(i, sub_idx=0)
-            self.issue_global_load_v(i, sub_idx=1)
-            self.issue_global_load_v_scale(i)
-
-            self.async_wait(0)
-            v0 = self.shared_load_v(sub_idx=0)
-            v1 = self.shared_load_v(sub_idx=1)
-            v_scale = self.shared_load_v_scale()
-            v0_scale, v1_scale = self.split_scale(v_scale)
-
-            acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
-            acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
-
-        acc = self.concat_subtile(acc0, acc1)
-        acc = acc / l_i[:, None]
-        self.store_output(acc)
-
-    @gluon.jit
-    def fwd_subtile_pipeline(self):
+    def fwd_4warp_subtile_pipeline(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -1636,6 +1680,144 @@ class BlockScaledAttentionProgram:
         acc = acc * l_recip[:, None]
         self.store_output(acc)
 
+    @gluon.jit
+    def fwd_8warp_pingpong_pipeline(self):
+        cfg = self.cfg
+
+        m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+        l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
+        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N], 0.0, ttgl.float32, cfg.acc_layout)
+        acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+        sm_scale = self.sm_scale
+
+        # pipeline prologue, iter -3
+        self.issue_global_load_k(0, buf=0)  # ................................. iter 0
+        self.issue_global_load_k_scale(0, buf=0)  # ........................... iter 0
+
+        # pipeline prologue, iter -2
+        self.issue_global_load_k(1, buf=1)  # ................................. iter 1
+        self.issue_global_load_k_scale(1, buf=1)  # ........................... iter 1
+
+        self.async_wait(2)  # ................................................. iter 0
+        k = self.shared_load_k(buf=0)
+        k_scale = self.shared_load_k_scale(buf=0)
+        self.issue_global_load_v(0, buf=0)  # ................................. iter 0
+        self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
+
+        # pipeline prologue, iter -1
+        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+
+        self.issue_global_load_k(2, buf=0)  # ................................. iter 2
+        self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
+
+        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m_ij = ttgl.maximum(m_i, m)
+        m_ij_scaled = m_ij * sm_scale
+        qk0, qk1 = self.split_subtile(qk)
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        p0 = ttgl.exp2(qk0_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        alpha = ttgl.exp2(m_diff)
+        m_i = m_ij
+
+        self.async_wait(4)  # ................................................. iter 0
+        k = self.shared_load_k(buf=1)
+        k_scale = self.shared_load_k_scale(buf=1)
+        self.issue_global_load_v(1, buf=1)  # ................................. iter 1
+        self.issue_global_load_v_scale(1, buf=1)  # ........................... iter 1
+
+        # main loop from 0 to end-3
+        # TODO: Ideally we should unroll the loop by 2 to remove the buffer index
+        # update, but our current codegen in llvm does not perform well. Re-enable
+        # unroll when fixed.
+        end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
+        for i in range(0, end - 2):
+            a = i % 2
+            b = 1 - a
+            pred = i - end + 3
+            pred = (pred >> 31) & 1
+
+            with warp_pipeline_stage("stage0"):
+                qk = self.compute_qk(k, k_scale, zero)  # ..................... iter i+1
+                p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
+                p = self.concat_subtile(p0, p1)
+                l_ij = ttgl.sum(p, 1)
+                acc = acc * alpha[:, None]
+                l_i = l_i * alpha + l_ij
+                p, p_scale = self.downcast_p(p)
+
+            self.async_wait(4)
+            with warp_pipeline_stage("stage1"):
+                v = self.shared_load_v(buf=a)  # .............................. iter i
+                v_scale = self.shared_load_v_scale(buf=a)
+                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .......... iter i+3
+                self.issue_global_load_k_scale(i + 3, buf=b, pred=pred)
+
+            with warp_pipeline_stage("stage2"):
+                acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ......... iter i
+                m = ttgl.max(qk, 1)  # ........................................ iter i+1
+                m_ij = ttgl.maximum(m_i, m)
+                m_ij_scaled = m_ij * sm_scale
+                qk0, qk1 = self.split_subtile(qk)
+                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+                qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+                p0 = ttgl.exp2(qk0_shifted)
+                m_diff = m_i * sm_scale - m_ij_scaled
+                alpha = ttgl.exp2(m_diff)
+                m_i = m_ij
+
+            self.async_wait(4)
+            with warp_pipeline_stage("stage3"):
+                k = self.shared_load_k(buf=a)  # .............................. iter i+2
+                k_scale = self.shared_load_k_scale(buf=a)
+                self.issue_global_load_v(i + 2, buf=a)  # ..................... iter i+2
+                self.issue_global_load_v_scale(i + 2, buf=a)
+
+        # pipeline epilogue, iter end-2
+        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        p = self.concat_subtile(p0, p1)
+        l_ij = ttgl.sum(p, 1)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        p, p_scale = self.downcast_p(p)
+
+        self.async_wait(4)  # ................................................. iter end-2
+        v = self.shared_load_v(buf=0)
+        v_scale = self.shared_load_v_scale(buf=0)
+
+        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
+        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m_ij = ttgl.maximum(m_i, m)
+        m_ij_scaled = m_ij * sm_scale
+        qk0, qk1 = self.split_subtile(qk)
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        p0 = ttgl.exp2(qk0_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        alpha = ttgl.exp2(m_diff)
+        m_i = m_ij
+
+        # pipeline epilogue, iter end-1
+        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p = self.concat_subtile(p0, p1)
+        l_ij = ttgl.sum(p, 1)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        p, p_scale = self.downcast_p(p)
+
+        self.async_wait(0)  # ................................................. iter end-1
+        v = self.shared_load_v(buf=1)
+        v_scale = self.shared_load_v_scale(buf=1)
+
+        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
+
+        # write output
+        l_recip = 1 / l_i
+        acc = acc * l_recip[:, None]
+        self.store_output(acc)
+
 
 # ===-----------------------------------------------------------------------===#
 # Entry Point
@@ -1658,43 +1840,44 @@ def mxfp_attn_fwd_kernel(  #
         BLOCK_M: ttgl.constexpr,  #
         BLOCK_N: ttgl.constexpr,  #
         BLOCK_SCALING: ttgl.constexpr,  #
-        SUBTILE: ttgl.constexpr,  #
-        PIPELINED: ttgl.constexpr,  #
         P_SCALING: ttgl.constexpr,  #
-        P_K_WIDTH: ttgl.constexpr,  #
-        WARP_BASES: ttgl.constexpr):
+        PIPELINED: ttgl.constexpr,  #
+        PINGPONG: ttgl.constexpr,  #
+        SUBTILE: ttgl.constexpr,  #
+        P_K_WIDTH: ttgl.constexpr):
 
     NUM_WARPS: ttgl.constexpr = ttgl.num_warps()
-    ttgl.static_assert(2**len(WARP_BASES) == NUM_WARPS)
-
     NUM_BUFFERS: ttgl.constexpr = 2 if PIPELINED else 1
-    if BLOCK_SCALING:
-        cfg = BlockScaledAttentionConfig(  #
-            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_SCALING,
-            P_K_WIDTH, SUBTILE, NUM_BUFFERS, WARP_BASES)
-        pgm = BlockScaledAttentionProgram.initialize(  #
-            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
-    else:
+    if not BLOCK_SCALING:
         cfg = GlobalScaledAttentionConfig(  #
-            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N, P_K_WIDTH,
-            SUBTILE, NUM_BUFFERS, WARP_BASES)
+            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,  #
+            SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
         pgm = GlobalScaledAttentionProgram.initialize(  #
             cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
+    else:
+        cfg = BlockScaledAttentionConfig(  #
+            Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,  #
+            P_SCALING, SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
+        pgm = BlockScaledAttentionProgram.initialize(  #
+            cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
 
-    if SUBTILE and PIPELINED:
-        pgm.fwd_subtile_pipeline()
-    if SUBTILE and not PIPELINED:
-        pgm.fwd_subtile()
-    if not SUBTILE and PIPELINED:
-        pgm.fwd_loop_pipeline()
-    if not SUBTILE and not PIPELINED:
+    if not PIPELINED:
         pgm.fwd_loop()
+    else:
+        ttgl.static_assert(NUM_WARPS == 4 or NUM_WARPS == 8)
+        if NUM_WARPS == 4 and SUBTILE:
+            pgm.fwd_4warp_subtile_pipeline()
+        elif NUM_WARPS == 8 and PINGPONG:
+            pgm.fwd_8warp_pingpong_pipeline()
+        else:
+            pgm.fwd_pipeline()
 
 
 def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
              q_scale: torch.Tensor | int, k_scale: torch.Tensor | int, v_scale: torch.Tensor | int,  #
              q_type: str, kv_type: str, block_m: int, block_n: int,  #
-             block_scaling: bool, subtile: bool, pipelined: bool, p_scaling: bool, p_k_width: int, num_warps: int = 4):
+             block_scaling: bool, p_scaling: bool, pipelined: bool, pingpong: bool, subtile: bool, p_k_width: int,
+             num_warps: int):
     batch, seqlen_q, num_q_heads, head_sz = q.shape
     _, seqlen_k, num_k_heads, _ = k.shape
     sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
@@ -1703,8 +1886,11 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     if pipelined:
         assert cdiv(seqlen_k, block_n) > 4
         assert cdiv(seqlen_k, block_n) % 2 == 0
-    if subtile:
-        assert head_sz == 128
+        if pingpong:
+            assert num_warps == 8
+        if subtile:
+            assert num_warps == 4
+            assert head_sz == 128
 
     # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
     # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
@@ -1756,15 +1942,11 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
 
     # Use (NUM_Q_HEADS, NUM_BLOCKS, BATCH) for better xcd locality
     grid = (num_q_heads, cdiv(seqlen_q, block_m), batch)
-    warp_bases = []
-    for i in range(int(math.log2(num_warps))):
-        warp_bases.append((1 << i, 0))
-    warp_bases = tuple(warp_bases)
 
     args = [
         q, k, v, q_scale, k_scale, v_scale, o, sm_scale,  #
         q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,  #
-        block_scaling, subtile, pipelined, p_scaling, p_k_width, warp_bases
+        block_scaling, p_scaling, pipelined, pingpong, subtile, p_k_width
     ]
     kwargs = {"num_warps": num_warps, "waves_per_eu": 1}
     kernel = mxfp_attn_fwd_kernel[grid](*args, **kwargs)
@@ -1865,7 +2047,7 @@ def static_profile(kernel):
           f"- occupancy: {occupancy}\n")
 
 
-def get_source_mapping(block_scaling, subtile, pipelined, amdgcn):
+def get_source_mapping(amdgcn, block_scaling, pipelined, pingpong, subtile, num_warps):
     """
     Create a mapping from amdgcn assembly to source code lines:
 
@@ -1883,13 +2065,15 @@ def get_source_mapping(block_scaling, subtile, pipelined, amdgcn):
     src_lines = inspect.getsource(mod).splitlines()
 
     pgm = BlockScaledAttentionProgram if block_scaling else GlobalScaledAttentionProgram
-    func_map = {
-        (True, True): pgm.fwd_subtile_pipeline,
-        (True, False): pgm.fwd_subtile,
-        (False, True): pgm.fwd_loop_pipeline,
-        (False, False): pgm.fwd_loop,
-    }
-    func = func_map[(subtile, pipelined)]
+    if not pipelined:
+        func = pgm.fwd_loop
+    else:
+        if num_warps == 4 and subtile:
+            func = pgm.fwd_4warp_subtile_pipeline
+        elif num_warps == 8 and pingpong:
+            func = pgm.fwd_8warp_pingpong_pipeline
+        else:
+            func = pgm.fwd_pipeline
     func_start, func_end = func.starting_line_number + 1, func.starting_line_number + len(func.raw_src) - 1
 
     def is_in_loop(line_no: int, base_indent: int) -> bool:
@@ -1956,7 +2140,7 @@ def get_source_mapping(block_scaling, subtile, pipelined, amdgcn):
 
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,subtile,pipelined,p_k_width",
+    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",
     [(*test, *config)  #
      for test in [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
                   for q_type, kv_type in [("e4m3", "e4m3"), ("e4m3", "e2m1")]
@@ -1965,19 +2149,15 @@ def get_source_mapping(block_scaling, subtile, pipelined, amdgcn):
                   for seqlen_k in [1024]
                   for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
                   for head_sz in [64, 128]]
-     for config in [[128, 128, False, False, 16],  # baseline
-                    [128, 128, False, True, 16],  # pipeline
-                    [128, 128, False, True, 8],  # pipeline + layout optimization
-                    [256, 128, True, False, 8],  # subtile + layout optimization
-                    [256, 128, True, True, 8]  # subtile + pipeline + layout optimization
+     for config in [[128, 128, False, False, False, 16, 4],  # loop
+                    [128, 128, True, False, False, 8, 4],  # pipeline
+                    [256, 128, True, False, True, 8, 4],  # 4-warp subtile pipeline with block size 256x128
+                    [128, 128, True, True, False, 8, 8],  # 8-warp pingpong pipeline with block size 128x128
                     ]
-     # only run optimized config for decode mha with head_sz=128
-     if not (config != [128, 128, False, False, False, 16] and test[3:] != [1024, 1024, 1, 1, 128])])
+     # only run optimized config for prefill MXFP8 MHA with head_sz=128
+     if not (config != [128, 128, False, False, False, 16, 4] and test != ["e4m3", "e4m3", 1, 1024, 1024, 1, 1, 128])])
 def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
-                               block_m, block_n, subtile, pipelined, p_k_width):
-    if kv_type == 'e2m1' and p_k_width == 8:
-        pytest.skip("e2m1 can not use k_width=8 for p")
-
+                               block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
     torch.manual_seed(0)
 
     q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
@@ -1990,7 +2170,8 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     o, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
-                         True, subtile, pipelined, False, p_k_width)
+                         True, False, pipelined, pingpong, subtile, p_k_width,  #
+                         num_warps)
     o = o.to(torch.float32)
 
     o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
@@ -2005,7 +2186,7 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
 
     # check code generation
     amdgcn = kernel.asm['amdgcn']
-    mapping = get_source_mapping(True, subtile, pipelined, amdgcn)
+    mapping = get_source_mapping(amdgcn, True, pipelined, pingpong, subtile, num_warps)
 
     groups = {
         'qk': r'.*compute_qk.*',
@@ -2020,15 +2201,16 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
         if g == 'convert_layout' and p_k_width == 8:
             assert len(code) == 0
             continue
-        # check all groups exist
+        # check all other groups exist
         assert len(code) > 0
+
     for loc, instrs in mapping.items():
         _, code = loc
         # check use correct wmma instruction
         if re.match(groups['pv'], code) or re.match(groups['qk'], code):
             wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
-            assert len(wmma_instrs) > 0 and all(
-                instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
+            assert len(wmma_instrs) > 0 and \
+                all(instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
         # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
         if re.match(groups['ds_load_k'], code):
             ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
@@ -2046,11 +2228,13 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
             v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
             assert len(v_permlane_instrs) > 0 and all(
                 instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
+        # check there is no v_readfirstlane
+        assert all(not re.match(r'v_readfirstlane', instr) for instr in instrs)
 
 
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,subtile,pipelined,p_k_width",
+    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",
     [(*test, *config)  #
      for test in [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
                   for q_type, kv_type in [("e4m3", "e4m3")]
@@ -2059,15 +2243,15 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
                   for seqlen_k in [1024]
                   for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
                   for head_sz in [64, 128]]
-     for config in [[128, 128, False, False, 16],  # baseline
-                    [128, 128, False, True, 8],  # pipeline + layout optimization
-                    [256, 128, True, False, 8],  # subtile + layout optimization
-                    [256, 128, True, True, 8],  # subtile + pipeline + layout optimization
+     for config in [[128, 128, False, False, False, 16, 4],  # loop
+                    [128, 128, True, False, False, 8, 4],  # pipeline
+                    [256, 128, True, False, True, 8, 4],  # 4-warp subtile pipeline with block size 256x128
+                    [128, 128, True, True, False, 8, 8],  # 8-warp pingpong pipeline with block size 128x128
                     ]
-     # only run optimized config for decode mha with head_sz=128
-     if not (config != [128, 128, False, False, 16] and test[3:] != [1024, 1024, 1, 1, 128])])
+     # only run optimized config for prefill MHA with head_sz=128
+     if not (config != [128, 128, False, False, False, 16, 4] and test[3:] != [1024, 1024, 1, 1, 128])])
 def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
-                                block_m, block_n, subtile, pipelined, p_k_width):
+                                block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
     torch.manual_seed(0)
 
     q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
@@ -2080,7 +2264,8 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     o, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
-                         False, subtile, pipelined, False, p_k_width)
+                         False, False, pipelined, pingpong, subtile, p_k_width,  #
+                         num_warps)
     o = o.to(torch.float32)
 
     o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
@@ -2095,7 +2280,7 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
 
     # check code generation
     amdgcn = kernel.asm['amdgcn']
-    mapping = get_source_mapping(False, subtile, pipelined, amdgcn)
+    mapping = get_source_mapping(amdgcn, False, pipelined, pingpong, subtile, num_warps)
 
     groups = {
         'qk': r'.*compute_qk.*',
@@ -2110,15 +2295,16 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
         if g == 'convert_layout' and p_k_width == 8:
             assert len(code) == 0
             continue
-        # check all groups exist
+        # check all other groups exist
         assert len(code) > 0
+
     for loc, instrs in mapping.items():
         _, code = loc
         # check use correct wmma instruction
         if re.match(groups['pv'], code) or re.match(groups['qk'], code):
             wmma_instrs = [instr for instr in instrs if re.match(r'v_wmma_*', instr)]
-            assert len(wmma_instrs) > 0 and all(
-                instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
+            assert len(wmma_instrs) > 0 and \
+                all(instr.startswith("v_wmma_scale_f32_16x16x128_f8f6f4") for instr in wmma_instrs)
         # check always use ds_load_b128 to load k and all instructions are using the same vgpr for address
         if re.match(groups['ds_load_k'], code):
             ds_load_instrs = [instr for instr in instrs if re.match(r'ds_load_', instr)]
@@ -2136,10 +2322,12 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
             v_permlane_instrs = [instr for instr in instrs if re.match(r'v_permlane_*', instr)]
             assert len(v_permlane_instrs) > 0 and all(
                 instr.startswith("v_permlane16_swap") for instr in v_permlane_instrs)
+        # check there is no v_readfirstlane
+        assert all(not re.match(r'v_readfirstlane', instr) for instr in instrs)
 
 
 def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
-                  scale_type, subtile, pipelined, disable_p_scaling, p_k_width):
+                  scale_type, disable_p_scaling, pipelined, pingpong, subtile, p_k_width, num_warps):
     if kv_type == 'e2m1' and p_k_width == 8:
         raise RuntimeError("e2m1 can not use k_width=8 for p")
 
@@ -2159,7 +2347,8 @@ def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
     _, kernel = attn_fwd(q, k, v,  #
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
-                         scale_type == 'block', subtile, pipelined, not disable_p_scaling, p_k_width)
+                         scale_type == 'block', not disable_p_scaling, pipelined, pingpong, subtile, p_k_width,
+                         num_warps)
     return kernel
 
 
@@ -2180,15 +2369,19 @@ if __name__ == "__main__":
         "--scale_type", type=str, choices=['block', 'global'], required=True,
         help="`block` = use block scaling where 32 elements share a scale; "
         "`global` = use a single global scale for all elements")
-    parser.add_argument("--subtile", action="store_true")
-    parser.add_argument("--pipelined", action="store_true")
     parser.add_argument(
         "--disable_p_scaling", action="store_true", help="When set, we will use a fixed scale of 1.0 for all P blocks. "
         "Otherwise, we will compute and apply per-block scaling for the P matrix tensor. "
         "Only apply when block scaling is enabled. Ignored for global scaling.")
+    parser.add_argument("--pipelined", action="store_true")
+    parser.add_argument("--pingpong", action="store_true",
+                        help="Whether to use pingpong schedule. Only works for 8 warps")
+    parser.add_argument("--subtile", action="store_true",
+                        help="Whether to subtile K, V in the pipeline. Only works for 4 warps")
     parser.add_argument(
         "--p_k_width", type=int, choices=[8, 16], required=True,
         help="The K width (in elements) for p. When set to 8, we can remove the layout conversion for p")
+    parser.add_argument("--num_warps", type=int, choices=[4, 8], required=True)
     args = parser.parse_args()
     args = vars(args)
 
