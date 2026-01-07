@@ -523,11 +523,33 @@ static void insertSchedBarrier(Instruction *IP) {
   CI->setTailCallKind(CallInst::TCK_Tail);
 }
 
+static void insertDSWaitCnt(Instruction *IP, int cnt) {
+  assert(cnt == 0);
+  Function *F = IP->getFunction();
+  Module *M = F->getParent();
+
+  Function *BarrierFn =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_s_waitcnt);
+
+  IRBuilder<> Builder(F->getContext());
+
+  // Insert BEFORE IP
+  Builder.SetInsertPoint(IP);
+
+  Value *Cnt = Builder.getInt32(49279);
+  CallInst *CI = Builder.CreateCall(BarrierFn, {Cnt});
+
+  // Mark as tail call (matches your example)
+  CI->setTailCallKind(CallInst::TCK_Tail);
+}
+
 static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
                                     SmallVectorImpl<Instruction *> &MFMAInsts,
                                     unsigned X, unsigned Y) {
 
   unsigned MFMAIdx = MFMAInsts.size() - 1;
+
+  insertDSWaitCnt(MFMAInsts[0], 0);
 
   auto spacingFor = [&](SchedKind K) {
     return (K == SchedKind::BufferLoadLDS) ? X : Y;
@@ -595,7 +617,7 @@ void scheduleBB(BasicBlock *BB, const BBMFMAAnalysisMap &Analysis) {
     return;
 
   const MFMARegionList &Regions = It->second;
-  llvm::outs() << "total regions: " << Regions.size() << "\n";
+  // llvm::outs() << "total regions: " << Regions.size() << "\n";
 
   unsigned X = /* tunable: mfma between buffer.load.lds */ 4;
   unsigned Y = /* tunable: mfma between lds load */ 1;
@@ -627,7 +649,7 @@ void scheduleEp(BasicBlock *BB, const BBMFMAAnalysisMap &Analysis) {
     return;
 
   const MFMARegionList &Regions = It->second;
-  llvm::outs() << "total regions: " << Regions.size() << "\n";
+  // llvm::outs() << "total regions: " << Regions.size() << "\n";
 
   for (unsigned i = 1; i < Regions.size(); ++i) {
     const MFMARegionInfo &R = Regions[i];
