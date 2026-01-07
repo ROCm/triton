@@ -303,6 +303,15 @@ class LDSReadChain:
         self.isLiveAcrossBB: bool = False
 
 
+class BufferLoadLDSChain:
+
+    def __init__(self):
+        self.entry_reg = None
+        self.buffer_load: list[Instruction] = []
+        self.copy_inst: list[Instruction] = []
+        self.cndmask: Instruction = None
+
+
 REG_SINGLE = re.compile(r'([sva])(\d+)')
 REG_RANGE = re.compile(r'([sva])\[(\d+):(\d+)\]')
 REG_PATTERNS = [
@@ -501,7 +510,7 @@ CMP_PREFIXES = ('s_cmp_', 'v_cmp_')
 ## TODO(lixun)
 ## Only buffer_load lds should be included in ALL_USERS set
 ALL_USERS = ('s_cmp_', 'v_cmp_', 'v_permlane', 'buffer_store', 'buffer_load')
-ALL_DEFS = ('v_permlane')
+ALL_DEFS_USES = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov')
 
 
@@ -569,10 +578,12 @@ def compute_inst_def_use(inst):
     if inst.opcode.startswith(ALL_USERS):
         for reg in inst.regs_by_operand:
             inst.uses |= flatten_regs(reg)
+        return
 
-    if inst.opcode.startswith(ALL_DEFS):
+    if inst.opcode.startswith(ALL_DEFS_USES):
         for reg in inst.regs_by_operand:
             inst.defs |= flatten_regs(reg)
+            inst.uses |= flatten_regs(reg)
         return
 
     # Normal case
@@ -1030,7 +1041,8 @@ def optimize_mfma_accumulators(bb, chains):
     print(f"=========================== done ====================================")
 
 
-def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int) -> Optional[Set[Tuple[str, int]]]:
+def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
+                                    myKind: str = None) -> Optional[Set[Tuple[str, int]]]:
     if x <= 0:
         raise ValueError("x must be positive")
 
@@ -1040,6 +1052,8 @@ def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int) -> O
         by_kind[kind].append(rid)
 
     for kind, ids in by_kind.items():
+        if myKind and (kind != myKind):
+            continue
         ids = sorted(ids)
         id_set = set(ids)
 
@@ -1135,6 +1149,119 @@ def collect_ds_chains(blocks):
     return chains
 
 
+def collect_buffer_load_chains(bb):
+    print(f"========== Collecting buffer load chains ==========")
+
+    visited = set()
+    chains = set()
+
+    for inst in bb.instructions:
+        if 'buffer_load' in inst.opcode:
+            if inst in visited:
+                continue
+            visited.add(inst)
+            '''
+            v_accvgpr_read_b32 v1, a153
+            v_cndmask_b32_e32 v1, v1, v0, vcc
+            buffer_load_dwordx4 v1, s[0:3], 0 offen lds
+            v_accvgpr_write_b32 a179, v1
+            v_accvgpr_read_b32 v0, a179
+            buffer_load_dwordx4 v0, s[52:55], 0 offen lds
+            '''
+
+            chain = BufferLoadLDSChain()
+            chain.buffer_load.append(inst)
+            voff = inst.regs_by_operand[0]
+            #print(f"{inst.emit()} --> {voff=}")
+            cndmask_inst = next(iter(bb.get_reaching_defs(inst, voff)))
+            #print(f"  {cndmask_inst.emit()=}")
+            assert 'cndmask' in cndmask_inst.opcode
+            chain.cndmask = cndmask_inst
+
+            vreg = cndmask_inst.regs_by_operand[1]
+            copy_inst = next(iter(bb.get_reaching_defs(cndmask_inst, vreg)))
+            assert 'v_accvgpr' in copy_inst.opcode
+
+            chain.copy_inst.append(copy_inst)
+            chain.entry_reg = copy_inst.regs_by_operand[1]
+            #print(f"  {chain.entry_reg=}")
+            assert flatten_regs(chain.entry_reg).issubset(bb.live_in)
+
+            for user_inst in bb.instructions_between(inst, bb.instructions[-1]):
+                if user_inst.uses_regs(voff) or ('buffer_load' in user_inst.opcode
+                                                 and user_inst.regs_by_operand[0] == voff):
+                    #print(f"  Found a user of voff: {user_inst.emit()}")
+                    if 'buffer_load' in user_inst.opcode:
+                        chain.buffer_load.append(user_inst)
+                        visited.add(user_inst)
+                        #print(f"  2nd buffer_load: {user_inst.emit()}")
+                    else:
+                        #print(f"  else: {user_inst.emit()}")
+                        assert 'v_accvgpr' in user_inst.opcode
+                        chain.copy_inst.append(user_inst)
+                        copy_2nd = next(iter(user_inst.users))
+                        assert 'v_accvgpr' in copy_2nd.opcode
+                        chain.copy_inst.append(copy_2nd)
+                        buffer_load_2nd = next(iter(copy_2nd.users))
+                        assert 'buffer_load' in buffer_load_2nd.opcode
+                        chain.buffer_load.append(buffer_load_2nd)
+                        visited.add(buffer_load_2nd)
+                    break
+
+            chains.add(chain)
+
+    print(f"========== Done Collecting buffer load chains ==========")
+
+    return chains
+
+
+def optimize_buffer_load_voff(bb, chains):
+
+    prologue = bb.preds[0]
+    for chain in chains:
+        ## mark copy inst as dead
+        for inst in chain.copy_inst:
+            inst.mark_dead = True
+        pick_reg = pick_and_remove_contiguous_regs(bb.free_regs, 1, 'v')
+        assert pick_reg
+        free_reg = coalesce_regs(pick_reg)[0]
+        ## rewrite cndmask instruction
+        if chain.cndmask:
+            chain.cndmask.replace_dst(free_reg)
+            chain.cndmask.operands[1] = free_reg.emit()
+            chain.cndmask.update_regs_by_operand()
+            #print(f"replaced cndmask dst and op1 with {free_reg}")
+
+        ## rewrite buffer_load voff
+        for buffer_inst in chain.buffer_load:
+            buffer_inst.replace_dst(free_reg)
+
+        ## copy old voff into new voff
+        old_reg = chain.entry_reg
+        assert old_reg and old_reg.kind == 'a'
+        inst_str = f'v_accvgpr_read_b32 {free_reg.emit()} {old_reg.emit()}'
+        #print(f"writing {inst_str} in the prologue")
+        prologue.add_inst(parse_instruction(inst_str, 0))
+
+    cleanup_bb(bb)
+
+
+def optimize_buffer_load_m0(bb, chains):
+
+    for chain in chains:
+        for buffer_load in chain.buffer_load:
+            idx = bb.instructions.index(buffer_load)
+            ## pattern 1: s_mov_b32 m0 --> s_nop 0 --> buffer_load --> mfma
+            ## pattern 2: s_mov_b32 m0 --> buffer_load --> mfma
+            ## swap buffer_load and mfma
+            mfma = bb.instructions[idx + 1]
+            assert 'mfma' in mfma.opcode
+            bb.instructions[idx], bb.instructions[idx + 1] = bb.instructions[idx + 1], bb.instructions[idx]
+            ## remove s_nop
+            if 'nop' in bb.instructions[idx - 1].opcode:
+                bb.instructions.pop(idx - 1)
+
+
 def print_map(map, loc):
     print(f"{loc}: ", end="")
     for regs in map[loc]:
@@ -1214,7 +1341,7 @@ def optimize_nops(bb):
     for inst in bb.instructions:
         if 'nop' in inst.opcode:
             idx = bb.instructions.index(inst)
-            ## The only allowed nop is the one between set m0 abd buffer_load
+            ## The only allowed nop is the one between set m0 and buffer_load
             if idx == 0:
                 inst.mark_dead = True
                 continue
@@ -1239,8 +1366,8 @@ def optimize_nops(bb):
 
 
 if __name__ == "__main__":
-    with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7/v7.amdgcn") as f:
-        #with open("./v7/v7.amdgcn") as f:
+    with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8.amdgcn") as f:
+        #with open("./v8/v8.amdgcn") as f:
         text = f.read()
 
     program = parse_asm(text)
@@ -1302,6 +1429,24 @@ if __name__ == "__main__":
     print(f"========== Done Analyze loop ==========")
 
     optimize_nops(loop)
+
+    bufferLoadChains = collect_buffer_load_chains(loop)
+
+    print(f"========== Optimize buffer load voff ==========")
+    optimize_buffer_load_voff(loop, bufferLoadChains)
+    print(f"========== Done Optimize buffer load voff ==========")
+
+    for bb in blocks:
+        compute_bb_def_use(bb)
+    build_def_use_chains_linear(blocks)
+
+    compute_liveness(blocks)
+
+    print(f"========== Analyze loop ==========")
+    analyze_block(loop, mfmaChainsInLoop, LDSChains)
+    print(f"========== Done Analyze loop ==========")
+
+    optimize_buffer_load_m0(loop, bufferLoadChains)
 
     # Suppose emit_program(program) returns a string of the assembly
     emitted_text = emit_program(program)
