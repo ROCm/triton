@@ -172,7 +172,7 @@ within each region.
 - perf: 1190 tflops
 - 81%
 
-#### amdgcn v0
+### amdgcn v0
 
 Use the python assembler to further compile the generated amdgcn file from v7.
 This version removes `v_accvgpr_` and related `s_nop` instructions inside the loop.
@@ -190,7 +190,111 @@ Next steps
       v_add_u32_e32 v254, 0, v1
       v_add_u32_e32 v6, 0x18bc0, v254
       ```
-- [ ] the first `buffer_load` always takes longer? 
+- [ ] the first `buffer_load` always takes longer?
 - [ ] `s_mov_b32 m0, s25` We should be able to compute m0 directly
 - [ ] There are a few salu and valu instructions between `ds_read` and `buffer_load`
       regions. And we see DIDT issue after that. We need more mfma between them.
+
+### llir sched v4
+
+This version puts 2 more mfma after the last anchor, and 2 more mfma between
+different kinds of anchors.
+
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7_llirSchedV4`
+
+### llir sched v5
+
+This version inserts `s_waitcnt lgkmcnt(0)` in front the 1st mfma in each region.
+This reduces the number of `s_xx` instructions.
+And since there are enough mfma instructions from the last `ds_read` and
+the 1st mfma, there should not be any extra wait cycles at the `lgkmcnt(0)`.
+
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v7_llirSchedV5`
+
+
+#### Study buffer load
+
+```
+s_cmpk_eq_i32 s4, 0x1f00
+s_cselect_b64 vcc, -1, 0
+
+v_accvgpr_read_b32 v1, a153
+v_cndmask_b32_e32 v1, v1, v0, vcc
+```
+
+| tensor | addr | comes from |
+|--------|------|------------|
+| A (8)  | v1   | a153       |
+|        | v1   | a154       |
+|        | v1   | a155       |
+|        | v1   | a156       |
+|        | v1   | a157       |
+|        | v1   | a158       |
+|        | v1   | a159       |
+|        | v1   | a160       |
+| B0 (4) | v1   | a161       |
+|        | v1   | a162       |
+|        | v1   | a163       |
+|        | v1   | a164       |
+| B1 (4) | v10  | a165       |
+|        | v1   | a166       |
+|        | v11  | a167       |
+|        | v12  | a168       |
+| unroll |      |            |
+| A (8)  | v0   | a179       |
+|        | v0   | a196       |
+|        | v0   | a197       |
+|        | v0   | a198       |
+|        | v0   | a199       |
+|        | v0   | a200       |
+|        | v0   | a201       |
+|        | v0   | a202       |
+| B0 (4) | v0   | a203       |
+|        | v0   | a204       |
+|        | v0   | a205       |
+|        | v0   | a206       |
+| B1 (4) | v10  | a165       |
+|        | v1   | a166       |
+|        | v11  | a167       |
+|        | v12  | a168       |
+
+### v8
+
+This version changes where to update the base ptr for buffer load
+
+before
+```
+load A
+load B0
+load B1
+
+base += BLOCK_K
+```
+
+after
+```
+load A
+load B0
+
+base += BLOCK_K
+load B1
+```
+
+In this way, the `s_add` instructions to update the base won't be scheduled at
+the very beginning of the loop.
+
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8`
+- 82%
+
+```
+ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att_matmul.json -d ./study_matmul/gluon/v8/att_output -- python study_matmul/gluon/gl_matmul.py
+```
+
+### amdgcnas v1
+
+This version of the amdgcnas optimized the register allocation for
+the `voff` regs of `buffer_load`.
+
+
+- asm: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8_amdgcnasv1.s`
+- 94%
