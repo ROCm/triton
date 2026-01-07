@@ -287,6 +287,58 @@ public:
 private:
   triton::AMD::ISAFamily isaFamily;
 };
+
+class AllocSharedMemForTranspose : public OpRewritePattern<tt::TransOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tt::TransOp transOp,
+                                PatternRewriter &rewriter) const override {
+    if (!transOp->hasOneUse() || !isa<tt::DotOp>(*transOp->user_begin()))
+      return rewriter.notifyMatchFailure(transOp,
+                                         "transOp has multiple users.");
+
+    auto cvtOp = transOp.getSrc().getDefiningOp<ttg::ConvertLayoutOp>();
+    if (!cvtOp)
+      return rewriter.notifyMatchFailure(cvtOp,
+                                         "Source of transOp is not a cvtOp.");
+
+    auto srcTy = dyn_cast<RankedTensorType>(cvtOp.getSrc().getType());
+    auto dstTy = dyn_cast<RankedTensorType>(transOp.getType());
+
+    auto dotEncoding = dyn_cast<ttg::DotOperandEncodingAttr>(dstTy.getEncoding());
+    if (!dotEncoding)
+      return rewriter.notifyMatchFailure(transOp,
+                                         "Expecting dot operand encoding attr.");
+
+    auto ctx = getContext();
+    auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(ctx);
+
+    auto swizzleEnc = ttg::SwizzledSharedEncodingAttr::get(
+        ctx, dotEncoding, srcTy.getShape(),
+        ttg::getOrderForMemory(srcTy),
+        ttg::getCTALayout(srcTy.getEncoding()),
+        srcTy.getElementType(),
+        true);
+
+    rewriter.setInsertionPoint(cvtOp);
+
+    auto alloc = ttg::LocalAllocOp::create(
+        rewriter, transOp.getLoc(),
+        ttg::MemDescType::get(srcTy.getShape(), srcTy.getElementType(),
+                              swizzleEnc, sharedMemorySpace),
+        cvtOp.getSrc());
+
+    auto newTrans = ttg::MemDescTransOp::create(rewriter, transOp.getLoc(),
+                                                alloc, transOp.getOrder());
+
+    auto localLoad = ttg::LocalLoadOp::create(rewriter, transOp.getLoc(),
+                                              dstTy, newTrans);
+
+    rewriter.replaceOp(transOp, localLoad.getResult());
+    return success();
+  }
+};
 } // namespace
 
 #define GEN_PASS_DEF_TRITONAMDGPUOPTIMIZEDOTOPERANDS
@@ -309,6 +361,7 @@ public:
         .add<AllocSharedMemForUpcastedScales<tt::amdgpu::ScaledUpcastFp8Op>,
              AllocSharedMemForUpcastedScales<tt::amdgpu::ScaledUpcastFp4Op>>(
             context, isaFamily);
+    patterns.add<AllocSharedMemForTranspose>(context);
     ttg::ConvertLayoutOp::getCanonicalizationPatterns(patterns, context);
     if (failed(applyPatternsGreedily(m, std::move(patterns))))
       signalPassFailure();
