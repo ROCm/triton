@@ -127,9 +127,13 @@ the new path for mounting volume.
 
 ### Update FFM
 
-Following https://amd.atlassian.net/wiki/spaces/MLSE/pages/1181562650/Triton+FFM-Lite+on+MI450,
-download the new FFM package under `/data/ci/ffm` and unzip it and then
-send pull request to update `.github/workflows/gfx1250-ci.sh` to use
+Following https://amd.atlassian.net/wiki/spaces/GFXAM/pages/1036867144/FFM+Rocm+Easy+Install,
+download the new FFM package under `/data/ci/ffm` and unzip it.
+Note that the package downloaded only contains `libhsakmtmodel.so`, so you need
+to copy the existing FFM as a base, and update the `libhsakmtmodel.so` library
+and rename accordingly.
+
+Then send pull request to update `.github/workflows/gfx1250-ci.sh` to use
 the new path for mounting volume.
 
 Common issues you may encounter:

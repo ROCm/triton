@@ -76,7 +76,7 @@ jobs:
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
             -v /data/ci/actions-runner/_work/triton/triton:/code \
             -v /data/ci/llvm/a992f294-release:/llvm \
-            -v /data/ci/ffm/rocm-ffmlite-mi450-eaafd2da-rel-20251205:/ffm \
+            -v /data/ci/ffm/rocm-ffmlite-mi450-1318-ce0033dd-rel-20251222:/ffm \
             -v /data/ci/triton-cache:/home/mirror/.triton \
             -v /data/ci/ccache:/home/mirror/.ccache \
             -v /data/ci/roccap/${DIRNAME}:/roccap \
