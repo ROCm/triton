@@ -1,6 +1,12 @@
 name: Core Kernels LLIR Generator
 
 on:
+  pull_request:
+    branches:
+      - shared/gfx1250*
+    paths:
+      - 'third_party/amd/python/examples/gluon/*.py'
+      - '.github/workflows/core_kernel_llir_gen.sh'
   workflow_dispatch:
 
 permissions:
