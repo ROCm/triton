@@ -51,7 +51,7 @@ echo "=== Gathering CORE MXFP Gluon GEMM/Attention Kernels ==="
 unset HSA_MODEL_ARGS
 # TODO: uncomment. Temp disabled for experimenting
 HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py -M 8192 -N 8192 -K 8192 -BM 256 -BN 256 -BK 256 --num_warps 4 --num_buffers 2 --dtype_a float8_e4m3 --dtype_b float8_e4m3 --scale_preshuffled --with_a_scale --single_warp_schedule
-HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py --q_type e4m3 --kv_type e4m3 --batch 1 --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 1 --num_k_heads 1 --head_sz 128 --block_m 128 --block_n 128 --scale_type global --p_k_width 8 --pipelined
+HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py --q_type e4m3 --kv_type e4m3 --batch 1 --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 1 --num_k_heads 1 --head_sz 128 --block_m 256 --block_n 128 --scale_type global --p_k_width 8 --subtile --pipelined
 
 echo "=== Saving LLIR into llir_kernels directory ==="
 cd $TRITON_HOME
