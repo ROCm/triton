@@ -39,7 +39,9 @@ import triton
 
 #from matmul_kernels.matmul_kernel import v7 as matmul_kernel
 
-from matmul_kernels.matmul_kernel import v8 as matmul_kernel
+#from matmul_kernels.matmul_kernel import v8 as matmul_kernel
+
+from matmul_kernels.matmul_kernel import v9 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -54,14 +56,18 @@ def matmul(a, b, num_warps):
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     # 1D launch kernel where each block gets its own program.
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 64
-    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+    GRID_MN = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
+    grid = (GRID_MN, 1)
+    NUM_XCDS = 8
+    GROUP_SIZE_M = 4
     matmul_kernel[grid](
         a, b, c,  #
         M, N, K,  #
         a.stride(0), a.stride(1),  #
         b.stride(0), b.stride(1),  #
         c.stride(0), c.stride(1),  #
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=num_warps)
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, GRID_MN=GRID_MN, NUM_XCDS=NUM_XCDS,
+        GROUP_SIZE_M=GROUP_SIZE_M, num_warps=num_warps)
     return c
 
 
