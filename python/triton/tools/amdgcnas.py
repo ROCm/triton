@@ -2,13 +2,12 @@ from collections import defaultdict, Counter, deque
 from typing import Set, Tuple, Optional
 import re
 import logging
+import argparse
+
 
 def setup_logging(debug=False):
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(levelname)s: %(message)s"
-    )
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
 class Register:
@@ -148,7 +147,7 @@ class Instruction:
         return self.opcode.startswith("s_cmp") or self.opcode.startswith("v_cmp")
 
     def is_pure(self):
-        return not (self.is_memory() or self.is_control() or self.is_cmp)
+        return not (self.is_memory() or self.is_control() or self.is_cmp())
 
     # MFMA-only helpers
     def is_mfma(self) -> bool:
@@ -340,10 +339,10 @@ class LDSReadChain:
     def __init__(self, root_ds: Instruction):
         self.ds = root_ds
         self.users: set[Instruction] = []
-        self.opIdx: Int = 0
+        self.opIdx = 0
         self.data: Register = None
         self.addr: Register = None
-        self.loc: Int = 0
+        self.loc = 0
         self.isLiveAcrossBB: bool = False
 
 
@@ -837,7 +836,7 @@ def analyze_block(bb, mfmaChainsInBB, LDSChains):
 
     for chain in LDSChains:
         ds_read_inst = chain.ds
-        if (not ds_read_inst in bb.instructions) and (next(iter(chain.users), None) in bb.instructions):
+        if (ds_read_inst not in bb.instructions) and (next(iter(chain.users), None) in bb.instructions):
             entry_lds_data |= flatten_regs(ds_read_inst.get_dst_regs())
 
     assert entry_acc.issubset(live_in)
@@ -857,7 +856,7 @@ def analyze_block(bb, mfmaChainsInBB, LDSChains):
 
     bb_uses = bb.defs | bb.uses
     if live_in.issubset(bb_uses):
-        logging.debug(f"bb_uses contains live_in")
+        logging.debug("bb_uses contains live_in")
     #bb_uses = bb_uses - live_in
     bb_a, bb_v = count_regs(coalesce_regs(bb_uses))
     logging.debug(f"BB uses: a={bb_a} v={bb_v} {coalesce_regs(bb_uses)}")
@@ -959,7 +958,7 @@ def choose_canonical_acc(chain, bb):
     logging.debug(f"Need optimize copy inst on the chain!! Use {candidate=} while {chain.entry_acc=}")
     logging.debug(f"  number of nops: {len(chain.nops)}")
     if chain.entry_acc != chain.exit_acc:
-        logging.debug(f"    mismatch acc")
+        logging.debug("    mismatch acc")
         mfma = chain.mfmas[-1]
         reach_defs = bb.get_reaching_defs(mfma, mfma.get_mfma_acc())
         for reaching_def in reach_defs:
@@ -1044,7 +1043,7 @@ def get_entry_exit_acc_reg(bb, chain):
 
 def optimize_mfma_accumulators(bb, chains):
 
-    logging.debug(f"===================================================================")
+    logging.debug("===================================================================")
     logging.debug(f"Optimizing {len(chains)} mfma chains")
 
     entry_regs = []
@@ -1081,7 +1080,7 @@ def optimize_mfma_accumulators(bb, chains):
 
     cleanup_bb(bb)
 
-    logging.debug(f"=========================== done ====================================")
+    logging.debug("=========================== done ====================================")
 
 
 def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
@@ -1102,8 +1101,6 @@ def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
 
         # Try every possible contiguous window
         for start in ids:
-            end = start + x - 1
-
             # Alignment constraint
             if x > 1 and start % 2 != 0:
                 continue
@@ -1122,7 +1119,7 @@ def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
 
 
 def clear_optimize_mfma_obstacles(bb, chains):
-    logging.debug(f"========== clear obstacles ==========")
+    logging.debug("========== clear obstacles ==========")
 
     x = 4
     for chain in chains:
@@ -1130,7 +1127,7 @@ def clear_optimize_mfma_obstacles(bb, chains):
             logging.debug(f"{inst.emit()}")
             avai_regs = pick_and_remove_contiguous_regs(bb.free_regs, x)
             if avai_regs is None:
-                logging.debug(f"Not enough free registers")
+                logging.debug("Not enough free registers")
                 return
             logging.debug(f"free regs: {coalesce_regs(avai_regs)}, remaining: {coalesce_regs(bb.free_regs)}")
             free_reg = coalesce_regs(avai_regs)[0]
@@ -1141,12 +1138,12 @@ def clear_optimize_mfma_obstacles(bb, chains):
                 for user in lds_chain.users:
                     user.replace_mfma_operand(free_reg, opIdx)
 
-    logging.debug(f"========== done clear obstacles ==========")
+    logging.debug("========== done clear obstacles ==========")
 
 
 def collect_ds_chains(blocks):
 
-    logging.debug(f"========== Collecting lds chains ==========")
+    logging.debug("========== Collecting lds chains ==========")
     chains = []
 
     for bb in blocks:
@@ -1166,10 +1163,10 @@ def collect_ds_chains(blocks):
                     #logging.debug(f"    {opIdx=}: {user.emit()}")
                     assert opIdx == 1 or opIdx == 2
                     if chain.opIdx != 0 and chain.opIdx != opIdx:
-                        logging.debug(f"mismatch opIdx!!!")
+                        logging.debug("mismatch opIdx!!!")
                     chain.opIdx = opIdx
 
-                    if not user in bb.instructions:
+                    if user not in bb.instructions:
                         chain.isLiveAcrossBB = True
                 inst.lds_chain = chain
                 chains.append(chain)
@@ -1188,12 +1185,12 @@ def collect_ds_chains(blocks):
     a_num, v_num = count_regs(total_lds_regs)
     logging.debug(f"total LDS regs: {a_num=}  {v_num=} {coalesce_regs(flatten_regs(total_lds_regs))}")
 
-    logging.debug(f"========== Done Collecting lds chains ==========")
+    logging.debug("========== Done Collecting lds chains ==========")
     return chains
 
 
 def collect_buffer_load_chains(bb):
-    logging.debug(f"========== Collecting buffer load chains ==========")
+    logging.debug("========== Collecting buffer load chains ==========")
 
     visited = set()
     chains = set()
@@ -1253,7 +1250,7 @@ def collect_buffer_load_chains(bb):
 
             chains.add(chain)
 
-    logging.debug(f"========== Done Collecting buffer load chains ==========")
+    logging.debug("========== Done Collecting buffer load chains ==========")
 
     return chains
 
@@ -1374,9 +1371,8 @@ def construct_lds_reg_map():
     return lds_reg_assignment
 
 
-def reassign_lds_regs(chains: list[LDSReadChain]):
-
-    map = construct_lds_reg_map()
+#def reassign_lds_regs(chains: list[LDSReadChain]):
+#    map = construct_lds_reg_map()
 
 
 def optimize_nops(bb):
@@ -1476,7 +1472,7 @@ def can_hoist(inst, bb, invariant_regs):
         num = len(ids)
         free_reg = pick_and_remove_contiguous_regs(bb.free_regs, num, kind)
         if not free_reg:
-            logging.debug(f"Not enough free regs")
+            logging.debug("Not enough free regs")
             return False
         free_reg = coalesce_regs(free_reg)[0]
         logging.debug(f"  found free reg: {free_reg.emit()}")
@@ -1497,7 +1493,7 @@ def hoist_loop_invariants(bb: BasicBlock):
         logging.debug(f"{inst.emit()=}")
         if can_hoist(inst, bb, invariant_regs):
             hoistable.append(inst)
-            logging.debug(f"  can hoist!!")
+            logging.debug("  can hoist!!")
 
     if not hoistable:
         return [], bb.instructions
@@ -1512,6 +1508,7 @@ def hoist_loop_invariants(bb: BasicBlock):
             new_loop.append(inst)
 
     return hoistable, new_loop
+
 
 def remove_debug_info_section(asm_text: str) -> str:
     """
@@ -1536,7 +1533,8 @@ def remove_debug_info_section(asm_text: str) -> str:
 
     return "".join(output)
 
-def amdgcn_as(text, verbose = False):
+
+def amdgcn_as(text, verbose=False):
 
     setup_logging(debug=verbose)
 
@@ -1563,13 +1561,13 @@ def amdgcn_as(text, verbose = False):
     #analyze_blocks(blocks)
 
     LDSChains = collect_ds_chains(blocks)
-    reassign_lds_regs(LDSChains)
+    #reassign_lds_regs(LDSChains)
 
     mfmaChainsInLoop = collect_mfma_chains(loop)
 
-    logging.debug(f"========== Analyze loop ==========")
+    logging.debug("========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    logging.debug(f"========== Done Analyze loop ==========")
+    logging.debug("========== Done Analyze loop ==========")
 
     optimize_mfma_accumulators(loop, mfmaChainsInLoop)
 
@@ -1591,20 +1589,20 @@ def amdgcn_as(text, verbose = False):
 
     optimize_mfma_accumulators(loop, mfmaChainsInLoop)
 
-    for chain in mfmaChainsInLoop:
-        zero_init = chain.get_zero_init(prologue)
+    #for chain in mfmaChainsInLoop:
+    #    zero_init = chain.get_zero_init(prologue)
 
-    logging.debug(f"========== Analyze loop ==========")
+    logging.debug("========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    logging.debug(f"========== Done Analyze loop ==========")
+    logging.debug("========== Done Analyze loop ==========")
 
     optimize_nops(loop)
 
     bufferLoadChains = collect_buffer_load_chains(loop)
 
-    logging.debug(f"========== Optimize buffer load voff ==========")
+    logging.debug("========== Optimize buffer load voff ==========")
     optimize_buffer_load_voff(loop, bufferLoadChains)
-    logging.debug(f"========== Done Optimize buffer load voff ==========")
+    logging.debug("========== Done Optimize buffer load voff ==========")
 
     for bb in blocks:
         compute_bb_def_use(bb)
@@ -1612,9 +1610,9 @@ def amdgcn_as(text, verbose = False):
 
     compute_liveness(blocks)
 
-    logging.debug(f"========== Analyze loop ==========")
+    logging.debug("========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    logging.debug(f"========== Done Analyze loop ==========")
+    logging.debug("========== Done Analyze loop ==========")
 
     optimize_buffer_load_m0(loop, bufferLoadChains)
 
@@ -1624,7 +1622,7 @@ def amdgcn_as(text, verbose = False):
 
     compute_liveness(blocks)
 
-    logging.debug(f"========== LICM ==========")
+    logging.debug("========== LICM ==========")
     hoisted, new_loop = hoist_loop_invariants(loop)
     loop.instructions = new_loop
 
@@ -1632,7 +1630,7 @@ def amdgcn_as(text, verbose = False):
     for inst in hoisted:
         logging.debug(f"{inst.emit()}")
         prologue.add_inst(inst)
-    logging.debug(f"========== Done LICM ==========")
+    logging.debug("========== Done LICM ==========")
 
     # Suppose emit_program(program) returns a string of the assembly
     emitted_text = emit_program(program)
@@ -1644,16 +1642,26 @@ def amdgcn_as(text, verbose = False):
     return emitted_text
 
 
-if __name__ == "__main__":
-    with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v9/v9.amdgcn") as f:
-        #with open("./v8/v8.amdgcn") as f:
+def main():
+    parser = argparse.ArgumentParser(description="AMDGPU assembly optimizer")
+    parser.add_argument("input", help="Input AMDGCN assembly file")
+    parser.add_argument("output", help="Output AMDGCN assembly file")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(levelname)s: %(message)s")
+
+    with open(args.input, "r") as f:
         text = f.read()
 
     emitted_text = amdgcn_as(text)
 
-    # Write to a file
-    output_file = "./dump/new_asm.s"  # or whatever you want
-    with open(output_file, "w") as f:
+    with open(args.output, "w") as f:
         f.write(emitted_text)
 
-    logging.debug(f"Emitted program written to {output_file}")
+    logging.debug("Emitted program written to %s", args.output)
+
+
+if __name__ == "__main__":
+    main()
