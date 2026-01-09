@@ -1,6 +1,14 @@
 from collections import defaultdict, Counter, deque
 from typing import Set, Tuple, Optional
 import re
+import logging
+
+def setup_logging(debug=False):
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s: %(message)s"
+    )
 
 
 class Register:
@@ -742,10 +750,10 @@ def build_def_use_chains_linear(blocks):
 
 
 def analyze_blocks(blocks):
-    print("")
-    print("============================================================")
+    logging.debug("")
+    logging.debug("============================================================")
     for bb in blocks:
-        print(f"BasicBlock {bb.name}:")
+        logging.debug(f"BasicBlock {bb.name}:")
 
         # --------------------------------------------------
         # Instruction histogram
@@ -755,9 +763,9 @@ def analyze_blocks(blocks):
             inst_hist[(inst.opcode, inst.loc[1])] += 1
             inst.index = bb.instructions.index(inst)
 
-        print("  Instruction histogram:")
+        logging.debug("  Instruction histogram:")
         for op, cnt in inst_hist.most_common():
-            print(f"    {op[1]:3d}:{op[0]:<40} {cnt}")
+            logging.debug(f"    {op[1]:3d}:{op[0]:<40} {cnt}")
 
         # --------------------------------------------------
         # Register usage (from defs ∪ uses)
@@ -771,24 +779,24 @@ def analyze_blocks(blocks):
         def dump_regs(kind, name):
             ids = sorted(regs_by_kind.get(kind, []))
             if not ids:
-                print(f"    {name}: none")
+                logging.debug(f"    {name}: none")
                 return
 
             ranges = collapse_ranges(ids)
-            print(f"    {name}: {len(ids)} regs")
-            print(f"      ranges: {', '.join(ranges)}")
+            logging.debug(f"    {name}: {len(ids)} regs")
+            logging.debug(f"      ranges: {', '.join(ranges)}")
 
         def dump_reg_set(regset, name):
             by_kind = {}
             for k, r in regset:
                 by_kind.setdefault(k, set()).add(r)
 
-            print(f"  {name}:")
+            logging.debug(f"  {name}:")
             for kind, ids in by_kind.items():
                 ranges = collapse_ranges(sorted(ids))
-                print(f"    {kind}: {', '.join(ranges)}")
+                logging.debug(f"    {kind}: {', '.join(ranges)}")
 
-        print("  Register usage:")
+        logging.debug("  Register usage:")
         dump_regs('s', "SGPR")
         dump_regs('v', "VGPR")
         dump_regs('a', "AGPR")
@@ -797,11 +805,11 @@ def analyze_blocks(blocks):
         # --------------------------------------------------
         # Liveness
         # --------------------------------------------------
-        print("  Liveness:")
+        logging.debug("  Liveness:")
         dump_reg_set(bb.live_in, "Live-in")
         dump_reg_set(bb.live_out, "Live-out")
 
-        print("--------------------------------------------------------")
+        logging.debug("--------------------------------------------------------")
 
 
 def analyze_block(bb, mfmaChainsInBB, LDSChains):
@@ -835,29 +843,29 @@ def analyze_block(bb, mfmaChainsInBB, LDSChains):
     remaining = live_in - entry_acc - entry_lds_data
 
     live_in_a, live_in_v = count_regs(coalesce_regs(live_in))
-    print(f"live_in: a={live_in_a} v={live_in_v} {coalesce_regs(live_in)}")
+    logging.debug(f"live_in: a={live_in_a} v={live_in_v} {coalesce_regs(live_in)}")
     acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
-    print(f"live-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
+    logging.debug(f"live-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
     lds_a, lds_v = count_regs(coalesce_regs(entry_lds_data))
-    print(f"live-in lds data: a={lds_a} v={lds_v} {coalesce_regs(entry_lds_data)}")
+    logging.debug(f"live-in lds data: a={lds_a} v={lds_v} {coalesce_regs(entry_lds_data)}")
 
     re_a, re_v = count_regs(coalesce_regs(remaining))
-    print(f"live-in remaining: a={re_a} v={re_v} {coalesce_regs(remaining)}")
+    logging.debug(f"live-in remaining: a={re_a} v={re_v} {coalesce_regs(remaining)}")
 
     bb_uses = bb.defs | bb.uses
     if live_in.issubset(bb_uses):
-        print(f"bb_uses contains live_in")
+        logging.debug(f"bb_uses contains live_in")
     #bb_uses = bb_uses - live_in
     bb_a, bb_v = count_regs(coalesce_regs(bb_uses))
-    print(f"BB uses: a={bb_a} v={bb_v} {coalesce_regs(bb_uses)}")
+    logging.debug(f"BB uses: a={bb_a} v={bb_v} {coalesce_regs(bb_uses)}")
 
     live_through = live_in - bb_uses
     th_a, th_v = count_regs(coalesce_regs(live_through))
-    print(f"live through: a={th_a} v={th_v} {coalesce_regs(live_through)}")
+    logging.debug(f"live through: a={th_a} v={th_v} {coalesce_regs(live_through)}")
 
     free_regs = all_regs - bb_uses - live_through
     free_a, free_v = count_regs(coalesce_regs(free_regs))
-    print(f"free: a={free_a} v={free_v} {coalesce_regs(free_regs)}")
+    logging.debug(f"free: a={free_a} v={free_v} {coalesce_regs(free_regs)}")
 
     bb.free_regs = free_regs
 
@@ -887,7 +895,7 @@ def collect_mfma_chains(bb):
                 continue
             visited.add(cur)
 
-            #print(f"visiting mfma: {cur.emit()}")
+            #logging.debug(f"visiting mfma: {cur.emit()}")
 
             if cur.is_mfma():
                 chain.mfmas.append(cur)
@@ -916,7 +924,7 @@ def collect_mfma_chains(bb):
 
         if len(chain.mfmas) >= 2:
             chains.append(chain)
-            #print(f"How many mfma in the chain: {len(chain.mfmas)}")
+            #logging.debug(f"How many mfma in the chain: {len(chain.mfmas)}")
 
         ## fwd pass
         worklist = []
@@ -945,27 +953,27 @@ def collect_mfma_chains(bb):
 def choose_canonical_acc(chain, bb):
     candidate = chain.exit_acc
 
-    print(f"Need optimize copy inst on the chain!! Use {candidate=} while {chain.entry_acc=}", end="")
-    print(f"  number of nops: {len(chain.nops)}")
+    logging.debug(f"Need optimize copy inst on the chain!! Use {candidate=} while {chain.entry_acc=}")
+    logging.debug(f"  number of nops: {len(chain.nops)}")
     if chain.entry_acc != chain.exit_acc:
-        print(f"    mismatch acc")
+        logging.debug(f"    mismatch acc")
         mfma = chain.mfmas[-1]
         reach_defs = bb.get_reaching_defs(mfma, mfma.get_mfma_acc())
         for reaching_def in reach_defs:
-            print(f"    {reaching_def.emit()}")
+            logging.debug(f"    {reaching_def.emit()}")
 
     for inst in bb.instructions_between(chain.mfmas[-1], chain.mfmas[0]):
         if inst in chain.mfmas or inst in chain.copy_instrs:
             continue
         if inst.defines(candidate):
             chain.use_acc.add(inst)
-            print(f"    oops, {inst.emit()} defines {candidate}")
+            logging.debug(f"    oops, {inst.emit()} defines {candidate}")
             if 'ds_read_b128' in inst.opcode:
                 for user in inst.users:
-                    print(f"      {user.emit()} {user in bb.instructions}")
+                    logging.debug(f"      {user.emit()} {user in bb.instructions}")
             return None
         if inst.uses_regs(candidate):
-            print(f"    oops, {inst.emit()} uses {candidate}")
+            logging.debug(f"    oops, {inst.emit()} uses {candidate}")
             return None
 
     return candidate
@@ -1033,8 +1041,8 @@ def get_entry_exit_acc_reg(bb, chain):
 
 def optimize_mfma_accumulators(bb, chains):
 
-    print(f"===================================================================")
-    print(f"Optimizing {len(chains)} mfma chains")
+    logging.debug(f"===================================================================")
+    logging.debug(f"Optimizing {len(chains)} mfma chains")
 
     entry_regs = []
     exit_regs = []
@@ -1060,17 +1068,17 @@ def optimize_mfma_accumulators(bb, chains):
     entry_acc = coalesce_regs(entry_acc_flatten)
     exit_acc = coalesce_regs(exit_acc_flatten)
     a_num, v_num = count_regs(entry_regs)
-    print(f"{a_num=} {v_num=}: {entry_acc=}")
+    logging.debug(f"{a_num=} {v_num=}: {entry_acc=}")
     #for reg, cnt in entry_hist.most_common():
-    #    print(f"    {reg}: {cnt}")
+    #    logging.debug(f"    {reg}: {cnt}")
 
-    print(f"{len(exit_acc_flatten)}: {exit_acc=}")
+    logging.debug(f"{len(exit_acc_flatten)}: {exit_acc=}")
     #for reg, cnt in exit_hist.most_common():
-    #    print(f"    {reg}: {cnt}")
+    #    logging.debug(f"    {reg}: {cnt}")
 
     cleanup_bb(bb)
 
-    print(f"=========================== done ====================================")
+    logging.debug(f"=========================== done ====================================")
 
 
 def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
@@ -1111,17 +1119,17 @@ def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
 
 
 def clear_optimize_mfma_obstacles(bb, chains):
-    print(f"========== clear obstacles ==========")
+    logging.debug(f"========== clear obstacles ==========")
 
     x = 4
     for chain in chains:
         for inst in chain.use_acc:
-            print(f"{inst.emit()}")
+            logging.debug(f"{inst.emit()}")
             avai_regs = pick_and_remove_contiguous_regs(bb.free_regs, x)
             if avai_regs is None:
-                print(f"Not enough free registers")
+                logging.debug(f"Not enough free registers")
                 return
-            print(f"free regs: {coalesce_regs(avai_regs)}, remaining: {coalesce_regs(bb.free_regs)}")
+            logging.debug(f"free regs: {coalesce_regs(avai_regs)}, remaining: {coalesce_regs(bb.free_regs)}")
             free_reg = coalesce_regs(avai_regs)[0]
             if 'ds_read' in inst.opcode:
                 lds_chain = inst.lds_chain
@@ -1130,12 +1138,12 @@ def clear_optimize_mfma_obstacles(bb, chains):
                 for user in lds_chain.users:
                     user.replace_mfma_operand(free_reg, opIdx)
 
-    print(f"========== done clear obstacles ==========")
+    logging.debug(f"========== done clear obstacles ==========")
 
 
 def collect_ds_chains(blocks):
 
-    print(f"========== Collecting lds chains ==========")
+    logging.debug(f"========== Collecting lds chains ==========")
     chains = []
 
     for bb in blocks:
@@ -1143,19 +1151,19 @@ def collect_ds_chains(blocks):
             if 'ds_read_b128' in inst.opcode:
                 chain = LDSReadChain(inst)
                 chain.users = inst.users
-                #print(f"lds users: {len(chain.users)}  {inst.get_dst_regs()[0]}")
+                #logging.debug(f"lds users: {len(chain.users)}  {inst.get_dst_regs()[0]}")
                 data_reg = inst.get_dst_regs()
                 assert chain.opIdx == 0
                 chain.loc = inst.loc[1]
                 chain.addr = inst.get_src_regs()[0]
-                #print(f"{inst.emit()}")
+                #logging.debug(f"{inst.emit()}")
                 for user in chain.users:
                     assert user.is_mfma()
                     opIdx = user.get_op_idx(data_reg)
-                    #print(f"    {opIdx=}: {user.emit()}")
+                    #logging.debug(f"    {opIdx=}: {user.emit()}")
                     assert opIdx == 1 or opIdx == 2
                     if chain.opIdx != 0 and chain.opIdx != opIdx:
-                        print(f"mismatch opIdx!!!")
+                        logging.debug(f"mismatch opIdx!!!")
                     chain.opIdx = opIdx
 
                     if not user in bb.instructions:
@@ -1167,22 +1175,22 @@ def collect_ds_chains(blocks):
     lds_regs_by_loc = {}
     for chain in chains:
         total_lds_regs.append(chain.ds.get_dst_regs())
-        #print(f"{chain.loc=}")
+        #logging.debug(f"{chain.loc=}")
         lds_regs_by_loc.setdefault(chain.loc, list()).append(chain.ds.get_dst_regs())
 
     #for loc, regs in lds_regs_by_loc.items():
     #    reg_list = coalesce_regs(flatten_regs(regs))
-    #    print(f"{loc=}: {len(regs)} {reg_list}")
+    #    logging.debug(f"{loc=}: {len(regs)} {reg_list}")
 
     a_num, v_num = count_regs(total_lds_regs)
-    print(f"total LDS regs: {a_num=}  {v_num=} {coalesce_regs(flatten_regs(total_lds_regs))}")
+    logging.debug(f"total LDS regs: {a_num=}  {v_num=} {coalesce_regs(flatten_regs(total_lds_regs))}")
 
-    print(f"========== Done Collecting lds chains ==========")
+    logging.debug(f"========== Done Collecting lds chains ==========")
     return chains
 
 
 def collect_buffer_load_chains(bb):
-    print(f"========== Collecting buffer load chains ==========")
+    logging.debug(f"========== Collecting buffer load chains ==========")
 
     visited = set()
     chains = set()
@@ -1204,9 +1212,9 @@ def collect_buffer_load_chains(bb):
             chain = BufferLoadLDSChain()
             chain.buffer_load.append(inst)
             voff = inst.regs_by_operand[0]
-            #print(f"{inst.emit()} --> {voff=}")
+            #logging.debug(f"{inst.emit()} --> {voff=}")
             cndmask_inst = next(iter(bb.get_reaching_defs(inst, voff)))
-            #print(f"  {cndmask_inst.emit()=}")
+            #logging.debug(f"  {cndmask_inst.emit()=}")
             assert 'cndmask' in cndmask_inst.opcode
             chain.cndmask = cndmask_inst
 
@@ -1216,19 +1224,19 @@ def collect_buffer_load_chains(bb):
 
             chain.copy_inst.append(copy_inst)
             chain.entry_reg = copy_inst.regs_by_operand[1]
-            #print(f"  {chain.entry_reg=}")
+            #logging.debug(f"  {chain.entry_reg=}")
             assert flatten_regs(chain.entry_reg).issubset(bb.live_in)
 
             for user_inst in bb.instructions_between(inst, bb.instructions[-1]):
                 if user_inst.uses_regs(voff) or ('buffer_load' in user_inst.opcode
                                                  and user_inst.regs_by_operand[0] == voff):
-                    #print(f"  Found a user of voff: {user_inst.emit()}")
+                    #logging.debug(f"  Found a user of voff: {user_inst.emit()}")
                     if 'buffer_load' in user_inst.opcode:
                         chain.buffer_load.append(user_inst)
                         visited.add(user_inst)
-                        #print(f"  2nd buffer_load: {user_inst.emit()}")
+                        #logging.debug(f"  2nd buffer_load: {user_inst.emit()}")
                     else:
-                        #print(f"  else: {user_inst.emit()}")
+                        #logging.debug(f"  else: {user_inst.emit()}")
                         assert 'v_accvgpr' in user_inst.opcode
                         chain.copy_inst.append(user_inst)
                         copy_2nd = next(iter(user_inst.users))
@@ -1242,7 +1250,7 @@ def collect_buffer_load_chains(bb):
 
             chains.add(chain)
 
-    print(f"========== Done Collecting buffer load chains ==========")
+    logging.debug(f"========== Done Collecting buffer load chains ==========")
 
     return chains
 
@@ -1262,7 +1270,7 @@ def optimize_buffer_load_voff(bb, chains):
             chain.cndmask.replace_dst(free_reg)
             chain.cndmask.operands[1] = free_reg.emit()
             chain.cndmask.update_regs_by_operand()
-            #print(f"replaced cndmask dst and op1 with {free_reg}")
+            #logging.debug(f"replaced cndmask dst and op1 with {free_reg}")
 
         ## rewrite buffer_load voff
         for buffer_inst in chain.buffer_load:
@@ -1272,7 +1280,7 @@ def optimize_buffer_load_voff(bb, chains):
         old_reg = chain.entry_reg
         assert old_reg and old_reg.kind == 'a'
         inst_str = f'v_accvgpr_read_b32 {free_reg.emit()} {old_reg.emit()}'
-        #print(f"writing {inst_str} in the prologue")
+        #logging.debug(f"writing {inst_str} in the prologue")
         prologue.add_inst(parse_instruction(inst_str, 0, prologue))
 
     cleanup_bb(bb)
@@ -1295,10 +1303,10 @@ def optimize_buffer_load_m0(bb, chains):
 
 
 def print_map(map, loc):
-    print(f"{loc}: ", end="")
+    logging.debug(f"{loc}: ")
     for regs in map[loc]:
-        print(f"{regs} ", end="")
-    print("")
+        logging.debug(f"{regs} ")
+    logging.debug("")
 
 
 def construct_lds_reg_map():
@@ -1460,20 +1468,20 @@ def can_hoist(inst, bb, invariant_regs):
     if redef:
         ## Try to use a different reg
         def_reg = coalesce_regs(inst.defs)[0]
-        print(f"  inst redefined, trying to rewrite {def_reg.emit()}")
+        logging.debug(f"  inst redefined, trying to rewrite {def_reg.emit()}")
         kind, ids = def_reg.kind, def_reg.ids
         num = len(ids)
         free_reg = pick_and_remove_contiguous_regs(bb.free_regs, num, kind)
         if not free_reg:
-            print(f"Not enough free regs")
+            logging.debug(f"Not enough free regs")
             return False
         free_reg = coalesce_regs(free_reg)[0]
-        print(f"  found free reg: {free_reg.emit()}")
+        logging.debug(f"  found free reg: {free_reg.emit()}")
         inst.replace_users_with(free_reg)
         #for user in inst.users:
-        #    print(f"    {user.emit()}")
+        #    logging.debug(f"    {user.emit()}")
         inst.replace_reg(def_reg, free_reg)
-        print(f"  new inst: {inst.emit()}")
+        logging.debug(f"  new inst: {inst.emit()}")
 
     return True
 
@@ -1483,10 +1491,10 @@ def hoist_loop_invariants(bb: BasicBlock):
 
     hoistable = []
     for inst in invariant_insts:
-        print(f"{inst.emit()=}")
+        logging.debug(f"{inst.emit()=}")
         if can_hoist(inst, bb, invariant_regs):
             hoistable.append(inst)
-            print(f"  can hoist!!")
+            logging.debug(f"  can hoist!!")
 
     if not hoistable:
         return [], bb.instructions
@@ -1502,11 +1510,32 @@ def hoist_loop_invariants(bb: BasicBlock):
 
     return hoistable, new_loop
 
+def remove_debug_info_section(asm_text: str) -> str:
+    """
+    Remove the .debug_info section from an AMDGPU assembly file.
+    """
+    lines = asm_text.splitlines(keepends=True)
+    output = []
 
-if __name__ == "__main__":
-    with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8.amdgcn") as f:
-        #with open("./v8/v8.amdgcn") as f:
-        text = f.read()
+    in_debug_section = False
+
+    for line in lines:
+        if line.strip().startswith(".section") and ".debug_info" in line:
+            in_debug_section = True
+            continue
+
+        if in_debug_section:
+            if line.strip().startswith(".Ldebug_info_end"):
+                in_debug_section = False
+            continue
+
+        output.append(line)
+
+    return "".join(output)
+
+def amdgcn_as(text, verbose = False):
+
+    setup_logging(debug=verbose)
 
     program = parse_asm(text)
 
@@ -1535,9 +1564,9 @@ if __name__ == "__main__":
 
     mfmaChainsInLoop = collect_mfma_chains(loop)
 
-    print(f"========== Analyze loop ==========")
+    logging.debug(f"========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    print(f"========== Done Analyze loop ==========")
+    logging.debug(f"========== Done Analyze loop ==========")
 
     optimize_mfma_accumulators(loop, mfmaChainsInLoop)
 
@@ -1546,8 +1575,8 @@ if __name__ == "__main__":
     #########################################################
     ## 2nd round
     #########################################################
-    print("")
-    print("")
+    logging.debug("")
+    logging.debug("")
     for bb in blocks:
         compute_bb_def_use(bb)
     build_def_use_chains_linear(blocks)
@@ -1562,17 +1591,17 @@ if __name__ == "__main__":
     for chain in mfmaChainsInLoop:
         zero_init = chain.get_zero_init(prologue)
 
-    print(f"========== Analyze loop ==========")
+    logging.debug(f"========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    print(f"========== Done Analyze loop ==========")
+    logging.debug(f"========== Done Analyze loop ==========")
 
     optimize_nops(loop)
 
     bufferLoadChains = collect_buffer_load_chains(loop)
 
-    print(f"========== Optimize buffer load voff ==========")
+    logging.debug(f"========== Optimize buffer load voff ==========")
     optimize_buffer_load_voff(loop, bufferLoadChains)
-    print(f"========== Done Optimize buffer load voff ==========")
+    logging.debug(f"========== Done Optimize buffer load voff ==========")
 
     for bb in blocks:
         compute_bb_def_use(bb)
@@ -1580,9 +1609,9 @@ if __name__ == "__main__":
 
     compute_liveness(blocks)
 
-    print(f"========== Analyze loop ==========")
+    logging.debug(f"========== Analyze loop ==========")
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
-    print(f"========== Done Analyze loop ==========")
+    logging.debug(f"========== Done Analyze loop ==========")
 
     optimize_buffer_load_m0(loop, bufferLoadChains)
 
@@ -1592,22 +1621,36 @@ if __name__ == "__main__":
 
     compute_liveness(blocks)
 
-    print(f"========== LICM ==========")
+    logging.debug(f"========== LICM ==========")
     hoisted, new_loop = hoist_loop_invariants(loop)
     loop.instructions = new_loop
 
-    #print(f"Hoisting the following before the loop:")
+    #logging.debug(f"Hoisting the following before the loop:")
     for inst in hoisted:
-        print(f"{inst.emit()}")
+        logging.debug(f"{inst.emit()}")
         prologue.add_inst(inst)
-    print(f"========== Done LICM ==========")
+    logging.debug(f"========== Done LICM ==========")
 
     # Suppose emit_program(program) returns a string of the assembly
     emitted_text = emit_program(program)
 
+    emitted_text = remove_debug_info_section(emitted_text)
+
+    setup_logging(debug=False)
+
+    return emitted_text
+
+
+if __name__ == "__main__":
+    with open("/var/lib/jenkins/OAI-triton/study_matmul/gluon/v9/v9.amdgcn") as f:
+        #with open("./v8/v8.amdgcn") as f:
+        text = f.read()
+
+    emitted_text = amdgcn_as(text)
+
     # Write to a file
-    output_file = "./new_asm.s"  # or whatever you want
+    output_file = "./dump/new_asm.s"  # or whatever you want
     with open(output_file, "w") as f:
         f.write(emitted_text)
 
-    print(f"Emitted program written to {output_file}")
+    logging.debug(f"Emitted program written to {output_file}")

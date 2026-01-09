@@ -12,6 +12,7 @@ import os
 import functools
 import warnings
 from pathlib import Path
+from triton.tools.amdgcnas import amdgcn_as
 
 
 def get_min_dot_size(target: GPUTarget):
@@ -533,6 +534,8 @@ class HIPBackend(BaseBackend):
         else:
             amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags,
                                            options.enable_fp_fusion, False)
+
+        amdgcn = amdgcn_as(amdgcn, False)
 
         if "AMD_INSERT_AMDGCN" in os.environ.keys():
             insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
