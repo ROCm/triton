@@ -298,3 +298,21 @@ the `voff` regs of `buffer_load`.
 
 - asm: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8_amdgcnasv1.s`
 - 94%
+
+### amdgcnas v2
+
+
+- asm: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8_amdgcnasv2.s`
+- 97%
+
+|          | cycles | portion |
+|----------|--------|---------|
+| prologue | 5156   | 3.4%    |
+| loop     | 135220 | 90%     |
+| epilogue | 9120   | 6%      |
+
+### kernel v9
+
+Add support for xcd remapping logic
+
+Kernel level change, loop code stays the same.
