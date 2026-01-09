@@ -1508,6 +1508,7 @@ AMDWmmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
 
   return success();
 }
+
 //===----------------------------------------------------------------------===//
 // Sliced Encoding
 //===----------------------------------------------------------------------===//
@@ -1594,7 +1595,6 @@ Attribute parseSwizzledEncoding(AsmParser &parser, Type type) {
   unsigned vec = 0;
   unsigned perPhase = 0;
   unsigned maxPhase = 0;
-
   SmallVector<unsigned> order;
   Attribute cgaAttr = nullptr;
   for (const NamedAttribute &attr : dict) {

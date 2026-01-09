@@ -146,9 +146,7 @@ struct ScaledUpcastFp8OpPattern
 
     Value result = packLLElements(loc, getTypeConverter(), results, rewriter,
                                   upcastOp.getType());
-
     rewriter.replaceOp(upcastOp, result);
-
     return success();
   }
 

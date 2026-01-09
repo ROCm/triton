@@ -43,7 +43,6 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     Value D = op.getResult();
 
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
-
     if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
       return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
     }

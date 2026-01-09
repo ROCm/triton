@@ -596,9 +596,8 @@ bool isExpensiveLoadOrStore(Operation *op) {
     return true;
   // Case 2a: A size 1 tensor is not expensive since all threads will load the
   // same
-  if (isSingleValue(op->getOperand(0))) {
+  if (isSingleValue(op->getOperand(0)))
     return false;
-  }
   // Case 2b: Tensor of pointers has more threads than elements
   // we can presume a high hit-rate that makes it cheap to load
   auto ptrType = cast<RankedTensorType>(op->getOperand(0).getType());
@@ -607,7 +606,6 @@ bool isExpensiveLoadOrStore(Operation *op) {
   int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
   if (ptrType.getNumElements() < numWarps * threadsPerWarp)
     return false;
-
   return true;
 }
 

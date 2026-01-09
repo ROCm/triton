@@ -249,7 +249,7 @@ public:
 
     if (!llvm::is_contained({AMD::ISAFamily::CDNA3, AMD::ISAFamily::CDNA4},
                             targetInfo.getISAFamily()))
-      return;
+      return; // This pass is CDNA3 and CDNA4 specific.
 
     // Precompute the contiguity of all AsyncCopy ops based on the src and
     // mask contiguity/alignment to avoid rebuilding ModuleAxisInfoAnalysis

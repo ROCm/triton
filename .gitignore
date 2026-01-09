@@ -93,8 +93,3 @@ docs/sg_execution_times.rst
 
 # macOS
 .DS_Store
-
-
-# remove later one day!
-test/lit-results.json
-hsakmt_counters.csv

@@ -53,6 +53,7 @@ bool comesFromAsyncWait(Value token) {
 
 void annotateLocalLoadsSyncedViaAsyncWait(ModuleOp mod) {
   auto *ctx = mod->getContext();
+
   mod->walk([&](Operation *op) {
     TypeSwitch<Operation *, void>(op)
         .Case<triton::gpu::LocalLoadOp,

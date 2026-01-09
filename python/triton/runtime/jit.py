@@ -6,9 +6,7 @@ import inspect
 import itertools
 import threading
 import re
-import os
 import textwrap
-from ..backends.compiler import GPUTarget
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
@@ -704,60 +702,6 @@ class JITFunction(JITCallable, KernelInterface[T]):
         attrs = {k: backend.parse_attr(get_iterable_path(attrvals, k)) for k in attrs}
 
         return options, signature, constexprs, attrs
-
-    def _save_temps(self, kernel, target):
-        save_temps_dir = os.getenv("TRITON_SAVETEMPS_DIR", "").strip() or os.getcwd()
-        if target.backend == 'hip':
-            save_temps_basename = kernel.name + '-hip-amdgcn-amd-amdhsa-' + target.arch
-            asm_co = kernel.asm['hsaco']
-            asm_s = kernel.asm['amdgcn']
-        else:
-            save_temps_basename = kernel.name + '-' + target.arch
-            asm_co = kernel.asm['cubin']
-            asm_s = kernel.asm['ptx']
-
-        save_temps_filepath = os.path.join(save_temps_dir, save_temps_basename)
-        with open(save_temps_filepath + '.out', 'wb') as f:
-            f.write(asm_co)
-        f.close()
-        with open(save_temps_filepath + '.s', 'w') as f:
-            f.write(asm_s)
-        f.close()
-
-    def _update_fn_name(self, constexpr_params, bound_args, options):
-        arg_list = list(bound_args.items())
-        for pos, val in constexpr_params.items():
-            key = arg_list[pos[0]][0]
-
-            strkey = str(key)
-            strval = str(val)
-            if "." or "-" in strval:
-                strval = strval.replace(".", "p")
-                strval = strval.replace("-", "neg")
-            spchars = re.compile("[-@!#$%^&*<>?/|\\{}~:.]")
-
-            if spchars.search(strkey):
-                raise ValueError(f"constrexpr param {strkey} has a special character")
-            if spchars.search(strval):
-                raise ValueError(f"constrexpr param {strval} has a special character")
-
-            self._fn_name += "__" + strkey + "_" + strval
-
-        # adding num_warps, waves_per_eu, num_stages, num_ctas to kernel name
-        # comment the following if not required
-        opts = dict(itertools.islice(options.__dict__.items(), 4))
-        for key, val in opts.items():
-            self._fn_name += "__" + str(key) + "_" + str(val)
-
-    def get_aux_target(self):
-        arch = os.getenv('TRITON_SAVETEMPS_AUX_TARGET')
-        if driver.active.get_current_target().backend == 'hip':
-            warp_size = 32 if 'gfx10' in arch or 'gfx11' in arch or 'gfx12' in arch else 64
-        else:
-            warp_size = 32
-        target = GPUTarget(driver.active.get_current_target().backend, arch, warp_size)
-
-        return target
 
     def run(self, *args, grid, warmup, **kwargs):
         kwargs["debug"] = kwargs.get("debug", self.debug) or knobs.runtime.debug

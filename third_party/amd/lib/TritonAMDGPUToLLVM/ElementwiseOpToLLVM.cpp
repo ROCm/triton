@@ -379,6 +379,7 @@ cvtScalePk8DowncastToFp8(Location loc, ConversionPatternRewriter &rewriter,
 static SmallVector<Value>
 Fp16_to_Fp8E5M2_RTNE_SW(Location loc, ConversionPatternRewriter &rewriter,
                         const SmallVector<Value> &v) {
+
   assert(v.size() == 4);
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
