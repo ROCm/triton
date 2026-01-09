@@ -144,8 +144,11 @@ class Instruction:
     def is_control(self):
         return self.opcode.startswith("s_branch") or self.opcode.startswith("s_cbranch")
 
+    def is_cmp(self):
+        return self.opcode.startswith("s_cmp") or self.opcode.startswith("v_cmp")
+
     def is_pure(self):
-        return not (self.is_memory() or self.is_control())
+        return not (self.is_memory() or self.is_control() or self.is_cmp)
 
     # MFMA-only helpers
     def is_mfma(self) -> bool:
@@ -546,11 +549,11 @@ NO_DEF_OPS = {
     's_cbranch_scc1',
 }
 
-CMP_PREFIXES = ('s_cmp_', 'v_cmp_')
+CMP_PREFIXES = ('s_cmp', 'v_cmp')
 
 ## TODO(lixun)
 ## Only buffer_load lds should be included in ALL_USERS set
-ALL_USERS = ('s_cmp_', 'v_cmp_', 'v_permlane', 'buffer_store', 'buffer_load')
+ALL_USERS = ('s_cmp', 'v_cmp', 'v_permlane', 'buffer_store', 'buffer_load')
 ALL_DEFS_USES = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov')
 
