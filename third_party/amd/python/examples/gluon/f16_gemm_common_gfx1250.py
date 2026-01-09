@@ -6,7 +6,6 @@ This module contains shared functions, classes, and utilities used by both
 persistent and StreamK GEMM implementations.
 """
 
-import re
 from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
@@ -72,26 +71,6 @@ def remap_xcd_chunked(pid, grid_mn, num_xcds: ttgl.constexpr = 8, chunk_size: tt
     # Calculate new PID
     new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
     return new_pid
-
-
-def static_profile(kernel):
-    amdgcn = kernel.asm['amdgcn']
-
-    sgpr_count = int(re.search(r'\.sgpr_count:\s+(\d+)', amdgcn).group(1))
-    sgpr_spill_count = int(re.search(r'\.sgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-    vgpr_count = int(re.search(r'\.vgpr_count:\s+(\d+)', amdgcn).group(1))
-    vgpr_spill_count = int(re.search(r'\.vgpr_spill_count:\s+(\d+)', amdgcn).group(1))
-    scratch_size = int(re.search(r';\s+ScratchSize:\s+(\d+)', amdgcn).group(1))
-    code_len_in_byte = int(re.search(r';\s+codeLenInByte\s+=\s+(\d+)', amdgcn).group(1))
-    occupancy = int(re.search(r';\s+Occupancy:\s+(\d+)', amdgcn).group(1))
-
-    print(f"- sgpr_count: {sgpr_count}\n"
-          f"- sgpr_spill_count: {sgpr_spill_count}\n"
-          f"- vgpr_count: {vgpr_count}\n"
-          f"- vgpr_spill_count: {vgpr_spill_count}\n"
-          f"- scratch_size: {scratch_size}\n"
-          f"- code_len_in_byte: {code_len_in_byte}\n"
-          f"- occupancy: {occupancy}\n")
 
 
 @gluon.constexpr_function

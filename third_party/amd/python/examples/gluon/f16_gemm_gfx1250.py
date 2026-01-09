@@ -15,8 +15,8 @@ import triton.experimental.gluon.language as ttgl
 
 # Handle imports for both pytest (module context) and direct execution
 try:
+    from .gfx1250_utils import static_profile
     from .f16_gemm_common_gfx1250 import (
-        static_profile,
         create_shared_layouts,
         create_tensor_descriptors,
         issue_loads,
@@ -25,8 +25,8 @@ try:
         TileScheduler,
     )
 except ImportError:
+    from gfx1250_utils import static_profile
     from f16_gemm_common_gfx1250 import (
-        static_profile,
         create_shared_layouts,
         create_tensor_descriptors,
         issue_loads,
