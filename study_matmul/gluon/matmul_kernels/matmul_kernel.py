@@ -1304,13 +1304,13 @@ def v9(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
 
     cdna4_async_copy.wait_group(0)
     b1 = cdna4_async_copy.load_shared_relaxed(smemB1.index(l_idx), dotOpLayoutB)
-    c0 = acc0.to(tl.float16)
+    c0 = acc0.to(a_ptr.dtype.element_ty)
     c0 = gl.convert_layout(c0, layout=gStoreLayoutC)
 
     sched_barrier(0)
 
     acc1 = gl.amd.cdna3.mfma(a, b1, acc1)
     gl.amd.cdna3.buffer_store(stored_value=c0, ptr=c0_base, offsets=c_offsets)
-    c1 = acc1.to(tl.float16)
+    c1 = acc1.to(a_ptr.dtype.element_ty)
     c1 = gl.convert_layout(c1, layout=gStoreLayoutC)
     gl.amd.cdna3.buffer_store(stored_value=c1, ptr=c1_base, offsets=c_offsets)

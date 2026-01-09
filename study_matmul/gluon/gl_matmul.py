@@ -70,57 +70,57 @@ def matmul(a, b, num_warps):
         GROUP_SIZE_M=GROUP_SIZE_M, num_warps=num_warps)
     return c
 
+def get_x_vals():
+    return [(4096, 4096, 1024),
+            (4096, 4096, 2048),
+            (4096, 4096, 3072),
+            (4096, 4096, 4096),
+            (4096, 4096, 8192),
+            (4096, 4096, 16384),
+            ]
 
-M, N, K = 4096, 4096, 4096
-#M, N, K = 256, 256, 256
-num_warps = 4
+def test_correctness(dtype):
+    num_warps = 4
 
-## Check correctness
-a = torch.rand((M, K), device=DEVICE, dtype=torch.float16) - .5
-b = torch.rand((N, K), device=DEVICE, dtype=torch.float16).T - .5
-triton_output = matmul(a, b, num_warps)
-torch_output = torch.matmul(a, b)
+    for M, N, K in get_x_vals():
+        ## Check correctness
+        a = torch.rand((M, K), device=DEVICE, dtype=dtype) - .5
+        b = torch.rand((N, K), device=DEVICE, dtype=dtype).T - .5
+        triton_output = matmul(a, b, num_warps)
+        torch_output = torch.matmul(a, b)
+        if torch.allclose(triton_output, torch_output, atol=1e-1, rtol=0):
+            print(f"{M=} {N=} {K=}: ✅ Triton and Torch match")
+        else:
+            print(f"{M=} {N=} {K=}: ❌ Triton and Torch differ")
 
-part_torch = torch_output[0:256:, 0:256]
-part_triton = triton_output[0:256:, 0:256]
-
-#for row in range(0, 256):
-#    #for col in range(0, N // 256):
-#    part_torch = torch_output[row, 0:256]
-#    part_triton = triton_output[row, 0:256]
-#    if torch.allclose(part_triton, part_torch, atol=1e-1, rtol=0):
-#        print(f"{(row)}: ✅")
-#    else:
-#        print(f"{(row)}: ❌")
-
-if torch.allclose(triton_output, torch_output, atol=1e-1, rtol=0):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
-
-print(f"max diff = {torch.max(triton_output-torch_output)}")
+        #print(f"max diff = {torch.max(triton_output-torch_output)}")
 
 configs = []
 configs.append(
     triton.testing.Benchmark(
         x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-        x_vals=[(M, N, K)],  # Different possible values for `x_name`
-        line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
+        x_vals=get_x_vals(),
+        line_arg="dtype",  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
         # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-        line_vals=["triton"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-        line_names=["Triton"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
-        styles=[("green", "-")],
+        line_vals=["fp16", "bf16"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
+        line_names=["fp16", "bf16"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+        styles=[("green", "-"), ("yellow", "--")],
         ylabel="TFLOPS",  # Label name for the y-axis
-        plot_name="matmul-performance-" + ("fp16"),  # Name for the plot, used also as a file name for saving the plot.
+        plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
         args={},
     ))
 
+name_to_torch_type = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16
+}
 
 @triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider):
-    a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
-    b = torch.randn((N, K), device=DEVICE, dtype=torch.float16).T
+def benchmark(M, N, K, dtype):
+    dtype = name_to_torch_type[dtype]
+    a = torch.randn((M, K), device=DEVICE, dtype=dtype)
+    b = torch.randn((N, K), device=DEVICE, dtype=dtype).T
     num_warps = 4
     quantiles = [0.5, 0.2, 0.8]
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, num_warps), quantiles=quantiles)
@@ -128,4 +128,6 @@ def benchmark(M, N, K, provider):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
+test_correctness(torch.float16)
+test_correctness(torch.bfloat16)
 benchmark.run(show_plots=False, print_data=True)
