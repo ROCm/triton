@@ -127,11 +127,12 @@ the new path for mounting volume.
 
 ### Update FFM
 
-Following https://amd.atlassian.net/wiki/spaces/GFXAM/pages/1036867144/FFM+Rocm+Easy+Install,
-download the new FFM package under `/data/ci/ffm` and unzip it.
-Note that the package downloaded only contains `libhsakmtmodel.so`, so you need
-to copy the existing FFM as a base, and update the `libhsakmtmodel.so` library
-and rename accordingly.
+Go to https://atlartifactory.amd.com/ui/repos/tree/General/gfxip-mi400-dev-local/gfxip/mi400/main/jitcu/mi450,
+download the new FFM package under `/data/ci/ffm` and unzip it and rename to
+`ffmlite-main-<build-id>-<sha>-<date>`.
+Note that the package downloaded only contains `libhsakmtmodel.so`, so we
+still relying on a "base FFM Lite" that shipped to customers which bundles
+HIP runtime and so.
 
 Then send pull request to update `.github/workflows/gfx1250-ci.sh` to use
 the new path for mounting volume.
