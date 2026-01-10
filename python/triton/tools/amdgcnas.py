@@ -290,6 +290,14 @@ class BasicBlock:
 
         return False
 
+    def swap_inst(self, ida, idb):
+        s = len(self.instructions)
+        if ida >= s or idb >= s:
+            return
+        if ida == idb:
+            return
+        self.instructions[ida], self.instructions[idb] = self.instructions[idb], self.instructions[ida]
+
     def emit(self):
         lines = []
         lines.append(f"{self.name}:")
@@ -319,7 +327,6 @@ class Program:
         for bb in self.blocks:
             if bb.is_epilogue():
                 return bb
-
 
 
 class set_queue:
@@ -899,9 +906,8 @@ def analyze_block(bb, mfmaChainsInBB, LDSChains):
         if (ds_read_inst not in bb.instructions) and (next(iter(chain.users), None) in bb.instructions):
             entry_lds_data |= flatten_regs(ds_read_inst.get_dst_regs())
 
-
-    #assert entry_acc.issubset(live_in)
-    #assert entry_lds_data.issubset(live_in)
+    assert entry_acc.issubset(live_in)
+    assert entry_lds_data.issubset(live_in)
 
     remaining = live_in - entry_acc - entry_lds_data
 
@@ -1603,18 +1609,20 @@ def remove_debug_info_section(asm_text: str) -> str:
 
     return "".join(output)
 
+
 def licm(program):
     logging.debug("========== LICM ==========")
     loop = program.get_loop()
     hoisted, new_loop = hoist_loop_invariants(loop)
     loop.instructions = new_loop
 
-    logging.debug(f"Hoisting the following before the loop:")
+    logging.debug("Hoisting the following before the loop:")
     prologue = program.get_prologue()
     for inst in hoisted:
         logging.debug(f"{inst.emit()}")
         prologue.add_inst(inst)
     logging.debug("========== Done LICM ==========")
+
 
 def process_blocks(blocks):
 
@@ -1630,6 +1638,131 @@ def process_blocks(blocks):
     compute_liveness(blocks)
 
     logging.debug("========== done process blocks =========")
+
+
+def rotate_lgkmcnt(program):
+    loop = program.get_loop()
+    target = None
+    for inst in loop.instructions:
+        if 's_waitcnt' in inst.opcode and 'lgkmcnt' in inst.operands[0]:
+            target = inst
+            break
+
+    if target is None:
+        return
+    ## 1. remove the target from the loop
+    ## 2. add the target at the end of the prologue
+    ## 3. add the target before the s_cbranch inst in the loop
+    idx = len(loop.instructions) - 1
+    loop.instructions.insert(idx, target)
+    idx = target.index
+    loop.instructions.pop(idx)
+    program.get_prologue().add_inst(target)
+
+
+def separate_waitcnt_and_barrier(loop):
+    for inst in loop.instructions:
+        if 's_barrier' in inst.opcode:
+            ## pattern
+            ## mfma --> waitcnt --> barrier
+            ## change to
+            ## waitcnt --> mfma --> barrier
+            idx = loop.instructions.index(inst)
+            if idx < 2:
+                continue
+            maybe_mfma = loop.instructions[idx - 2]
+            if 'mfma' not in maybe_mfma.opcode:
+                continue
+            maybe_waitcnt = loop.instructions[idx - 1]
+            if 'waitcnt' not in maybe_waitcnt.opcode:
+                continue
+            loop.swap_inst(idx - 2, idx - 1)
+
+
+def schedule_window(window):
+    mfmas = [i for i in window if i.is_mfma()]
+    nonmfmas = [i for i in window if not i.is_mfma() and not i.is_control()]
+    barriers = [i for i in window if i.is_control()]
+
+    if len(nonmfmas) <= 2 and window[0].is_mfma():
+        return window[:]  # unchanged
+
+    logging.debug("Found window:")
+    for inst in window:
+        logging.debug(f"  {inst.emit()}")
+
+    out = []
+    mi = ni = 0
+
+    while mi < len(mfmas) or ni < len(nonmfmas):
+        if mi < len(mfmas):
+            out.append(mfmas[mi])
+            mi += 1
+        for _ in range(2):
+            if ni < len(nonmfmas):
+                out.append(nonmfmas[ni])
+                ni += 1
+
+        if mi >= len(mfmas):
+            out.extend(nonmfmas[ni:])
+            break
+        if ni >= len(nonmfmas):
+            out.extend(mfmas[mi:])
+            break
+
+    # Always put one MFMA before barrier if possible
+    if barriers:
+        if out and not out[-1].is_mfma() and mfmas:
+            out.insert(len(out), mfmas[-1])
+        out.extend(barriers)
+
+    return out
+
+
+def optimize_mfma_density(block):
+    i = 0
+    n = len(block)
+    out = []
+
+    while i < n:
+        # ---- CASE A: start of block ----
+        if i == 0:
+            j = i
+            while j < n and not block[j].is_mfma():
+                j += 1
+            if j < n:  # found mfma
+                k = j
+                while k < n and block[k].is_mfma():
+                    k += 1
+                window_end = k - 1
+                window = block[i:window_end + 1]
+                rewritten = schedule_window(window)
+                out.extend(rewritten)
+                i = window_end + 1
+                continue
+
+        # ---- CASE B: non-mfma -> mfma transition ----
+        if i > 0 and not block[i - 1].is_mfma() and block[i].is_mfma():
+            start = i
+            j = i
+            while j < n and block[j].is_mfma():
+                j += 1
+            k = j
+            while k < n and not block[k].is_mfma() and not block[k].is_control():
+                k += 1
+            window_end = k - 1
+            window = block[start:window_end + 1]
+            rewritten = schedule_window(window)
+            out.extend(rewritten)
+            i = window_end + 1
+            continue
+
+        # ---- Default: copy ----
+        out.append(block[i])
+        i += 1
+
+    return out
+
 
 def amdgcn_as(text, verbose=False):
 
@@ -1683,6 +1816,26 @@ def amdgcn_as(text, verbose=False):
     analyze_block(loop, mfmaChainsInLoop, LDSChains)
 
     licm(program)
+
+    #########################################################
+    ## 4th round
+    #########################################################
+    process_blocks(blocks)
+
+    analyze_block(loop, mfmaChainsInLoop, LDSChains)
+
+    rotate_lgkmcnt(program)
+
+    separate_waitcnt_and_barrier(loop)
+
+    #########################################################
+    ## 5th round
+    #########################################################
+    process_blocks(blocks)
+
+    analyze_block(loop, mfmaChainsInLoop, LDSChains)
+
+    loop.instructions = optimize_mfma_density(loop.instructions)
 
     #########################################################
     ## write out
