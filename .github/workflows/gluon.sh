@@ -24,6 +24,7 @@ echo "=== Setup Environment ==="
 
 cd /ffm-base && source ffmlite_env.sh && cd -
 export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
+export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
 export HSA_MODEL_NUM_THREADS=1
 export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
