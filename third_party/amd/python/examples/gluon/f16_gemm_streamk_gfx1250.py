@@ -117,11 +117,10 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     if STREAMK_TILES == 0:
         return
 
-    # P buffer stores WMMA-layout accumulators - use WMMA layout
-    rm1 = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-    rn1 = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
-
-    p_offset = pid * BLOCK_M * BLOCK_N + rm1[:, None] * BLOCK_N + rn1[None, :]
+    # Initialize P buffer and locks
+    rm = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
+    rn = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
+    p_offset = pid * BLOCK_M * BLOCK_N + rm[:, None] * BLOCK_N + rn[None, :]
     ttgl.store(p_ptr + p_offset, ttgl.zeros((BLOCK_M, BLOCK_N), dtype=p_ptr.type.element_ty, layout=WMMA_LAYOUT))
     ttgl.store(locks_ptr + pid, 0)
 
@@ -134,30 +133,27 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
         remainder = current_start_iter % iters_per_tile
         end_iter = ttgl.minimum(current_start_iter + (iters_per_tile - remainder), last_iter)
         tile_id = current_start_iter // iters_per_tile
+        tile_iter = tile_id * iters_per_tile
 
         pid_m, pid_n = scheduler.get_swizzled_tile_coords(tile_id, GROUP_SIZE_M)
-
-        # Calculate offsets for this tile (used as coordinates in loads)
         off_am = pid_m * BLOCK_M
         off_bn = pid_n * BLOCK_N
 
         accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
-
         num_k_iters = end_iter - current_start_iter
+
         for k_idx in range(num_k_iters):
             k_offset = (remainder + k_idx) * BLOCK_K
 
-            # Load A and B blocks for this K-slice using TDM (reuse descriptors from Phase 1)
+            # Load FULL blocks
             ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, k_offset], a_buffer.index(0))
             if not TRANSPOSE_B:
                 ttgl.amd.gfx1250.tdm.async_load(b_desc, [k_offset, off_bn], b_buffer.index(0))
             else:
                 ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, k_offset], b_buffer.index(0))
 
-            # Wait for loads to complete
             ttgl.amd.gfx1250.tdm.async_wait(0)
 
-            # Perform WMMA
             a_operand = a_buffer.index(0).load(layout=OPERAND_LAYOUT_A)
             if not TRANSPOSE_B:
                 b_operand = b_buffer.index(0).load(layout=OPERAND_LAYOUT_B)
@@ -166,66 +162,114 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
 
             accumulator = ttgl.amd.gfx1250.wmma(a_operand, b_operand, accumulator)
 
-        tile_iter = tile_id * iters_per_tile
-
+        # ====================================================================
+        # Contributor or Owner logic (quadrant accumulation for aggregation)
+        # ====================================================================
         if current_start_iter != tile_iter:
-            # ====================================================================
-            # Contributor: Store partial result and signal completion
-            # Store partial accumulator to P buffer - use WMMA layout to match accumulator
-            # ====================================================================
-            rm_partial = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-            rn_partial = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
-            p_offset_store = pid * BLOCK_M * BLOCK_N + rm_partial[:, None] * BLOCK_N + rn_partial[None, :]
+            # ============================================================
+            # Contributor: Store FULL accumulator to P buffer
+            # ============================================================
+            rm1 = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
+            rn1 = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
+            p_offset = pid * BLOCK_M * BLOCK_N + rm1[:, None] * BLOCK_N + rn1[None, :]
 
-            offs_cm_partial = pid_m * BLOCK_M + rm_partial
-            offs_cn_partial = pid_n * BLOCK_N + rn_partial
-            mask_partial = (offs_cm_partial[:, None] < M) & (offs_cn_partial[None, :] < N)
-
-            # Store with mask, zeros for out-of-bounds (will not affect accumulation)
-            ttgl.store(p_ptr + p_offset_store, accumulator, mask=mask_partial)
-            # test with FFM needs set below two env vars to make thread_barrier works
-            # export HSA_MODEL_TOML="/home/mi450/triton_pr/.github/workflows/ffm_config.toml"
-            # export HSA_MODEL_ARGS=ffm_enable_time_slicing
+            ttgl.store(p_ptr + p_offset, accumulator)
             ttgl.barrier()
-            # atomic_xchg provides synchronization signal to owner
             ttgl.atomic_xchg(locks_ptr + pid, 1)
+
         else:
-            # ====================================================================
-            # Owner: Aggregate partials and write final result
-            # ====================================================================
+            # ============================================================
+            # Owner: Aggregate contributors and store result
+            # - Use quadrant aggregation for 256x256 to reduce spills
+            # - Use full accumulator for smaller tiles to avoid parsing issues
+            # ============================================================
             next_pid = pid + 1
-            tile_iter_end = tile_iter + iters_per_tile
             end = end_iter
 
-            while (end < tile_iter_end and next_pid < num_sms):
-                while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
-                    pass
+            if BLOCK_M == 256 and BLOCK_N == 256:
+                # Split accumulator into quadrants (top-left, top-right, bottom-left, bottom-right)
+                acc_4d = accumulator.reshape([2, BLOCK_M // 2, 2, BLOCK_N // 2])
+                acc_4d = acc_4d.permute(1, 3, 0, 2)
+                acc_n0, acc_n1 = acc_4d.split()
+                acc_00, acc_10 = acc_n0.split()
+                acc_01, acc_11 = acc_n1.split()
 
-                rm_load = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-                rn_load = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
+                # Use default layouts for quadrant indexing to match sliced accumulator layout
+                rm_q = ttgl.arange(0, BLOCK_M // 2)
+                rn_q = ttgl.arange(0, BLOCK_N // 2)
 
-                p_base = next_pid * BLOCK_M * BLOCK_N
-                p_offset_load = p_base + rm_load[:, None] * BLOCK_N + rn_load[None, :]
+                # Aggregate from contributors using quadrant loads to reduce pressure
+                while (end < tile_iter + iters_per_tile and next_pid < num_sms):
+                    # Wait for contributor
+                    while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
+                        pass
 
-                offs_cm_load = pid_m * BLOCK_M + rm_load
-                offs_cn_load = pid_n * BLOCK_N + rn_load
-                mask_load = (offs_cm_load[:, None] < M) & (offs_cn_load[None, :] < N)
+                    P_base = p_ptr + next_pid * BLOCK_M * BLOCK_N
 
-                partial_result = ttgl.load(p_ptr + p_offset_load, mask=mask_load, other=0.0)
-                # Direct accumulation - both have WMMA layout, no conversion needed
-                accumulator += partial_result
+                    # Quadrant 00 (top-left)
+                    p00 = P_base + rm_q[:, None] * BLOCK_N + rn_q[None, :]
+                    acc_00 += ttgl.load(p00)
 
-                # Update tracking: how many iterations did next_pid contribute?
-                end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
-                next_pid += 1
+                    # Quadrant 01 (top-right)
+                    p01 = P_base + rm_q[:, None] * BLOCK_N + (rn_q[None, :] + BLOCK_N // 2)
+                    acc_01 += ttgl.load(p01)
 
-            offs_cm = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-            offs_cn = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
-            offs_c = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-            mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-            ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
+                    # Quadrant 10 (bottom-left)
+                    p10 = P_base + (rm_q[:, None] + BLOCK_M // 2) * BLOCK_N + rn_q[None, :]
+                    acc_10 += ttgl.load(p10)
 
-        current_start_iter = end_iter  # Move to next tile portion
+                    # Quadrant 11 (bottom-right)
+                    p11 = P_base + (rm_q[:, None] + BLOCK_M // 2) * BLOCK_N + (rn_q[None, :] + BLOCK_N // 2)
+                    acc_11 += ttgl.load(p11)
+
+                    end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
+                    next_pid += 1
+
+                # Store aggregated quadrants to output
+                rm_top = pid_m * BLOCK_M + rm_q
+                rm_bottom = pid_m * BLOCK_M + (rm_q + BLOCK_M // 2)
+                rn_left = pid_n * BLOCK_N + rn_q
+                rn_right = pid_n * BLOCK_N + (rn_q + BLOCK_N // 2)
+
+                mask00 = (rm_top[:, None] < M) & (rn_left[None, :] < N)
+                offs00 = stride_cm * rm_top[:, None] + stride_cn * rn_left[None, :]
+                ttgl.store(c_ptr + offs00, acc_00, mask=mask00)
+
+                mask01 = (rm_top[:, None] < M) & (rn_right[None, :] < N)
+                offs01 = stride_cm * rm_top[:, None] + stride_cn * rn_right[None, :]
+                ttgl.store(c_ptr + offs01, acc_01, mask=mask01)
+
+                mask10 = (rm_bottom[:, None] < M) & (rn_left[None, :] < N)
+                offs10 = stride_cm * rm_bottom[:, None] + stride_cn * rn_left[None, :]
+                ttgl.store(c_ptr + offs10, acc_10, mask=mask10)
+
+                mask11 = (rm_bottom[:, None] < M) & (rn_right[None, :] < N)
+                offs11 = stride_cm * rm_bottom[:, None] + stride_cn * rn_right[None, :]
+                ttgl.store(c_ptr + offs11, acc_11, mask=mask11)
+            else:
+                # Aggregate full accumulator for smaller tiles
+                rm = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
+                rn = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
+                offs_m = pid_m * BLOCK_M + rm
+                offs_n = pid_n * BLOCK_N + rn
+
+                while (end < tile_iter + iters_per_tile and next_pid < num_sms):
+                    while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
+                        pass
+
+                    p_offset_load = next_pid * BLOCK_M * BLOCK_N + rm[:, None] * BLOCK_N + rn[None, :]
+                    contrib_acc = ttgl.load(p_ptr + p_offset_load)
+                    accumulator += contrib_acc
+
+                    end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
+                    next_pid += 1
+
+                # Store aggregated result to output (reuse rm1/rn1 derived offsets)
+                mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+                offs_c = stride_cm * offs_m[:, None] + stride_cn * offs_n[None, :]
+                ttgl.store(c_ptr + offs_c, accumulator, mask=mask)
+
+        current_start_iter = end_iter
 
 
 def run_streamk_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, STREAMK_TILES, M, N, K,
@@ -313,11 +357,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='StreamK GEMM kernel test - automatically calculates StreamK tiles for load balancing',
         epilog='Example: python3 f16_sk_gemm_gfx1250.py -M 258 -N 258 -K 510')
-    parser.add_argument("-M", type=int, default=258, help='problem M size (default: 258)')
-    parser.add_argument("-N", type=int, default=258, help='problem N size (default: 258)')
-    parser.add_argument("-K", type=int, default=510, help='problem K size (default: 510)')
-    parser.add_argument("--block-m", type=int, default=32, help='BLOCK_M tile size (default: 32)')
-    parser.add_argument("--block-n", type=int, default=32, help='BLOCK_N tile size (default: 32)')
+    parser.add_argument("-M", type=int, default=1028, help='problem M size (default: 258)')
+    parser.add_argument("-N", type=int, default=1028, help='problem N size (default: 258)')
+    parser.add_argument("-K", type=int, default=1024, help='problem K size (default: 510)')
+    parser.add_argument("--block-m", type=int, default=256, help='BLOCK_M tile size (default: 32)')
+    parser.add_argument("--block-n", type=int, default=256, help='BLOCK_N tile size (default: 32)')
     parser.add_argument("--block-k", type=int, default=128, help='BLOCK_K tile size (default: 128)')
     parser.add_argument("--num-warps", type=int, choices=[4, 8], default=4, help='num warps (default: 4)')
     parser.add_argument("--num-buffers", type=int, choices=[2, 4], default=2,
