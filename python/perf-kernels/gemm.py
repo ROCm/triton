@@ -7,46 +7,59 @@ import pytest
 import re
 
 from utils.benchmark_utils import get_available_models, get_model_configs
+from generate_configs import generate_triton_configs
 
 # TODO: Make this an argument, Benchmarking, testing code and kernel helper need to change for it.
 SCALE_BLOCK_SIZE = 128
 
+import os
+# os.environ["TRITON_CACHE_DIR"] = "/model/Qwen/huizzhan/triton/.gluon_cache_linear"
+
+
+def get_triton_configs():
+    """
+    从 generate_configs.py 生成 Triton 配置列表
+    根据当前 generate_configs.py 中定义的参数空间自动生成配置
+    """
+    # 调用 generate_triton_configs，生成配置代码字符串列表
+    configs_str_list = generate_triton_configs(max_configs=4096, verbose=False)
+    
+    # 将配置代码字符串转换为实际的 triton.Config 对象
+    configs_code = "configs = [\n" + "\n".join(configs_str_list) + "\n]"
+    
+    # 执行代码生成配置对象
+    local_vars = {'triton': triton}
+    exec(configs_code, local_vars)
+    configs = local_vars['configs']
+    
+    print(f"✓ 已从 generate_configs.py 加载 {len(configs)} 个配置")
+    
+    return configs
+
 
 @triton.autotune(
-    configs=[
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
-                'kpack': 2, 'matrix_instr_nonkdim': 16
-            }, num_warps=4, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
-                'kpack': 2, 'matrix_instr_nonkdim': 16
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
-                'kpack': 1, 'matrix_instr_nonkdim': 16
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
-                'kpack': 1
-            }, num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-    ],
-    key=['M', 'N', 'K'],
-    use_cuda_graph=True,
+    configs = get_triton_configs(),
+        key=['M', 'N', 'K'],
+        use_cuda_graph=True,
 )
+
+# @triton.autotune(
+#     configs=[
+#         # triton.Config(
+#         #     {
+#         #         'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0,
+#         #         'kpack': 2, 'matrix_instr_nonkdim': 16
+#         #     }, num_warps=8, num_stages=2),
+#         triton.Config(
+#             {
+#                 'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 2, 'waves_per_eu': 2,
+#                 'kpack': 2, 'matrix_instr_nonkdim': 16
+#             }, num_warps=8, num_stages=2),
+#     ],
+#     key=['M', 'N', 'K'],
+#     use_cuda_graph=True,
+# )
+
 @triton.heuristics({
     'EVEN_K':
     lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0, 'GRID_MN':
@@ -266,6 +279,42 @@ def matmul(a, b, c, a_scale, b_scale, scale_a8_b8=None, activation=""):
         ACTIVATION=activation,
     )
 
+# Wrapper for gemm kernel.
+def matmul_triton_main_perf(a, b, c, a_scale, b_scale, scale_a8_b8=None, activation=""):
+    # Check constraints.
+    assert a.shape[1] == b.shape[0], "Incompatible dimensions!!!"
+    assert (a.element_size()
+            >= b.element_size()), "Mixed dtype GEMMs are only supported when data type of a is bigger than b!!!"
+    assert (a.is_floating_point() == b.is_floating_point()
+            ), "GEMMs between float and integer type tensors are not supported!!!"
+    assert (scale_a8_b8 in [None, 'tensor', 'block']), f"Scaling mode {scale_a8_b8} is not supported!!!"
+    M, K = a.shape
+    K, N = b.shape
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        a_scale,
+        b_scale,
+        a_scale.stride(0) if (a_scale is not None) and a_scale.ndim else 0,
+        a_scale.stride(1) if (a_scale is not None) and a_scale.ndim else 0,
+        b_scale.stride(0) if (b_scale is not None) and b_scale.ndim else 0,
+        b_scale.stride(1) if (b_scale is not None) and b_scale.ndim else 0,
+        GROUP_K=SCALE_BLOCK_SIZE,
+        GROUP_N=SCALE_BLOCK_SIZE,
+        APPLY_SCALE=scale_a8_b8,
+        ACTIVATION=activation,
+    )
 
 def is_cdna4():
     return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
