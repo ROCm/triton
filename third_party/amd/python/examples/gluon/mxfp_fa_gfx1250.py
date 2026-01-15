@@ -322,7 +322,7 @@ class GlobalScaledAttentionConfig:
 class GlobalScaledAttentionProgram:
     cfg: GlobalScaledAttentionConfig
 
-    q: ttgl.tensor
+    q_blk: MemoryBlock
     q_scale: ttgl.tensor
     k_mem: MemoryUnit
     k_scale: ttgl.tensor
@@ -336,13 +336,13 @@ class GlobalScaledAttentionProgram:
 
     @gluon.constexpr_function
     def __init__(self, cfg,  #
-                 q, q_scale,  #
+                 q_blk, q_scale,  #
                  k_mem, k_scale,  #
                  v_mem, v_scale,  #
                  o_blk,  #
                  sm_scale):
         self.cfg = cfg
-        self.q = q
+        self.q_blk = q_blk
         self.q_scale = q_scale
         self.k_mem = k_mem
         self.k_scale = k_scale
@@ -354,6 +354,7 @@ class GlobalScaledAttentionProgram:
     @gluon.jit
     def initialize(cfg, q_ptr, q_scale, k_ptr, k_scale, v_ptr, v_scale, o_ptr, sm_scale):
         ttgl.static_assert(isinstance(cfg, GlobalScaledAttentionConfig))
+
         SEQLEN_K: ttgl.constexpr = cfg.SEQLEN_K
         SEQLEN_Q: ttgl.constexpr = cfg.SEQLEN_Q
         HEAD_SZ: ttgl.constexpr = cfg.HEAD_SZ
@@ -364,21 +365,54 @@ class GlobalScaledAttentionProgram:
         NUM_BUFFERS: ttgl.constexpr = cfg.NUM_BUFFERS
         SUBTILE: ttgl.constexpr = cfg.SUBTILE
 
-        off_h = ttgl.program_id(0)  # NUM_Q_HEADS
-        off_m = ttgl.program_id(1)  # NUM_BLOCKS
-        off_z = ttgl.program_id(2)  # BATCH
+        off_h = ttgl.program_id(0)
+        off_m = ttgl.program_id(1)
+        off_z = ttgl.program_id(2)
 
-        ttgl.static_assert(NUM_Q_HEADS % NUM_K_HEADS == 0)
-        group_sz: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
-        off_hk = off_h // group_sz
+        if SEQLEN_Q == SEQLEN_K:
+            GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
+            off_hk = off_h // GROUP_SZ
 
-        q_off = SEQLEN_Q * HEAD_SZ * (NUM_Q_HEADS * off_z + off_h) +\
-                BLOCK_M * off_m * HEAD_SZ
-        q_blk = MemoryBlock.initialize(  #
-            q_ptr + q_off,  #
-            shape=[SEQLEN_Q, HEAD_SZ],  #
-            block_shape=[BLOCK_M, HEAD_SZ],  #
-            layout=cfg.q_layout)
+            # q_off =
+            #   off_z * stride_z (NUM_Q_HEADS * SEQLEN_Q * HEAD_SZ) +
+            #   off_h * stride_h (SEQLEN_Q * HEAD_SZ) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ)
+            q_off = SEQLEN_Q * HEAD_SZ * (NUM_Q_HEADS * off_z + off_h) + \
+                    BLOCK_M * HEAD_SZ * off_m
+            q_blk = MemoryBlock.initialize(  #
+                q_ptr + q_off,  #
+                shape=[SEQLEN_Q, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.q_layout)
+
+            o_blk = MemoryBlock.initialize(  #
+                o_ptr + q_off,  #
+                shape=[SEQLEN_Q, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.acc_layout)
+        else:
+            GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
+            NUM_GROUPS: ttgl.constexpr = NUM_K_HEADS
+            off_hk = off_h
+
+            # q_off =
+            #   off_z * stride_z (NUM_GROUPS * GROUP_SZ * HEAD_SZ) +
+            #   off_h * stride_h (GROUP_SZ * HEAD_SZ) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ)
+            q_off = GROUP_SZ * HEAD_SZ * (NUM_GROUPS * off_z + off_h) + \
+                    BLOCK_M * HEAD_SZ * off_m
+            q_blk = MemoryBlock.initialize(  #
+                q_ptr + q_off,  #
+                shape=[GROUP_SZ, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.q_layout)
+
+            o_off = q_off
+            o_blk = MemoryBlock.initialize(  #
+                o_ptr + o_off,  #
+                shape=[GROUP_SZ, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.acc_layout)
 
         k_off = SEQLEN_K * HEAD_SZ * (NUM_K_HEADS * off_z + off_hk)
         k_mem = MemoryUnit.initialize(  #
@@ -390,8 +424,9 @@ class GlobalScaledAttentionProgram:
             num_buffers=NUM_BUFFERS,  #
             sub_axis=0 if SUBTILE else None)
 
+        v_off = k_off
         v_mem = MemoryUnit.initialize(  #
-            base=v_ptr + k_off,  #
+            base=v_ptr + v_off,  #
             shape=[SEQLEN_K, HEAD_SZ],  #
             block_shape=[BLOCK_N, HEAD_SZ],  #
             layout=cfg.v_layout,  #
@@ -399,21 +434,19 @@ class GlobalScaledAttentionProgram:
             num_buffers=NUM_BUFFERS,  #
             sub_axis=1 if SUBTILE else None)
 
-        o_blk = MemoryBlock.initialize(  #
-            o_ptr + q_off,  #
-            shape=[SEQLEN_Q, HEAD_SZ],  #
-            block_shape=[BLOCK_M, HEAD_SZ],  #
-            layout=cfg.acc_layout)
-
-        q = buffer_load(q_blk.ptr, q_blk.offs, q_blk.mask, other=0.0)
-
         return GlobalScaledAttentionProgram(  #
             cfg,  #
-            q, q_scale,  #
+            q_blk, q_scale,  #
             k_mem, k_scale,  #
             v_mem, v_scale,  #
             o_blk,  #
             sm_scale)
+
+    @gluon.jit
+    def global_load_q(self):
+        q_blk = self.q_blk
+        q = buffer_load(q_blk.ptr, q_blk.offs, q_blk.mask, other=0.0)
+        return q
 
     @gluon.jit
     def issue_global_load_k(self, idx, sub_idx=0, buf=0, pred=1):
@@ -444,10 +477,10 @@ class GlobalScaledAttentionProgram:
         return v
 
     @gluon.jit
-    def compute_qk(self, k, k_scale, acc):
+    def compute_qk(self, q, q_scale, k, k_scale, acc):
         cfg = self.cfg
 
-        qk = wmma_scaled(self.q, self.q_scale, cfg.Q_TYPE, k, k_scale, cfg.KV_TYPE, acc)
+        qk = wmma_scaled(q, q_scale, cfg.Q_TYPE, k, k_scale, cfg.KV_TYPE, acc)
         return qk
 
     @gluon.jit
@@ -503,9 +536,12 @@ class GlobalScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
+        q_scale = self.q_scale
         k_scale = self.k_scale
-        v_scale = self.v_scale
         p_scale = 0x7F
+        v_scale = self.v_scale
+
+        q = self.global_load_q()
 
         end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
         for i in range(0, end):
@@ -514,7 +550,7 @@ class GlobalScaledAttentionProgram:
             self.async_wait(0)
             k = self.shared_load_k()
 
-            qk = self.compute_qk(k, k_scale, zero)
+            qk = self.compute_qk(q, q_scale, k, k_scale, zero)
 
             m = ttgl.max(qk, 1)
             m_ij = ttgl.maximum(m_i, m)
@@ -549,9 +585,12 @@ class GlobalScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
+        q_scale = self.q_scale
         k_scale = self.k_scale
-        v_scale = self.v_scale
         p_scale = 0x7F
+        v_scale = self.v_scale
+
+        q = self.global_load_q()
 
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, buf=0)  # ................................. iter 0
@@ -564,7 +603,7 @@ class GlobalScaledAttentionProgram:
         self.issue_global_load_v(0, buf=0)  # ................................. iter 0
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
 
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
 
@@ -592,7 +631,7 @@ class GlobalScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            qk = self.compute_qk(k, k_scale, zero)  # ......................... iter i+1
+            qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
             l_ij = ttgl.sum(p, 1)  # .......................................... iter i
             acc = acc * alpha[:, None]
             l_i = l_i * alpha + l_ij
@@ -617,7 +656,7 @@ class GlobalScaledAttentionProgram:
             self.issue_global_load_v(i + 2, buf=a)  # ......................... iter i+2
 
         # pipeline epilogue, iter end-2
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
         l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
         acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
@@ -664,9 +703,12 @@ class GlobalScaledAttentionProgram:
         acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
+        q_scale = self.q_scale
         k_scale = self.k_scale
-        v_scale = self.v_scale
         p_scale = 0x7F
+        v_scale = self.v_scale
+
+        q = self.global_load_q()
 
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, sub_idx=0, buf=0)  # ...................... iter 0
@@ -681,12 +723,12 @@ class GlobalScaledAttentionProgram:
         self.issue_global_load_k(1, sub_idx=1, buf=1)  # ...................... iter 1
 
         # pipeline prologue, iter -1
-        qk0 = self.compute_qk(k0, k_scale, zero)  # ........................... iter 0
+        qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)  # ............... iter 0
         self.async_wait(2)  # ................................................. iter 0
         k1 = self.shared_load_k(sub_idx=1, buf=0)
         self.issue_global_load_v(0, sub_idx=0, buf=0)  # ...................... iter 0
 
-        qk1 = self.compute_qk(k1, k_scale, zero)  # ........................... iter 0
+        qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ............... iter 0
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
@@ -709,7 +751,7 @@ class GlobalScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            qk0 = self.compute_qk(k0, k_scale, zero)  # ....................... iter i+1
+            qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)  # ........... iter i+1
             self.async_wait(4)  # ............................................. iter i+1
             k1 = self.shared_load_k(sub_idx=1, buf=b)
             p1 = ttgl.exp2(qk1_shifted)  # .................................... iter i
@@ -720,7 +762,7 @@ class GlobalScaledAttentionProgram:
             acc1 = acc1 * alpha[:, None]
             self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .............. iter i+1
 
-            qk1 = self.compute_qk(k1, k_scale, zero)  # ....................... iter i+1
+            qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ........... iter i+1
             self.async_wait(4)  # ............................................. iter i
             v0 = self.shared_load_v(sub_idx=0, buf=a)
             p = self.concat_subtile(p0, p1)  # ................................ iter i
@@ -770,9 +812,9 @@ class GlobalScaledAttentionProgram:
         acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
 
         # pipeline epilogue iter end-1
-        qk0 = self.compute_qk(k0, k_scale, zero)
+        qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)
         k1 = self.shared_load_k(sub_idx=1, buf=1)
-        qk1 = self.compute_qk(k1, k_scale, zero)
+        qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
         m = ttgl.max(qk, 1)
@@ -817,9 +859,12 @@ class GlobalScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
+        q_scale = self.q_scale
         k_scale = self.k_scale
-        v_scale = self.v_scale
         p_scale = 0x7F
+        v_scale = self.v_scale
+
+        q = self.global_load_q()
 
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, buf=0)  # ................................. iter 0
@@ -832,7 +877,7 @@ class GlobalScaledAttentionProgram:
         self.issue_global_load_v(0, buf=0)  # ................................. iter 0
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
 
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
 
@@ -860,7 +905,7 @@ class GlobalScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             with warp_pipeline_stage("stage0"):
-                qk = self.compute_qk(k, k_scale, zero)  # ..................... iter i+1
+                qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ......... iter i+1
                 p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
                 p = self.concat_subtile(p0, p1)
                 l_ij = ttgl.sum(p, 1)
@@ -871,7 +916,7 @@ class GlobalScaledAttentionProgram:
             self.async_wait(2)
             with warp_pipeline_stage("stage1"):
                 v = self.shared_load_v(buf=a)  # .............................. iter i
-                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .. iter i+3
+                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .......... iter i+3
 
             with warp_pipeline_stage("stage2"):
                 acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ......... iter i
@@ -892,7 +937,7 @@ class GlobalScaledAttentionProgram:
                 self.issue_global_load_v(i + 2, buf=a)  # ..................... iter i+2
 
         # pipeline epilogue, iter end-2
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
         p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
@@ -1034,8 +1079,8 @@ class BlockScaledAttentionConfig:
 class BlockScaledAttentionProgram:
     cfg: BlockScaledAttentionConfig
 
-    q: ttgl.tensor
-    q_scale: ttgl.tensor
+    q_blk: MemoryBlock
+    q_scale_blk: MemoryBlock
     k_mem: MemoryUnit
     k_scale_mem: MemoryUnit
     v_mem: MemoryUnit
@@ -1048,14 +1093,14 @@ class BlockScaledAttentionProgram:
 
     @gluon.constexpr_function
     def __init__(self, cfg,  #
-                 q, q_scale,  #
+                 q_blk, q_scale_blk,  #
                  k_mem, k_scale_mem,  #
                  v_mem, v_scale_mem,  #
                  o_blk,  #
                  sm_scale):
         self.cfg = cfg
-        self.q = q
-        self.q_scale = q_scale
+        self.q_blk = q_blk
+        self.q_scale_blk = q_scale_blk
         self.k_mem = k_mem
         self.k_scale_mem = k_scale_mem
         self.v_mem = v_mem
@@ -1064,13 +1109,9 @@ class BlockScaledAttentionProgram:
         self.sm_scale = sm_scale
 
     @gluon.jit
-    def initialize(cfg,  #
-                   q_ptr, q_scale_ptr,  #
-                   k_ptr, k_scale_ptr,  #
-                   v_ptr, v_scale_ptr,  #
-                   o_ptr,  #
-                   sm_scale):
+    def initialize(cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale):
         ttgl.static_assert(isinstance(cfg, BlockScaledAttentionConfig))
+
         SEQLEN_K: ttgl.constexpr = cfg.SEQLEN_K
         SEQLEN_Q: ttgl.constexpr = cfg.SEQLEN_Q
         HEAD_SZ: ttgl.constexpr = cfg.HEAD_SZ
@@ -1082,29 +1123,79 @@ class BlockScaledAttentionProgram:
         NUM_BUFFERS: ttgl.constexpr = cfg.NUM_BUFFERS
         SUBTILE: ttgl.constexpr = cfg.SUBTILE
 
-        off_h = ttgl.program_id(0)  # NUM_Q_HEADS
-        off_m = ttgl.program_id(1)  # NUM_BLOCKS
-        off_z = ttgl.program_id(2)  # BATCH
+        off_h = ttgl.program_id(0)
+        off_m = ttgl.program_id(1)
+        off_z = ttgl.program_id(2)
 
-        ttgl.static_assert(NUM_Q_HEADS % NUM_K_HEADS == 0)
-        group_sz: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
-        off_hk = off_h // group_sz
+        if SEQLEN_Q == SEQLEN_K:
+            GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
+            off_hk = off_h // GROUP_SZ
 
-        q_off = SEQLEN_Q * HEAD_SZ * (NUM_Q_HEADS * off_z + off_h) + \
-                BLOCK_M * off_m * HEAD_SZ
-        q_blk = MemoryBlock.initialize(  #
-            base=q_ptr + q_off,  #
-            shape=[SEQLEN_Q, HEAD_SZ],  #
-            block_shape=[BLOCK_M, HEAD_SZ],  #
-            layout=cfg.q_layout)
+            # q_off =
+            #   off_z * stride_z (NUM_Q_HEADS * SEQLEN_Q * HEAD_SZ) +
+            #   off_h * stride_h (SEQLEN_Q * HEAD_SZ) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ)
+            q_off = SEQLEN_Q * HEAD_SZ * (NUM_Q_HEADS * off_z + off_h) + \
+                    BLOCK_M * HEAD_SZ * off_m
+            q_blk = MemoryBlock.initialize(  #
+                base=q_ptr + q_off,  #
+                shape=[SEQLEN_Q, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.q_layout)
 
-        q_scale_off = SEQLEN_Q * (HEAD_SZ // 32) * (NUM_Q_HEADS * off_z + off_h) + \
-                      BLOCK_M * off_m * (HEAD_SZ // 32)
-        q_scale_blk = MemoryBlock.initialize(  #
-            base=q_scale_ptr + q_scale_off,  #
-            shape=[SEQLEN_Q, HEAD_SZ // 32],  #
-            block_shape=[BLOCK_M, HEAD_SZ // 32],  #
-            layout=cfg.q_scale_layout)
+            # q_scale_off =
+            #   off_z * stride_z (NUM_Q_HEADS * SEQLEN_Q * HEAD_SZ // 32) +
+            #   off_h * stride_h (SEQLEN_Q * HEAD_SZ // 32) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ // 32)
+            q_scale_off = SEQLEN_Q * (HEAD_SZ // 32) * (NUM_Q_HEADS * off_z + off_h) + \
+                          BLOCK_M * (HEAD_SZ // 32) * off_m
+            q_scale_blk = MemoryBlock.initialize(  #
+                base=q_scale_ptr + q_scale_off,  #
+                shape=[SEQLEN_Q, HEAD_SZ // 32],  #
+                block_shape=[BLOCK_M, HEAD_SZ // 32],  #
+                layout=cfg.q_scale_layout)
+
+            o_off = q_off
+            o_blk = MemoryBlock.initialize(  #
+                o_ptr + o_off,  #
+                shape=[SEQLEN_Q, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.acc_layout)
+        else:
+            GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
+            NUM_GROUPS: ttgl.constexpr = NUM_K_HEADS
+            off_hk = off_h
+
+            # q_off =
+            #   off_z * stride_z (NUM_GROUPS * GROUP_SZ * HEAD_SZ) +
+            #   off_h * stride_h (GROUP_SZ * HEAD_SZ) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ)
+            q_off = GROUP_SZ * HEAD_SZ * (NUM_GROUPS * off_z + off_h) + \
+                    BLOCK_M * HEAD_SZ * off_m
+            q_blk = MemoryBlock.initialize(  #
+                q_ptr + q_off,  #
+                shape=[GROUP_SZ, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.q_layout)
+
+            # q_scale_off =
+            #   off_z * stride_z (NUM_GROUPS * GROUP_SZ * HEAD_SZ // 32) +
+            #   off_h * stride_h (GROUP_SZ * HEAD_SZ // 32) +
+            #   off_m * stride_m (BLOCK_M * HEAD_SZ // 32)
+            q_scale_off = GROUP_SZ * (HEAD_SZ // 32) * (NUM_GROUPS * off_z + off_h) + \
+                          BLOCK_M * (HEAD_SZ // 32) * off_m
+            q_scale_blk = MemoryBlock.initialize(  #
+                base=q_scale_ptr + q_scale_off,  #
+                shape=[GROUP_SZ, HEAD_SZ // 32],  #
+                block_shape=[BLOCK_M, HEAD_SZ // 32],  #
+                layout=cfg.q_scale_layout)
+
+            o_off = q_off
+            o_blk = MemoryBlock.initialize(  #
+                o_ptr + o_off,  #
+                shape=[GROUP_SZ, HEAD_SZ],  #
+                block_shape=[BLOCK_M, HEAD_SZ],  #
+                layout=cfg.acc_layout)
 
         k_off = SEQLEN_K * (HEAD_SZ // KV_PACK_DIV) * (NUM_K_HEADS * off_z + off_hk)
         k_mem = MemoryUnit.initialize(  #
@@ -1146,22 +1237,25 @@ class BlockScaledAttentionProgram:
             smem_layout=cfg.v_scale_smem_layout,  #
             num_buffers=NUM_BUFFERS)
 
-        o_blk = MemoryBlock.initialize(  #
-            o_ptr + q_off,  #
-            shape=[SEQLEN_Q, HEAD_SZ],  #
-            block_shape=[BLOCK_M, HEAD_SZ],  #
-            layout=cfg.acc_layout)
-
-        q = buffer_load(q_blk.ptr, q_blk.offs, q_blk.mask, other=0.0)
-        q_scale = buffer_load(q_scale_blk.ptr, q_scale_blk.offs, q_scale_blk.mask, other=0x7F)
-
         return BlockScaledAttentionProgram(  #
             cfg,  #
-            q, q_scale,  #
+            q_blk, q_scale_blk,  #
             k_mem, k_scale_mem,  #
             v_mem, v_scale_mem,  #
             o_blk,  #
             sm_scale)
+
+    @gluon.jit
+    def global_load_q(self):
+        q_blk = self.q_blk
+        q = buffer_load(q_blk.ptr, q_blk.offs, q_blk.mask, other=0.0)
+        return q
+
+    @gluon.jit
+    def global_load_q_scale(self):
+        q_scale_blk = self.q_scale_blk
+        q_scale = buffer_load(q_scale_blk.ptr, q_scale_blk.offs, q_scale_blk.mask, other=0x7F)
+        return q_scale
 
     @gluon.jit
     def issue_global_load_k(self, idx, sub_idx=0, buf=0, pred=1):
@@ -1220,10 +1314,10 @@ class BlockScaledAttentionProgram:
         return v_scale
 
     @gluon.jit
-    def compute_qk(self, k, k_scale, acc):
+    def compute_qk(self, q, q_scale, k, k_scale, acc):
         cfg = self.cfg
 
-        qk = wmma_scaled(self.q, self.q_scale, cfg.Q_TYPE, k, k_scale, cfg.KV_TYPE, acc)
+        qk = wmma_scaled(q, q_scale, cfg.Q_TYPE, k, k_scale, cfg.KV_TYPE, acc)
         return qk
 
     @gluon.jit
@@ -1338,6 +1432,9 @@ class BlockScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
         sm_scale = self.sm_scale
 
+        q = self.global_load_q()
+        q_scale = self.global_load_q_scale()
+
         end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
         for i in range(0, end):
             self.issue_global_load_k(i)
@@ -1347,7 +1444,7 @@ class BlockScaledAttentionProgram:
             k = self.shared_load_k()
             k_scale = self.shared_load_k_scale()
 
-            qk = self.compute_qk(k, k_scale, zero)
+            qk = self.compute_qk(q, q_scale, k, k_scale, zero)
 
             m = ttgl.max(qk, 1)
             m_ij = ttgl.maximum(m_i, m)
@@ -1384,6 +1481,9 @@ class BlockScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
         sm_scale = self.sm_scale
 
+        q = self.global_load_q()
+        q_scale = self.global_load_q_scale()
+
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, buf=0)  # ................................. iter 0
         self.issue_global_load_k_scale(0, buf=0)  # ........................... iter 0
@@ -1399,7 +1499,7 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
 
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
         self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
@@ -1430,7 +1530,7 @@ class BlockScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            qk = self.compute_qk(k, k_scale, zero)  # ......................... iter i+1
+            qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
             l_ij = ttgl.sum(p, 1)  # .......................................... iter i
             acc = acc * alpha[:, None]
             l_i = l_i * alpha + l_ij
@@ -1459,7 +1559,7 @@ class BlockScaledAttentionProgram:
             self.issue_global_load_v_scale(i + 2, buf=a)  # ................... iter i+2
 
         # pipeline epilogue, iter end-2
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
         l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
         acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
@@ -1507,6 +1607,9 @@ class BlockScaledAttentionProgram:
         acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
         sm_scale = self.sm_scale
 
+        q = self.global_load_q()
+        q_scale = self.global_load_q_scale()
+
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, sub_idx=0, buf=0)  # ...................... iter 0
         self.issue_global_load_k_scale(0, buf=0)  # ........................... iter 0
@@ -1525,13 +1628,13 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_k(1, sub_idx=1, buf=1)  # ...................... iter 1
 
         # pipeline prologue, iter -1
-        qk0 = self.compute_qk(k0, k0_scale, zero)  # .......................... iter 0
+        qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)  # .............. iter 0
         self.async_wait(3)  # ................................................. iter 0
         k1 = self.shared_load_k(sub_idx=1, buf=0)
         self.issue_global_load_v(0, sub_idx=0, buf=0)  # ...................... iter 0
         self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
 
-        qk1 = self.compute_qk(k1, k1_scale, zero)  # .......................... iter 0
+        qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)  # .............. iter 0
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
@@ -1558,7 +1661,7 @@ class BlockScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            qk0 = self.compute_qk(k0, k0_scale, zero)  # ...................... iter i+1
+            qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)  # .......... iter i+1
             self.async_wait(5)  # ............................................. iter i+1
             k1 = self.shared_load_k(sub_idx=1, buf=b)
             p1 = ttgl.exp2(qk1_shifted)  # .................................... iter i
@@ -1570,7 +1673,7 @@ class BlockScaledAttentionProgram:
             self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .............. iter i+1
             self.issue_global_load_v_scale(i + 1, buf=b)  # ................... iter i+1
 
-            qk1 = self.compute_qk(k1, k1_scale, zero)  # ...................... iter i+1
+            qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)  # .......... iter i+1
             self.async_wait(6)  # ............................................. iter i
             v0 = self.shared_load_v(sub_idx=0, buf=a)
             self.async_wait(5)  # ............................................. iter i
@@ -1631,8 +1734,8 @@ class BlockScaledAttentionProgram:
 
         # pipeline epilogue iter end-1
         k1 = self.shared_load_k(sub_idx=1, buf=1)
-        qk0 = self.compute_qk(k0, k0_scale, zero)
-        qk1 = self.compute_qk(k1, k1_scale, zero)
+        qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)
+        qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
         m = ttgl.max(qk, 1)
@@ -1680,6 +1783,9 @@ class BlockScaledAttentionProgram:
         acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
         sm_scale = self.sm_scale
 
+        q = self.global_load_q()
+        q_scale = self.global_load_q_scale()
+
         # pipeline prologue, iter -3
         self.issue_global_load_k(0, buf=0)  # ................................. iter 0
         self.issue_global_load_k_scale(0, buf=0)  # ........................... iter 0
@@ -1695,7 +1801,7 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter 0
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
 
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
         self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
@@ -1729,7 +1835,7 @@ class BlockScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             with warp_pipeline_stage("stage0"):
-                qk = self.compute_qk(k, k_scale, zero)  # ..................... iter i+1
+                qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ......... iter i+1
                 p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
                 p = self.concat_subtile(p0, p1)
                 l_ij = ttgl.sum(p, 1)
@@ -1765,7 +1871,7 @@ class BlockScaledAttentionProgram:
                 self.issue_global_load_v_scale(i + 2, buf=a)
 
         # pipeline epilogue, iter end-2
-        qk = self.compute_qk(k, k_scale, zero)  # ............................. iter end-1
+        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
         p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
@@ -1870,7 +1976,10 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
              num_warps: int):
     batch, seqlen_q, num_q_heads, head_sz = q.shape
     _, seqlen_k, num_k_heads, _ = k.shape
-    sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
+    dtype = torch.float32
+
+    assert seqlen_q == 1 or seqlen_q == seqlen_k
+    assert num_q_heads >= num_k_heads and num_q_heads % num_k_heads == 0
     assert head_sz in {64, 128}
     assert block_n == 128
     if pipelined:
@@ -1882,44 +1991,69 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
             assert num_warps == 4
             assert head_sz == 128
 
-    # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
-    # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
-    # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
-    q = q.permute(0, 2, 1, 3).contiguous()
-    k = k.permute(0, 2, 1, 3).contiguous()
-    v = v.permute(0, 2, 1, 3).contiguous()
-    if block_scaling:
-        # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
-        q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
+    # In scaled wmma instruction, scales takes following shapes in global memory:
+    # - a_scale: [M, K // 32]
+    # - b_scale: [N, K // 32]
+    #
+    # To have vectorized memory access, it's better to store scales in a packed block scale layout. In this
+    # layout, scales are stored in the shape:
+    # - a_scale: [M // 32 // 4, K // 32 // 4, 32, 4, 4]
+    # - b_scale: [N // 32 // 4, K // 32 // 4, 32, 4, 4]
+    #
+    # In this way, we can load scales from global memory in a more vectorized way. Then inside the kernel, we
+    # permute and reshape scales to canonical shapes required by scaled wmma.
+    def preshuffle_scale(x: torch.Tensor, preshuffle_factor: int):
+        b, h, non_k, k = x.shape
+        num_chunk_m = non_k // preshuffle_factor
+        scale_kwidth = 4 if k >= 4 else k
+        num_chunk_k = k // scale_kwidth
 
-        # In scaled wmma instruction, scales takes following shapes in global memory:
-        # - a_scale: [M, K // 32]
-        # - b_scale: [N, K // 32]
-        #
-        # To have vectorized memory access, it's better to store scales in a packed block scale layout. In this
-        # layout, scales are stored in the shape:
-        # - a_scale: [M // 32 // 4, K // 32 // 4, 32, 4, 4]
-        # - b_scale: [N // 32 // 4, K // 32 // 4, 32, 4, 4]
-        #
-        # In this way, we can load scales from global memory in a more vectorized way. Then inside the kernel, we
-        # permute and reshape scales to canonical shapes required by scaled wmma.
-        def _preshuffle_scale(x: torch.Tensor, preshuffle_factor: int):
-            b, h, non_k, k = x.shape
-            num_chunk_m = non_k // preshuffle_factor
-            scale_kwidth = 4 if k >= 4 else k
-            num_chunk_k = k // scale_kwidth
+        x = x.view(b, h, num_chunk_m, 4, preshuffle_factor // 4, num_chunk_k, scale_kwidth)
+        x = x.permute(0, 1, 2, 5, 4, 3, 6).contiguous()
+        return x.view(b, h, non_k // preshuffle_factor, k * preshuffle_factor)
 
-            x = x.view(b, h, num_chunk_m, 4, preshuffle_factor // 4, num_chunk_k, scale_kwidth)
-            x = x.permute(0, 1, 2, 5, 4, 3, 6).contiguous()
-            return x.view(b, h, non_k // preshuffle_factor, k * preshuffle_factor)
+    if seqlen_q == seqlen_k:
+        # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
+        # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
+        # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
+        q = q.permute(0, 2, 1, 3).contiguous()
+        k = k.permute(0, 2, 1, 3).contiguous()
+        v = v.permute(0, 2, 1, 3).contiguous()
+        # o: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
+        o = torch.zeros_like(q, dtype=dtype)
+        # q_scale:       [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
+        # k_scale:       [BATCH, NUM_K_HEADS, SEQLEN_K / 128, HEAD_SZ * 4]
+        # v_scale:
+        # - head_sz=128: [BATCH, NUM_K_HEADS, HEAD_SZ / 128, SEQLEN_K * 4]
+        # - head_sz=64:  [BATCH, NUM_K_HEADS, HEAD_SZ / 64, SEQLEN_K * 2]
+        if block_scaling:
+            q_scale = q_scale.permute(0, 2, 1, 3).contiguous()
+            k_scale = preshuffle_scale(k_scale.permute(0, 2, 1, 3), 128)
+            v_scale = preshuffle_scale(v_scale.permute(0, 2, 3, 1), 128 if head_sz == 128 else 64)
 
-        # k_scale:              [BATCH, NUM_K_HEADS, SEQLEN_K / 128, HEAD_SZ * 4]
-        # v_scale(head_sz=128): [BATCH, NUM_K_HEADS, HEAD_SZ / 128, SEQLEN_K * 4]
-        # v_scale(head_sz=64):  [BATCH, NUM_K_HEADS, HEAD_SZ / 64, SEQLEN_K * 2]
-        k_scale = _preshuffle_scale(k_scale.permute(0, 2, 1, 3), 128)
-        v_scale = _preshuffle_scale(v_scale.permute(0, 2, 3, 1), 128 if head_sz == 128 else 64)
-    # o: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
-    o = torch.zeros_like(q, dtype=torch.float32)
+        grid = (num_q_heads, cdiv(seqlen_q, block_m), batch)
+    else:
+        group_sz = num_q_heads // num_k_heads
+        num_groups = num_k_heads
+        # q: [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ]
+        # k: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
+        # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
+        q = q.permute(0, 2, 1, 3).view(batch, num_groups, group_sz, head_sz).contiguous()
+        k = k.permute(0, 2, 1, 3).contiguous()
+        v = v.permute(0, 2, 1, 3).contiguous()
+        # o: [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ]
+        o = torch.zeros((batch, group_sz, num_groups, head_sz), dtype=dtype)
+        # q_scale:       [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ / 32]
+        # k_scale:       [BATCH, NUM_K_HEADS, SEQLEN_K / 128, HEAD_SZ * 4]
+        # v_scale:
+        # - head_sz=128: [BATCH, NUM_K_HEADS, HEAD_SZ / 128, SEQLEN_K * 4]
+        # - head_sz=64:  [BATCH, NUM_K_HEADS, HEAD_SZ / 64, SEQLEN_K * 2]
+        if block_scaling:
+            q_scale = q_scale.permute(0, 2, 1, 3).view(batch, num_groups, group_sz, head_sz // 32).contiguous()
+            k_scale = preshuffle_scale(k_scale.permute(0, 2, 1, 3), 128)
+            v_scale = preshuffle_scale(v_scale.permute(0, 2, 3, 1), 128 if head_sz == 128 else 64)
+
+        grid = (num_groups, cdiv(group_sz, block_m), batch)
 
     q = q.cuda()
     k = k.cuda()
@@ -1930,18 +2064,22 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
         v_scale = v_scale.cuda()
     o = o.cuda()
 
-    # Use (NUM_Q_HEADS, NUM_BLOCKS, BATCH) for better xcd locality
-    grid = (num_q_heads, cdiv(seqlen_q, block_m), batch)
-
+    sm_scale = head_sz**(-0.5) * 1.4426950408889634  # 1 / ln(2)
     args = [
         q, k, v, q_scale, k_scale, v_scale, o, sm_scale,  #
         q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,  #
         block_scaling, p_scaling, pipelined, pingpong, subtile, p_k_width
     ]
     kwargs = {"num_warps": num_warps, "waves_per_eu": 1}
-    kernel = mxfp_attn_fwd_kernel[grid](*args, **kwargs)
 
-    return o.cpu().permute(0, 2, 1, 3), kernel
+    kernel = mxfp_attn_fwd_kernel[grid](*args, **kwargs)
+    out = o.cpu()
+    if seqlen_q == seqlen_k:
+        out = out.permute(0, 2, 1, 3)
+    else:
+        out = out.view(batch, num_q_heads, seqlen_q, head_sz).permute(0, 2, 1, 3)
+
+    return out, kernel
 
 
 # ===-----------------------------------------------------------------------===#
@@ -2108,24 +2246,83 @@ def get_source_mapping(amdgcn, block_scaling, pipelined, pingpong, subtile, num_
     return mapping
 
 
+def get_attn_fwd_configs():
+    configs = {
+        "128x128_loop": [128, 128, False, False, False, 16, 4],
+        "16x128_loop": [16, 128, False, False, False, 16, 4],
+        "128x128_pipeline": [128, 128, True, False, False, 16, 4],
+        "16x128_pipeline": [16, 128, True, False, False, 16, 4],
+        "128x128_pipeline_pkwidth8": [128, 128, True, False, False, 8, 4],
+        "16x128_pipeline_pkwidth8": [16, 128, True, False, False, 8, 4],
+        "256x128_pipeline_subtile_pkwidth8": [256, 128, True, False, True, 8, 4],
+        "128x128_pipeline_pingpong_pkwidth8": [128, 128, True, True, False, 8, 8],
+    }
+
+    return configs
+
+
+def get_block_scaled_attn_fwd_cases():
+    tests = [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
+             for q_type, kv_type in [("e4m3", "e4m3"), ("e4m3", "e2m1")]
+             for batch in [1]
+             for seqlen_q in [1, 1024]  # Prefill, Decode
+             for seqlen_k in [1024]
+             for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
+             for head_sz in [64, 128]]
+    configs = get_attn_fwd_configs()
+
+    param = []
+    for test in tests:
+        seqlen_q = test[3]
+        if seqlen_q == 1:
+            param.append((*test, *configs["16x128_loop"]))
+        else:
+            param.append((*test, *configs["128x128_loop"]))
+
+        if test == ["e4m3", "e4m3", 1, 1024, 1024, 1, 1, 128]:
+            param.append((*test, *configs["128x128_pipeline_pkwidth8"]))
+            param.append((*test, *configs["256x128_pipeline_subtile_pkwidth8"]))
+            param.append((*test, *configs["128x128_pipeline_pingpong_pkwidth8"]))
+        elif test == ["e4m3", "e2m1", 1, 1024, 1024, 1, 1, 128]:
+            param.append((*test, *configs["128x128_pipeline"]))
+        elif test == ["e4m3", "e4m3", 1, 1, 1024, 1, 4, 128]:
+            param.append((*test, *configs["16x128_pipeline_pkwidth8"]))
+        elif test == ["e2m1", "e4m3", 1, 1, 1024, 1, 4, 128]:
+            param.append((*test, *configs["16x128_pipeline"]))
+    return param
+
+
+def get_global_scaled_attn_fwd_cases():
+    tests = [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
+             for q_type, kv_type in [("e4m3", "e4m3")]
+             for batch in [1]
+             for seqlen_q in [1, 1024]  # Prefill, Decode
+             for seqlen_k in [1024]
+             for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
+             for head_sz in [64, 128]]
+    configs = get_attn_fwd_configs()
+
+    param = []
+    for test in tests:
+        seqlen_q = test[3]
+        if seqlen_q == 1:
+            param.append((*test, *configs["16x128_loop"]))
+        else:
+            param.append((*test, *configs["128x128_loop"]))
+
+        if test == ["e4m3", "e4m3", 1, 1024, 1024, 1, 1, 128]:
+            param.append((*test, *configs["128x128_pipeline_pkwidth8"]))
+            param.append((*test, *configs["256x128_pipeline_subtile_pkwidth8"]))
+            param.append((*test, *configs["128x128_pipeline_pingpong_pkwidth8"]))
+        elif test == ["e4m3", "e4m3", 1, 1, 1024, 1, 4, 128]:
+            param.append((*test, *configs["16x128_pipeline_pkwidth8"]))
+    return param
+
+
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",
-    [(*test, *config)  #
-     for test in [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
-                  for q_type, kv_type in [("e4m3", "e4m3"), ("e4m3", "e2m1")]
-                  for batch in [1]
-                  for seqlen_q in [1, 1024]  # Prefill, Decode
-                  for seqlen_k in [1024]
-                  for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
-                  for head_sz in [64, 128]]
-     for config in [[128, 128, False, False, False, 16, 4],  # loop
-                    [128, 128, True, False, False, 8, 4],  # pipeline
-                    [256, 128, True, False, True, 8, 4],  # 4-warp subtile pipeline with block size 256x128
-                    [128, 128, True, True, False, 8, 8],  # 8-warp pingpong pipeline with block size 128x128
-                    ]
-     # only run optimized config for prefill MXFP8 MHA with head_sz=128
-     if not (config != [128, 128, False, False, False, 16, 4] and test != ["e4m3", "e4m3", 1, 1024, 1024, 1, 1, 128])])
+    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",  #
+    get_block_scaled_attn_fwd_cases())
 def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
                                block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
     torch.manual_seed(0)
@@ -2204,22 +2401,8 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
 
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",
-    [(*test, *config)  #
-     for test in [[q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz]
-                  for q_type, kv_type in [("e4m3", "e4m3")]
-                  for batch in [1]
-                  for seqlen_q in [1, 1024]  # Prefill, Decode
-                  for seqlen_k in [1024]
-                  for num_q_heads, num_k_heads in [(1, 1), (4, 1), (4, 2)]  # MHA, MQA, GQA
-                  for head_sz in [64, 128]]
-     for config in [[128, 128, False, False, False, 16, 4],  # loop
-                    [128, 128, True, False, False, 8, 4],  # pipeline
-                    [256, 128, True, False, True, 8, 4],  # 4-warp subtile pipeline with block size 256x128
-                    [128, 128, True, True, False, 8, 8],  # 8-warp pingpong pipeline with block size 128x128
-                    ]
-     # only run optimized config for prefill MHA with head_sz=128
-     if not (config != [128, 128, False, False, False, 16, 4] and test[3:] != [1024, 1024, 1, 1, 128])])
+    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",  #
+    get_global_scaled_attn_fwd_cases())
 def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
                                 block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
     torch.manual_seed(0)
