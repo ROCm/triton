@@ -40,6 +40,7 @@ def load_code_json(folder):
 
 def analyze_code(code_list):
     """Extract loop info and compute iteration count."""
+    ## ["v_mfma_f32_16x16x32_f16 v[14:17], a[68:71], a[56:59], v[14:17]",0,686,"",3,9492,256,1024]
     sorted_code = sorted(code_list, key=lambda x: x[2])
     hitcounts = [ins[6] for ins in sorted_code]
     indices = [ins[2] for ins in sorted_code]
@@ -77,6 +78,8 @@ def process_wave_file(path, loop_index, epilogue_index):
     instructions = data["wave"]["instructions"]
     loop_clock = None
     epilogue_clock = None
+    start_clock = None
+    end_clock = None
 
     for clock, _, _, _, idx in instructions:
         if loop_clock is None and idx == loop_index:
@@ -86,10 +89,16 @@ def process_wave_file(path, loop_index, epilogue_index):
         if loop_clock is not None and epilogue_clock is not None:
             break
 
+    start_clock = instructions[0][0]
+    end_clock = instructions[-1][0]
+
     if loop_clock is None or epilogue_clock is None:
         return None
 
-    return epilogue_clock - loop_clock
+    pro = loop_clock - start_clock
+    epi = end_clock - epilogue_clock
+
+    return pro, epilogue_clock - loop_clock, epi
 
 
 def analyze_waves(folder, loop_index, epilogue_index):
@@ -100,16 +109,22 @@ def analyze_waves(folder, loop_index, epilogue_index):
         raise FileNotFoundError(f"No files matching {pattern}")
 
     durations = {}
+    pro_dur = {}
+    epi_dur = {}
     for path in files:
-        dur = process_wave_file(path, loop_index, epilogue_index)
+        pro, dur, epi = process_wave_file(path, loop_index, epilogue_index)
         if dur is not None:
             durations[os.path.basename(path)] = dur
+            pro_dur[os.path.basename(path)] = pro
+            epi_dur[os.path.basename(path)] = epi
 
     if not durations:
         raise ValueError("No valid loop durations found in any se0_sm0_sl0_wv*.json file")
 
     avg_duration = sum(durations.values()) / len(durations)
-    return durations, avg_duration
+    avg_pro_dur = sum(pro_dur.values()) / len(pro_dur)
+    avg_epi_dur = sum(epi_dur.values()) / len(epi_dur)
+    return durations, avg_duration, pro_dur, avg_pro_dur, epi_dur, avg_epi_dur
 
 
 def main():
@@ -121,7 +136,7 @@ def main():
         code_list = load_code_json(args.folder)
         code_info = analyze_code(code_list)
 
-        durations, avg_loop_duration = analyze_waves(
+        durations, avg_loop_duration, _, avg_pro, _, avg_epi = analyze_waves(
             args.folder,
             code_info["loop_first_index"],
             code_info["epilogue_first_index"],
@@ -131,11 +146,17 @@ def main():
                                   if code_info["num_iterations"] and code_info["num_iterations"] > 0 else None)
 
         mfma_efficiency = code_info["mfma_count_in_loop"] * 16 / avg_iteration_duration
+        total_dur = avg_loop_duration + avg_pro + avg_epi
 
         result = {
             **code_info,
             "wave_durations": durations,
             "average_loop_duration": avg_loop_duration,
+            "average_prologue_duration": avg_pro,
+            "average_epilogue_duration": avg_epi,
+            "pro_ratio": f"{avg_pro / total_dur * 100:.2f}%",
+            "loop_ratio": f"{avg_loop_duration / total_dur * 100:.2f}%",
+            "epi_ratio": f"{avg_epi / total_dur * 100:.2f}%",
             "average_iteration_duration": avg_iteration_duration,
             "mfma efficiency": f"{mfma_efficiency * 100:.2f}%",
         }
