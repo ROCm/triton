@@ -1096,6 +1096,11 @@ void init_gluon_ir(py::module &&m) {
                                IntegerAttr::get(i32Ty, priority));
              }
            })
+      .def("create_extract_slice",
+           [](GluonOpBuilder &self, Type resultType, Value src,
+              std::vector<int64_t> &offsets) -> Value {
+             return self.create<ttag::ExtractSliceOp>(resultType, src, offsets);
+           })
       .def("create_sched_barrier", [](GluonOpBuilder &self, unsigned mask) {
         self.create<rocdl::SchedBarrier>(mask);
       });
