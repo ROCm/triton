@@ -63,7 +63,7 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, shape=[NUM_BUFFERS] + a_desc.block_shape, layout=a_desc.layout)
     b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
-    # Initialize scheduler with STREAMK_TILES
+    # Initialize scheduler
     scheduler = TileScheduler.initialize(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, STREAMK_TILES)
 
     # ============================================================================
@@ -124,9 +124,17 @@ def streamk_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, p_ptr, locks_ptr, M, 
     ttgl.store(p_ptr + p_offset, ttgl.zeros((BLOCK_M, BLOCK_N), dtype=p_ptr.type.element_ty, layout=WMMA_LAYOUT))
     ttgl.store(locks_ptr + pid, 0)
 
-    iters_per_tile = scheduler.get_iters_per_tile()
-    total_streamk_iters, streamk_iters_pcu, streamk_remainder_iters = scheduler.get_streamk_params()
-    start_iter, last_iter = scheduler.get_streamk_iteration_range()
+    # Compute StreamK params inline (not stored in scheduler to reduce SGPR pressure)
+    iters_per_tile = ttgl.cdiv(K, BLOCK_K)
+    num_streamk_tiles = scheduler.get_num_streamk_tiles()
+    total_streamk_iters = num_streamk_tiles * iters_per_tile
+    streamk_iters_pcu = total_streamk_iters // num_sms
+    streamk_remainder_iters = total_streamk_iters % num_sms
+
+    # Compute iteration range inline
+    base_offset = num_full_tiles * iters_per_tile
+    start_iter = base_offset + pid * streamk_iters_pcu + ttgl.minimum(pid, streamk_remainder_iters)
+    last_iter = base_offset + (pid + 1) * streamk_iters_pcu + ttgl.minimum(pid + 1, streamk_remainder_iters)
 
     current_start_iter = start_iter
     while current_start_iter < last_iter:
