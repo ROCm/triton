@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "buffer_atomic_add", "buffer_atomic_and", "buffer_atomic_min", "buffer_atomic_max", "buffer_atomic_or",
-    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma", "sched_barrier"
+    "buffer_atomic_xor", "buffer_atomic_xor", "buffer_load", "buffer_store", "mfma", "sched_barrier", "extract_slice"
 ]
 
 _atomic_op_str_to_op = {
@@ -177,6 +177,15 @@ def sched_barrier(mask, _semantic: GluonSemantic = None):
     """
     mask = ttgl._unwrap_if_constexpr(mask)
     _semantic.builder.create_sched_barrier(mask)
+
+
+@builtin
+def extract_slice(src, shape, offsets, _semantic: GluonSemantic = None):
+    src_ty = src.type
+    builder = _semantic.builder
+    res_ty = ttgl.distributed_type(src_ty.element_ty, shape, src_ty.layout)
+    handle = builder.create_extract_slice(res_ty.to_ir(builder), src.handle, offsets)
+    return _semantic.tensor(handle, res_ty)
 
 
 """
