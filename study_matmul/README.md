@@ -316,3 +316,18 @@ the `voff` regs of `buffer_load`.
 Add support for xcd remapping logic
 
 Kernel level change, loop code stays the same.
+
+
+### amdgcnas v3
+
+- `rotate_lgkmcnt`
+- add mfma between `waitcnt` and `s_barrier`
+- separate non-mfma with neighboring mfma instructions
+
+
+
+```
+AMD_INSERT_AMDGCN=/var/lib/jenkins/OAI-triton/study_matmul/gluon/experiment/correct/v10.s python study_matmul/gluon/gl_matmul.py
+```
+
+### kernel v10 + amdgcn v4
