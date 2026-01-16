@@ -41,7 +41,9 @@ import triton
 
 #from matmul_kernels.matmul_kernel import v8 as matmul_kernel
 
-from matmul_kernels.matmul_kernel import v9 as matmul_kernel
+#from matmul_kernels.matmul_kernel import v9 as matmul_kernel
+
+from matmul_kernels.matmul_kernel import v10 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -70,14 +72,18 @@ def matmul(a, b, num_warps):
         GROUP_SIZE_M=GROUP_SIZE_M, num_warps=num_warps)
     return c
 
+
 def get_x_vals():
-    return [(4096, 4096, 1024),
-            (4096, 4096, 2048),
-            (4096, 4096, 3072),
-            (4096, 4096, 4096),
-            (4096, 4096, 8192),
-            (4096, 4096, 16384),
-            ]
+    return [
+        (4096, 4096, 1024),
+        (4096, 4096, 2048),
+        (4096, 4096, 3072),
+        (4096, 4096, 3072),
+        (4096, 4096, 4096),
+        (4096, 4096, 8192),
+        (4096, 4096, 16384),
+    ]
+
 
 def test_correctness(dtype):
     num_warps = 4
@@ -95,6 +101,7 @@ def test_correctness(dtype):
 
         #print(f"max diff = {torch.max(triton_output-torch_output)}")
 
+
 configs = []
 configs.append(
     triton.testing.Benchmark(
@@ -111,10 +118,8 @@ configs.append(
         args={},
     ))
 
-name_to_torch_type = {
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16
-}
+name_to_torch_type = {"fp16": torch.float16, "bf16": torch.bfloat16}
+
 
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, dtype):
