@@ -43,7 +43,11 @@ import triton
 
 #from matmul_kernels.matmul_kernel import v9 as matmul_kernel
 
+#from matmul_kernels.matmul_kernel import v9_1 as matmul_kernel
+
 from matmul_kernels.matmul_kernel import v10 as matmul_kernel
+
+#from matmul_kernels.matmul_kernel import v11 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
