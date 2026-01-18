@@ -26,7 +26,7 @@ uniformWarpId (69%)
 This PR is necessary to remove the `readfirstlane` before `buffer_load_lds`.
 
 
-## 4 wave
+## gluon 4 wave
 
 - Branch: `matmul_4waves`
 - Commit: `813f6f4fe8`
@@ -99,6 +99,7 @@ However, the backend does not respect the scheduling at llir level
 - 77%
 
 Same kernel is used as v0.
+
 This version of the llir scheduler further inserts `sched.barrier` before
 each anchor instructions, i.e. `buffer.load.lds` and `lds load`.
 This forces the backend to respect the scheduling arranged at llir level.
@@ -131,7 +132,7 @@ We can actually achieve the same thing by disabling `misched` and `post-misched`
 - vgpr: 512
 - perf: 1120 tflops
 
-### v6
+### kernel v6
 
 The same llir scheduler happens to work with the v6 version of the kernel, which does
 - 3 stage pipeline with partial LDS prefetch
@@ -145,7 +146,7 @@ Result
 - perf: 1150 tflops
 - 74%
 
-### v7
+### kernel v7
 
 Unroll the loop
 
@@ -160,9 +161,11 @@ Region based llvm ir scheduler.
 
 By enabling `sched.barrier`, the loop can be partitioned into several scheduling regions.
 The scheduler only moves instructions within its own region.
-this version shows the key idea of the llvm ir scheduler: The gluon kernel handles
-op scheduling at region scope. Then the llir scheduler does fine grained interleaving
-within each region.
+
+This version shows the key idea of the llvm ir scheduler:
+- The gluon kernel handles op scheduling at region scope.
+- Then the llir scheduler does fine grained interleaving within each region.
+
 
 - gluon kernel version: v7
   - Note that we also set K as `gl.constexpr` since this cleans up the basic block
@@ -258,7 +261,7 @@ v_cndmask_b32_e32 v1, v1, v0, vcc
 |        | v11  | a167       |
 |        | v12  | a168       |
 
-### v8
+### kernel v8
 
 This version changes where to update the base ptr for buffer load
 
@@ -301,6 +304,7 @@ the `voff` regs of `buffer_load`.
 
 ### amdgcnas v2
 
+Added LICM. This helps hoist instructions to compute the `ds_read` addr.
 
 - asm: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v8/v8_amdgcnasv2.s`
 - 97%
@@ -324,10 +328,90 @@ Kernel level change, loop code stays the same.
 - add mfma between `waitcnt` and `s_barrier`
 - separate non-mfma with neighboring mfma instructions
 
-
-
 ```
 AMD_INSERT_AMDGCN=/var/lib/jenkins/OAI-triton/study_matmul/gluon/experiment/correct/v10.s python study_matmul/gluon/gl_matmul.py
 ```
 
 ### kernel v10 + amdgcn v4
+
+Kernel level change
+- slice acc0 and acc1 further into 4 pieces
+- Use blocked layout for `buffer_store`
+
+amdgcnas v4
+- Reassign registers for `ds_read` based on buffer reuse analysis
+- Can also reassign registers for `mfma` if they are using too many vgprs
+- Bug fixes and refactor
+
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v10_amdgcnasV4`
+
+### kernel v11
+
+Explicitly allocate LDS for c0 and c1
+
+In this case, `lgkmcnt` after `ds_read` and before `buffer_store` are very long.
+So this version is worse than v10 :shrug
+
+- IR dump: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v11_amdgcnasV4`
+
+
+### kernel v9_1
+
+Replace the linear layout with basic blocked layout for `buffer_store`.
+
+
+### Summary
+
+The baseline kernel, v5, implements a 3-stage pipeline with full LDS buffer prefetch.
+The llir schduler interleaves mfma and `ds_read` and `buffer_load`.
+But the backend does not respect such scheduling.
+
+Notes
+- `v5_llirSchedV0`: The baseline kernel, v5, implements a 3-stage pipeline with full LDS buffer prefetch.
+  The llir schduler interleaves mfma and `ds_read` and `buffer_load`.
+  But the backend does not respect such scheduling.
+- `v5_llirSchedV1`: diable misched in LLVM so the llir level scheduling is repsected
+- `v6`: partial LDS prefetch and better linear layout to enable `buffer_store_dwordx4` by `v_permlane`.
+- `v7`: unroll the loop + llirSchedV3, which does region based llvm ir scheduling
+- `v7_amdgcnasV0`: introduced the amdgcnas v0, which re-assign registers for mfma chains
+  to remove `v_accvgpr_` instructions.
+- `v7_llirSchedV4`: llirSchedV4, which puts 2 extra mfma during the anchor op transition region.
+  At this region, there are usually valu and salu instructions to compute the addr for the
+  anchor ops. Thus we need more mfma to cover them.
+- `v8`: update `buffer_load` base addr in the middle of the loop + llirSchedV5, which
+  inserts `s_waitcnt lgkmcnt(0)` at the beginning of each cluster to save `s_waitcnt`
+  instructions inside the cluster.
+- `v8_amdgcnasV0`: apply amdgcnas v0 on top of `v8`.
+- `v8_amdgcnasV1`: amdgcnas v1, which optimizes `voff` reg calculation of `buffer_load`.
+- `v8_amdgcnasV2`: amdgcnas v2, which implements LICM to hoist valu and salu insts used
+  to compute `ds_read` addr out of the loop.
+- `v9_amdgcnasV3`: xcd remapping + `group_m` + amdgcnas v3, which contains several peephole opt
+  - rotate `lgkmcnt`: so that the loop can start with mfma.
+  - add mfma between `waitcnt` and `s_barrier` so that the latency of `s_barrier`
+    can be partially hidden.
+  - separate non-mfma with neighboring mfma instructions
+- `v9_amdgcnasV4`: amdgcnas v4, which can assign registers for mfma and lds chains.
+  Also bug fixes and refactor.
+- `v9_1_amdgcnasV4`: kernel `v9_1` uses blocked layout for `buffer_store`, which leads to
+  LDS traffic in the epilogue
+- `v10_amdgcnasV4`: kernel `v10` slices acc0 and acc1 further into 4 pieces
+- `v11_amdgcnasV4`: kernel `v11` uses LDS buffer explicitly for layout conversion.
+
+
+|                   | mfma eff | tflops | prologue  | epilogue    | loop         |
+|-------------------|----------|--------|-----------|-------------|--------------|
+| `v5_llirSchedV0`  | 52.88%   | 950    | 5228 (2%) | 21912 (8%)  | 240112 (90%) |
+| `v5_llirSchedV1`  | 77.28%   | 1120   | 6260 (3%) | 21784 (11%) | 164321 (85%) |
+| `v6`              | 73.95%   | 1150   | 5484 (3%) | 8384 (4%)   | 174484 (93%) |
+| `v7`              | 81.76%   | 1190   | 5268 (3%) | 9120 (5%)   | 160312 (92%) |
+| `v7_amdgcnasV0`   | 86.77%   |        | 5612 (3%) | 9124 (5%)   | 151056 (91%) |
+| `v7_llirSchedV4`  | 85.48%   |        | 5360 (3%) | 8068 (5%)   | 153344 (92%) |
+| `v8`              | 82%      |        | 5080 (3%) | 9140 (5%)   | 159832 (92%) |
+| `v8_amdgcnasV0`   | 86.87%   |        | 5228 (3%) | 8112 (5%)   | 150888 (92%) |
+| `v8_amdgcnasV1`   | 94.7%    |        | 5520 (4%) | 8116 (5%)   | 138288 (91%) |
+| `v8_amdgcnasV2`   | 96.9%    |        | 5160 (3$) | 9120 (6%)   | 135216 (90%) |
+| `v9_amdgcnasV3`   | 98.5%    |        | 4436 (3%) | 8056 (6%)   | 133060 (91%) |
+| `v9_amdgcnasV4`   | 98.6%    | 1387   | 4324 (3%) | 8056 (6%)   | 132924 (91%) |
+| `v9_1_amdgcnasV4` | 98.64%   | 1428   | 4332 (3%) | 11460 (8%)  | 132880 (89%) |
+| `v10_amdgcnasV4`  | 98.21%   | 1425   | 4536 (3%) | 8808 (6%)   | 133456 (91%) |
+| `v11_amdgcnasV4`  | 98.33%   | 1395   | 4540 (3%) | 13936 (9%)  | 133300 (88%) |
