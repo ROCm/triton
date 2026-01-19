@@ -134,7 +134,7 @@ private:
   void sync(ConversionPatternRewriter &rewriter, Location loc,
             triton::ReduceOp op) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    b.barrier();
+    b.barrier(triton::gpu::AddrSpace::Local);
   }
 
   // Reduce along op axis for elements that are in the same thread. The
@@ -174,6 +174,7 @@ private:
       }
       return;
     }
+  }
 
     // --- First pass: group indices by bucket key ---
     llvm::SmallMapVector<SmallVector<unsigned>, SmallVector<int>, 8> perKeyIdxs;
@@ -222,6 +223,7 @@ private:
         accumulate(op.getLoc(), rewriter, *combineOp, acc_even, acc_odd);
         accs[key] = acc_even;
       }
+      accumulate(op.getLoc(), rewriter, op.getCombineOp(), acc, shfl, pred);
     }
   }
 

@@ -114,10 +114,7 @@ Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
     return arith::ConstantIntOp::create(rewriter, loc, 0, 32);
 
   // We dispatch only along x; return the workgroup id x
-  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
-                                         "llvm.amdgcn.cluster.workgroup.id.x",
-                                         {rewriter.getI32Type()}, {})
-      .getResult(0);
+  return ROCDL::ClusterIdXOp::create(rewriter, loc, rewriter.getI32Type());
 }
 
 Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
@@ -126,14 +123,14 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
 }
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
-                         bool isWarpSync) const {
-  if (isWarpSync) {
-    LLVM::createLLVMIntrinsicCallOp(rewriter, loc, "llvm.amdgcn.wave.barrier",
-                                    {}, {});
-  } else {
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    b.barrier();
-  }
+                         triton::gpu::AddrSpace targets) const {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  b.barrier(targets);
+}
+
+void TargetInfo::warpSync(Location loc, RewriterBase &rewriter) const {
+  LLVM::createLLVMIntrinsicCallOp(rewriter, loc, "llvm.amdgcn.wave.barrier", {},
+                                  {});
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -362,7 +359,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             unsigned interleave) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  if ((getISAFamily() == ISAFamily::CDNA4) &&
+  if (getISAFamily() == ISAFamily::CDNA4 &&
       warpReduceSwap16or32(rewriter, loc, acc, op, numLaneToReduce, interleave))
     return true;
   if ((getISAFamily() == ISAFamily::GFX1250) &&
@@ -625,7 +622,7 @@ void TargetInfo::assertFail(RewriterBase &rewriter, Location loc,
 
   // Set block barrier before aborting kernel, give a chance for all
   // the threads in a block to check/print the assert failure.
-  b.barrier();
+  b.barrier(triton::gpu::AddrSpace::All);
   // Perform the trap to abort the kernel.
   LLVM::Trap::create(rewriter, loc);
 }

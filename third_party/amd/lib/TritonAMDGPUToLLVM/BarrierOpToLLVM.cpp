@@ -49,7 +49,7 @@ struct InitBarrierOpConversion
     LLVM::BrOp::create(rewriter, loc, ValueRange(), endBlock);
     rewriter.setInsertionPointToStart(endBlock);
     // Synchronize the whole CTA, so all waves see the LDS barrier
-    b.barrier();
+    b.barrier(triton::gpu::AddrSpace::Local);
     rewriter.eraseOp(op);
     return success();
   }
@@ -71,11 +71,8 @@ struct ArriveBarrierOpConversion
     auto count = adaptor.getCount();
     // NOTE: The LLVM intrisic expects an i64_ty for count (update value)
     // But count cannot be more than 32bits according to ISA docs.
-    Value priorState =
-        LLVM::createLLVMIntrinsicCallOp(
-            rewriter, loc, "llvm.amdgcn.ds.atomic.barrier.arrive.rtn.b64",
-            i64_ty, {smemObj.getBase(), b.i64_val(count)})
-            .getResult(0);
+    Value priorState = ROCDL::DsAtomicBarrierArriveRtnOp::create(
+        rewriter, loc, i64_ty, smemObj.getBase(), b.i64_val(count), {}, {}, {});
     Value priorPhase = b.and_(
         i32_ty, b.i32_val(kBarrierPhaseMask),
         b.trunc(i32_ty, b.lshr(priorState, b.i64_val(kBarrierCountBitWidth))));
@@ -119,12 +116,12 @@ struct WaitBarrierOpConversion
   }
 };
 
-struct ClusterBarrierSignalOpConversion
-    : public ConvertOpToLLVMPattern<triton::amdgpu::ClusterBarrierSignalOp> {
+struct ClusterBarrierArriveOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::ClusterBarrierArriveOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(triton::amdgpu::ClusterBarrierSignalOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::amdgpu::ClusterBarrierArriveOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
     TritonLLVMOpBuilder b(loc, rewriter);
@@ -174,6 +171,6 @@ void mlir::triton::AMD::populateBarrierOpToLLVMPatterns(
   patterns.add<InitBarrierOpConversion>(typeConverter, benefit);
   patterns.add<WaitBarrierOpConversion>(typeConverter, benefit);
   patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
-  patterns.add<ClusterBarrierSignalOpConversion>(typeConverter, benefit);
+  patterns.add<ClusterBarrierArriveOpConversion>(typeConverter, benefit);
   patterns.add<ClusterBarrierWaitOpConversion>(typeConverter, benefit);
 }

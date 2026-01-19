@@ -37,7 +37,7 @@ tt.func @two_stage_backend(%n: index, %ptr: !tt.ptr<f32>) {
 // CHECK-NOT: no_inline
 
 // === Pre-loop sync + role setup ===
-// CHECK: gpu.barrier
+// CHECK: ttg.barrier local
 // CHECK: arith.divsi
 // WAVE64-SAME: %c256
 // WAVE32-SAME: %c128
@@ -94,7 +94,7 @@ tt.func @three_stage_backend(%n: index, %ptr0: !tt.ptr<f32>, %ptr1: !tt.ptr<f32>
 
 // CHECK-LABEL: tt.func @three_stage_backend(
 // CHECK-NOT: no_inline
-// CHECK: gpu.barrier
+// CHECK: ttg.barrier local
 // CHECK: amdg.cond_barrier
 // CHECK: scf.for
 // CHECK-NOT:   scf.execute_region
@@ -111,7 +111,7 @@ tt.func @three_stage_backend(%n: index, %ptr0: !tt.ptr<f32>, %ptr1: !tt.ptr<f32>
 // 1:         <lload>-<dot  >-<lload>-<dot  >-<lload>*<dot  >-<lstore>*<dot  >|<lload>-<dot  >-<lload>-<dot>
 // < > : a pipeline cluster, relevant operation in it.
 // -  : pipeline border with s.barrier
-// *  : pipeline border with local_barrier
+// *  : pipeline border with ttg.barrier local
 // |  : end of the loop, begins next iteration.
 //
 // Dependency comes from the second warp (deferred) to the first warp,
@@ -121,7 +121,7 @@ tt.func @three_stage_backend(%n: index, %ptr0: !tt.ptr<f32>, %ptr1: !tt.ptr<f32>
 //
 // CHECK-LABEL: tt.func public @eight_stage_dependency
 // CHECK-NOT: no_inline
-// CHECK: gpu.barrier
+// CHECK: ttg.barrier local
 // CHECK: amdg.cond_barrier
 // CHECK: scf.for
 // CHECK-COUNT-2: local_load
@@ -133,11 +133,11 @@ tt.func @three_stage_backend(%n: index, %ptr0: !tt.ptr<f32>, %ptr1: !tt.ptr<f32>
 // CHECK: tt.dot
 // CHECK: s.barrier
 // CHECK-COUNT-4: local_load
-// CHECK: local_barrier
+// CHECK: ttg.barrier local
 // CHECK: tt.dot
 // CHECK: s.barrier
 // CHECK-COUNT-2: local_store
-// CHECK: local_barrier
+// CHECK: ttg.barrier local
 // CHECK: tt.dot
 // CHECK: s.barrier
 // CHECK: scf.yield
@@ -222,7 +222,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 //
 // CHECK-LABEL: tt.func public @triple_buf_2stage
 // CHECK-NOT: no_inline
-// CHECK: gpu.barrier
+// CHECK: ttg.barrier local
 // CHECK: amdg.cond_barrier
 // CHECK: scf.for
 // CHECK-COUNT-2: local_load
@@ -234,7 +234,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK: rocdl.sched.barrier
 
 // CHECK: async_copy_global_to_local
-// CHECK: local_barrier
+// CHECK: ttg.barrier local
 // CHECK: scf.yield
 // CHECK: amdg.cond_barrier
 
@@ -320,7 +320,7 @@ tt.func @no_total_stages(%n: index, %ptr: !tt.ptr<f32>) {
 }
 
 // CHECK-LABEL: tt.func @no_total_stages(
-// CHECK-NOT: gpu.barrier
+// CHECK-NOT: ttg.barrier
 // CHECK-NOT: amdg.cond_barrier
 // CHECK: scf.for
 // CHECK:   scf.execute_region
