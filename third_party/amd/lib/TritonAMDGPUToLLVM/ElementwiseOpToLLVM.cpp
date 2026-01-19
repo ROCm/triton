@@ -2251,10 +2251,13 @@ struct Exp2OpConversion
     // which flushes input and output denorms. `llvm.amdgcn.exp2.f32` provides
     // direct access to v_exp_f32. For `llvm.exp2.f32`, the LLVM backend inserts
     // instructions to handle denorms iff `allow_flush_denorm` is False.
-    if (ftz)
-      return {ROCDL::ROCDLExp2::create(rewriter, loc, elemTy, operands[0])};
+    StringRef funcName = ftz ? "llvm.amdgcn.exp2.f32" : "llvm.exp2.f32";
+    Type funcType = getFunctionType(elemTy, operands[0]);
+    LLVM::LLVMFuncOp funcOp =
+        appendOrGetExternFuncOp(rewriter, op, funcName, funcType);
 
-    return {LLVM::Exp2Op::create(rewriter, loc, elemTy, operands[0])};
+    return {
+        LLVM::createLLVMCallOp(rewriter, loc, funcOp, operands[0]).getResult()};
   }
 
 private:
@@ -2362,8 +2365,14 @@ struct SqrtOpConversion
 
     // llvm.amdgcn.sqrt.f32 provides direct access to v_sqrt_f32, which provides
     // 1ULP accuracy and flushs denorms.
+    StringRef funcName = "llvm.amdgcn.sqrt.f32";
+
+    Type funcType = getFunctionType(elemTy, operands[0]);
+    LLVM::LLVMFuncOp funcOp =
+        appendOrGetExternFuncOp(rewriter, op, funcName, funcType);
+
     Value intrinsicsOutput =
-        ROCDL::ROCDLSqrt::create(rewriter, loc, elemTy, operands[0]);
+        LLVM::createLLVMCallOp(rewriter, loc, funcOp, operands[0]).getResult();
 
     if (!ftz) {
       // In case of non-ftz, we need to calibrate the results by scaling down by
