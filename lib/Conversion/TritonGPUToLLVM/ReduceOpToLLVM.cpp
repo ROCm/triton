@@ -174,7 +174,6 @@ private:
       }
       return;
     }
-  }
 
     // --- First pass: group indices by bucket key ---
     llvm::SmallMapVector<SmallVector<unsigned>, SmallVector<int>, 8> perKeyIdxs;
@@ -223,7 +222,6 @@ private:
         accumulate(op.getLoc(), rewriter, *combineOp, acc_even, acc_odd);
         accs[key] = acc_even;
       }
-      accumulate(op.getLoc(), rewriter, op.getCombineOp(), acc, shfl, pred);
     }
   }
 
