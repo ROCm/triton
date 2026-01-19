@@ -6,8 +6,8 @@
 
 #include <limits>
 
-namespace tt = mlir::triton;
-namespace ttg = mlir::triton::gpu;
+namespace tt = triton;
+namespace ttg = triton::gpu;
 
 namespace deduceMin {
 int deduceMinCountInBlock(Block &block,
@@ -296,7 +296,7 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
       {
           {StringAttr::get(ctx, "offset"), bases},
       },
-      tt::standardOutDimNames(ctx, rank));
+      triton::standardOutDimNames(ctx, rank));
   linearComponent = triton::gpu::combineCtaCgaWithShape(
       linearComponent, cgaLayout, srcTy.getShape());
 

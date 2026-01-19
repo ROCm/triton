@@ -134,9 +134,7 @@ bool ReduceOpHelper::isReduceWithinCTA() {
   // TODO: Support reduce across CTAS
   // Layout optimization passes such as PlanCTAPass and
   // RemoveLayoutConversionPass should avoid cross-CTA reduction
-  auto ctasPerCGA = getCTAsPerCGA(srcEncoding);
-  auto ctasSplit = getCTASplitNum(srcEncoding);
-  return (ctasPerCGA[axis] / ctasSplit[axis] == 1);
+  return getCTASplitNum(srcEncoding)[axis] == 1;
 }
 
 bool ReduceOpHelper::isAssociative() {

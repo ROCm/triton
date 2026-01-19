@@ -1,7 +1,6 @@
 #ifndef TRITON_CONVERSION_TRITONAMDGPU_TO_LLVM_TYPECONVERTER_H
 #define TRITON_CONVERSION_TRITONAMDGPU_TO_LLVM_TYPECONVERTER_H
 
-#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/MLIRTypes.h"

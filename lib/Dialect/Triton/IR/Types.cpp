@@ -4,7 +4,6 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "llvm/ADT/TypeSwitch.h" // required by `Types.cpp.inc`
 
 using namespace mlir;
@@ -79,11 +78,8 @@ Type getPointeeType(Type type) {
     // scalar pointer
     Type pointeeType = ptrType.getPointeeType();
     return pointeeType;
-  } else if (auto desc = dyn_cast<TensorDescType>(type)) {
-    return desc.getBlockType();
-  } else {
-    return {};
   }
+  return type;
 }
 
 Type getI32SameShape(Type type) {
