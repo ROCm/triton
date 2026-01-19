@@ -20,6 +20,8 @@ try:
         create_shared_layouts,
         create_tensor_descriptors,
         issue_loads,
+        issue_l2_prefetches,
+        issue_l2_prefetches_prologue,
         issue_wmma,
         lds_subtile_load,
         TileScheduler,
@@ -30,6 +32,8 @@ except ImportError:
         create_shared_layouts,
         create_tensor_descriptors,
         issue_loads,
+        issue_l2_prefetches,
+        issue_l2_prefetches_prologue,
         issue_wmma,
         lds_subtile_load,
         TileScheduler,
@@ -45,7 +49,7 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                                          BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
                                          NUM_BUFFERS: ttgl.constexpr,  #
                                          TRANSPOSE_B: ttgl.constexpr,  #
-                                         WARP_BASES: ttgl.constexpr):
+                                         WARP_BASES: ttgl.constexpr, L2_PREFETCH_DISTANCE: ttgl.constexpr):
 
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
@@ -81,6 +85,9 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         consumer = 0
         accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
 
+        issue_l2_prefetches_prologue(L2_PREFETCH_DISTANCE, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K,
+                                     NUM_BUFFERS, TRANSPOSE_B)
+
         for _ in ttgl.static_range(NUM_BUFFERS - 1):
             producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
                                    TRANSPOSE_B)
@@ -88,6 +95,9 @@ def persistent_gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
             producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
                                    TRANSPOSE_B)
+            # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
+            issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K,
+                                TRANSPOSE_B)
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                                accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -112,7 +122,7 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
                                                       BLOCK_K: ttgl.constexpr,  #
                                                       NUM_BUFFERS: ttgl.constexpr,  #
                                                       TRANSPOSE_B: ttgl.constexpr,  #
-                                                      WARP_BASES: ttgl.constexpr):
+                                                      WARP_BASES: ttgl.constexpr, L2_PREFETCH_DISTANCE: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -149,6 +159,9 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
         off_bn_next = pid_n_next * BLOCK_N
 
         producer = 0
+
+        issue_l2_prefetches_prologue(L2_PREFETCH_DISTANCE, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K,
+                                     NUM_BUFFERS, TRANSPOSE_B)
         # Initial prefetch for first NUM_BUFFERS - 1 tiles
         for i in ttgl.static_range(NUM_BUFFERS - 1):
             producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
@@ -160,6 +173,9 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
         for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
             producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
                                    TRANSPOSE_B)
+            # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
+            issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K,
+                                TRANSPOSE_B)
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                                accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -167,6 +183,9 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
         for i in ttgl.static_range(NUM_BUFFERS - 1):
             producer = issue_loads(producer, a_desc, b_desc, off_am_next, off_bn_next, a_buffer, b_buffer, BLOCK_K,
                                    NUM_BUFFERS, TRANSPOSE_B, pred=tile_idx + num_sms < num_tiles)
+            # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
+            issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, off_am_next, off_bn_next, BLOCK_K,
+                                TRANSPOSE_B)
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                                accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -189,7 +208,7 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                               BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
                               NUM_BUFFERS: ttgl.constexpr,  #
                               TRANSPOSE_B: ttgl.constexpr,  #
-                              WARP_BASES: ttgl.constexpr):
+                              WARP_BASES: ttgl.constexpr, L2_PREFETCH_DISTANCE: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -218,11 +237,17 @@ def gemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     consumer = 0
     accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
 
+    # Prefetching buffers we load in the prologue does not make sense
+    issue_l2_prefetches_prologue(L2_PREFETCH_DISTANCE, producer, a_desc, b_desc, 0, 0, BLOCK_K, NUM_BUFFERS,
+                                 TRANSPOSE_B)
+
     for _ in ttgl.static_range(NUM_BUFFERS - 1):
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
 
     for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
+        # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
+        issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, 0, 0, BLOCK_K, TRANSPOSE_B)
         consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                            accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -247,7 +272,8 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
                                                             BLOCK_K: ttgl.constexpr,  #
                                                             NUM_BUFFERS: ttgl.constexpr,  #
                                                             TRANSPOSE_B: ttgl.constexpr,  #
-                                                            WARP_BASES: ttgl.constexpr):
+                                                            WARP_BASES: ttgl.constexpr,
+                                                            L2_PREFETCH_DISTANCE: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -279,6 +305,9 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
     consumer = 0
     accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
 
+    issue_l2_prefetches_prologue(L2_PREFETCH_DISTANCE, producer, a_desc, b_desc, 0, 0, BLOCK_K, NUM_BUFFERS,
+                                 TRANSPOSE_B)
+
     for _ in ttgl.static_range(NUM_BUFFERS - 1):
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
 
@@ -302,6 +331,10 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
         # If we are in epilogue, we have already issued our tile loads
         producer = issue_loads(producer, a_desc, b_desc, 0, 0, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B,
                                pred=i < epilogue_lb)
+
+        # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
+        issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, 0, 0, BLOCK_K, TRANSPOSE_B)
+
         # LDS load SubIteration2
         a2, b2 = lds_subtile_load(consumer, 2 * SUBTILE_LEN, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                   NUM_BUFFERS, TRANSPOSE_B, SUBTILE_LEN)
@@ -335,10 +368,11 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
 @pytest.mark.parametrize("TRANSPOSE_B", [False, True])
 @pytest.mark.parametrize("PERSISTENT", [False, True])
 @pytest.mark.parametrize("PREFETCH", [False, True])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0, 2])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
 @pytest.mark.parametrize("num_warps", [4, 8])
-def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, M, N, K,
-                                    num_warps):
+def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,
+                                    L2_PREFETCH_DISTANCE, M, N, K, num_warps):
     if triton.cdiv(K, BLOCK_K) < NUM_BUFFERS:
         pytest.skip("Skip tests where K/BLOCK_K < NUM_BUFFERS")
 
@@ -372,7 +406,8 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
             stride_cm, stride_cn,  #
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
             NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
-            num_warps=num_warps, WARP_BASES=warp_bases, waves_per_eu=num_warps // 4)
+            num_warps=num_warps, WARP_BASES=warp_bases, waves_per_eu=num_warps // 4,
+            L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
         static_profile(kernel)
     else:
         # num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -388,7 +423,8 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 stride_cm, stride_cn,  #
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
-                num_warps=num_warps, WARP_BASES=warp_bases, waves_per_eu=num_warps // 4)
+                num_warps=num_warps, WARP_BASES=warp_bases, waves_per_eu=num_warps // 4,
+                L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
             static_profile(kernel)
         else:
             kernel = persistent_gemm_tdm_pipelined_kernel[grid](
@@ -399,7 +435,7 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 stride_cm, stride_cn,  #
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, num_warps=num_warps, WARP_BASES=warp_bases,
-                waves_per_eu=num_warps // 4)
+                waves_per_eu=num_warps // 4, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
             static_profile(kernel)
 
     c_triton = c_device.cpu()
@@ -410,8 +446,10 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32)])
 @pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
 @pytest.mark.parametrize("TRANSPOSE_B", [False, True])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0, 2])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
-def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK_N, NUM_BUFFERS, TRANSPOSE_B, M, N, K):
+def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK_N, NUM_BUFFERS, TRANSPOSE_B,
+                                                                  L2_PREFETCH_DISTANCE, M, N, K):
     num_warps = 4
     BLOCK_K = 128  # 4 subtiles * 32 (wmma kdim)
 
@@ -444,7 +482,8 @@ def test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK
         stride_cm, stride_cn,  #
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
         NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
-        num_warps=num_warps, WARP_BASES=tuple(warp_bases), waves_per_eu=num_warps // 4)
+        num_warps=num_warps, WARP_BASES=tuple(warp_bases), waves_per_eu=num_warps // 4,
+        L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
     static_profile(kernel)
 
     c_triton = c_device.cpu()
@@ -1404,6 +1443,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-buffers", type=int, choices=[1, 2, 4], default=2, help='num shared memory buffers')
     parser.add_argument("--persistent", action="store_true", help="Use persistent variant")
     parser.add_argument("--prefetch-lds", action="store_true", help="Enable prefetch LDS")
+    parser.add_argument(
+        "--prefetch-l2-distance", type=int, default=0, choices=[0, 1, 2, 3, 4, 5], help=
+        "Prefetch distance (in iterations) for operands into L2 before issuing preloads (TDM). 0 disables L2 prefetch.")
     parser.add_argument("--single-warp-schedule", action="store_true", help="Use single warp per SIMD schedule variant")
     parser.add_argument("--warp-specialized", action="store_true", help="Use warp specialized variant")
     parser.add_argument("--subtiled", action="store_true", help="Use subtiled quadrant processing")
@@ -1428,8 +1470,10 @@ if __name__ == "__main__":
     TRANSPOSE_B = True
     PERSISTENT = args.persistent
     PREFETCH = args.prefetch_lds
+    L2_PREFETCH_DISTANCE = args.prefetch_l2_distance
 
     if args.warp_specialized:
+        assert L2_PREFETCH_DISTANCE == 0, "L2 prefetch no support in warp specialized kernel"
         # For warp specialized, allow larger blocks with subtiled variant
         if args.subtiled:
             BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
@@ -1453,15 +1497,15 @@ if __name__ == "__main__":
                                                    M, N, K, NUM_WARPS)
     elif args.single_warp_schedule:
         print(
-            f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"
+            f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}, {L2_PREFETCH_DISTANCE=}"
         )
         test_runtime_gemm_tdm_pipelined_single_warp_per_simd_schedule(BLOCK_M, BLOCK_N,  #
-                                                                      NUM_BUFFERS, TRANSPOSE_B,  #
+                                                                      NUM_BUFFERS, TRANSPOSE_B, L2_PREFETCH_DISTANCE,  #
                                                                       M, N, K)
     else:
         print(
-            f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"
+            f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}, {L2_PREFETCH_DISTANCE=}"
         )
         test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K,  #
-                                        NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,  #
+                                        NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, L2_PREFETCH_DISTANCE,  #
                                         M, N, K, NUM_WARPS)

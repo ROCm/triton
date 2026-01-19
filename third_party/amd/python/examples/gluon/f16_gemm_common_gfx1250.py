@@ -103,6 +103,37 @@ def create_tensor_descriptors(a_ptr, b_ptr, off_am, off_bn, stride_am, stride_ak
 
 
 @gluon.jit
+def issue_l2_prefetches(distance, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K: ttgl.constexpr,
+                        TRANSPOSE_B: ttgl.constexpr, pred=True):
+    """
+    Creates L2 prefetch for iteration `producer + distance`.
+    """
+    if distance == 0:
+        return
+
+    prefetch_iteration = producer + distance
+    ttgl.amd.gfx1250.tdm.prefetch(a_desc, [off_am, prefetch_iteration * BLOCK_K], pred=pred)
+    if not TRANSPOSE_B:
+        ttgl.amd.gfx1250.tdm.prefetch(b_desc, [prefetch_iteration * BLOCK_K, off_bn], pred=pred)
+    else:
+        ttgl.amd.gfx1250.tdm.prefetch(b_desc, [off_bn, prefetch_iteration * BLOCK_K], pred=pred)
+
+
+@gluon.jit
+def issue_l2_prefetches_prologue(distance, producer, a_desc, b_desc, off_am, off_bn, BLOCK_K: ttgl.constexpr,
+                                 NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
+    """
+    Creates prefetches for iterations [NUM_BUFFERS, distance - NUM_BUFFERS) or no prefetches if distance <= NUM_BUFFERS.
+    This skips iterations which are preloaded in the prologue because prefetching them does not make sense for GEMMs.
+    """
+    if distance <= NUM_BUFFERS:
+        return
+
+    for i in ttgl.static_range(NUM_BUFFERS - distance):
+        issue_l2_prefetches(distance + NUM_BUFFERS + i, producer, a_desc, b_desc, 0, 0, BLOCK_K, TRANSPOSE_B, pred)
+
+
+@gluon.jit
 def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
                 NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
     # Note: pred parameter is for conditional execution via if-statements, not passed to async_load
