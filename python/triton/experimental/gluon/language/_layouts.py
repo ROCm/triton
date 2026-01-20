@@ -335,9 +335,6 @@ def _get_shape_per_cta(shape, cga_layout):
         else:
             cga_shape[i] *= 2
     for dim in range(rank):
-        # Skip broadcasting dimensions
-        if (cga_shape[dim] == 0):
-            continue
         assert shape_per_cta[dim] % cga_shape[dim] == 0, f"Shape {shape} is not divisible by CGA layout {cga_layout}"
         shape_per_cta[dim] //= cga_shape[dim]
     return shape_per_cta
