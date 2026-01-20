@@ -152,8 +152,21 @@ def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BL
 @gluon.jit
 def issue_wmma(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr, accumulator,
                wait_producers_cnt, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
+    """
+    For multi-CTA configurations, we want warps within the CGA (cluster) to stay temporally aligned so we can
+    multicast data to multiple CTAs.
+    We do this by signaling the cluster barrier before `async_wait` (which inserts a CTA barrier), then waiting
+    for the cluster barrier to complete. This keeps warps of a CGA within one iteration of each other.
+    It can also improve latency hiding by overlapping the cluster and CTA barriers.
+    """
+    num_ctas: ttgl.constexpr = ttgl.num_ctas()
+    if num_ctas > 1:
+        ttgl.amd.gfx1250.cluster.arrive()
 
     ttgl.amd.gfx1250.tdm.async_wait(wait_producers_cnt)
+
+    if num_ctas > 1:
+        ttgl.amd.gfx1250.cluster.wait()
 
     a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
     if not TRANSPOSE_B:

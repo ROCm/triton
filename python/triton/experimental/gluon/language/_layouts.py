@@ -335,6 +335,9 @@ def _get_shape_per_cta(shape, cga_layout):
         else:
             cga_shape[i] *= 2
     for dim in range(rank):
+        # Skip broadcasting dimensions
+        if (cga_shape[dim] == 0):
+            continue
         assert shape_per_cta[dim] % cga_shape[dim] == 0, f"Shape {shape} is not divisible by CGA layout {cga_layout}"
         shape_per_cta[dim] //= cga_shape[dim]
     return shape_per_cta
@@ -549,30 +552,30 @@ class PaddedSharedLayout(SharedLayout):
     """
     interval_padding_pairs: List[List[int]]
     offset_bases: List[List[int]]
-    block_bases: List[List[int]]
+    cga_layout: List[List[int]]
     shape: List[int]
 
     def __post_init__(self):
         super().__setattr__("interval_padding_pairs", _unwrap_shape(self.interval_padding_pairs))
         super().__setattr__("offset_bases", _unwrap_shape(self.offset_bases))
-        super().__setattr__("block_bases", _unwrap_shape(self.block_bases))
+        super().__setattr__("cga_layout", _unwrap_shape(self.cga_layout))
         super().__setattr__("shape", _unwrap_shape(self.shape))
 
         rank = len(self.shape)
 
         for basis in self.offset_bases:
             assert len(basis) == rank
-        for basis in self.block_bases:
+        for basis in self.cga_layout:
             assert len(basis) == rank
 
         self.verify()
 
     def _to_ir(self, builder):
         intervals, paddings = zip(*self.interval_padding_pairs)
-        return builder.get_padded_shared_layout(intervals, paddings, self.offset_bases, self.block_bases, self.shape)
+        return builder.get_padded_shared_layout(intervals, paddings, self.offset_bases, self.cga_layout, self.shape)
 
     def mangle(self) -> str:
-        return f"PaddedShared_{self.interval_padding_pairs}_{self.offset_bases}_{self.block_bases}_{self.shape}_PaddedShared"
+        return f"PaddedShared_{self.interval_padding_pairs}_{self.offset_bases}_{self.cga_layout}_{self.shape}_PaddedShared"
 
     def verify(self):
         pairs = self.interval_padding_pairs
@@ -592,7 +595,7 @@ class PaddedSharedLayout(SharedLayout):
 
     @staticmethod
     @constexpr_function
-    def with_identity_for(interval_padding_pairs, shape, order):
+    def with_identity_for(interval_padding_pairs, shape, order, cga_layout=[]):
         """Returns a PaddedSharedLayout with the given interval and padding pairs and an identity mapping as the linear component for the given shape and order.
         """
         assert len(shape) == len(order)
@@ -600,17 +603,19 @@ class PaddedSharedLayout(SharedLayout):
         assert all(is_power_of_2(n) for n in shape)
 
         rank = len(shape)
-        # Create a idendity mapping based on shape + order
+        shape_per_cta = _get_shape_per_cta(shape, cga_layout) if cga_layout else shape
+
+        # Create a idendity mapping based on shape_per_cta + order
         offset_bases = []
         for dim in order:
-            for basis in range(int(math.log2(shape[dim]))):
+            for basis in range(int(math.log2(shape_per_cta[dim]))):
                 offset_bases.append([1 << basis if i == dim else 0 for i in range(rank)])
 
-        return PaddedSharedLayout(interval_padding_pairs, offset_bases, [], shape)
+        return PaddedSharedLayout(interval_padding_pairs, offset_bases, cga_layout, shape)
 
     def __hash__(self):
         return hash((tuple(map(tuple, self.interval_padding_pairs)), tuple(map(tuple, self.offset_bases)),
-                     tuple(map(tuple, self.block_bases)), tuple(self.shape)))
+                     tuple(map(tuple, self.cga_layout)), tuple(self.shape)))
 
 
 @dataclass(frozen=True)
