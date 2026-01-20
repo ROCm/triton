@@ -261,23 +261,6 @@ class HIPBackend(BaseBackend):
         if use_async_copy:
             amd.passes.ttgpuir.add_update_async_wait_count(pm, options.arch)
         pm.run(mod)
-
-        # It there're multiple kernels and you only want to replace one of them, you can use 
-        # AMD_INSERT_TTGIR="<kernel_name>:<filename>" to filter. Or just use AMD_INSERT_TTGIR="<filename>"
-        if "AMD_INSERT_TTGIR" in os.environ.keys():
-            fn = os.environ['AMD_INSERT_TTGIR']
-            if ':' in fn:
-                kernel_name, insert_module_path = fn.split(':')
-                print(f"Replace kernel {kernel_name}'s ttgir with {insert_module_path}")            
-                if not mod.has_function(kernel_name):
-                    return mod
-            else:
-                insert_module_path = fn
-                print(f"Replace kernel's ttgir with {insert_module_path}")
-            ctx = mod.context
-            mod = ir.parse_mlir_module(insert_module_path, ctx)
-            mod.context = ctx
-            
         return mod
 
     @staticmethod
