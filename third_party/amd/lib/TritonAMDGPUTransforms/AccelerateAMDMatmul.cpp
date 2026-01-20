@@ -623,7 +623,6 @@ public:
         oldAType.getShape().front() >= 16 * 2 &&
         oldBType.getShape().back() == 16 && isChainDotHead(dotOp);
 
-
     ttg::AMDMfmaEncodingAttr mfmaEnc;
     if (isMfma16InBwdFA) {
       // Use tilesPerWarp of [2, 1] for the mfma16x16 layout of a chain dot head
