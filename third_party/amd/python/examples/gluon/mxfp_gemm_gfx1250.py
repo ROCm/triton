@@ -63,7 +63,6 @@ class MXFPGEMMConfig:
     BLOCK_M_PRESHUFFLED: gl.constexpr
     BLOCK_N_PRESHUFFLED: gl.constexpr
     BLOCK_K_SCALE_PRESHUFFLED: gl.constexpr
-    tiles_per_warp: gl.constexpr
     SCALE_BLOCK: gl.constexpr
     ASYNC_COPY_SCALE: gl.constexpr
 
@@ -100,8 +99,6 @@ class MXFPGEMMConfig:
         else:
             reg_bases: gl.constexpr = []
             warp_bases: gl.constexpr = [[0, 1], [1, 0]]
-
-        self.tiles_per_warp = gl.constexpr([2, 2] if SCALE_PRESHUFFLE else [1, 1])
 
         self.BLOCK_M_PRESHUFFLED = gl.constexpr(BLOCK_M // self.PRESHUFFLE_FACTOR)
         self.BLOCK_N_PRESHUFFLED = gl.constexpr(BLOCK_N // self.PRESHUFFLE_FACTOR)
