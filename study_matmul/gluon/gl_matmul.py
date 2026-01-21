@@ -45,12 +45,15 @@ import triton
 
 #from matmul_kernels.matmul_kernel import v9_1 as matmul_kernel
 
-from matmul_kernels.matmul_kernel import v10 as matmul_kernel
+#from matmul_kernels.matmul_kernel import v10 as matmul_kernel
+
+from matmul_kernels.matmul_kernel import v10_f8 as matmul_kernel
 
 #from matmul_kernels.matmul_kernel import v11 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
+name_to_torch_type = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 def matmul(a, b, num_warps):
     # Check constraints.
@@ -59,9 +62,11 @@ def matmul(a, b, num_warps):
     M, K = a.shape
     K, N = b.shape
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 64
+    if a.dtype == torch.float8_e5m2:
+        BLOCK_K = 128
     GRID_MN = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
     grid = (GRID_MN, 1)
     NUM_XCDS = 8
@@ -79,25 +84,35 @@ def matmul(a, b, num_warps):
 
 def get_x_vals():
     return [
-        (4096, 4096, 1024),
-        (4096, 4096, 2048),
-        (4096, 4096, 3072),
-        (4096, 4096, 3072),
+        #(4096, 4096, 1024),
+        #(4096, 4096, 2048),
+        #(4096, 4096, 3072),
+        #(4096, 4096, 3072),
         (4096, 4096, 4096),
-        (4096, 4096, 8192),
-        (4096, 4096, 16384),
+        #(4096, 4096, 8192),
+        #(4096, 4096, 16384),
     ]
 
 
 def test_correctness(dtype):
     num_warps = 4
 
+    if dtype == 'f8':
+        torch_dtype = torch.float16
+    else:
+        torch_dtype = name_to_torch_type[dtype]
+
     for M, N, K in get_x_vals():
-        ## Check correctness
-        a = torch.rand((M, K), device=DEVICE, dtype=dtype) - .5
-        b = torch.rand((N, K), device=DEVICE, dtype=dtype).T - .5
+        a = torch.rand((M, K), device=DEVICE, dtype=torch_dtype) - .5
+        b = torch.rand((N, K), device=DEVICE, dtype=torch_dtype).T - .5
+        if dtype == 'f8':
+            a = a.to(torch.float8_e5m2)
+            b = b.to(torch.float8_e5m2)
         triton_output = matmul(a, b, num_warps)
-        torch_output = torch.matmul(a, b)
+        if dtype == 'f8':
+            torch_output = torch.matmul(a.to(torch.float16), b.to(torch.float16))
+        else:
+            torch_output = torch.matmul(a, b)
         if torch.allclose(triton_output, torch_output, atol=1e-1, rtol=0):
             print(f"{M=} {N=} {K=}: ✅ Triton and Torch match")
         else:
@@ -114,22 +129,26 @@ configs.append(
         line_arg="dtype",  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
         # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-        line_vals=["fp16", "bf16"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-        line_names=["fp16", "bf16"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+        line_vals=["f8"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
+        line_names=["f8"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
         styles=[("green", "-"), ("yellow", "--")],
         ylabel="TFLOPS",  # Label name for the y-axis
         plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
         args={},
     ))
 
-name_to_torch_type = {"fp16": torch.float16, "bf16": torch.bfloat16}
-
 
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, dtype):
-    dtype = name_to_torch_type[dtype]
-    a = torch.randn((M, K), device=DEVICE, dtype=dtype)
-    b = torch.randn((N, K), device=DEVICE, dtype=dtype).T
+    if dtype == 'f8':
+        torch_dtype = torch.float16
+    else:
+        torch_dtype = name_to_torch_type[dtype]
+    a = torch.randn((M, K), device=DEVICE, dtype=torch_dtype)
+    b = torch.randn((N, K), device=DEVICE, dtype=torch_dtype).T
+    if dtype == 'f8':
+        a = a.to(torch.float8_e5m2)
+        b = b.to(torch.float8_e5m2)
     num_warps = 4
     quantiles = [0.5, 0.2, 0.8]
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, num_warps), quantiles=quantiles)
@@ -137,6 +156,6 @@ def benchmark(M, N, K, dtype):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-test_correctness(torch.float16)
-test_correctness(torch.bfloat16)
+test_correctness("f8")
+#test_correctness("bf16")
 benchmark.run(show_plots=False, print_data=True)
