@@ -22,7 +22,131 @@ import argparse
 import json
 import os
 import sys
+import re
 from glob import glob
+
+# MFMA instruction cycle mapping for non-scaled versions
+MFMA_CYCLE_MAP = {
+    "v_mfma_f32_16x16x32_f16": 16,
+    "v_mfma_f32_32x32x16_f16": 32,
+    #"v_mfma_f32_4x4x4_f16": 4,
+    #"v_mfma_f32_16x16x4_f32": 16,
+    #"v_mfma_f32_32x32x2_f32": 32,
+    #"v_mfma_f32_4x4x1_f32": 4,
+    # Add more standard MFMA instructions as needed
+}
+
+# MFMA scaled instruction cycle rules
+MFMA_SCALE_CYCLE_RULES = {
+    "v_mfma_scale_f32_16x16x128_f8f6f4": {"cbsz_or_blgp_le_1": 32, "default": 16},
+    "v_mfma_scale_f32_32x32x64_f8f6f4": {"cbsz_or_blgp_le_1": 64, "default": 32},
+    # Add more scaled MFMA instructions as needed
+}
+
+
+def extract_cbsz_blgp(instruction):
+    """
+    Extract cbsz and blgp values from an MFMA instruction.
+
+    Args:
+        instruction: String containing the MFMA instruction
+
+    Returns:
+        tuple: (cbsz_value, blgp_value) or (None, None) if not found
+    """
+    cbsz_match = re.search(r'cbsz:(\d+)', instruction)
+    blgp_match = re.search(r'blgp:(\d+)', instruction)
+
+    cbsz = int(cbsz_match.group(1)) if cbsz_match else None
+    blgp = int(blgp_match.group(1)) if blgp_match else None
+
+    return cbsz, blgp
+
+
+def get_mfma_opcode(instruction):
+    """
+    Extract the MFMA opcode from the instruction.
+
+    Args:
+        instruction: String containing the MFMA instruction
+
+    Returns:
+        str: The opcode (e.g., "v_mfma_f32_16x16x32_f16")
+    """
+    # Match pattern like "v_mfma_..." up to the first space or end
+    match = re.match(r'(v_mfma_\S+?)(?:\s|$)', instruction.strip())
+    if match:
+        return match.group(1)
+    return None
+
+
+def get_mfma_cycles(instruction):
+    """
+    Determine the cycle count for an MFMA instruction.
+
+    Args:
+        instruction: String containing the MFMA instruction
+
+    Returns:
+        int: Number of cycles for the instruction, or 0 if not an MFMA
+    """
+    instruction_lower = instruction.lower()
+
+    # Check if it's an MFMA instruction
+    if "v_mfma" not in instruction_lower:
+        return 0
+
+    # Extract the opcode
+    opcode = get_mfma_opcode(instruction_lower)
+    if not opcode:
+        return 0
+
+    # Check if it's a scaled MFMA instruction
+    is_scale = "v_mfma_scale" in opcode
+
+    if is_scale:
+        # Find matching rule in MFMA_SCALE_CYCLE_RULES
+        matching_rule = None
+        for rule_opcode in MFMA_SCALE_CYCLE_RULES:
+            if rule_opcode in opcode:
+                matching_rule = rule_opcode
+                break
+
+        if not matching_rule:
+            # Unknown scaled MFMA, return 0 or a default value
+            print(f"Warning: Unknown scaled MFMA instruction: {opcode}", file=sys.stderr)
+            return 0
+
+        # Extract cbsz and blgp values
+        cbsz, blgp = extract_cbsz_blgp(instruction_lower)
+
+        # Apply the rule: if either cbsz or blgp is <= 1
+        rule = MFMA_SCALE_CYCLE_RULES[matching_rule]
+        if (cbsz is not None and cbsz <= 1) or (blgp is not None and blgp <= 1):
+            return rule["cbsz_or_blgp_le_1"]
+        else:
+            return rule["default"]
+
+    else:
+        # Non-scaled MFMA instruction
+        # Try to find exact match in the cycle map
+        if opcode in MFMA_CYCLE_MAP:
+            return MFMA_CYCLE_MAP[opcode]
+
+        # If not found, try to infer from dimensions
+        # Pattern: v_mfma_<type>_<M>x<N>x<K>_<input_type>
+        match = re.search(r'v_mfma_\w+_(\d+)x(\d+)x\d+', opcode)
+        if match:
+            m_dim = int(match.group(1))
+            n_dim = int(match.group(2))
+            # Typically, cycle count equals max(M, N)
+            cycles = max(m_dim, n_dim)
+            print(f"Warning: Inferred cycles for {opcode}: {cycles}", file=sys.stderr)
+            return cycles
+
+        # Unknown MFMA instruction
+        print(f"Warning: Unknown MFMA instruction: {opcode}", file=sys.stderr)
+        return 0
 
 
 def load_code_json(folder):
@@ -40,11 +164,10 @@ def load_code_json(folder):
 
 def analyze_code(code_list):
     """Extract loop info and compute iteration count."""
-    ## ["v_mfma_f32_16x16x32_f16 v[14:17], a[68:71], a[56:59], v[14:17]",0,686,"",3,9492,256,1024]
     sorted_code = sorted(code_list, key=lambda x: x[2])
     hitcounts = [ins[6] for ins in sorted_code]
     indices = [ins[2] for ins in sorted_code]
-    names = [ins[0].lower() for ins in sorted_code]
+    names = [ins[0] for ins in sorted_code]  # Keep original case for instruction parsing
 
     max_hit = max(hitcounts)
     loop_first_pos = next(i for i, h in enumerate(hitcounts) if h == max_hit)
@@ -56,12 +179,20 @@ def analyze_code(code_list):
     epilogue_hit = hitcounts[epilogue_first_pos] if epilogue_first_pos is not None else 1
     num_iterations = loop_hit / epilogue_hit if epilogue_hit != 0 else None
 
-    mfma_count = sum(1 for i in range(loop_first_pos, loop_last_pos + 1) if "mfma" in names[i])
+    # Count MFMA instructions and their total cycles
+    total_mfma_cycles = 0
+    mfma_count = 0
+    for i in range(loop_first_pos, loop_last_pos + 1):
+        cycles = get_mfma_cycles(names[i])
+        if cycles > 0:
+            mfma_count += 1
+            total_mfma_cycles += cycles
 
     return {
         "loop_first_index": indices[loop_first_pos],
         "epilogue_first_index": None if epilogue_first_pos is None else indices[epilogue_first_pos],
         "mfma_count_in_loop": mfma_count,
+        "total_mfma_cycles_in_loop": total_mfma_cycles,
         "loop_hitcount": loop_hit,
         "epilogue_hitcount": epilogue_hit,
         "num_iterations": num_iterations,
@@ -112,8 +243,9 @@ def analyze_waves(folder, loop_index, epilogue_index):
     pro_dur = {}
     epi_dur = {}
     for path in files:
-        pro, dur, epi = process_wave_file(path, loop_index, epilogue_index)
-        if dur is not None:
+        result = process_wave_file(path, loop_index, epilogue_index)
+        if result is not None:
+            pro, dur, epi = result
             durations[os.path.basename(path)] = dur
             pro_dur[os.path.basename(path)] = pro
             epi_dur[os.path.basename(path)] = epi
@@ -145,7 +277,8 @@ def main():
         avg_iteration_duration = (avg_loop_duration / code_info["num_iterations"]
                                   if code_info["num_iterations"] and code_info["num_iterations"] > 0 else None)
 
-        mfma_efficiency = code_info["mfma_count_in_loop"] * 16 / avg_iteration_duration
+        mfma_efficiency = (code_info["total_mfma_cycles_in_loop"] /
+                           avg_iteration_duration if avg_iteration_duration and avg_iteration_duration > 0 else None)
         total_dur = avg_loop_duration + avg_pro + avg_epi
 
         result = {
@@ -158,7 +291,7 @@ def main():
             "loop_ratio": f"{avg_loop_duration / total_dur * 100:.2f}%",
             "epi_ratio": f"{avg_epi / total_dur * 100:.2f}%",
             "average_iteration_duration": avg_iteration_duration,
-            "mfma efficiency": f"{mfma_efficiency * 100:.2f}%",
+            "mfma efficiency": f"{mfma_efficiency * 100:.2f}%" if mfma_efficiency is not None else "N/A",
         }
 
         print(json.dumps(result, indent=2))
