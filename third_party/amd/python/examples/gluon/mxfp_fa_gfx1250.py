@@ -64,39 +64,25 @@ def get_padded_shared_layout(shape, transposed=False):
 
 
 @gluon.constexpr_function
-def get_load_layout(shape, num_warps):
-    """ Get a layout with better vectorized access for a given tensor shape. """
-    _, inner_dim = shape
-    assert inner_dim in [64, 128, 256, 512]
-    if inner_dim == 512:
-        return ttgl.BlockedLayout([1, 16], [1, 32], [num_warps, 1], [1, 0])
-    if inner_dim == 256:
-        return ttgl.BlockedLayout([1, 8], [1, 32], [num_warps, 1], [1, 0])
-    elif inner_dim == 128:
-        return ttgl.BlockedLayout([1, 4], [1, 32], [num_warps, 1], [1, 0])
-    else:
-        return ttgl.BlockedLayout([1, 4], [2, 16], [num_warps, 1], [1, 0])
-
-
-@gluon.constexpr_function
-def get_wmma_layout(num_warps, packed=False, preshuffled=False):
-    assert num_warps == 4 or num_warps == 8
-
+def get_wmma_layout(num_warps, packed=False, preshuffled=False, warp_axis=0):
     reg_bases = []
-    tiles_m = 1
+    tiles = 1
     # For preshuffled case, each warp will handle 2 tiles along the M dim
     # and 2 tiles along the N dim.
     if preshuffled:
         reg_bases = [[0, 1], [1, 0]]
-        tiles_m = 2
+        tiles = 2
 
     warp_bases = []
     warps = 1
     # Distribute all warps along the M dim
     while warps < num_warps:
-        warp_bases.append([tiles_m, 0])
+        if warp_axis == 0:
+            warp_bases.append([tiles, 0])
+        else:
+            warp_bases.append([0, tiles])
         warps <<= 1
-        tiles_m <<= 1
+        tiles <<= 1
 
     instr_shape = [16, 16, 128] if not packed else [16, 16, 64]
 
@@ -293,16 +279,16 @@ class GlobalScaledAttentionConfig:
 
     @gluon.constexpr_function
     def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
+                 SUBTILE, WARP_REDUCE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
         assert Q_TYPE in ['e5m2', 'e4m3']
         assert KV_TYPE in ['e5m2', 'e4m3']
-        assert NUM_WARPS == 4 or NUM_WARPS == 8
         assert P_K_WIDTH == 16 or P_K_WIDTH == 8
 
         self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
-        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS)
+        warp_axis = 0 if not WARP_REDUCE else 1
+        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS, warp_axis=warp_axis)
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
         self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
         self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, P_K_WIDTH))
@@ -314,7 +300,7 @@ class GlobalScaledAttentionConfig:
             self.v_smem_layout = ttgl.constexpr(get_padded_shared_layout([BLOCK_N, HEAD_SZ // 2], transposed=True))
         self.acc_layout = ttgl.constexpr(wmma_layout)
 
-        self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
+        self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 and not WARP_REDUCE else False)
         self.SUBTILE = ttgl.constexpr(SUBTILE)
 
 
@@ -639,7 +625,7 @@ class GlobalScaledAttentionProgram:
 
             self.async_wait(2)  # ............................................. iter i
             v = self.shared_load_v(buf=a)
-            self.issue_global_load_k(i + 3, buf=b, pred=pred)  # ...... iter i+3
+            self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .............. iter i+3
 
             acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ............. iter i
             m = ttgl.max(qk, 1)  # ............................................ iter i+1
@@ -692,9 +678,8 @@ class GlobalScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_4warp_subtile_pipeline(self):
+    def fwd_pipeline_subtile(self):
         cfg = self.cfg
-        ttgl.static_assert(cfg.NUM_WARPS == 4 and cfg.HEAD_SZ == 128)
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
         l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -849,9 +834,8 @@ class GlobalScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_8warp_pingpong_pipeline(self):
+    def fwd_pipeline_pingpong(self):
         cfg = self.cfg
-        ttgl.static_assert(cfg.NUM_WARPS == 8)
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
         l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -994,7 +978,6 @@ class BlockScaledAttentionConfig:
 
     k_smem_layout: ttgl.constexpr
     k_layout: ttgl.constexpr
-    k_scale_load_layout: ttgl.constexpr
     k_scale_smem_layout: ttgl.constexpr
     k_scale_layout: ttgl.constexpr
 
@@ -1003,7 +986,6 @@ class BlockScaledAttentionConfig:
 
     v_smem_layout: ttgl.constexpr
     v_layout: ttgl.constexpr
-    v_scale_load_layout: ttgl.constexpr
     v_scale_smem_layout: ttgl.constexpr
     v_scale_layout: ttgl.constexpr
 
@@ -1020,18 +1002,19 @@ class BlockScaledAttentionConfig:
 
     @gluon.constexpr_function
     def __init__(self, Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,
-                 P_SCALING, SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
+                 P_SCALING, SUBTILE, WARP_REDUCE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS):
         assert Q_TYPE in ['e5m2', 'e4m3']
         assert KV_TYPE in ['e5m2', 'e4m3', 'e2m1']
-        assert NUM_WARPS == 4 or NUM_WARPS == 8
         assert P_K_WIDTH == 16 or (KV_TYPE != 'e2m1' and P_K_WIDTH == 8)
 
         KV_PACK_DIV: ttgl.constexpr = 2 if KV_TYPE == 'e2m1' else 1
         self.base = AttentionConfigBase(Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M,
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
-        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS, preshuffled=True)
-        wmma_layout_packed: ttgl.constexpr = get_wmma_layout(NUM_WARPS, packed=True, preshuffled=True)
+        warp_axis = 0 if not WARP_REDUCE else 1
+        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS, preshuffled=True, warp_axis=warp_axis)
+        wmma_layout_packed: ttgl.constexpr = get_wmma_layout(NUM_WARPS, packed=True, preshuffled=True,
+                                                             warp_axis=warp_axis)
 
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
         if KV_TYPE == 'e2m1':
@@ -1043,7 +1026,7 @@ class BlockScaledAttentionConfig:
             self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=16))
             self.p_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=P_K_WIDTH))
             self.v_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, k_width=P_K_WIDTH))
-            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 else False)
+            self.CONVERT_LAYOUT_TRIVIAL = ttgl.constexpr(True if P_K_WIDTH == 8 and not WARP_REDUCE else False)
 
         self.q_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.q_layout, [BLOCK_M, HEAD_SZ // 32]))
@@ -1053,9 +1036,6 @@ class BlockScaledAttentionConfig:
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.p_layout, [BLOCK_M, BLOCK_N // 32]))
         self.v_scale_layout = ttgl.constexpr(
             ttgl.amd.gfx1250.get_wmma_scale_layout(self.v_layout, [HEAD_SZ, BLOCK_N // 32]))
-
-        self.k_scale_load_layout = ttgl.constexpr(get_load_layout([HEAD_SZ // 32, BLOCK_N], NUM_WARPS))
-        self.v_scale_load_layout = ttgl.constexpr(get_load_layout([BLOCK_N // 32, HEAD_SZ], NUM_WARPS))
 
         self.k_smem_layout = ttgl.constexpr(  #
             get_padded_shared_layout([BLOCK_N, HEAD_SZ // KV_PACK_DIV]))
@@ -1597,7 +1577,7 @@ class BlockScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_4warp_subtile_pipeline(self):
+    def fwd_pipeline_subtile(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -1774,7 +1754,7 @@ class BlockScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_8warp_pingpong_pipeline(self):
+    def fwd_pipeline_pingpong(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
@@ -1940,6 +1920,7 @@ def mxfp_attn_fwd_kernel(  #
         PIPELINED: ttgl.constexpr,  #
         PINGPONG: ttgl.constexpr,  #
         SUBTILE: ttgl.constexpr,  #
+        WARP_REDUCE: ttgl.constexpr,  #
         P_K_WIDTH: ttgl.constexpr):
 
     NUM_WARPS: ttgl.constexpr = ttgl.num_warps()
@@ -1947,49 +1928,48 @@ def mxfp_attn_fwd_kernel(  #
     if not BLOCK_SCALING:
         cfg = GlobalScaledAttentionConfig(  #
             Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,  #
-            SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
+            SUBTILE, WARP_REDUCE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
         pgm = GlobalScaledAttentionProgram.initialize(  #
             cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
     else:
         cfg = BlockScaledAttentionConfig(  #
             Q_TYPE, KV_TYPE, SEQLEN_Q, SEQLEN_K, NUM_Q_HEADS, NUM_K_HEADS, HEAD_SZ, BLOCK_M, BLOCK_N,  #
-            P_SCALING, SUBTILE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
+            P_SCALING, SUBTILE, WARP_REDUCE, P_K_WIDTH, NUM_BUFFERS, NUM_WARPS)
         pgm = BlockScaledAttentionProgram.initialize(  #
             cfg, q_ptr, q_scale_ptr, k_ptr, k_scale_ptr, v_ptr, v_scale_ptr, o_ptr, sm_scale)
 
     if not PIPELINED:
         pgm.fwd_loop()
     else:
-        ttgl.static_assert(NUM_WARPS == 4 or NUM_WARPS == 8)
-        if NUM_WARPS == 4 and SUBTILE:
-            pgm.fwd_4warp_subtile_pipeline()
-        elif NUM_WARPS == 8 and PINGPONG:
-            pgm.fwd_8warp_pingpong_pipeline()
+        if SUBTILE:
+            pgm.fwd_pipeline_subtile()
+        elif PINGPONG:
+            pgm.fwd_pipeline_pingpong()
         else:
             pgm.fwd_pipeline()
 
 
-def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
-             q_scale: torch.Tensor | int, k_scale: torch.Tensor | int, v_scale: torch.Tensor | int,  #
-             q_type: str, kv_type: str, block_m: int, block_n: int,  #
-             block_scaling: bool, p_scaling: bool, pipelined: bool, pingpong: bool, subtile: bool, p_k_width: int,
-             num_warps: int):
+def attn_fwd(  #
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
+        q_scale: torch.Tensor | int, k_scale: torch.Tensor | int, v_scale: torch.Tensor | int,  #
+        q_type: str, kv_type: str, block_m: int, block_n: int,  #
+        block_scaling: bool, p_scaling: bool, pipelined: bool, pingpong: bool, subtile: bool, p_k_width: int,
+        warp_reduce: bool, num_warps: int):
+
     batch, seqlen_q, num_q_heads, head_sz = q.shape
     _, seqlen_k, num_k_heads, _ = k.shape
     dtype = torch.float32
 
+    if kv_type == 'e2m1':
+        assert p_k_width == 16
     assert seqlen_q == 1 or seqlen_q == seqlen_k
     assert num_q_heads >= num_k_heads and num_q_heads % num_k_heads == 0
     assert head_sz in {64, 128}
-    assert block_n == 128
     if pipelined:
         assert cdiv(seqlen_k, block_n) > 4
         assert cdiv(seqlen_k, block_n) % 2 == 0
-        if pingpong:
-            assert num_warps == 8
-        if subtile:
-            assert num_warps == 4
-            assert head_sz == 128
+    if pingpong:
+        assert num_warps > 4
 
     # In scaled wmma instruction, scales takes following shapes in global memory:
     # - a_scale: [M, K // 32]
@@ -2068,7 +2048,7 @@ def attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,  #
     args = [
         q, k, v, q_scale, k_scale, v_scale, o, sm_scale,  #
         q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,  #
-        block_scaling, p_scaling, pipelined, pingpong, subtile, p_k_width
+        block_scaling, p_scaling, pipelined, pingpong, subtile, warp_reduce, p_k_width
     ]
     kwargs = {"num_warps": num_warps, "waves_per_eu": 1}
 
@@ -2176,10 +2156,10 @@ def get_source_mapping(amdgcn, block_scaling, pipelined, pingpong, subtile, num_
     if not pipelined:
         func = pgm.fwd_loop
     else:
-        if num_warps == 4 and subtile:
-            func = pgm.fwd_4warp_subtile_pipeline
-        elif num_warps == 8 and pingpong:
-            func = pgm.fwd_8warp_pingpong_pipeline
+        if subtile:
+            func = pgm.fwd_pipeline_subtile
+        elif pingpong:
+            func = pgm.fwd_pipeline_pingpong
         else:
             func = pgm.fwd_pipeline
     func_start, func_end = func.starting_line_number + 1, func.starting_line_number + len(func.raw_src) - 1
@@ -2247,15 +2227,17 @@ def get_source_mapping(amdgcn, block_scaling, pipelined, pingpong, subtile, num_
 
 
 def get_attn_fwd_configs():
+    # block_m,block_n,pipelined,pingpong,subtile,warp_reduce,p_k_width,num_warps
     configs = {
-        "128x128_loop": [128, 128, False, False, False, 16, 4],
-        "16x128_loop": [16, 128, False, False, False, 16, 4],
-        "128x128_pipeline": [128, 128, True, False, False, 16, 4],
-        "16x128_pipeline": [16, 128, True, False, False, 16, 4],
-        "128x128_pipeline_pkwidth8": [128, 128, True, False, False, 8, 4],
-        "16x128_pipeline_pkwidth8": [16, 128, True, False, False, 8, 4],
-        "256x128_pipeline_subtile_pkwidth8": [256, 128, True, False, True, 8, 4],
-        "128x128_pipeline_pingpong_pkwidth8": [128, 128, True, True, False, 8, 8],
+        "128x128_loop": [128, 128, False, False, False, False, 16, 4],
+        "16x128_loop": [16, 128, False, False, False, False, 16, 4],
+        "128x128_pipeline": [128, 128, True, False, False, False, 16, 4],
+        "16x128_pipeline": [16, 128, True, False, False, False, 16, 4],
+        "128x128_pipeline_pkwidth8": [128, 128, True, False, False, False, 8, 4],
+        "16x128_pipeline_pkwidth8": [16, 128, True, False, False, False, 8, 4],
+        "16x128_pipeline_reduce_pkwidth8": [16, 128, True, False, False, True, 8, 4],
+        "256x128_pipeline_subtile_pkwidth8": [256, 128, True, False, True, False, 8, 4],
+        "128x128_pipeline_pingpong_pkwidth8": [128, 128, True, True, False, False, 8, 8],
     }
 
     return configs
@@ -2285,9 +2267,10 @@ def get_block_scaled_attn_fwd_cases():
             param.append((*test, *configs["128x128_pipeline_pingpong_pkwidth8"]))
         elif test == ["e4m3", "e2m1", 1, 1024, 1024, 1, 1, 128]:
             param.append((*test, *configs["128x128_pipeline"]))
-        elif test == ["e4m3", "e4m3", 1, 1, 1024, 1, 4, 128]:
+        elif test == ["e4m3", "e4m3", 1, 1, 1024, 4, 1, 128]:
             param.append((*test, *configs["16x128_pipeline_pkwidth8"]))
-        elif test == ["e2m1", "e4m3", 1, 1, 1024, 1, 4, 128]:
+            param.append((*test, *configs["16x128_pipeline_reduce_pkwidth8"]))
+        elif test == ["e4m3", "e2m1", 1, 1, 1024, 4, 1, 128]:
             param.append((*test, *configs["16x128_pipeline"]))
     return param
 
@@ -2314,17 +2297,18 @@ def get_global_scaled_attn_fwd_cases():
             param.append((*test, *configs["128x128_pipeline_pkwidth8"]))
             param.append((*test, *configs["256x128_pipeline_subtile_pkwidth8"]))
             param.append((*test, *configs["128x128_pipeline_pingpong_pkwidth8"]))
-        elif test == ["e4m3", "e4m3", 1, 1, 1024, 1, 4, 128]:
+        elif test == ["e4m3", "e4m3", 1, 1, 1024, 4, 1, 128]:
             param.append((*test, *configs["16x128_pipeline_pkwidth8"]))
+            param.append((*test, *configs["16x128_pipeline_reduce_pkwidth8"]))
     return param
 
 
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",  #
+    "block_m,block_n,pipelined,pingpong,subtile,warp_reduce,p_k_width,num_warps",  #
     get_block_scaled_attn_fwd_cases())
 def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
-                               block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
+                               block_m, block_n, pipelined, pingpong, subtile, warp_reduce, p_k_width, num_warps):
     torch.manual_seed(0)
 
     q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
@@ -2338,7 +2322,7 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
                          True, False, pipelined, pingpong, subtile, p_k_width,  #
-                         num_warps)
+                         warp_reduce, num_warps)
     o = o.to(torch.float32)
 
     o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
@@ -2364,8 +2348,9 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
     }
     for g in groups.keys():
         code = [loc[1] for loc in mapping.keys() if re.match(groups[g], loc[1])]
-        # check when k_width=8, there is no convert layout
-        if g == 'convert_layout' and p_k_width == 8:
+        # check convert layout
+        convert_layout_trivial = (p_k_width == 8 and not warp_reduce)
+        if g == 'convert_layout' and convert_layout_trivial:
             assert len(code) == 0
             continue
         # check all other groups exist
@@ -2401,10 +2386,10 @@ def test_block_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q
 
 @pytest.mark.parametrize(
     "q_type,kv_type,batch,seqlen_q,seqlen_k,num_q_heads,num_k_heads,head_sz,"
-    "block_m,block_n,pipelined,pingpong,subtile,p_k_width,num_warps",  #
+    "block_m,block_n,pipelined,pingpong,subtile,warp_reduce,p_k_width,num_warps",  #
     get_global_scaled_attn_fwd_cases())
 def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz,  #
-                                block_m, block_n, pipelined, pingpong, subtile, p_k_width, num_warps):
+                                block_m, block_n, pipelined, pingpong, subtile, warp_reduce, p_k_width, num_warps):
     torch.manual_seed(0)
 
     q, q_ref = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
@@ -2418,7 +2403,7 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
                          False, False, pipelined, pingpong, subtile, p_k_width,  #
-                         num_warps)
+                         warp_reduce, num_warps)
     o = o.to(torch.float32)
 
     o_ref = attn_fwd_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
@@ -2444,8 +2429,9 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
     }
     for g in groups.keys():
         code = [loc[1] for loc in mapping.keys() if re.match(groups[g], loc[1])]
-        # check when k_width=8, there is no convert layout
-        if g == 'convert_layout' and p_k_width == 8:
+        # check convert layout
+        convert_layout_trivial = (p_k_width == 8 and not warp_reduce)
+        if g == 'convert_layout' and convert_layout_trivial:
             assert len(code) == 0
             continue
         # check all other groups exist
@@ -2480,10 +2466,7 @@ def test_global_scaled_attn_fwd(q_type, kv_type, batch, seqlen_q, seqlen_k, num_
 
 
 def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_m, block_n,
-                  scale_type, disable_p_scaling, pipelined, pingpong, subtile, p_k_width, num_warps):
-    if kv_type == 'e2m1' and p_k_width == 8:
-        raise RuntimeError("e2m1 can not use k_width=8 for p")
-
+                  scale_type, disable_p_scaling, pipelined, pingpong, subtile, p_k_width, warp_reduce, num_warps):
     q, _ = create_operand(q_type, batch, seqlen_q, num_q_heads, head_sz)
     k, _ = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=3)
     v, _ = create_operand(kv_type, batch, seqlen_k, num_k_heads, head_sz, pack_dim=1)
@@ -2501,7 +2484,7 @@ def run_attention(q_type, kv_type, batch, seqlen_q, seqlen_k, num_q_heads, num_k
                          q_scale, k_scale, v_scale,  #
                          q_type, kv_type, block_m, block_n,  #
                          scale_type == 'block', not disable_p_scaling, pipelined, pingpong, subtile, p_k_width,
-                         num_warps)
+                         warp_reduce, num_warps)
     return kernel
 
 
@@ -2527,14 +2510,13 @@ if __name__ == "__main__":
         "Otherwise, we will compute and apply per-block scaling for the P matrix tensor. "
         "Only apply when block scaling is enabled. Ignored for global scaling.")
     parser.add_argument("--pipelined", action="store_true")
-    parser.add_argument("--pingpong", action="store_true",
-                        help="Whether to use pingpong schedule. Only works for 8 warps")
-    parser.add_argument("--subtile", action="store_true",
-                        help="Whether to subtile K, V in the pipeline. Only works for 4 warps")
+    parser.add_argument("--pingpong", action="store_true", help="Whether to use pingpong schedule")
+    parser.add_argument("--subtile", action="store_true", help="Whether to subtile K, V in the pipeline")
+    parser.add_argument("--warp_reduce", action="store_true", help="Whether to use inter-warp reduction")
     parser.add_argument(
         "--p_k_width", type=int, choices=[8, 16], required=True,
         help="The K width (in elements) for p. When set to 8, we can remove the layout conversion for p")
-    parser.add_argument("--num_warps", type=int, choices=[4, 8], required=True)
+    parser.add_argument("--num_warps", type=int, required=True)
     args = parser.parse_args()
     args = vars(args)
 
