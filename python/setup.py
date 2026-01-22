@@ -1,4 +1,4 @@
-import os
+fimport os
 import platform
 import re
 import contextlib
@@ -206,7 +206,8 @@ def get_llvm_package_info():
                 # Ubuntu 24 LTS (v2.39)
                 # Ubuntu 22 LTS (v2.35)
                 # Ubuntu 20 LTS (v2.31)
-                system_suffix = "ubuntu-x64"
+                # system_suffix = "ubuntu-x64"
+                system_suffix = "almalinux-x64" # Since we are always using an almalinux llvm tarball
             elif vglibc > 217:
                 # Manylinux_2.28 (v2.28)
                 # AlmaLinux 8 (v2.28)
