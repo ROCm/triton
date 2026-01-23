@@ -1232,3 +1232,462 @@ module attributes {ttg.target = "cuda:90", "ttg.num-warps" = 8 : i32} {
     tt.return
   }
 }
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: constant_buffer_indices_no_barrier
+// Test that multi-buffered accesses with CONSTANT indices don't require
+// a barrier between them because different constant indices access different
+// buffer slots regardless of loop iteration.
+tt.func @constant_buffer_indices_no_barrier(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  // 4-stage multi-buffer
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // Access buffer slot 0
+  %view0 = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_load
+  %loaded = ttg.local_load %view0 : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  // Access buffer slot 1 - no barrier needed because 0 != 1
+  %view1 = ttg.memdesc_index %alloc[%c1_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK-NOT: ttg.barrier local
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %view1 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: same_constant_buffer_index_needs_barrier
+// Test that accesses to the SAME constant buffer index DO require a barrier.
+tt.func @same_constant_buffer_index_needs_barrier(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+
+  // 4-stage multi-buffer
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // Access buffer slot 0
+  %view = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_load
+  %loaded = ttg.local_load %view : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  // Write to SAME buffer slot 0 - barrier required
+  // CHECK: ttg.barrier local
+  // CHECK-NEXT: ttg.local_store
+  ttg.local_store %data, %view : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_carried_index_no_war_barrier
+// Test that memdesc_index[i] and memdesc_index[i+1] don't require a
+// WAR barrier within the same iteration (read at i, write at i+1).
+// However, a RAW barrier IS still needed at the start of the iteration
+// for cross-iteration dependencies (previous iter's write to i+1,
+// current iter's read from i+1 after i increments).
+tt.func @loop_carried_index_no_war_barrier(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %c4_i32 = arith.constant 4 : i32
+
+  // 4-stage multi-buffer
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  %writeView_tmp = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %writeView_tmp : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%readIdx = %c0_i32) -> (i32) {
+    // CHECK: ttg.barrier local
+    // Read from buffer[readIdx]
+    %readView = ttg.memdesc_index %alloc[%readIdx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // A RAW barrier may be inserted here for cross-iteration dependencies
+    // (this is expected and correct)
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    // Compute writeIdx = (readIdx + 1) % 4 using the select pattern
+    %addOne = arith.addi %readIdx, %c1_i32 : i32
+    %outOfRange = arith.cmpi sge, %addOne, %c4_i32 : i32
+    %writeIdx = arith.select %outOfRange, %c0_i32, %addOne : i32
+
+    // Write to buffer[writeIdx]
+    // No WAR barrier needed here because readIdx != writeIdx (same iteration)
+    %writeView = ttg.memdesc_index %alloc[%writeIdx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-NOT: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    scf.yield %writeIdx : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: raw_same_block_different_indices
+// Test RAW hazard within the same basic block with different constant indices.
+// Write to slot 0, then read from slot 1 - no barrier needed.
+tt.func @raw_same_block_different_indices(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // Write to slot 0
+  %view0 = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %view0 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // Read from slot 1 - no barrier needed (different slot, same block)
+  %view1 = ttg.memdesc_index %alloc[%c1_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK-NOT: ttg.barrier local
+  // CHECK: ttg.local_load
+  %loaded = ttg.local_load %view1 : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: raw_same_block_same_index_needs_barrier
+// Test RAW hazard within the same block with SAME index - barrier needed.
+tt.func @raw_same_block_same_index_needs_barrier(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // Write to slot 0
+  %view = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %view : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // Read from slot 0 - barrier needed (same slot)
+  // CHECK: ttg.barrier local
+  // CHECK-NEXT: ttg.local_load
+  %loaded = ttg.local_load %view : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: waw_same_block_different_indices
+// Test WAW hazard within the same basic block with different indices.
+// Write to slot 0, then write to slot 1 - no barrier needed.
+tt.func @waw_same_block_different_indices(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // Write to slot 0
+  %view0 = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %view0 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // Write to slot 1 - no barrier needed (different slot)
+  %view1 = ttg.memdesc_index %alloc[%c1_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK-NOT: ttg.barrier local
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %view1 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_carried_addi_pattern
+// Test the common pattern: read from index i, write to index i+1
+// where i+1 is computed via arith.addi (not select).
+tt.func @loop_carried_addi_pattern(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  // 4-stage multi-buffer
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    // Read from buffer[idx]
+    %readView = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    // Compute writeIdx = idx + 1 (simple add, not modular)
+    %writeIdx = arith.addi %idx, %c1_i32 : i32
+
+    // Write to buffer[writeIdx]
+    // No WAR barrier needed because idx != idx+1
+    %writeView = ttg.memdesc_index %alloc[%writeIdx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-NOT: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    scf.yield %writeIdx : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_raw_same_iteration_different_indices
+// Test RAW within the same loop iteration: write to i+1, then read from i+2.
+// Both are different from the base i, so no barrier needed.
+tt.func @loop_raw_same_iteration_different_indices(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %c2_i32 = arith.constant 2 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    // Compute indices
+    %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+    %idx_plus_2 = arith.addi %idx, %c2_i32 : i32
+
+    // Write to slot i+1
+    %writeView = ttg.memdesc_index %alloc[%idx_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    // Read from slot i+2 - no barrier needed (different slot: i+1 != i+2)
+    %readView = ttg.memdesc_index %alloc[%idx_plus_2] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-NOT: ttg.barrier local
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    scf.yield %idx_plus_1 : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_waw_same_iteration_different_indices
+// Test WAW within the same loop iteration: write to i, then write to i+1.
+tt.func @loop_waw_same_iteration_different_indices(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+
+    // Write to slot i
+    %view0 = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %view0 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    // Write to slot i+1 - no barrier needed (different slot)
+    %view1 = ttg.memdesc_index %alloc[%idx_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-NOT: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %view1 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    scf.yield %idx_plus_1 : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_same_index_needs_barrier
+// Test that same index in loop still needs barrier.
+tt.func @loop_same_index_needs_barrier(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+
+    // Read from slot i
+    %view = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %view : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    // Write to SAME slot i - barrier required!
+    // CHECK: ttg.barrier local
+    // CHECK-NEXT: ttg.local_store
+    ttg.local_store %data, %view : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    scf.yield %idx_plus_1 : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_cross_iter_raw_alias
+// Cross-iteration RAW: write to i+1 in iter N, read from i in iter N+1.
+// Even though write precedes read in the block, they can alias across
+// iterations, so a barrier is required before the read.
+tt.func @loop_cross_iter_raw_alias(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+
+    // Write to slot i+1
+    %writeView = ttg.memdesc_index %alloc[%idx_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    // Read from slot i (next iteration can read the slot just written)
+    %readView = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    scf.yield %idx_plus_1 : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_cross_iter_waw_alias
+// Cross-iteration WAW: write to i+1 in iter N, then write to i in iter N+1.
+// They can alias across iterations, so a barrier is required before the
+// second write.
+tt.func @loop_cross_iter_waw_alias(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+
+    // Write to slot i+1
+    %writeView1 = ttg.memdesc_index %alloc[%idx_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView1 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    // Write to slot i (next iteration can hit the slot just written)
+    %writeView0 = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView0 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    scf.yield %idx_plus_1 : i32
+  }
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
+// CHECK-LABEL: loop_three_stage_pipeline
+// Test a 3-stage pipeline pattern with proper prologue and epilogue:
+// Prologue: Fill pipeline by writing to initial buffers
+// Main loop: Read from buffer[i], write to buffer[i+2] (3-stage pipeline)
+// Epilogue: Drain pipeline by reading from remaining buffers
+tt.func @loop_three_stage_pipeline(%lb : index, %ub : index, %data: tensor<128x128xf16>) {
+  %step = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %c2_i32 = arith.constant 2 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  // PROLOGUE: Fill the pipeline by writing to initial buffers
+  // Write to buffer 0
+  %prologue_view0 = ttg.memdesc_index %alloc[%c0_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %prologue_view0 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // Write to buffer 1
+  %prologue_view1 = ttg.memdesc_index %alloc[%c1_i32] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK-NOT: ttg.barrier local
+  // CHECK: ttg.local_store
+  ttg.local_store %data, %prologue_view1 : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // MAIN LOOP: 3-stage pipeline
+  // Read from buffer[i], write to buffer[i+2]
+  // CHECK: scf.for
+  %result = scf.for %iv = %lb to %ub step %step iter_args(%idx = %c0_i32) -> (i32) {
+    %idx_plus_2 = arith.addi %idx, %c2_i32 : i32
+
+    // Read from slot i (data written 2 iterations ago)
+    %readView = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK: ttg.barrier local
+    // CHECK: ttg.local_load
+    %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+    // Write to slot i+2 - no WAR barrier (different slot: i != i+2)
+    %writeView = ttg.memdesc_index %alloc[%idx_plus_2] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+    // CHECK-NOT: ttg.barrier local
+    // CHECK: ttg.local_store
+    ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+    // Increment index for next iteration
+    %next_idx = arith.addi %idx, %c1_i32 : i32
+    scf.yield %next_idx : i32
+  }
+
+  // EPILOGUE: Drain the pipeline by reading from remaining buffers
+  // Read from buffer[result] (last written buffer in main loop)
+  %epilogue_view0 = ttg.memdesc_index %alloc[%result] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_load
+  %epilogue_loaded0 = ttg.local_load %epilogue_view0 : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  // Read from buffer[result+1] (next buffer)
+  %result_plus_1 = arith.addi %result, %c1_i32 : i32
+  %epilogue_view1 = ttg.memdesc_index %alloc[%result_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK-NOT: ttg.barrier local
+  // CHECK: ttg.local_load
+  %epilogue_loaded1 = ttg.local_load %epilogue_view1 : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  tt.return
+}
