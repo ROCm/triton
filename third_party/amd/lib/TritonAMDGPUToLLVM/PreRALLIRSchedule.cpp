@@ -318,6 +318,25 @@ struct Utils {
     }
     return nullptr;
   }
+
+  static unsigned getMFMACyclesFromName(StringRef Name) {
+    // Extend this table as needed.
+    if (Name.contains("mfma.scale.f32.16x16x128.f8f6f4"))
+      return 32;
+    if (Name.contains("mfma.f32.16x16x32.f16"))
+      return 16;
+    return 0; // Unknown
+  }
+
+  static unsigned getMFMACycles(const Instruction &I) {
+    if (!isMFMAorWMMA(I))
+      return 0;
+    const auto *CI = cast<CallInst>(&I);
+    const Function *Callee = CI->getCalledFunction();
+    if (!Callee)
+      return 0;
+    return getMFMACyclesFromName(Callee->getName());
+  }
 };
 
 // Region analysis and scheduling logic grouped into a helper class
@@ -593,6 +612,7 @@ private:
       SchedKind ThisKind = Anchors[static_cast<size_t>(i)].Kind;
 
       // If changing kind, put 2 extra mfma here
+
       if (PrevKind != ThisKind) {
         if (MFMAIdx >= 1)
           MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
@@ -616,7 +636,7 @@ private:
     const MFMARegionList &Regions = It->second;
 
     // Tunables
-    const unsigned X = 4; // mfma between buffer.load.lds
+    unsigned X = 4;       // mfma between buffer.load.lds
     const unsigned Y = 1; // mfma between lds load
 
     for (unsigned i = 1; i < Regions.size(); ++i) {
@@ -631,6 +651,16 @@ private:
         bbR.End = (i + 1 < Regions.size()) ? Regions[i + 1].Barrier : nullptr;
 
         MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
+
+        if (!Res.MFMAInsts.empty()) {
+          unsigned cycles = Utils::getMFMACycles(*Res.MFMAInsts.front());
+          if (cycles == 32)
+            X = 2;
+          else if (cycles == 16)
+            X = 4;
+          // Unknown cycles -> keep fallback X = 4
+        }
+
         scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, X, Y);
       }
     }
