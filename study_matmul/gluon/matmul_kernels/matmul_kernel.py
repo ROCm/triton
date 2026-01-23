@@ -2151,13 +2151,14 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
     dotOpLayoutA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=mfmaLayout, k_width=32)
     dotOpLayoutB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=mfmaLayout, k_width=32)
 
-    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout(
-        [[1024, 32]], [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [0, 64], [16, 0], [32, 0], [64, 0], [1, 0],
-                       [2, 0], [4, 0], [8, 0], [128, 0]], [], [BLOCK_M, BLOCK_K])
-    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[1024, 32]],
-                                                        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [64, 0],
-                                                         [0, 16], [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8]], [],
-                                                        [BLOCK_K, BLOCK_N // 2])
+    sharedLayoutA: gl.constexpr = gl.PaddedSharedLayout([[1024, 16], [2048, 32]],
+        [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [0, 64],
+         [16, 0], [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+        [], [BLOCK_M, BLOCK_K])
+    sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[1024, 16], [2048, 32]],
+        [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [64, 0],
+         [0, 16], [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8]],
+        [], [BLOCK_K, BLOCK_N // 2])
 
     nBuffers: gl.constexpr = 2
     smemA = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [nBuffers, BLOCK_M, BLOCK_K], sharedLayoutA)

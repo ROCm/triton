@@ -1,4 +1,4 @@
-# Study matmul
+# Study matmul (16-bit)
 
 Base triton compiler commit: 77e7a7b74f0731d0e65fb9 (PR#9092)
 
@@ -415,3 +415,125 @@ Notes
 | `v9_1_amdgcnasV4` | 98.64%   | 1428   | 4332 (3%) | 11460 (8%)  | 132880 (89%) |
 | `v10_amdgcnasV4`  | 98.21%   | 1425   | 4536 (3%) | 8808 (6%)   | 133456 (91%) |
 | `v11_amdgcnasV4`  | 98.33%   | 1395   | 4540 (3%) | 13936 (9%)  | 133300 (88%) |
+
+
+# Study Matmul (8-bit)
+
+
+kernel level change (`v10_f8`) compared to v10
+- double `BLOCK_K` to 128
+- global load layout change
+  ```
+  reg_bases=[[0, 1], [0, 2], [0, 4], [4, 0], [8, 0], [128, 0]]
+  lane_bases=[[0, 8], [0, 16], [0, 32], [16, 0], [32, 0], [64, 0]]
+  warp_bases=[[1, 0], [2, 0]]
+  ```
+  to
+  ```
+  reg_bases=[[0, 1], [0, 2], [0, 4], [0, 8], [4, 0], [8, 0], [128, 0]]
+  lane_bases=[[0, 16], [0, 32], [0, 64], [16, 0], [32, 0], [64, 0]]
+  warp_bases=[[1, 0], [2, 0]]
+  ```
+  Note that each thread is loading 16 x f8 elements.
+- shared layout change
+  ```
+  [[512, 16]],
+  [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32],
+  [16, 0], [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+  ```
+  to
+  ```
+  [[1024, 32]],
+  [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [0, 64],
+  [16, 0], [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+  ```
+  Note that we added [0, 64] since the K dim is doubled
+- mfma
+  - instr shape is changed to 16x16x128
+  - kWidth is changed to 32
+  - API is changed to `mfma_scaled(a, None, 'e5m2', b0, None, 'e5m2', acc0)`
+
+Results
+- using llvm sched and RA: `/root/OAI-triton/study_matmul/gluon/v10_f8/llvm_sched`
+  - vgpr: 428
+  - mfma eff: 55.09%
+- Disable miched: `/root/OAI-triton/study_matmul/gluon/v10_f8/disable_miched`
+  - vgpr: 512 (196)
+  - mfma eff: 15.58%
+  - This version has so many spills inside the loop.
+
+
+rocm7.0 rocprof command:
+```
+ROCPROF_ATT_LIBRARY_PATH=/root/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux/opt/rocm/lib/ rocprofv3 --att -i att_matmul.json -d ./study_matmul/gluon/v10_f8/att_disable_miched -- python study_matmul/gluon/gl_matmul.py
+```
+
+rocm6.5 rocprof command:
+```
+ROCPROF_ATT_LIBRARY_PATH=/var/lib/jenkins/att-decoder-v3-3.0.0-Linux/opt/rocm/lib/ rocprofv3 --att -i att_matmul.json -d ./study_matmul/gluon/v10_f8_mi355/X2Y1_1024-16_2048-32/att_output -- python study_matmul/gluon/gl_matmul.py
+```
+
+## [llir sched] v6 and v7
+
+v6 is code refactor done by gpt-5
+
+- IR: `/root/OAI-triton/study_matmul/gluon/v10_f8/llirSchedV6`
+- Note that amdgcnas is still disabled
+- vgpr: 500
+- mfma eff: 71.66%
+
+v7
+- Set X = 2 if mfma cycles = 32
+- IR: `/root/OAI-triton/study_matmul/gluon/v10_f8/llirSchedV7`
+- amdgcnas is still disabled
+- vgpr: 492
+- mfma eff: 76.2%
+
+
+## [kernel] Use 2-level padding 1024:+16, 2048:+32
+
+The old kernel uses 1024:+16. This only works if thread0-15 are served by LDS
+at the same cycle.
+However, `ds_read_b128` has a non-linear return pattern as follows
+- 0-3, 20-27, 12-15
+- 16-19, 4-11, 28-31
+- 32-35, 52-59, 44-47
+- 48-51, 36-43, 60-63
+
+Also due to mfma_16x16 layout, 1024:+16 and 1024:+32 both lead to 2-way bank conflicts.
+It seems we cannot avoid bank conflict with 1-level padding.
+Therefore, we have to use 2-level padding.
+Fortunately, the optimized padded addr calculation logic also works for
+multi-level padding, i.e only 1 vgpr is used as addr for all `ds_read` of the same tensor.
+
+- IR: `/var/lib/jenkins/OAI-triton/study_matmul/gluon/v10_f8_mi355/X2Y1_1024-16_2048-32`
+- amdgcnas is still disabled
+- vgpr: 492
+- mfma eff: 85%
+
+### The penalty of bank conflicts
+
+There are 3 parts that we need to consider how long it takes to issue `ds_read_b128`:
+- SIMD takes 4 cycles to issue the instruction.
+- LDS bus has bw of 128B/cycle ==> a single `ds_read_b128` takes 8 cycls to go through the bus.
+- LDS has 64 banks ==> 4 cycles to serve data from all 64 thread w/o bank conflicts.
+
+So if there is only 1 wave issuing `ds_read_b128`
+- The first few should take 4 cycles until some queue is full.
+- Then it takes 8 cycles due to LDS bus bw is the bottleneck.
+- no conflicts or 2-way conflict does not make a difference
+  since LDS bus bw is still the bottleneck.
+- n-way (n > 2) conflicts will increase issue cycles to 4n.
+
+But we have 4 waves issuing `ds_read_b128` at the same time.
+- wave 0/2 share the same LDS bus ==> now each `ds_read_b128` takes 16 cycles to
+  go through the bus.
+- 4 waves are requesting data from 64 banks ==> each `ds_read_b128` from each wave
+  now takes 16 cycles.
+- If there is no bank conflicts, each `ds_read_b128` takes 16 cycles.
+  That's why it looks perfect if we interleave 1 16-cycle mfma with 1 `ds_read_b128`
+  in the 16-bit matmul kernel.
+- If there is no bank conflicts, we can also interleave 1 32-cycle mfma with
+  2 `ds_read_b128`. The key is to keep the rate of 1 `ds_read_b128` with 16-cycle gap.
+- If there are 2-way conflicts, now data serving time becomes 32 cycles.
+  Now we need 2 16-cycle mfma to interleave with 1 `ds_read_b128`.
