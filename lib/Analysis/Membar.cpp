@@ -217,6 +217,7 @@ void MembarOrFenceAnalysis::resolve(FunctionOpInterface funcOp,
   std::deque<VirtualBlock> blockList;
   // Start the analysis from the entry block of the function.
   blockList.emplace_back(&funcOp.getBlocks().front(), Block::iterator());
+  DominanceInfo domInfo(funcOp);
 
   // A fixed point algorithm
   while (!blockList.empty()) {
@@ -234,7 +235,7 @@ void MembarOrFenceAnalysis::resolve(FunctionOpInterface funcOp,
       update(&op, &inputBlockInfo, funcBlockInfoMap, builder);
       if (op.hasTrait<OpTrait::IsTerminator>() ||
           isa<RegionBranchOpInterface>(op)) {
-        visitTerminator(&op, successors);
+        visitTerminator(&op, domInfo, successors);
         break;
       }
     }
@@ -290,12 +291,17 @@ void MembarOrFenceAnalysis::resolve(FunctionOpInterface funcOp,
 }
 
 void MembarOrFenceAnalysis::visitTerminator(
-    Operation *op, SmallVector<SuccessorInfo> &successors) {
+    Operation *op, DominanceInfo &domInfo,
+    SmallVector<SuccessorInfo> &successors) {
   if (isa<BranchOpInterface>(op)) {
     // Collect the block successors of the branch.
-    for (Block *successor : op->getSuccessors())
-      successors.push_back(
-          {{successor, Block::iterator()}, /*isBackedge=*/false});
+    Block *from = op->getBlock();
+    for (Block *successor : op->getSuccessors()) {
+      bool isBackedge = false;
+      if (successor->getParent() == from->getParent())
+        isBackedge = domInfo.dominates(successor, from);
+      successors.push_back({{successor, Block::iterator()}, isBackedge});
+    }
     return;
   }
 
@@ -305,14 +311,20 @@ void MembarOrFenceAnalysis::visitTerminator(
     // successors. It can also branch to after itself.
     SmallVector<RegionSuccessor> regions;
     br.getSuccessorRegions(RegionBranchPoint::parent(), regions);
+    Block *from = op->getBlock();
     for (RegionSuccessor &region : regions) {
       if (region.isParent()) {
-        successors.push_back({{br->getBlock(), br->getIterator()},
-                              /*isBackedge=*/false});
+        Block *successor = br->getBlock();
+        bool isBackedge = false;
+        if (successor->getParent() == from->getParent())
+          isBackedge = domInfo.dominates(successor, from);
+        successors.push_back({{successor, br->getIterator()}, isBackedge});
       } else {
         Block &block = region.getSuccessor()->front();
-        successors.push_back({{&block, Block::iterator()},
-                              /*isBackedge=*/false});
+        bool isBackedge = false;
+        if (block.getParent() == from->getParent())
+          isBackedge = domInfo.dominates(&block, from);
+        successors.push_back({{&block, Block::iterator()}, isBackedge});
       }
     }
     return;
@@ -326,19 +338,25 @@ void MembarOrFenceAnalysis::visitTerminator(
     SmallVector<RegionSuccessor> regions;
     br.getSuccessorRegions(operands, regions);
     Region *parentRegion = br->getParentRegion();
+    Block *from = op->getBlock();
 
     for (const RegionSuccessor &region : regions) {
       if (region.isParent()) {
         // Branch to after the parent operation (loop exit)
         Operation *parent = br->getParentOp();
-        successors.push_back({{parent->getBlock(), parent->getIterator()},
-                              /*isBackedge=*/false});
+        Block *successor = parent->getBlock();
+        bool isBackedge = false;
+        if (successor->getParent() == from->getParent())
+          isBackedge = domInfo.dominates(successor, from);
+        successors.push_back({{successor, parent->getIterator()}, isBackedge});
       } else {
         // Branch to another region
         Block &block = region.getSuccessor()->front();
         // This is a backedge if we're branching back to the same region
         // (e.g., scf.yield branching back to scf.for header)
         bool isBackedge = (region.getSuccessor() == parentRegion);
+        if (block.getParent() == from->getParent())
+          isBackedge = domInfo.dominates(&block, from);
         successors.push_back({{&block, Block::iterator()}, isBackedge});
       }
     }

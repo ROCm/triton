@@ -1559,6 +1559,44 @@ tt.func @loop_same_index_needs_barrier(%lb : index, %ub : index, %data: tensor<1
 #shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
 #smem = #ttg.shared_memory
 
+// CHECK-LABEL: cf_loop_cross_iter_raw_alias
+// Cross-iteration RAW in a CF loop: write to i+1 in iter N, read from i in
+// iter N+1. Backedge detection must mark the edge loop-carried so a barrier is
+// inserted before the first conflicting op.
+tt.func @cf_loop_cross_iter_raw_alias(%data: tensor<128x128xf16>) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %c4_i32 = arith.constant 4 : i32
+
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable>
+
+  cf.br ^bb1(%c0_i32 : i32)
+
+^bb1(%idx: i32):
+  %idx_plus_1 = arith.addi %idx, %c1_i32 : i32
+
+  // Write to slot i+1
+  %writeView = ttg.memdesc_index %alloc[%idx_plus_1] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.barrier local
+  // CHECK-NEXT: ttg.local_store
+  ttg.local_store %data, %writeView : tensor<128x128xf16> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+
+  // Read from slot i (next iteration can read the slot just written)
+  %readView = ttg.memdesc_index %alloc[%idx] : !ttg.memdesc<4x128x128xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x128xf16, #shared, #smem, mutable>
+  // CHECK: ttg.local_load
+  %loaded = ttg.local_load %readView : !ttg.memdesc<128x128xf16, #shared, #smem, mutable> -> tensor<128x128xf16>
+
+  %cond = arith.cmpi slt, %idx_plus_1, %c4_i32 : i32
+  cf.cond_br %cond, ^bb1(%idx_plus_1 : i32), ^bb2
+
+^bb2:
+  tt.return
+}
+
+// -----
+#shared = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
+#smem = #ttg.shared_memory
+
 // CHECK-LABEL: loop_cross_iter_raw_alias
 // Cross-iteration RAW: write to i+1 in iter N, read from i in iter N+1.
 // Even though write precedes read in the block, they can alias across

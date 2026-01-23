@@ -3,6 +3,7 @@
 
 #include "Allocation.h"
 
+#include "mlir/IR/Dominance.h"
 #include "llvm/Support/raw_ostream.h"
 #include <set>
 #include <tuple>
@@ -312,7 +313,7 @@ protected:
                OpBuilder *builder);
 
   /// Collects the successors of the terminator
-  void visitTerminator(Operation *operation,
+  void visitTerminator(Operation *operation, DominanceInfo &domInfo,
                        SmallVector<SuccessorInfo> &successors);
 
   /// Updates the BlockInfo operation based on the operation.
