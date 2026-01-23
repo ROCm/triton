@@ -112,11 +112,10 @@ def make_bitmatrix_metadata(nonzero_indx, bitmatrix):
     PARTIAL_BLOCK_M = 32
     col_sum, col_partial_sum = sum_bitmatrix_rows(bitmatrix, partials_block_size=PARTIAL_BLOCK_M)
     # allocate memory
-    device = bitmatrix.device
     n_indx = nonzero_indx.numel()
     n_cols = bitmatrix.shape[1]
-    col_offs = torch.empty(n_cols, dtype=torch.int32, device=device)
-    combined_indx = torch.empty(n_indx * 2, dtype=torch.int32, device=device)
+    col_offs = torch.empty(n_cols, dtype=torch.int32).cuda()
+    combined_indx = torch.empty(n_indx * 2, dtype=torch.int32).cuda()
     col_sorted_indx = combined_indx[:n_indx]
     row_sorted_indx = combined_indx[n_indx:]
     # this kernel:

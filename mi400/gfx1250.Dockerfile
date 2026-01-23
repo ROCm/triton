@@ -49,8 +49,8 @@ RUN pip install --ignore-installed --upgrade pip PyYAML
 RUN pip install --ignore-installed --upgrade "setuptools>=40.8.0" wheel
 RUN pip install --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pybind11>=2.13.1" nanobind \
   numpy scipy pandas matplotlib einops \
-  pytest pytest-xdist pytest-repeat lit expecttest \
-  pylama pre-commit clang-format
+  pytest pytest-xdist pytest-repeat pytest-forked lit \
+  expecttest pylama pre-commit clang-format
 
 ARG USE_NPI_ROCM=FALSE
 # Switch to choose either NPI or regular torch distribution

@@ -120,13 +120,17 @@ from ._math import (
     ceil,
 )
 from ._standard import (
+    bitonic_merge,
     cdiv,
     full_like,
     max,
     min,
     ravel,
     reduce_or,
+    softmax,
+    sort,
     sum,
+    topk,
     xor_sum,
     zeros,
     zeros_like,

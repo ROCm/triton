@@ -1,0 +1,1120 @@
+import math
+import torch
+import pytest
+import triton
+import argparse
+from typing import TypeVar
+from triton.experimental import gluon
+from triton.runtime.jit import JITFunction
+from triton.experimental.gluon.language.amd.gfx1250 import tdm
+import triton.experimental.gluon.language as gl
+from triton.experimental.gluon._runtime import GluonJITFunction, jit
+from triton.experimental.gluon.language.amd.gfx1250 import async_copy as cp
+from triton.language.core import _aggregate as aggregate
+
+from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor, Storage
+from triton_kernels.tensor import make_ragged_tensor_metadata, wrap_torch_tensor, convert_layout
+from triton_kernels.tensor_details.ragged_tensor import ragged_metadata_fields
+from triton_kernels.tensor_details import layout
+from triton_kernels.topk import topk
+from triton_kernels.specialize import ClosureArg, specialize
+from triton_kernels.matmul import FlexCtx, FusedActivation, PrecisionConfig
+from triton_kernels.matmul import init_allocation, apply_allocation, _canonicalize_storage, should_upcast_indices, matmul_torch
+from triton_kernels.matmul_details.opt_flags import make_opt_flags
+from triton_kernels.matmul_details._common import compute_pids, compute_offsets
+from triton_kernels.specialize import FnSpecs
+from triton_kernels.numerics import InFlexData, OutFlexData
+from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp, downcast_to_mxfp_torch, upcast_from_mxfp_torch
+from triton_kernels.swiglu import swiglu_fn, swiglu, PrecisionConfig as SwiGLUPrecisionConfig
+from triton_kernels.target_info import is_cuda, get_cdna_version, cuda_capability_geq
+
+from triton_kernels.testing import assert_close, make_slice_sizes, alloc_rand
+
+T = TypeVar("T")
+
+
+def _import_from_triton(fn: JITFunction[T]) -> GluonJITFunction[T]:
+    # Wrap the function and preserve its original docstring
+    gluon_fn = jit(fn.fn)
+    gluon_fn.__doc__ = fn.__doc__
+    return gluon_fn
+
+
+compute_pids = _import_from_triton(compute_pids)
+compute_offsets = _import_from_triton(compute_offsets)
+swiglu_fn = _import_from_triton(swiglu_fn)
+
+
+# Borrowed from https://github.com/triton-lang/triton/blob/53b0eafd76debe074965a5d751dd21c593097eb2/python/triton_kernels/bench/bench_mlp.py#L35
+def quantize_weight(w, dtype, value_layout=None, scale_layout=None):
+    if dtype == "bf16":
+        wq = w.to(torch.bfloat16).transpose(-1, -2).contiguous().transpose(-1, -2)
+        return wq, InFlexData(), None
+    elif dtype == "fp8":
+        fp8e4_dtype = torch.float8_e4m3fn if get_cdna_version() != 3 else torch.float8_e4m3fnuz
+        wq = w.to(fp8e4_dtype)
+        if is_cuda() and not cuda_capability_geq(10, 0):
+            wq = wq.transpose(-1, -2).contiguous().transpose(-1, -2)
+        return wq, InFlexData(dtype=wq.dtype, scale=w.abs().max().unsqueeze(0)), None
+    else:
+        assert dtype == "mx4", f"{dtype=}"
+        w, w_scale = downcast_to_mxfp(w.to(torch.bfloat16), torch.uint8, axis=1)
+        if value_layout is not None:
+            w = convert_layout(wrap_torch_tensor(w, dtype=FP4), value_layout)
+        if scale_layout is not None:
+            w_scale = convert_layout(wrap_torch_tensor(w_scale), scale_layout)
+        return w, InFlexData(), w_scale
+
+
+@gluon.constexpr_function
+def get_bitwidth(dtype):
+    if isinstance(dtype, gl.pointer_type):
+        dtype = dtype.element_ty
+    return dtype.primitive_bitwidth
+
+
+@gluon.constexpr_function
+def get_blocked_layout(shape, dtype, num_warps, ndim=2):
+    if ndim == 1:
+        return gl.BlockedLayout([1], [32], [num_warps], [0])
+
+    assert (ndim == 2)
+    inner_dim = shape[-1]
+    assert inner_dim in [32, 64, 128, 256, 512]
+
+    bitwidth = get_bitwidth(dtype)
+    vector_size = max(inner_dim // (8 * (bitwidth // 8)), 4)
+
+    return gl.BlockedLayout([1, vector_size],  #
+                            [4, 8],  #
+                            [num_warps // 2, 2],  #
+                            [1, 0])
+
+
+def routing(x, logits, n_expts_act, apply_softmax: bool = True):
+    logits = topk(logits, n_expts_act, apply_softmax=apply_softmax)
+    dispatch_indx = logits.mask_metadata.row_sorted_indx
+    combine_indx = logits.mask_metadata.col_sorted_indx
+    ragged_metadata = make_ragged_tensor_metadata(logits.mask_metadata.col_sum, dispatch_indx.shape[0])
+    gather_indx = combine_indx // n_expts_act
+    scatter_indx = combine_indx
+    return x, ragged_metadata, gather_indx, scatter_indx, None
+
+
+@aggregate
+class MoEConfig:
+    BLOCK_M: gl.constexpr
+    BLOCK_N: gl.constexpr
+    BLOCK_K: gl.constexpr
+    NUM_WARPS: gl.constexpr
+
+    # DIV_FACTOR_* are divisors to simplify calculating actual block shape when elements
+    # are packed along K dimension. It's 2 for fp4 and 1 for other dtypes.
+    DIV_FACTOR_X: gl.constexpr
+    DIV_FACTOR_W: gl.constexpr
+    DTYPE_X: gl.constexpr
+    DTYPE_W: gl.constexpr
+
+    W_TRANSPOSE: gl.constexpr
+    NUM_BUFFERS: gl.constexpr
+    NUM_LOADS_IN_BATCH: gl.constexpr
+
+    # scales
+    SCALE_BLOCK: gl.constexpr  # Number of elements sharing one scale factor
+    WITH_X_MX_SCALE: gl.constexpr
+    WITH_W_MX_SCALE: gl.constexpr
+    SCALE_PRESHUFFLE: gl.constexpr
+    PRESHUFFLE_FACTOR: gl.constexpr
+    BLOCK_M_PRESHUFFLED: gl.constexpr
+    BLOCK_N_PRESHUFFLED: gl.constexpr
+    BLOCK_K_SCALE_PRESHUFFLED: gl.constexpr
+    SCALE_KWIDTH: gl.constexpr
+
+    NUM_SUBTILES: gl.constexpr
+    EVEN_K: gl.constexpr
+    USE_GATHER: gl.constexpr
+
+    # layouts
+    shared_layout_x: gl.constexpr
+    dot_layout_x: gl.constexpr
+
+    shared_layout_w: gl.constexpr
+    dot_layout_w: gl.constexpr
+
+    shared_layout_x_scale: gl.constexpr
+    layout_x_scale: gl.constexpr
+
+    shared_layout_w_scale: gl.constexpr
+    layout_w_scale: gl.constexpr
+
+    acc_layout: gl.constexpr
+
+    index_type: gl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_X, DTYPE_W, SCALE_BLOCK, NUM_BUFFERS, W_TRANSPOSE,
+                 WITH_X_MX_SCALE, WITH_W_MX_SCALE, SCALE_PRESHUFFLE, index_type, NUM_SUBTILES=(1, 1, 1), EVEN_K=True,
+                 USE_GATHER=False, NUM_WARPS=4):
+        self.BLOCK_M = gl.constexpr(BLOCK_M)
+        self.BLOCK_N = gl.constexpr(BLOCK_N)
+        self.BLOCK_K = gl.constexpr(BLOCK_K)
+        self.NUM_BUFFERS = gl.constexpr(NUM_BUFFERS)
+        self.W_TRANSPOSE = gl.constexpr(W_TRANSPOSE)
+        self.WITH_X_MX_SCALE = gl.constexpr(WITH_X_MX_SCALE)
+        self.WITH_W_MX_SCALE = gl.constexpr(WITH_W_MX_SCALE)
+        self.SCALE_PRESHUFFLE = gl.constexpr(SCALE_PRESHUFFLE)
+        self.SCALE_BLOCK = gl.constexpr(SCALE_BLOCK)
+        self.DIV_FACTOR_X = gl.constexpr(2 if DTYPE_X == "e2m1" else 1)
+        self.DIV_FACTOR_W = gl.constexpr(2 if DTYPE_W == "e2m1" else 1)
+        self.DTYPE_X = gl.constexpr(DTYPE_X)
+        self.DTYPE_W = gl.constexpr(DTYPE_W)
+        self.NUM_LOADS_IN_BATCH = gl.constexpr(4 if WITH_X_MX_SCALE else 3)
+        self.NUM_SUBTILES = gl.constexpr(NUM_SUBTILES)
+        self.EVEN_K = gl.constexpr(EVEN_K)
+        self.USE_GATHER = gl.constexpr(USE_GATHER)
+        self.NUM_WARPS = gl.constexpr(NUM_WARPS)
+        BLOCK_K_SCALE = BLOCK_K // SCALE_BLOCK
+        self.index_type = gl.constexpr(index_type)
+        self.SCALE_KWIDTH = gl.constexpr(4 if BLOCK_K_SCALE >= 4 else BLOCK_K_SCALE)
+        self.PRESHUFFLE_FACTOR = gl.constexpr(128 if SCALE_PRESHUFFLE else 1)
+        self.BLOCK_M_PRESHUFFLED = gl.constexpr(BLOCK_M // self.PRESHUFFLE_FACTOR)
+        self.BLOCK_N_PRESHUFFLED = gl.constexpr(BLOCK_N // self.PRESHUFFLE_FACTOR)
+        self.BLOCK_K_SCALE_PRESHUFFLED = gl.constexpr(BLOCK_K_SCALE * self.PRESHUFFLE_FACTOR)
+
+        if SCALE_PRESHUFFLE:
+            reg_bases: gl.constexpr = [[0, 1], [1, 0]]
+            warp_bases: gl.constexpr = [[0, 2], [2, 0]]
+        else:
+            reg_bases: gl.constexpr = []
+            warp_bases: gl.constexpr = [[0, 1], [1, 0]]
+
+        WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases, reg_bases=reg_bases,
+                                                         instr_shape=[16, 16, 128])
+        WMMA_LAYOUT_PACKED: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases,
+                                                                reg_bases=reg_bases, instr_shape=[16, 16, 64])
+
+        NUM_SUBTILES_M = self.NUM_SUBTILES[0]
+        NUM_SUBTILES_N = self.NUM_SUBTILES[1]
+        NUM_SUBTILES_K = self.NUM_SUBTILES[2]
+
+        self.dot_layout_x = gl.constexpr(
+            gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT_PACKED if DTYPE_X == "e2m1" else WMMA_LAYOUT,
+                                k_width=16))
+        self.dot_layout_w = gl.constexpr(
+            gl.DotOperandLayout(operand_index=1, parent=WMMA_LAYOUT_PACKED if DTYPE_W == "e2m1" else WMMA_LAYOUT,
+                                k_width=16))
+        self.layout_x_scale = gl.constexpr(
+            gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_x,
+                                                 [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE // NUM_SUBTILES_K]))
+        self.layout_w_scale = gl.constexpr(
+            gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_w,
+                                                 [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_SCALE // NUM_SUBTILES_K]))
+        self.acc_layout = gl.constexpr(WMMA_LAYOUT)
+
+        BLOCK_K_PACKED_X = BLOCK_K // self.DIV_FACTOR_X // NUM_SUBTILES_K
+        BLOCK_K_PACKED_W = BLOCK_K // self.DIV_FACTOR_W // NUM_SUBTILES_K
+        PAD_INTERVAL_X = 256 if BLOCK_K_PACKED_X <= 256 else BLOCK_K_PACKED_X
+        PAD_INTERVAL_W = 256 if BLOCK_K_PACKED_W <= 256 else BLOCK_K_PACKED_W
+        self.shared_layout_x = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_X, 16]],
+                                                    [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_PACKED_X], [1, 0]))
+        if W_TRANSPOSE:
+            self.shared_layout_w = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_W, 16]],
+                                                        [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_PACKED_W], [1, 0]))
+        else:
+            self.shared_layout_w = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[BLOCK_N // NUM_SUBTILES_N, 16]],
+                                                        [BLOCK_K_PACKED_W, BLOCK_N // NUM_SUBTILES_N], [1, 0]))
+
+        if USE_GATHER:
+            self.shared_layout_x_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[256, 16]],
+                                                        [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE // NUM_SUBTILES_K],
+                                                        [1, 0]))
+        else:
+            self.shared_layout_x_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for(
+                    [[256, 16]],
+                    [self.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                    [1, 0]))
+        self.shared_layout_w_scale = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for(
+                [[256, 16]],
+                [self.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K], [1, 0]))
+
+
+@gluon.jit
+def create_descriptor(cfg: MoEConfig, x_ptr, w_ptr, x_scale_ptr, w_scale_ptr, off_m, off_k_x, w_offs, w_scale_offs, M,
+                      N, K, stride_xm, stride_xk, stride_wk, stride_wn, stride_x_scale_m, stride_x_scale_k,
+                      stride_w_scale_n, stride_w_scale_k, GatherIndx, start_m):
+    SCALE_BLOCK: gl.constexpr = cfg.SCALE_BLOCK
+    PRESHUFFLE_FACTOR: gl.constexpr = cfg.PRESHUFFLE_FACTOR
+    SCALE_KWIDTH: gl.constexpr = cfg.SCALE_KWIDTH
+    NUM_SUBTILES_M: gl.constexpr = cfg.NUM_SUBTILES[0]
+    NUM_SUBTILES_N: gl.constexpr = cfg.NUM_SUBTILES[1]
+    NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
+
+    if cfg.USE_GATHER:
+        # TODO: Use TDM Gather once available
+        blocked_layout: gl.constexpr = get_blocked_layout([cfg.BLOCK_M, cfg.BLOCK_K // cfg.DIV_FACTOR_X], x_ptr.dtype,
+                                                          cfg.NUM_WARPS)
+        GatherIndx_ptr = GatherIndx + start_m
+        offs_m_gather = off_m + gl.arange(0, cfg.BLOCK_M, gl.SliceLayout(1, blocked_layout))
+        gathered_m = gl.load(GatherIndx_ptr + offs_m_gather)
+        gathered_m = gathered_m.to(cfg.index_type)[:, None]
+
+        x_desc = AsyncCopyDescriptor.initialize(cfg, x_ptr, off_k_x // cfg.DIV_FACTOR_X, stride_xm, stride_xk,
+                                                gathered_m, cfg.DIV_FACTOR_X)
+
+        if cfg.WITH_X_MX_SCALE:
+            x_scale_desc = AsyncCopyDescriptor.initialize(cfg, x_scale_ptr, off_k_x // SCALE_BLOCK, stride_x_scale_m,
+                                                          stride_x_scale_k, gathered_m, SCALE_BLOCK)
+        else:
+            x_scale_desc = gl.constexpr(0)
+    else:
+        x_offs = off_m * stride_xm
+        x_desc = tdm.make_tensor_descriptor(
+            base=x_ptr + x_offs, shape=(M, K // cfg.DIV_FACTOR_X), strides=(stride_xm, stride_xk),
+            block_shape=(cfg.BLOCK_M // NUM_SUBTILES_M, cfg.BLOCK_K // cfg.DIV_FACTOR_X // NUM_SUBTILES_K),
+            layout=cfg.shared_layout_x)
+
+        if cfg.WITH_X_MX_SCALE:
+            x_scale_offs = off_m * stride_x_scale_m // PRESHUFFLE_FACTOR
+            x_scale_desc = tdm.make_tensor_descriptor(
+                base=x_scale_ptr + x_scale_offs, shape=(M // PRESHUFFLE_FACTOR, K // SCALE_BLOCK * PRESHUFFLE_FACTOR),
+                strides=(stride_x_scale_m, stride_x_scale_k),
+                block_shape=(cfg.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M,
+                             cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K), layout=cfg.shared_layout_x_scale)
+        else:
+            x_scale_desc = gl.constexpr(0)
+
+    if cfg.W_TRANSPOSE:
+        w_desc = tdm.make_tensor_descriptor(
+            base=w_ptr + w_offs, shape=(N, K // cfg.DIV_FACTOR_W), strides=(stride_wn, stride_wk),
+            block_shape=(cfg.BLOCK_N // NUM_SUBTILES_N, cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K),
+            layout=cfg.shared_layout_w)
+    else:
+        w_desc = tdm.make_tensor_descriptor(
+            base=w_ptr + w_offs, shape=(K // cfg.DIV_FACTOR_W, N), strides=(stride_wk, stride_wn),
+            block_shape=(cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K, cfg.BLOCK_N // NUM_SUBTILES_N),
+            layout=cfg.shared_layout_w)
+
+    # We need to use padded shape in TDM to make sure it loads all the preshuffled data
+    N_PADDED = (N + PRESHUFFLE_FACTOR - 1) // PRESHUFFLE_FACTOR * PRESHUFFLE_FACTOR
+    K_SCALE = (K + SCALE_BLOCK - 1) // SCALE_BLOCK
+    K_SCALE_PADDED = (K_SCALE + SCALE_KWIDTH - 1) // SCALE_KWIDTH * SCALE_KWIDTH
+    w_scale_desc = tdm.make_tensor_descriptor(
+        base=w_scale_ptr + w_scale_offs, shape=(N_PADDED // PRESHUFFLE_FACTOR, K_SCALE_PADDED * PRESHUFFLE_FACTOR),
+        strides=(stride_w_scale_n, stride_w_scale_k),
+        block_shape=(cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K),
+        layout=cfg.shared_layout_w_scale)
+
+    return x_desc, w_desc, x_scale_desc, w_scale_desc
+
+
+@aggregate
+class AsyncCopyDescriptor:
+    cfg: MoEConfig
+    ptr: gl.tensor
+    offs: gl.tensor
+    offs_k: gl.tensor
+    step_k: gl.tensor
+    BLOCK_M: gl.constexpr
+    BLOCK_K: gl.constexpr
+    dtype: gl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, cfg: MoEConfig, ptr, offs, offs_k, step_k, BLOCK_M, BLOCK_K):
+        self.cfg = cfg
+        self.ptr = ptr
+        self.offs = offs
+        self.offs_k = offs_k
+        self.step_k = step_k
+        self.BLOCK_M = gl.constexpr(BLOCK_M)
+        self.BLOCK_K = gl.constexpr(BLOCK_K)
+        self.dtype = gl.constexpr(ptr.dtype.element_ty)
+
+    @gluon.jit
+    def initialize(cfg: MoEConfig, ptr, off_k, stride_m, stride_k, gathered_m, DIV_FACTOR: gl.constexpr):
+        NUM_SUBTILES_M: gl.constexpr = cfg.NUM_SUBTILES[0]
+        NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
+        # We only use AsyncCopyDescriptor for X and X_scale, so we use BLOCK_M directly.
+        BLOCK_M: gl.constexpr = cfg.BLOCK_M // NUM_SUBTILES_M
+        BLOCK_K: gl.constexpr = cfg.BLOCK_K // DIV_FACTOR // NUM_SUBTILES_K
+
+        blocked_layout: gl.constexpr = get_blocked_layout([BLOCK_M, BLOCK_K], ptr.dtype, cfg.NUM_WARPS)
+        offs_k = off_k + gl.arange(0, BLOCK_K, gl.SliceLayout(0, blocked_layout))
+        step_k = BLOCK_K * stride_k
+
+        offs = gathered_m * stride_m + offs_k.to(cfg.index_type)[None, :] * stride_k
+
+        return AsyncCopyDescriptor(cfg, ptr, offs, offs_k, step_k, BLOCK_M, BLOCK_K)
+
+    @gluon.jit
+    def issue_async_load(self, idx: int, buffer, k_limit):
+        offs = self.offs + idx * self.step_k
+        if k_limit is not None:
+            mask_k = (self.offs_k + idx * self.BLOCK_K) < k_limit
+            cp.global_to_shared(buffer, self.ptr + offs, mask=mask_k[None, :], other=0.0)
+        else:
+            cp.global_to_shared(buffer, self.ptr + offs)
+        cp.commit_group()
+
+
+@aggregate
+class MoEPipelinedProgram:
+    cfg: MoEConfig
+    x_buffer: gl.shared_memory_descriptor
+    w_buffer: gl.shared_memory_descriptor
+    x_scale_buffer: gl.shared_memory_descriptor | gl.constexpr
+    w_scale_buffer: gl.shared_memory_descriptor
+
+    x_desc: tdm.tensor_descriptor | AsyncCopyDescriptor
+    w_desc: tdm.tensor_descriptor
+    x_scale_desc: tdm.tensor_descriptor | AsyncCopyDescriptor | gl.constexpr
+    w_scale_desc: tdm.tensor_descriptor
+
+    @gluon.constexpr_function
+    def __init__(self, cfg: MoEConfig, x_buffer, w_buffer, x_scale_buffer, w_scale_buffer, x_desc, w_desc, x_scale_desc,
+                 w_scale_desc):
+        self.cfg = cfg
+        self.x_buffer = x_buffer
+        self.w_buffer = w_buffer
+        if cfg.WITH_X_MX_SCALE:
+            self.x_scale_buffer = x_scale_buffer
+        else:
+            self.x_scale_buffer = gl.constexpr(x_scale_buffer)
+        self.w_scale_buffer = w_scale_buffer
+        self.x_desc = x_desc
+        self.w_desc = w_desc
+        if cfg.WITH_X_MX_SCALE:
+            self.x_scale_desc = x_scale_desc
+        else:
+            self.x_scale_desc = gl.constexpr(x_scale_desc)
+        self.w_scale_desc = w_scale_desc
+
+    @gluon.jit
+    def initialize(cfg: MoEConfig, x_desc, w_desc, x_scale_desc, w_scale_desc):
+        NUM_BUFFERS: gl.constexpr = cfg.NUM_BUFFERS
+        NUM_SUBTILES_M: gl.constexpr = cfg.NUM_SUBTILES[0]
+        NUM_SUBTILES_N: gl.constexpr = cfg.NUM_SUBTILES[1]
+        NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
+
+        BLOCK_K_PACKED_X: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_X // NUM_SUBTILES_K
+        BLOCK_K_PACKED_W: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K
+
+        x_buffer = gl.allocate_shared_memory(x_desc.dtype,
+                                             shape=[NUM_BUFFERS, cfg.BLOCK_M // NUM_SUBTILES_M,
+                                                    BLOCK_K_PACKED_X], layout=cfg.shared_layout_x)
+        w_buffer = gl.allocate_shared_memory(
+            w_desc.dtype, shape=[NUM_BUFFERS, cfg.BLOCK_N // NUM_SUBTILES_N, BLOCK_K_PACKED_W] if cfg.W_TRANSPOSE else
+            [NUM_BUFFERS, BLOCK_K_PACKED_W, cfg.BLOCK_N // NUM_SUBTILES_N], layout=cfg.shared_layout_w)
+
+        if cfg.WITH_X_MX_SCALE:
+            if cfg.USE_GATHER:
+                BLOCK_K_SCALE: gl.constexpr = cfg.BLOCK_K // cfg.SCALE_BLOCK // NUM_SUBTILES_K
+                x_scale_buffer = gl.allocate_shared_memory(
+                    gl.uint8, shape=[NUM_BUFFERS, cfg.BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE],
+                    layout=cfg.shared_layout_x_scale)
+            else:
+                x_scale_buffer = gl.allocate_shared_memory(
+                    gl.uint8, shape=[
+                        NUM_BUFFERS, cfg.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M,
+                        cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K
+                    ], layout=cfg.shared_layout_x_scale)
+        else:
+            x_scale_buffer = gl.constexpr(0)
+
+        w_scale_buffer = gl.allocate_shared_memory(
+            gl.uint8, shape=[
+                NUM_BUFFERS, cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K
+            ], layout=cfg.shared_layout_w_scale)
+
+        return MoEPipelinedProgram(cfg, x_buffer, w_buffer, x_scale_buffer, w_scale_buffer, x_desc, w_desc,
+                                   x_scale_desc, w_scale_desc)
+
+    @gluon.jit
+    def issue_global_loads(self, load_idx, K):
+        cfg = self.cfg
+        NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
+        BLOCK_K_PACKED_X: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_X // NUM_SUBTILES_K
+        BLOCK_K_PACKED_W: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K
+
+        if cfg.USE_GATHER and not cfg.EVEN_K:
+            k_limit_x = K // cfg.DIV_FACTOR_X
+            k_limit_x_scale = K // cfg.SCALE_BLOCK if cfg.WITH_X_MX_SCALE else None
+        else:
+            k_limit_x = None
+            k_limit_x_scale = None
+
+        if cfg.USE_GATHER:
+            self.x_desc.issue_async_load(load_idx, self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS),
+                                         k_limit_x)
+        else:
+            gl.amd.gfx1250.tdm.async_load(self.x_desc, [0, load_idx * BLOCK_K_PACKED_X],
+                                          self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+
+        if cfg.W_TRANSPOSE:
+            gl.amd.gfx1250.tdm.async_load(self.w_desc, [0, load_idx * BLOCK_K_PACKED_W],
+                                          self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+        else:
+            gl.amd.gfx1250.tdm.async_load(self.w_desc, [load_idx * BLOCK_K_PACKED_W, 0],
+                                          self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+
+        if cfg.WITH_X_MX_SCALE:
+            if cfg.USE_GATHER:
+                self.x_scale_desc.issue_async_load(
+                    load_idx, self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS),
+                    k_limit_x_scale)
+            else:
+                gl.amd.gfx1250.tdm.async_load(self.x_scale_desc,
+                                              [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                                              self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+
+        gl.amd.gfx1250.tdm.async_load(self.w_scale_desc,
+                                      [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                                      self.w_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+
+        return load_idx + 1
+
+    @gluon.jit
+    def issue_local_loads(self, wmma_idx):
+        cfg = self.cfg
+        NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
+        BLOCK_K_SCALE: gl.constexpr = cfg.BLOCK_K // cfg.SCALE_BLOCK // NUM_SUBTILES_K
+
+        x = self.x_buffer.index(wmma_idx % cfg.NUM_BUFFERS).load(layout=cfg.dot_layout_x)
+        if cfg.W_TRANSPOSE:
+            w = self.w_buffer.index(wmma_idx % cfg.NUM_BUFFERS).permute([1, 0]).load(layout=cfg.dot_layout_w)
+        else:
+            w = self.w_buffer.index(wmma_idx % cfg.NUM_BUFFERS).load(layout=cfg.dot_layout_w)
+
+        if cfg.WITH_X_MX_SCALE:
+            x_scale_buffer_slice = self.x_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+        w_scale_buffer_slice = self.w_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+
+        if cfg.SCALE_PRESHUFFLE:
+            if cfg.WITH_X_MX_SCALE and not cfg.USE_GATHER:
+                x_scale_buffer_slice = x_scale_buffer_slice.reshape(
+                    (cfg.BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // cfg.SCALE_KWIDTH, cfg.PRESHUFFLE_FACTOR // 4, 4,
+                     cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_M, BLOCK_K_SCALE))
+            w_scale_buffer_slice = w_scale_buffer_slice.reshape(
+                (cfg.BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // cfg.SCALE_KWIDTH, cfg.PRESHUFFLE_FACTOR // 4, 4,
+                 cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_N, BLOCK_K_SCALE))
+
+        if cfg.WITH_X_MX_SCALE:
+            scale_x = x_scale_buffer_slice.load(layout=cfg.layout_x_scale)
+        else:
+            scale_x = gl.constexpr(0)
+        scale_w = w_scale_buffer_slice.load(layout=cfg.layout_w_scale)
+
+        return x, w, scale_x, scale_w
+
+    @gluon.jit
+    def async_wait(self, waitcnt):
+        cfg = self.cfg
+        if cfg.USE_GATHER:
+            gl.amd.gfx1250.tdm.async_wait(waitcnt * 2)
+            if cfg.WITH_X_MX_SCALE:
+                cp.wait_group(waitcnt * 2)
+            else:
+                cp.wait_group(waitcnt)
+        else:
+            gl.amd.gfx1250.tdm.async_wait(waitcnt * cfg.NUM_LOADS_IN_BATCH)
+
+    @gluon.jit
+    def pipeline(self, loop_k, K):
+        cfg = self.cfg
+        # Index of global loads. It increments by 1 every time we issue a set of global loads.
+        load_idx = 0
+        # Index of wmma iterations. It increments by 1 every time we issue a wmma.
+        wmma_idx = 0
+
+        # prologue
+        for _ in gl.static_range(cfg.NUM_BUFFERS - 1):
+            load_idx = self.issue_global_loads(load_idx, K)
+
+        accumulator = gl.zeros((cfg.BLOCK_M, cfg.BLOCK_N), dtype=gl.float32, layout=cfg.acc_layout)
+        loop_ub = gl.cdiv(loop_k, cfg.BLOCK_K) - (cfg.NUM_BUFFERS - 1)
+        gl.assume(loop_ub >= 0)
+
+        # loop
+        for i in range(0, loop_ub):
+            load_idx = self.issue_global_loads(load_idx, K)
+            self.async_wait(cfg.NUM_BUFFERS - 1)
+
+            x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
+            accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            wmma_idx += 1
+
+        # epilogue
+        for _ in gl.static_range(cfg.NUM_BUFFERS - 1):
+            self.async_wait(cfg.NUM_BUFFERS - 1)
+
+            x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
+            accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            wmma_idx += 1
+
+        return accumulator
+
+
+@gluon.constexpr_function
+def get_scaled_dot_format_string(dtype: gl.dtype):
+    mapping = {
+        gl.float16: "fp16",
+        gl.bfloat16: "bf16",
+        gl.uint8: "e2m1",
+        gl.float8e4nv: "e4m3",
+        gl.float8e5: "e5m2",
+    }
+    return mapping[dtype]
+
+
+@gluon.jit
+def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, stride_x_m, stride_x_k, XMxScale,
+            stride_x_mx_z, stride_x_mx_m, stride_x_mx_k, W, stride_w_e, stride_w_k, stride_w_n,
+            W_TRANSPOSE: gl.constexpr, WMxScale, stride_w_mx_e, stride_w_mx_k, stride_w_mx_n, B, stride_b_e,  # Bias
+            M, N, K, KW,  # shapes
+            GatherIndx, WriteBackIndx, writeback_size, RAGGED_DIMENSION: gl.constexpr,  #
+            XSliceSizes, XSliceOffs, XBlockOffs, XBlockSchedule, X_EXPECTED_SLICE_SIZE: gl.constexpr,
+            X_SLICE_SIZES_DIVISIBILITY: gl.constexpr,  #
+            WSliceSizes, WSliceOffs, WBlockOffs, WBlockSchedule, W_EXPECTED_SLICE_SIZE: gl.constexpr,
+            _W_SLICE_SIZES_DIVISIBILITY: gl.constexpr,  #
+            # true grid size
+            batch_size, grid_m, grid_n, ACTIVATION_FN: gl.constexpr, activation_fn_args,
+            ACTIVATION_REDUCTION_N: gl.constexpr,
+            # MoE config
+            N_EXPTS_TOT: gl.constexpr,
+
+            # optimization config
+            BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
+            GROUP_M: gl.constexpr, XCD_SWIZZLE: gl.constexpr, SWIZZLE_MX_SCALE: gl.constexpr, EVEN_K: gl.constexpr,
+            UPCAST_INDICES: gl.constexpr = False, NUM_BUFFERS: gl.constexpr = 2, SCALE_BLOCK: gl.constexpr = 32):
+    gl.static_assert(RAGGED_DIMENSION == "M")
+    SPLIT_K: gl.constexpr = 1
+
+    DTYPE_X: gl.constexpr = get_scaled_dot_format_string(X.dtype.element_ty)
+    DTYPE_W: gl.constexpr = get_scaled_dot_format_string(W.dtype.element_ty)
+
+    index_type: gl.constexpr = gl.int64 if UPCAST_INDICES else gl.int32
+    USE_GATHER: gl.constexpr = GatherIndx is not None
+
+    SCALE_PRESHUFFLE: gl.constexpr = (SWIZZLE_MX_SCALE is not None and SWIZZLE_MX_SCALE != "STRIDED")
+
+    cfg = MoEConfig(BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_X, DTYPE_W, SCALE_BLOCK=SCALE_BLOCK, NUM_BUFFERS=NUM_BUFFERS,
+                    W_TRANSPOSE=W_TRANSPOSE, WITH_X_MX_SCALE=(XMxScale is not None), WITH_W_MX_SCALE=(WMxScale
+                                                                                                      is not None),
+                    SCALE_PRESHUFFLE=SCALE_PRESHUFFLE, index_type=index_type, EVEN_K=EVEN_K, USE_GATHER=USE_GATHER)
+
+    PACKED_BLOCK_K_W: gl.constexpr = BLOCK_K // cfg.DIV_FACTOR_W
+
+    if _W_SLICE_SIZES_DIVISIBILITY is None:
+        W_SLICE_SIZES_DIVISIBILITY: gl.constexpr = 1
+    else:
+        if PACKED_BLOCK_K_W > BLOCK_K:
+            W_SLICE_SIZES_DIVISIBILITY: gl.constexpr = _W_SLICE_SIZES_DIVISIBILITY * (PACKED_BLOCK_K_W // BLOCK_K)
+        else:
+            W_SLICE_SIZES_DIVISIBILITY: gl.constexpr = _W_SLICE_SIZES_DIVISIBILITY // (BLOCK_K // PACKED_BLOCK_K_W)
+
+    OUT_BLOCK_N: gl.constexpr = BLOCK_N // ACTIVATION_REDUCTION_N
+    yN = N // ACTIVATION_REDUCTION_N
+
+    pid = gl.program_id(0)
+    if RAGGED_DIMENSION == "M":
+        padding_m = grid_m - gl.load(XBlockOffs + N_EXPTS_TOT)
+    else:
+        padding_m: gl.constexpr = 0
+
+    unpadded_m = grid_m - padding_m
+    gl.assume(unpadded_m >= 0)
+    total_actual_tiles = batch_size * unpadded_m * grid_n * SPLIT_K
+
+    if padding_m > 0 and pid >= total_actual_tiles:
+        return
+
+    pid_s, pid_m, pid_n, pid_k = compute_pids(pid, unpadded_m, grid_n, total_actual_tiles, XCD_SWIZZLE, GROUP_M,
+                                              SPLIT_K)
+
+    (expt_id, start_z, start_z_out, start_m, _, off_m, off_k_x,
+     off_k_w) = compute_offsets(pid_s, pid_m, pid_k, XBlockSchedule, XSliceOffs, XBlockOffs, X_SLICE_SIZES_DIVISIBILITY,
+                                WBlockSchedule, WSliceOffs, W_SLICE_SIZES_DIVISIBILITY, RAGGED_DIMENSION, BLOCK_M,
+                                BLOCK_K, PACKED_BLOCK_K_W, SPLIT_K)
+    if X_SLICE_SIZES_DIVISIBILITY is not None:
+        off_k_x = off_k_x // X_SLICE_SIZES_DIVISIBILITY * X_SLICE_SIZES_DIVISIBILITY
+    if W_SLICE_SIZES_DIVISIBILITY is not None:
+        off_k_w = off_k_w // W_SLICE_SIZES_DIVISIBILITY * W_SLICE_SIZES_DIVISIBILITY
+
+    if RAGGED_DIMENSION == "M":
+        eM = gl.multiple_of(gl.load(XSliceSizes + expt_id), X_SLICE_SIZES_DIVISIBILITY)
+    else:
+        eM = M
+
+    expt_id, off_m = expt_id.to(cfg.index_type), off_m.to(cfg.index_type)
+    start_m, start_z = start_m.to(cfg.index_type), start_z.to(cfg.index_type)
+    pid_n, pid_k = pid_n.to(cfg.index_type), pid_k.to(cfg.index_type)
+
+    X_ptr = X + start_z * stride_x_z
+    if not cfg.USE_GATHER:
+        X_ptr += start_m * stride_x_m
+
+    W_ptr = W + expt_id * stride_w_e
+    w_offs = pid_n * BLOCK_N * stride_w_n
+
+    if cfg.WITH_X_MX_SCALE:
+        XMxScale_ptr = XMxScale + start_z.to(cfg.index_type) * stride_x_mx_z
+        if not cfg.USE_GATHER:
+            XMxScale_ptr += start_m * stride_x_mx_m
+    else:
+        XMxScale_ptr = XMxScale
+
+    if cfg.WITH_W_MX_SCALE:
+        WMxScale_ptr = WMxScale + expt_id * stride_w_mx_e
+        w_scale_offs = pid_n * cfg.BLOCK_N_PRESHUFFLED * stride_w_mx_n
+    else:
+        WMxScale_ptr = WMxScale
+        w_scale_offs = 0
+
+    x_desc, w_desc, x_scale_desc, w_scale_desc = create_descriptor(cfg, X_ptr, W_ptr, XMxScale_ptr, WMxScale_ptr, off_m,
+                                                                   off_k_x, w_offs, w_scale_offs, eM, N, K, stride_x_m,
+                                                                   stride_x_k, stride_w_k, stride_w_n, stride_x_mx_m,
+                                                                   stride_x_mx_k, stride_w_mx_n, stride_w_mx_k,
+                                                                   GatherIndx, start_m)
+
+    BLOCKED_LAYOUT_Y: gl.constexpr = get_blocked_layout([OUT_BLOCK_N, BLOCK_K], Y.dtype, cfg.NUM_WARPS)
+    BLOCKED_LAYOUT_SCATTER_INDX: gl.constexpr = get_blocked_layout([BLOCK_M], cfg.index_type, cfg.NUM_WARPS, 1)
+
+    offs_m = off_m + gl.arange(0, BLOCK_M, BLOCKED_LAYOUT_SCATTER_INDX)
+    offs_y_n = BLOCK_N * pid_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+    mask_m = offs_m < eM
+    mask_n = offs_y_n < N
+
+    Y_ptr = Y + start_z_out.to(cfg.index_type) * stride_y_z
+    if WriteBackIndx is not None:
+        WriteBackIndx += start_m
+        dst_idx = gl.load(WriteBackIndx + offs_m, mask=start_m + offs_m < writeback_size, other=-1)
+        mask_m = mask_m & (dst_idx != -1)
+        offs_y_m = dst_idx
+    else:
+        Y_ptr += start_m * stride_y_m
+        offs_y_m = offs_m
+
+    mask_m = gl.convert_layout(mask_m, gl.SliceLayout(1, BLOCKED_LAYOUT_Y))
+    mask_n = gl.convert_layout(mask_n, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+    offs_y_m = gl.convert_layout(offs_y_m, gl.SliceLayout(1, BLOCKED_LAYOUT_Y))
+    offs_y_n = gl.convert_layout(offs_y_n, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+    y_offs = offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n.to(cfg.index_type)[None, :] * stride_y_n
+    y_mask = mask_m[:, None] & mask_n[None, :]
+
+    pgm = MoEPipelinedProgram.initialize(cfg, x_desc, w_desc, x_scale_desc, w_scale_desc)
+    loop_k = K - off_k_x
+    acc = pgm.pipeline(loop_k, K)
+
+    # bias
+    b_dtype = B.dtype if B is not None else gl.float32
+    BLOCKED_LAYOUT_BIAS: gl.constexpr = get_blocked_layout([BLOCK_N], b_dtype, cfg.NUM_WARPS, 1)
+    offs_bias_n = BLOCK_N * pid_n + gl.arange(0, BLOCK_N, BLOCKED_LAYOUT_BIAS)
+    mask_bias_n = offs_bias_n < N
+    if B is not None:
+        BPtrs = B + expt_id * stride_b_e + offs_bias_n
+        if pid_k == 0:
+            bias = gl.load(BPtrs, mask=mask_bias_n, other=0)
+        else:
+            bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
+    else:
+        bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
+
+    bias = gl.convert_layout(bias, gl.SliceLayout(0, cfg.acc_layout))
+    acc += bias[None, :]
+
+    if ACTIVATION_FN is not None:
+        out = ACTIVATION_FN(acc, *activation_fn_args)
+        gl.static_assert(
+            out.shape[1] == OUT_BLOCK_N,
+            f"Activation fn out.shape[1] ({out.shape[1]}) doesn't match computed OUT_BLOCK_N ({OUT_BLOCK_N})")
+        out = gl.convert_layout(out, BLOCKED_LAYOUT_Y)
+        offs_y_n_act = OUT_BLOCK_N * pid_n + gl.arange(0, OUT_BLOCK_N, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+        mask_n_act = offs_y_n_act < yN
+        offs_y_n_final = gl.convert_layout(offs_y_n_act, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+        mask_n_final = gl.convert_layout(mask_n_act, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+        YPtrs_final = Y_ptr + offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n_final.to(
+            cfg.index_type)[None, :] * stride_y_n
+        mask_final = mask_m[:, None] & mask_n_final[None, :]
+        gl.store(YPtrs_final, out, mask=mask_final)
+    else:
+        gl.static_assert(ACTIVATION_REDUCTION_N == 1, "Activation reduction must be 1 if no activation fn is provided")
+        out = gl.convert_layout(acc, BLOCKED_LAYOUT_Y)
+        YPtrs = Y_ptr + y_offs
+        gl.store(YPtrs, out, mask=y_mask)
+
+
+class SpecializationModule:
+
+    def __init__(self, module_name: str, kernels: list[tuple[str, object]], closure_args: dict[str, ClosureArg]):
+        self.module_name = module_name
+        self.kernels = kernels
+        self.closure_args = closure_args
+        self._modules = dict()
+
+    def get(self, **kwargs):
+        import types
+        import sys
+        specs = [FnSpecs.default()] * len(self.closure_args)
+        for key, value in kwargs.items():
+            specs[list(self.closure_args.keys()).index(key)] = value
+        key = tuple(spec.name for spec in specs)
+        if key in self._modules:
+            return self._modules[key]
+        spec_constants = {arg.fn_name: spec.fn for arg, spec in zip(self.closure_args.values(), specs)}
+        spec_tuples = {arg.fn_params_name: spec.fn_arg_names for arg, spec in zip(self.closure_args.values(), specs)}
+        do_not_specialize = []
+        for spec in specs:
+            do_not_specialize.extend(spec.fn_arg_do_not_specialize)
+        module = types.ModuleType(self.module_name + '_'.join(key))
+        sys.modules[module.__name__] = module
+        for kernel_name, kernel_fn in self.kernels:
+            setattr(module, kernel_name,
+                    specialize(kernel_fn, module, spec_constants, spec_tuples, do_not_specialize=do_not_specialize))
+        self._modules[key] = module
+        return module
+
+
+specializations = SpecializationModule(
+    "matmul",
+    kernels=[("_matmul", _matmul)],
+    closure_args={
+        "activation": ClosureArg("ACTIVATION_FN", "activation_fn_args"),  #
+    },
+)
+
+
+def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
+           b_ragged_metadata: RaggedTensorMetadata | None = None, gather_indx: torch.Tensor | None = None,
+           scatter_indx: torch.Tensor | None = None, precision_config: PrecisionConfig | None = None,
+           fused_activation: FusedActivation | None = None, num_buffers: int = 2, scale_block: int = 32):
+    if precision_config is None:
+        precision_config = PrecisionConfig()
+
+    if fused_activation is None:
+        fused_activation = FusedActivation(FnSpecs.default(), tuple())
+
+    a_scale = precision_config.a_mx_scale
+    b_scale = precision_config.b_mx_scale
+    a_has_mx = a_scale is not None
+    b_has_mx = b_scale is not None
+
+    is_input_batched = a.ndim == 3
+    has_scatter = scatter_indx is not None
+    is_a_ragged = a_ragged_metadata is not None
+    assert (b_ragged_metadata is None)
+
+    is_b_ragged = b_ragged_metadata is not None
+    ragged_dimension = "K" if is_b_ragged else "M" if is_a_ragged else None
+
+    M = a.shape[-2] if gather_indx is None else gather_indx.shape[0]
+    K = a.shape[-1]
+    K_W, N = b.shape[-2:]
+
+    out_dtype = precision_config.out_dtype or a.dtype
+
+    if not isinstance(a, Tensor):
+        a = wrap_torch_tensor(a, dtype=a.dtype)
+
+    if not isinstance(b, Tensor):
+        # TODO: remove this code path; using uint8 for mxfp4 weight will bite us when we want to support uint8 for real
+        dtype = FP4 if b.dtype == torch.uint8 else b.dtype
+        b = wrap_torch_tensor(b, dtype=dtype)
+
+    if a_scale is not None and not isinstance(a_scale, Tensor):
+        a_scale = wrap_torch_tensor(a_scale)
+
+    if b_scale is not None and not isinstance(b_scale, Tensor):
+        b_scale = wrap_torch_tensor(b_scale)
+
+    if b_scale is not None:
+        # assume it's mxfp4
+        b_scale.storage.data = b_scale.data.view(torch.uint8)
+        b_scale.dtype = torch.uint8
+
+    # TODO: dynamically set block sizes based on problem size
+    block_m = 128
+    block_n = 128
+    block_k = 256
+    batch_size = 1
+
+    opt_flags = make_opt_flags(out_dtype, a.dtype, b.dtype, precision_config, batch_size, M, N, b.shape[-2],
+                               a_ragged_metadata, False, False, False, False, False, block_k=block_k)
+
+    opt_flags.block_m = block_m
+    opt_flags.block_n = block_n
+    opt_flags.block_k = block_k
+
+    # moe metadata
+    expt_data_w = tuple([None] *
+                        6) if ragged_dimension != "K" else ragged_metadata_fields(b_ragged_metadata, opt_flags.block_k)
+    expt_data_x = tuple([None] * 6) if ragged_dimension is None else ragged_metadata_fields(
+        a_ragged_metadata, opt_flags.block_m if ragged_dimension == "M" else opt_flags.block_k)
+
+    # init output
+    allocation = init_allocation(a, b, precision_config, fused_activation, gather_indx, scatter_indx, batch_size, 1,
+                                 opt_flags)
+    memory = apply_allocation(allocation, None)
+    # (1, batch_dim, M, N // fused_activation.specs)
+    out_matmul = memory["scratchpad"].get("matmul", memory["output"])
+
+    # grid
+    grid_m = triton.cdiv(M, opt_flags.block_m)
+    if ragged_dimension == "M":
+        grid_m = a_ragged_metadata.n_blocks(a_ragged_metadata.n_slices, M, opt_flags.block_m)
+    grid_n = triton.cdiv(N, opt_flags.block_n)
+    grid = grid_m * grid_n
+
+    n_slices = max(1, b.shape[0]) if a_ragged_metadata is None else a_ragged_metadata.n_slices
+    n_valid_slices = b.shape[0] if ragged_dimension == "M" else n_slices
+
+    flex = precision_config.flex_ctx
+    c = wrap_torch_tensor(
+        out_matmul.view(math.prod(out_matmul.shape[:-1]), out_matmul.shape[-1]) if has_scatter else out_matmul.
+        view(math.prod(out_matmul.shape[:-2]), *out_matmul.shape[-2:]))
+
+    a_storage = _canonicalize_storage(a.storage, 3, flex.lhs_data)
+    b_storage = _canonicalize_storage(b.storage, 3, flex.rhs_data)
+    c_storage = _canonicalize_storage(c.storage, 3, flex.out_data)
+
+    def tensor_to_cuda(x):
+        if x is None:
+            return None
+
+        if isinstance(x, torch.Tensor):
+            x = x.cuda()
+        elif isinstance(x, Tensor):
+            x.storage.data = x.storage.data.cuda()
+        elif isinstance(x, Storage):
+            x.data = x.data.cuda()
+        else:
+            raise ValueError(f"Unsupported type: {type(x)}")
+        return x
+
+    a_storage = tensor_to_cuda(a_storage)
+    b_storage = tensor_to_cuda(b_storage)
+    c_storage = tensor_to_cuda(c_storage)
+    a_scale = tensor_to_cuda(a_scale)
+    b_scale = tensor_to_cuda(b_scale)
+    bias = tensor_to_cuda(bias)
+    gather_indx = tensor_to_cuda(gather_indx)
+    scatter_indx = tensor_to_cuda(scatter_indx)
+
+    # canonicalize strides
+    a_strides = [0] * (3 - a_storage.data.ndim) + list(a_storage.data.stride())
+    a_scale_strides = a_scale.stride() if a_has_mx else (None, None, None)
+    a_scale_strides = (0, ) * (3 - len(a_scale_strides)) + a_scale_strides
+    b_scale_strides = b_scale.stride() if b_has_mx else (None, None, None)
+    b_scale_strides = (0, ) * (3 - len(b_scale_strides)) + b_scale_strides
+    bias_stride = None if bias is None else bias.stride(0)
+
+    kernels = specializations.get(activation=fused_activation.specs)
+
+    W_TRANSPOSE = True
+    kernels._matmul[(grid, )](
+        c_storage.data, *out_matmul.stride(), a_storage.data, *a_strides, a_scale, *a_scale_strides, b_storage.data,
+        *b_storage.data.stride(), W_TRANSPOSE, b_scale, *b_scale_strides, bias, bias_stride, M, N, K, K_W, gather_indx,
+        scatter_indx, None if scatter_indx is None else scatter_indx.shape[0], ragged_dimension, *expt_data_x,
+        *expt_data_w, batch_size, grid_m, grid_n, *fused_activation.fn_args, fused_activation.specs.reduction_n,
+        n_valid_slices, opt_flags.block_m, opt_flags.block_n, opt_flags.block_k, opt_flags.group_m,
+        opt_flags.xcd_swizzle, SWIZZLE_MX_SCALE=None if b_scale is None else b_scale.storage.layout.name,
+        EVEN_K=(K % opt_flags.block_k == 0), UPCAST_INDICES=should_upcast_indices(a, b, out_matmul), num_warps=4,
+        NUM_BUFFERS=num_buffers, SCALE_BLOCK=scale_block)
+
+    out_final = c_storage.data
+    if not (is_input_batched or b_ragged_metadata is not None):
+        out_final = out_final.squeeze(0)
+
+    return out_final
+
+
+class DType:
+
+    def __init__(self, dtype_str):
+        self.has_global_scale = dtype_str.startswith("float8")
+        self.has_mx_scale = dtype_str.startswith("mx")
+        to_torch_dtype = lambda name: torch.uint8 if name == "float4_e2m1" else getattr(torch, name)
+        self.torch_dtype = to_torch_dtype(dtype_str.strip("mx"))
+        self.is_mxfloat4 = self.has_mx_scale and "float4" in dtype_str
+
+
+def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, is_mx_rowmajor=False,
+                       scale_hbm_swizzling=None):
+    # allocate buffer
+    buffer_shape = ((n_slices, ) if ragged_dim is None else tuple()) + shape
+    buffer_dtype = torch.bfloat16 if dtype.has_mx_scale else dtype.torch_dtype
+    buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)
+    # handle raggedness
+    ragged_metadata = None
+    if ragged_dim is not None:
+        slice_sizes = make_slice_sizes(n_slices, shape[ragged_dim], device=device)
+        ragged_metadata = make_ragged_tensor_metadata(slice_sizes.cuda(), shape[ragged_dim])
+    # handle mxfp
+    scales = None
+    if mxfp_dim is not None:
+        assert dtype.has_mx_scale
+        buffer_dtype = dtype.torch_dtype
+        if is_mx_rowmajor:
+            scales = downcast_to_mxfp_torch(buffer, buffer_dtype, axis=mxfp_dim)[1]
+            buffer = downcast_to_mxfp_torch(buffer.mT.contiguous(), buffer_dtype, axis=mxfp_dim)[0].mT
+        else:
+            buffer, scales = downcast_to_mxfp_torch(buffer, buffer_dtype, axis=mxfp_dim)
+        buffer = buffer.to(device)
+        scales = scales.to(device) if scales is not None else None
+        buffer = wrap_torch_tensor(buffer, FP4 if dtype.is_mxfloat4 else None)
+        scales = wrap_torch_tensor(scales)
+        if scale_hbm_swizzling is not None:
+            # convert scales to swizzled hbm layout
+            if callable(scale_hbm_swizzling):
+                scale_hbm_swizzling = scale_hbm_swizzling(ragged_metadata)
+            scales = convert_layout(scales, scale_hbm_swizzling)
+    return buffer, scales, ragged_metadata
+
+
+@pytest.mark.parametrize("m, n, k", [(300, 400, 784), (128, 128, 1024)])
+@pytest.mark.parametrize("dtype_a, dtype_b", [("float8_e5m2", "mxfloat4_e2m1"), ("float8_e4m3fn", "mxfloat4_e2m1")])
+@pytest.mark.parametrize("do_gather", [True, False])
+@pytest.mark.parametrize("do_scatter", [True, False])
+@pytest.mark.parametrize("do_bias", [True, False])
+@pytest.mark.parametrize("SCALE_PRESHUFFLING", [True, False])
+@pytest.mark.parametrize("swiglu_opts", [None, (1.1, 1.4)])
+@pytest.mark.parametrize("num_buffers", [2, 4])
+def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE_PRESHUFFLING, swiglu_opts,
+                num_buffers):
+    if do_gather and do_scatter:
+        pytest.skip("Can't do gather and scatter at the same time")
+
+    if num_buffers == 4 and k < 1024:
+        pytest.skip("Skip small problem size for 4 buffers to reduce test time")
+
+    if k % 16 != 0:
+        pytest.skip("NYI: async_copy doesn't support unaligned cases where K doesn't have 16 divisibility")
+
+    torch.manual_seed(0)
+
+    n_slices = 10
+
+    a_dtype = DType(dtype_a)
+    b_dtype = DType(dtype_b)
+    c_dtype = DType(dtype_a)
+
+    # TODO: Use GPU once PyTorch support for GFX1250 finishes
+    device = 'cpu'
+
+    a_scale_preshuffling = SCALE_PRESHUFFLING and not do_gather
+    a, a_scales, a_ragged_metadata = make_random_tensor(
+        shape=(m, k),
+        n_slices=n_slices,
+        dtype=a_dtype,
+        device=device,
+        ragged_dim=0,
+        mxfp_dim=-1 if a_dtype.has_mx_scale else None,
+        scale_hbm_swizzling=layout.make_default_matmul_mxfp8_act_scale_layout
+        if a_dtype.has_mx_scale and a_scale_preshuffling else None,
+    )
+
+    b, b_scale_tri, b_ragged_metadata = make_random_tensor(
+        shape=(k, n),
+        n_slices=n_slices,
+        dtype=b_dtype,
+        device=device,
+        ragged_dim=None,
+        mxfp_dim=-2 if b_dtype.has_mx_scale else None,
+        scale_hbm_swizzling=layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=-2, num_warps=4)
+        if SCALE_PRESHUFFLING else None,
+    )
+
+    gather_indx = None if not do_gather else torch.randint(0, max(m, 1), (m, ), dtype=torch.int32, device=device)
+    scatter_indx = None if not do_scatter else torch.randperm(m, dtype=torch.int32, device=device)
+    bias = None if not do_bias else torch.randn(b.shape[:-2] + b.shape[-1:], dtype=torch.float32, device=device)
+
+    fused_activation = None
+    if swiglu_opts is not None:
+        fused_activation = FusedActivation(FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2), swiglu_opts)
+
+    flex_a = InFlexData()
+    flex_b = InFlexData()
+    flex_c = OutFlexData()
+    precision_opt = PrecisionConfig(
+        flex_ctx=FlexCtx(flex_a, flex_b, flex_c),
+        acc_scale=1.0,
+        out_dtype=c_dtype.torch_dtype,
+        a_mx_scale=a_scales,
+        b_mx_scale=b_scale_tri,
+    )
+
+    ref_y = matmul_torch(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt)
+    tri_y = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
+                   fused_activation=fused_activation, num_buffers=num_buffers)
+    if swiglu_opts is not None:
+        ref_y = swiglu(ref_y.cuda(), alpha=swiglu_opts[0], precision_config=SwiGLUPrecisionConfig(swiglu_opts[1])).cpu()
+
+    if c_dtype.has_mx_scale:
+        tri_y = upcast_from_mxfp(tri_y, precision_opt.c_mx_scale, target_dtype=torch.bfloat16, axis=-1).to(ref_y.dtype)
+        ref_y = upcast_from_mxfp_torch(*downcast_to_mxfp_torch(ref_y, c_dtype.torch_dtype, axis=-1),
+                                       target_dtype=ref_y.dtype, axis=-1)
+    maxtol, rmstol = None, None
+    if c_dtype.has_mx_scale:
+        maxtol, rmstol = 4e-1, 4e-2
+    elif b_dtype.is_mxfloat4:
+        maxtol, rmstol = 3e-2, None
+
+    assert_close(ref_y.cpu(), tri_y.cpu(), maxtol=maxtol, rmstol=rmstol)
+
+
+def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype):
+    assert ((x_dtype == "fp8" and w_dtype == "fp8") or w_dtype == "mx4")
+    dev = 'cuda'
+    batch = batch_per_expt * n_expts_tot // n_expts_act
+    wg = torch.randn((dim1, n_expts_tot), device=dev)
+    w1 = torch.randn((n_expts_tot, dim1, dim2), device=dev)
+    w2 = torch.randn((n_expts_tot, dim2 // 2, dim1), device=dev)
+    bg = torch.randn((n_expts_tot, ), device=dev)
+    b1 = torch.randn((n_expts_tot, dim2), device=dev)
+    b2 = torch.randn((n_expts_tot, dim1), device=dev)
+
+    value_layout = None
+    scale_layout = None
+    if w_dtype == "mx4":
+        num_warps = 4
+        value_layout = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
+        scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1, num_warps=num_warps)
+    wg, wg_flex, wg_scale = quantize_weight(wg, "bf16")
+    w1, w1_flex, w1_scale = quantize_weight(w1, w_dtype, value_layout=value_layout, scale_layout=scale_layout)
+    w2, w2_flex, w2_scale = quantize_weight(w2, w_dtype, value_layout=value_layout, scale_layout=scale_layout)
+    pcg = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=wg_flex), b_mx_scale=wg_scale)
+    act = FusedActivation(FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2), (1.0, 1.0))
+    pc1 = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=w1_flex), b_mx_scale=w1_scale)
+    pc2 = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=w2_flex), b_mx_scale=w2_scale)
+
+    x_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.float8_e4m3fn}[x_dtype]
+    input_x = torch.randn((batch, dim1), device=dev)
+    input_x = input_x.to(x_dtype)
+    xg = input_x.to(wg.dtype if n_expts_tot > 1 else input_x.dtype)
+
+    if n_expts_tot > 1:
+        logits = matmul(xg, wg, bg, precision_config=pcg)
+        x, rdata, gather_indx, scatter_indx, _ = routing(input_x, logits, n_expts_act)
+    else:
+        rdata, gather_indx, scatter_indx, _ = None, None, None, None
+
+    if x.nelement() > 0:
+        x = matmul(x, w1, b1, rdata, gather_indx=gather_indx, precision_config=pc1, fused_activation=act)
+        x = matmul(x, w2, b2, rdata, scatter_indx=scatter_indx, precision_config=pc2)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch_per_expt", '-b', type=int, default=8192)
+    parser.add_argument("--dim1", '-d1', type=int, default=5760)
+    parser.add_argument("--dim2", '-d2', type=int, default=5760)
+    parser.add_argument("--n_expts_tot", '-et', type=int, default=128)
+    parser.add_argument("--n_expts_act", '-ea', type=int, default=4)
+    parser.add_argument("--x_dtype", type=str, default="fp8", choices=["fp8", "bf16"])
+    parser.add_argument("--w_dtype", type=str, default="mx4", choices=["mx4", "fp8"])
+    args = parser.parse_args()
+    main(**vars(args))

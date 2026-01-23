@@ -23,6 +23,10 @@ min = _import_from_triton(tl_standard.min)
 ravel = _import_from_triton(tl_standard.ravel)
 reduce_or = _import_from_triton(tl_standard.reduce_or)
 xor_sum = _import_from_triton(tl_standard.xor_sum)
+sort = _import_from_triton(tl_standard.sort)
+topk = _import_from_triton(tl_standard.topk)
+bitonic_merge = _import_from_triton(tl_standard.bitonic_merge)
+softmax = _import_from_triton(tl_standard.softmax)
 
 
 @jit

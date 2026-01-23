@@ -84,7 +84,7 @@ def sum_bitmatrix_rows(x, partials_block_size=None):
 
     grid_m = cdiv(n_rows_max, BLOCK_MM)
     grid_n = cdiv(n_cols, 32)
-    out = torch.zeros((cdiv(n_cols, 128) * 128, ), device=x.device, dtype=torch.int32)[:n_cols]
+    out = torch.zeros((cdiv(n_cols, 128) * 128, ), device='cpu', dtype=torch.int32)[:n_cols].cuda()
     out_partials = torch.empty((grid_n * 32, grid_m * TILE_SIZE), device=x.device, dtype=torch.int32)
     out_partials = torch.transpose(out_partials, 0, 1)
     # output tensors

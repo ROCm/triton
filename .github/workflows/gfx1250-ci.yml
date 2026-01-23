@@ -72,4 +72,5 @@ jobs:
             -v /data/ci/ccache:/home/mirror/.ccache \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-pytorch-env -lc "/code/.github/workflows/triton.sh"
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.1 \
+            -lc "/code/.github/workflows/triton.sh"
