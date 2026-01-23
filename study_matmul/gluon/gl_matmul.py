@@ -47,13 +47,14 @@ import triton
 
 #from matmul_kernels.matmul_kernel import v10 as matmul_kernel
 
-from matmul_kernels.matmul_kernel import v10_f8 as matmul_kernel
+#from matmul_kernels.matmul_kernel import v10_f8 as matmul_kernel
 
 #from matmul_kernels.matmul_kernel import v11 as matmul_kernel
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 name_to_torch_type = {"fp16": torch.float16, "bf16": torch.bfloat16}
+
 
 def matmul(a, b, num_warps):
     # Check constraints.
@@ -67,6 +68,9 @@ def matmul(a, b, num_warps):
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 64
     if a.dtype == torch.float8_e5m2:
         BLOCK_K = 128
+        from matmul_kernels.matmul_kernel import v10_f8 as matmul_kernel
+    else:
+        from matmul_kernels.matmul_kernel import v10 as matmul_kernel
     GRID_MN = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
     grid = (GRID_MN, 1)
     NUM_XCDS = 8
@@ -86,7 +90,6 @@ def get_x_vals():
     return [
         #(4096, 4096, 1024),
         #(4096, 4096, 2048),
-        #(4096, 4096, 3072),
         #(4096, 4096, 3072),
         (4096, 4096, 4096),
         #(4096, 4096, 8192),
@@ -129,8 +132,8 @@ configs.append(
         line_arg="dtype",  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
         # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-        line_vals=["f8"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-        line_names=["f8"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+        line_vals=["fp16"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
+        line_names=["fp16"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
         styles=[("green", "-"), ("yellow", "--")],
         ylabel="TFLOPS",  # Label name for the y-axis
         plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
@@ -156,6 +159,6 @@ def benchmark(M, N, K, dtype):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-test_correctness("f8")
+#test_correctness("f8")
 #test_correctness("bf16")
 benchmark.run(show_plots=False, print_data=True)

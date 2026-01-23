@@ -1,4 +1,4 @@
-# Study matmul
+# Study matmul (16-bit)
 
 Base triton compiler commit: 77e7a7b74f0731d0e65fb9 (PR#9092)
 
@@ -415,3 +415,70 @@ Notes
 | `v9_1_amdgcnasV4` | 98.64%   | 1428   | 4332 (3%) | 11460 (8%)  | 132880 (89%) |
 | `v10_amdgcnasV4`  | 98.21%   | 1425   | 4536 (3%) | 8808 (6%)   | 133456 (91%) |
 | `v11_amdgcnasV4`  | 98.33%   | 1395   | 4540 (3%) | 13936 (9%)  | 133300 (88%) |
+
+
+# Study Matmul (8-bit)
+
+
+kernel level change (`v10_f8`) compared to v10
+- double `BLOCK_K` to 128
+- global load layout change
+  ```
+  reg_bases=[[0, 1], [0, 2], [0, 4], [4, 0], [8, 0], [128, 0]]
+  lane_bases=[[0, 8], [0, 16], [0, 32], [16, 0], [32, 0], [64, 0]]
+  warp_bases=[[1, 0], [2, 0]]
+  ```
+  to
+  ```
+  reg_bases=[[0, 1], [0, 2], [0, 4], [0, 8], [4, 0], [8, 0], [128, 0]]
+  lane_bases=[[0, 16], [0, 32], [0, 64], [16, 0], [32, 0], [64, 0]]
+  warp_bases=[[1, 0], [2, 0]]
+  ```
+  Note that each thread is loading 16 x f8 elements.
+- shared layout change
+  ```
+  [[512, 16]],
+  [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32],
+  [16, 0], [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+  ```
+  to
+  ```
+  [[1024, 32]],
+  [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32], [0, 64],
+  [16, 0], [32, 0], [64, 0], [1, 0], [2, 0], [4, 0], [8, 0], [128, 0]],
+  ```
+  Note that we added [0, 64] since the K dim is doubled
+- mfma
+  - instr shape is changed to 16x16x128
+  - kWidth is changed to 32
+  - API is changed to `mfma_scaled(a, None, 'e5m2', b0, None, 'e5m2', acc0)`
+
+Results
+- using llvm sched and RA: `/root/OAI-triton/study_matmul/gluon/v10_f8/llvm_sched`
+  - vgpr: 428
+  - mfma eff: 55.09%
+- Disable miched: `/root/OAI-triton/study_matmul/gluon/v10_f8/disable_miched`
+  - vgpr: 512 (196)
+  - mfma eff: 15.58%
+  - This version has so many spills inside the loop.
+
+
+```
+ROCPROF_ATT_LIBRARY_PATH=/root/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux/opt/rocm/lib/ rocprofv3 --att -i att_matmul.json -d ./study_matmul/gluon/v10_f8/att_disable_miched -- python study_matmul/gluon/gl_matmul.py
+```
+
+## [llir sched] v6 and v7
+
+v6 is code refactor done by gpt-5
+
+- IR: `/root/OAI-triton/study_matmul/gluon/v10_f8/llirSchedV6`
+- Note that amdgcnas is still disabled
+- vgpr: 500
+- mfma eff: 71.66%
+
+v7
+- Set X = 2 if mfma cycles = 32
+- IR: `/root/OAI-triton/study_matmul/gluon/v10_f8/llirSchedV7`
+- amdgcnas is still disabled
+- vgpr: 492
+- mfma eff: 76.2%
