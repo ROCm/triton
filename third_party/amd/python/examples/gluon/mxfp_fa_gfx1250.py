@@ -2022,7 +2022,7 @@ def attn_fwd(  #
         k = k.permute(0, 2, 1, 3).contiguous()
         v = v.permute(0, 2, 1, 3).contiguous()
         # o: [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ]
-        o = torch.zeros((batch, group_sz, num_groups, head_sz), dtype=dtype)
+        o = torch.zeros_like(q, dtype=dtype)
         # q_scale:       [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ / 32]
         # k_scale:       [BATCH, NUM_K_HEADS, SEQLEN_K / 128, HEAD_SZ * 4]
         # v_scale:
