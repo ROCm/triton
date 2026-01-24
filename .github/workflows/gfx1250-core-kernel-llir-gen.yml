@@ -43,7 +43,6 @@ jobs:
             -v /data/ci/llvm/a992f294-debug:/llvm \
             -v /data/ci/ffm/rocm-ffmlite-mi450-1318-ce0033dd-rel-20251222:/ffm-base \
             -v /data/ci/ffm/ffmlite-main-503fe115-20260109:/ffm-update \
-            -v /data/ci/triton-cache:/home/mirror/.triton \
             -v /data/ci/ccache:/home/mirror/.ccache \
             -v /data/ci/llir/${DIRNAME}:/llir \
             -w /code \

@@ -8,7 +8,7 @@ set -xeo pipefail
 
 echo "=== Clean up cache ==="
 
-rm -rf ~/.triton/cache
+sudo rm -rf ~/.triton/cache
 
 echo "=== Build and Install Triton ==="
 

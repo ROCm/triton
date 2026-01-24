@@ -133,7 +133,7 @@ fi
 RUN if [ ${DOCKER_USERID} -ne 0 ] && [ ${DOCKER_RENDERID} -ne 0 ]; then \
     echo "${DOCKER_USERNAME}:${DOCKER_USERNAME}" | chpasswd && \
     usermod -aG sudo ${DOCKER_USERNAME} && \
-    echo "username ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/username; \
+    echo "${DOCKER_USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/username; \
 fi
 
 # Ccache settings
