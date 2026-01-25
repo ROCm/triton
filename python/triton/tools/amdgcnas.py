@@ -4,6 +4,7 @@ from operator import attrgetter
 import re
 import logging
 import argparse
+import bisect
 
 NO_DEF_OPS = {
     's_waitcnt',
@@ -202,7 +203,7 @@ class Instruction:
 
     def get_mfma_acc(self) -> Register:
         assert self.is_mfma()
-        regs = extract_registers(self.operands[-1])
+        regs = extract_registers(self.operands[3])
         assert len(regs) == 1
         return regs[0]
 
@@ -213,7 +214,7 @@ class Instruction:
 
     def replace_mfma_acc(self, reg: Register):
         assert self.is_mfma()
-        self.operands[-1] = reg.emit()
+        self.operands[3] = reg.emit()
         self.update_regs_by_operand()
 
     def replace_mfma_operand(self, reg: Register, opIdx: int):
@@ -486,6 +487,11 @@ class Program:
             if bb.is_epilogue():
                 return bb
 
+    def update_inst_index(self):
+        for bb in self.blocks:
+            for idx, inst in enumerate(bb.instructions):
+                inst.index = idx
+
     def compute_liveness(self, indent):
 
         dbg("========== liveness ==========", indent)
@@ -651,7 +657,12 @@ class Program:
         groups = []
 
         ## collect all the ds groups
+
+        ## A map from (mfma_inst, opIdx) to its corresponding DSReadGroup
+        ds_map = defaultdict(DSReadGroup)
         for bb in self.blocks:
+            if bb.is_epilogue():
+                continue
             for inst in bb.instructions:
                 if 'ds_read_b128' in inst.opcode:
                     used_by_mfma = True
@@ -660,32 +671,42 @@ class Program:
                             used_by_mfma = False
                             break
                     if not used_by_mfma:
-                        #dbg(f"{inst.emit()} has non mfma users !!!", indent)
+                        dbg(f"{inst.emit()} has non mfma users !!!", indent)
+                        for user in inst.users:
+                            dbg(f"{user.raw_line}", indent + 2)
                         continue
 
-                    ds_group = DSReadGroup(inst)
-                    ds_group.users = inst.users
-                    #dbg(f"lds users: {len(chain.users)}  {inst.get_dst_regs()}")
                     data_reg = inst.get_dst_regs()
-                    ds_group.data = data_reg
-                    assert ds_group.opIdx == 0
+                    firstMfma = min(inst.users, key=lambda i: i.index)
+                    assert 'mfma' in firstMfma.opcode
+
+                    opIdx = firstMfma.get_op_idx(data_reg)
+                    assert opIdx == 1 or opIdx == 2
+
+                    key = (firstMfma, opIdx)
+                    if key in ds_map:
+                        dbg(f"{inst.emit()} added into exisitng group", indent)
+                        ## the ds_group already exist, add this ds_inst
+                        ds_group = ds_map[key]
+                        ds_group.insert_ds(inst)
+                        ds_group.users |= inst.users
+                    else:
+                        dbg(f"{inst.emit()} added into new group", indent)
+                        ## the ds_group does not exist
+                        ds_group = DSReadGroup(inst)
+                        ds_group.users = inst.users
+                        ds_map[key] = ds_group
+                        groups.append(ds_group)
+
+                    ds_group.update_data()
+                    ds_group.opIdx = opIdx
                     ds_group.loc = inst.loc[1]
                     ds_group.addr = inst.get_src_regs()[0]
-                    #dbg(f"{inst.emit()}")
-                    for user in ds_group.users:
-                        assert user.is_mfma()
-                        opIdx = user.get_op_idx(data_reg)
-                        #dbg(f"    {opIdx=}: {user.emit()}")
-                        assert opIdx == 1 or opIdx == 2
-                        if ds_group.opIdx != 0 and ds_group.opIdx != opIdx:
-                            dbg("mismatch opIdx!!!", indent)
-                        ds_group.opIdx = opIdx
-
-                        if user not in bb.instructions:
-                            ds_group.isLiveAcrossBB = True
+                    if firstMfma not in bb.instructions:
+                        ds_group.isLiveAcrossBB = True
                     inst.lds_group = ds_group
-                    groups.append(ds_group)
 
+        dbg(f"Collected {len(groups)} groups")
         ## construct ds read chains based on all the collect groups
         chains = []
 
@@ -1021,7 +1042,8 @@ class AccumulatorChain:
 class DSReadGroup:
     '''
     One DSReadGroup contians
-    1. one ds_read instruction as the root --> ds: inst
+    1. one or more ds_read instruction as the root --> ds: list[inst]
+       The operand of one mfma can take more registers than a single ds_read.
     2. All user mfma instructions of the ds_read --> users: set[Instruction]
     3. which opIdx of the mfma is using the loaded registers of the ds_read --> opIdx: int
     4. registers to hold the loaded data --> data: Register
@@ -1030,7 +1052,7 @@ class DSReadGroup:
     '''
 
     def __init__(self, root_ds: Instruction):
-        self.ds = root_ds
+        self.ds = [root_ds]
         self.users: set[Instruction] = []
         self.opIdx = 0
         self.data: Register = None
@@ -1039,7 +1061,19 @@ class DSReadGroup:
         self.isLiveAcrossBB: bool = False
 
     def update_data(self):
-        self.data = self.ds.get_dst_regs()
+        regs = set()
+        for ds_inst in self.ds:
+            regs |= flatten_regs(ds_inst.get_dst_regs())
+        self.data = coalesce_regs(regs)[0]
+
+    def insert_ds(self, ds_inst):
+        '''
+        Insert `ds_inst` into self.ds while keeping the register order
+        We assume the registers are of the same kind
+        '''
+        keys = [inst.get_dst_regs().start for inst in self.ds]
+        pos = bisect.bisect_left(keys, ds_inst.get_dst_regs().start)
+        self.ds.insert(pos, ds_inst)
 
 
 class DSReadChain:
@@ -1069,22 +1103,25 @@ class DSReadChain:
 
     def within_bb(self, bb):
         if self.ds_groups:
-            return self.ds_groups[0].ds in bb.instructions
+            return self.ds_groups[0].ds[0] in bb.instructions
         else:
             return False
 
 
 REG_SINGLE = re.compile(r'([sva])(\d+)')
 REG_RANGE = re.compile(r'([sva])\[(\d+):(\d+)\]')
+
 REG_PATTERNS = [
-    r's\d+',
-    r'v\d+',
-    r'a\d+',
-    r'm0',
-    r's\[\d+:\d+\]',
-    r'v\[\d+:\d+\]',
-    r'a\[\d+:\d+\]',
+    r'(?<![A-Za-z0-9_])s\d+(?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])v\d+(?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])a\d+(?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])m0(?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])s\[\d+:\d+\](?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])v\[\d+:\d+\](?![A-Za-z0-9_])',
+    r'(?<![A-Za-z0-9_])a\[\d+:\d+\](?![A-Za-z0-9_])',
 ]
+
+REGEXES = [re.compile(p) for p in REG_PATTERNS]
 
 
 def count_regs(regs: list[Register]):
@@ -1106,29 +1143,76 @@ def parse_register(text):
     else:
         return Register(kind, [int(text[1:])])
 
+def split_top_level_commas(text: str) -> list[str]:
+    parts = []
+    cur = []
+    depth = 0
 
-def split_operands(text):
+    for ch in text:
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+
+        if ch == ',' and depth == 0:
+            part = ''.join(cur).strip()
+            if part:
+                parts.append(part)
+            cur = []
+        else:
+            cur.append(ch)
+
+    part = ''.join(cur).strip()
+    if part:
+        parts.append(part)
+
+    return parts
+
+def split_by_whitespace(text: str) -> list[str]:
+    tokens = []
+    cur = []
+    depth = 0
+
+    for ch in text:
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+
+        if ch.isspace() and depth == 0:
+            tok = ''.join(cur).strip()
+            if tok:
+                tokens.append(tok)
+            cur = []
+        else:
+            cur.append(ch)
+
+    tok = ''.join(cur).strip()
+    if tok:
+        tokens.append(tok)
+
+    return tokens
+
+def split_operands(text: str) -> list[str]:
     if not text:
         return []
 
-    # First split by commas
-    comma_parts = [p.strip() for p in text.split(',')]
-
     operands = []
-    for part in comma_parts:
-        # Further split space-separated modifiers
-        operands.extend(part.split())
+    for part in split_top_level_commas(text):
+        operands.extend(split_by_whitespace(part))
 
     return operands
 
-
-def extract_registers(op):
+def extract_registers(op: str):
     regs = []
-    for pat in REG_PATTERNS:
-        for m in re.findall(pat, op):
+    for rx in REGEXES:
+        for m in rx.findall(op):
             regs.append(parse_register(m))
     return regs
 
+def is_modifier_token(tok: str) -> bool:
+    # Things like op_sel_hi:[...], cbsz:1, blgp:1
+    return ':' in tok and not any(c.isdigit() for c in tok.split(':', 1)[0])
 
 def parse_instruction(line, loc, bb):
     line = line.strip()
@@ -1142,14 +1226,29 @@ def parse_instruction(line, loc, bb):
     opcode = parts[0]
 
     operand_text = parts[1] if len(parts) > 1 else ""
-    operands = split_operands(operand_text)
+    raw_operands = split_operands(operand_text)
 
+    operands = []
     regs_by_operand = []
-    for op in operands:
-        regs_by_operand.extend(extract_registers(op))
 
-    return Instruction(opcode, operands, regs_by_operand, loc, line, bb)
+    for tok in raw_operands:
+        # Skip MFMA modifiers (op_sel, cbsz, blgp, etc.)
+        #if is_modifier_token(tok):
+        #    continue
 
+        regs = extract_registers(tok)
+        operands.append(tok)
+        if regs:
+            regs_by_operand.append(regs)
+
+    return Instruction(
+        opcode=opcode,
+        operands=operands,
+        regs_by_operand=regs_by_operand,
+        loc=loc,
+        raw_line=line,
+        bb=bb,
+    )
 
 def extract_label(line):
     """
@@ -1356,7 +1455,7 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
         chain.update_regs()
 
         total_lds_regs |= flatten_regs(chain.regs)
-        if chain.ds_groups[0].ds in bb.instructions:
+        if chain.ds_groups[0].ds[0] in bb.instructions:
             total_lds_regs_in_loop |= flatten_regs(chain.regs)
 
         if chain.isLiveAcrossBB:
@@ -1365,6 +1464,7 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
         cnt = len(flatten_regs(chain.regs))
         check_mark = print_check(chain.isLiveAcrossBB)
         dbg(f"loc-{chain.loc} ({cnt} regs, isLiveAcrossBB: {check_mark}): {chain.regs}", indent)
+        dbg(f"This chain has {len(chain.ds_groups)} lds groups")
 
     total_lds_regs_in_loop = coalesce_regs(total_lds_regs_in_loop)
     a_num, v_num = count_regs(total_lds_regs_in_loop)
@@ -1739,15 +1839,24 @@ def find_reuse(loc, loc_to_interval, loc_to_regs):
     return found
 
 
-def rewrite_lds_group(lds_group, free_reg):
-    logging.debug(f"  rewriting {lds_group.ds.emit()} with {free_reg}")
-    ds_inst = lds_group.ds
-    ## replace ds_read
-    ## Note that here we don't want to replace_all_users_with.
-    ## We have a strong connection from the ds_read to its users with
-    ## opIdx keeping tracking of which operand of mfma is using the result.
-    #ds_inst.replace_users_with(free_reg)
-    ds_inst.replace_dst(free_reg)
+def rewrite_lds_group(lds_group, free_reg, indent=0):
+    dbg(f"  rewriting the following ds inst with {free_reg}", indent)
+    my_regs = flatten_regs(free_reg)
+    x = 4
+    kind = free_reg.kind
+    for ds_inst in lds_group.ds:
+        dbg(f"{ds_inst.emit()}", indent + 2)
+        my_reg = pick_and_remove_contiguous_regs(my_regs, x, kind)
+        if not my_reg:
+            dbg(f"Not enough regs", indent + 2)
+            assert False
+        ## replace ds_read
+        ## Note that here we don't want to replace_all_users_with.
+        ## We have a strong connection from the ds_read to its users with
+        ## opIdx keeping tracking of which operand of mfma is using the result.
+        #ds_inst.replace_users_with(free_reg)
+        ds_inst.replace_dst(coalesce_regs(my_reg)[0])
+
     lds_group.data = free_reg
     opIdx = lds_group.opIdx
     for user in lds_group.users:
@@ -1778,8 +1887,8 @@ def rewrite_lds_data(bb, chains, entry_acc):
             for user in group.users:
                 if user in bb.instructions:
                     last_user_idx = max(last_user_idx, user.index)
-            if group.ds in bb.instructions:
-                first_ds_idx = min(first_ds_idx, group.ds.index)
+            if group.ds[0] in bb.instructions:
+                first_ds_idx = min(first_ds_idx, group.ds[0].index)
             else:
                 first_ds_idx = 0
         loc_to_interval[loc] = [first_ds_idx, last_user_idx]
@@ -1815,7 +1924,8 @@ def rewrite_lds_data(bb, chains, entry_acc):
         reuse_loc = find_reuse(loc, loc_to_interval, loc_to_regs)
         if reuse_loc is None:
             logging.debug(f"{loc=} need new reg")
-            x = 4
+            old_regs = flatten_regs(chain.regs)
+            x = len(flatten_regs(chain.ds_groups[0].data))
             #cnt1 = 0
             for lds_group in chain.ds_groups:
                 avai_regs = pick_and_remove_contiguous_regs(ds_reg_free, x, 'a')
@@ -1833,6 +1943,7 @@ def rewrite_lds_data(bb, chains, entry_acc):
                 target_reg = loc_to_chain[reuse_loc].ds_groups[idx].data
                 rewrite_lds_group(lds_group, target_reg)
         chain.update_regs()
+        #ds_reg_free = ds_reg_free | old_regs - entry_acc
 
     logging.debug("========== rewrite lds data done =====")
 
@@ -1956,7 +2067,9 @@ def can_hoist(inst, bb, invariant_regs):
 
     # 2. No redefinition after inst
     redef = False
-    for later in bb.instructions[inst.index + 1:]:
+    for later in bb.instructions:
+        if later == inst:
+            continue
         if later.get_dst_regs():
             if flatten_regs(later.get_dst_regs()) & flatten_regs(reg):
                 redef = True
@@ -2188,7 +2301,7 @@ def schedule_window(window):
     nonmfmas = [i for i in window if not i.is_mfma() and not i.is_control()]
     barriers = [i for i in window if i.is_control()]
 
-    if len(nonmfmas) <= 2 and window[0].is_mfma():
+    if len(nonmfmas) <= 5 and window[0].is_mfma():
         return window[:]  # unchanged
 
     logging.debug("Found window:")
@@ -2202,7 +2315,7 @@ def schedule_window(window):
         if mi < len(mfmas):
             out.append(mfmas[mi])
             mi += 1
-        for _ in range(2):
+        for _ in range(5):
             if ni < len(nonmfmas):
                 out.append(nonmfmas[ni])
                 ni += 1
@@ -2275,6 +2388,7 @@ def amdgcn_as(text, verbose=False):
     program = parse_asm(text)
     indent = 0
 
+    program.update_inst_index()
     program.process_blocks(indent)
 
     program.collect_ds_chains(indent)
@@ -2311,7 +2425,7 @@ def amdgcn_as(text, verbose=False):
     analyze_lds_chains(loop, LDSChains, indent)
 
     dbg("######################################################", indent)
-    dbg("## Step 4", indent)
+    dbg("## Step 3", indent)
     dbg("## licm", indent)
     dbg("######################################################", indent)
     licm(program)
@@ -2321,7 +2435,7 @@ def amdgcn_as(text, verbose=False):
     analyze_lds_chains(loop, LDSChains, indent)
 
     dbg("######################################################", indent)
-    dbg("## Step 5", indent)
+    dbg("## Step 4", indent)
     dbg("## optimize copy chains", indent)
     dbg("######################################################", indent)
     optimize_copy(loop)
@@ -2331,7 +2445,7 @@ def amdgcn_as(text, verbose=False):
     analyze_lds_chains(loop, LDSChains, indent)
 
     dbg("######################################################", indent)
-    dbg("## Step 3", indent)
+    dbg("## Step 5", indent)
     dbg("## rewrite ds_read data regs", indent)
     dbg("######################################################", indent)
     rewrite_lds_data(loop, LDSChains, entry_acc)
@@ -2339,13 +2453,6 @@ def amdgcn_as(text, verbose=False):
     program.update_free_regs(indent)
     analyze_regs(loop, mfmaChainsInLoop, indent)
     analyze_lds_chains(loop, LDSChains, indent)
-
-    #loop.cleanup_bb()
-    #emitted_text = emit_program(program)
-    #emitted_text = remove_debug_info_section(emitted_text)
-    #emitted_text = rewrite_next_free_vgpr(emitted_text, 512)
-    #setup_logging(debug=False)
-    #return emitted_text
 
     dbg("######################################################", indent)
     dbg("## Step 6", indent)
@@ -2373,10 +2480,10 @@ def amdgcn_as(text, verbose=False):
     dbg("## Step 8", indent)
     dbg("## loophole optimizations", indent)
     dbg("######################################################", indent)
-    rotate_lgkmcnt(program)
-    separate_waitcnt_and_barrier(loop)
+    #rotate_lgkmcnt(program)
+    #separate_waitcnt_and_barrier(loop)
 
-    loop.instructions = optimize_mfma_density(loop.instructions)
+    #loop.instructions = optimize_mfma_density(loop.instructions)
 
     program.process_blocks(indent)
     program.update_free_regs(indent)
