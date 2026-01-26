@@ -348,9 +348,15 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
      ---------------------------------------------------------------
           0           0         32 tensor_dim2 (3rd inner dimension)
           1           0         32 tensor_dim3 (4th inner dimension)
+                                   (or lds_addr_increment if iterate_enable)
           2           0         32 tensor_dim2_stride low-32-bit
+                                   (or global_addr_increment low-32-bit
+                                   if iterate_enable)
           3           0         16 tensor_dim2_stride high-16-bit
-                     16         16 tile_dim3
+                                   (or global_addr_increment high-16-bit
+                                   if iterate_enable)
+                     16         16 tile_dim3 (or iterate_count
+                                   if iterate_enable)
     ================================================================
 
      group2 bit-field definition (Gather/Scatter mode, 16-bit indices)
