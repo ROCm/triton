@@ -46,7 +46,7 @@ rm -rf $TRITON_HOME/.triton/cache
 echo "=== Gathering CORE BF16 Gluon GEMM/Attention Kernels ==="
 HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_gemm_gfx1250_tbuf_wp.py -M 1024 -N 1024 -K 1024 --num-warps 8
 HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py --num-warps=12 --num-buffers=2 --persistent --warp-specialized
-HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py --pipeline
+HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py --attention-type pipeline
 
 # TODO: Fix failures in mxfp variants when ffm_enable_time_slicing is enabled.
 echo "=== Gathering CORE MXFP Gluon GEMM/Attention Kernels ==="

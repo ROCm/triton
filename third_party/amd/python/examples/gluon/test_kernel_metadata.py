@@ -14,7 +14,6 @@ import re
 import os
 import pytest
 
-from .f16_fa_gfx1250 import attn_fwd_pipelined_kernel as f16_attn_fwd_pipelined_kernel
 from .f16_fa_gfx1250 import run_attention as run_f16_attention
 from .mxfp_fa_gfx1250 import run_attention as run_mxfp_attention
 
@@ -107,7 +106,8 @@ def generate_f16_attention_configs():
             "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8,  #
             "HEAD_SZ": 128,  #
             "BLOCK_M": 128, "BLOCK_N": 64,  #
-            "ATTN_FN": f16_attn_fwd_pipelined_kernel,  #
+            "ATTN_FN": "pipeline",  #
+            "CHECK_NUMERIC": True,  #
         }),
         pytest.param({
             "BATCH": 8,  #
@@ -115,7 +115,17 @@ def generate_f16_attention_configs():
             "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8,  #
             "HEAD_SZ": 128,  #
             "BLOCK_M": 128, "BLOCK_N": 128,  #
-            "ATTN_FN": f16_attn_fwd_pipelined_kernel,  #
+            "ATTN_FN": "pipeline",  #
+            "CHECK_NUMERIC": True,  #
+        }),
+        pytest.param({
+            "BATCH": 8,  #
+            "SEQLEN_Q": 1024, "SEQLEN_K": 1024,  #
+            "NUM_Q_HEADS": 8, "NUM_K_HEADS": 8,  #
+            "HEAD_SZ": 128,  #
+            "BLOCK_M": 256, "BLOCK_N": 64,  #
+            "ATTN_FN": "pingpong",  #
+            "CHECK_NUMERIC": False,  #
         }),
     ]
     return base_configs
@@ -124,7 +134,8 @@ def generate_f16_attention_configs():
 @pytest.mark.parametrize("config", generate_f16_attention_configs())
 def test_f16_attention_kernel_metadata(config):
     # TODO: figure out correctness issue and re-enable testing
-    attn_kernel = run_f16_attention(config)
+    CHECK_NUMERIC = config["CHECK_NUMERIC"]
+    attn_kernel = run_f16_attention(config, check=CHECK_NUMERIC)
 
     BATCH = config["BATCH"]
     SEQLEN_Q = config["SEQLEN_Q"]

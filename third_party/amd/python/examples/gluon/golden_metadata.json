@@ -70,5 +70,14 @@
     "scratch_size": 124,
     "code_len_in_byte": 46496,
     "occupancy": 1
+  },
+  "BATCH8_SEQLENQ1024_SEQLENK1024_QHEADS8_KVHEADS8_HEADSZ128_BM256_BN64_f16_attn_fwd_pipelined_kernel": {
+    "sgpr_count": 60,
+    "sgpr_spill_count": 0,
+    "vgpr_count": 512,
+    "vgpr_spill_count": 165,
+    "scratch_size": 536,
+    "code_len_in_byte": 25808,
+    "occupancy": 2
   }
 }
