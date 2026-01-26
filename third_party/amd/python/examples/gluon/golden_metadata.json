@@ -77,7 +77,7 @@
     "vgpr_count": 512,
     "vgpr_spill_count": 165,
     "scratch_size": 536,
-    "code_len_in_byte": 25808,
+    "code_len_in_byte": 25980,
     "occupancy": 2
   }
 }
