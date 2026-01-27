@@ -89,7 +89,6 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
       }
     }
     LDBG("newShape: " << newShape[0] << ", " << newShape[1] << ", " << newShape[2]);
-    LDBG("splitDimPos: " << splitDimPos);
 
     // Use ReshapeOp builder that infers encoding automatically
     // When rank changes, some encodings (like AMDMfmaEncodingAttr) may not support it,
@@ -102,13 +101,14 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     // Permute to move the "2" dimension to last position if needed
     Value transposed = reshaped;
     int newRank = rank + 1;  // After reshape, we have one more dimension
-    if (splitDimPos != newRank - 1) {
+    if (axis != newRank - 1) {
       LDBG("transposing");
       SmallVector<int32_t> trans;
       for (int i = 0; i < newRank; ++i) {
-        if (i != splitDimPos) trans.push_back(i);
+        if (i != axis) trans.push_back(i);
       }
-      trans.push_back(splitDimPos);  // Move "2" dimension to end
+      trans.push_back(axis);  // Move "2" dimension to end
+      LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
       transposed = triton::TransOp::create(builder, loc, reshaped, trans);
     }
     LDBG("transposed: " << transposed);
@@ -147,10 +147,12 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
 }
 
 // Helper function to join tensors along a specific axis (inverse of splitAlongAxis)
-// JoinOp only joins along the last dimension, so we need to transpose, join, reshape, and transpose back
+// JoinOp only joins along the last dimension, so we need to join, transpose, and reshape
 static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location loc, OpBuilder &builder) {
-  LDBG("joinValuesAlongAxis(): n=" << tiles.size() << ", a=" << axis);
-
+  LDBG("\n\n\njoinValuesAlongAxis(): n=" << tiles.size() << ", a=" << axis);
+  for (auto tile : tiles) {
+    LDBG("tile: " << tile);
+  }
   if (tiles.size() == 1) {
     return tiles[0];
   }
@@ -158,50 +160,58 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
   // Lambda to perform a single binary join
   auto joinOnce = [&](Value left, Value right) -> Value {
     LDBG("joinOnce");
+    LDBG("left: " << left);
+    LDBG("right: " << right);
+
     auto leftType = cast<RankedTensorType>(left.getType());
     auto shape = leftType.getShape();
     int rank = shape.size();
-    
-    // Transpose to move target axis to last position if needed
-    Value leftToJoin = left;
-    Value rightToJoin = right;
-    if (axis != rank - 1) {
-      SmallVector<int32_t> perm;
-      for (int j = 0; j < rank; ++j) {
-        if (j != axis) perm.push_back(j);
-      }
-      perm.push_back(axis);  // Move target axis to end
-      leftToJoin = triton::TransOp::create(builder, loc, left, perm);
-      rightToJoin = triton::TransOp::create(builder, loc, right, perm);
-    }
-    
+    LDBG("rank: " << rank);
+    assert(axis < rank);
+
     // Join creates a new trailing dimension of size 2
-    auto joined = triton::JoinOp::create(builder, loc, leftToJoin, rightToJoin);
-    
-    // Reshape to merge the trailing dimension: [..., N, 2] -> [..., 2*N]
-    auto joinedType = cast<RankedTensorType>(joined.getType());
-    auto joinedShape = joinedType.getShape();
-    SmallVector<int64_t> newShape(joinedShape.begin(), joinedShape.end() - 2);
-    newShape.push_back(joinedShape[joinedShape.size() - 2] * 2);
-    auto reshapeType = RankedTensorType::get(newShape, joinedType.getElementType(), joinedType.getEncoding());
-    Value reshaped = triton::ReshapeOp::create(builder, loc, reshapeType, joined);
-    
-    // Transpose back if we transposed earlier
-    Value result = reshaped;
-    if (axis != rank - 1) {
-      SmallVector<int32_t> invTrans(rank);
-      for (int j = 0; j < rank - 1; ++j) {
-        invTrans[j < axis ? j : j + 1] = j;
-      }
-      invTrans[axis] = rank - 1;
-      result = triton::TransOp::create(builder, loc, reshaped, invTrans);
+    // 64x64 + 64x64 -> 64x64x2 (where 2 is fastest changing dim)
+    auto joined = triton::JoinOp::create(builder, loc, left, right);
+    LDBG("joined: " << joined);
+    auto joinedLL = toLinearLayout(cast<RankedTensorType>(joined.getType()));
+    LDBG("joinedLL: " << joinedLL);
+
+    // Transpose 64x64x2 -> 2x64x64
+    // for axis=0, trans=2, 0, 1
+    // for axis=1, trans=0, 2, 1
+    SmallVector<int32_t> trans(rank+1);
+    LDBG("trans.size(): " << trans.size());
+    for (int j = 0; j < rank; ++j) {
+      trans[j < axis ? j : j + 1] = j;
     }
-    
-    return result;
+    trans[axis] = rank;
+    LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
+    Value transposed = triton::TransOp::create(builder, loc, joined, trans);
+    LDBG("transposed: " << transposed);
+    auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
+    LDBG("transposedLL: " << transposedLL);
+
+    // Reshape 2x64x64 -> 128x64
+    auto transposedType = cast<RankedTensorType>(transposed.getType());
+    auto transposedShape = transposedType.getShape();
+    LDBG("transposedShape.size(): " << transposedShape.size());
+    SmallVector<int64_t> newShape(shape.begin(), shape.end());
+    LDBG("newShape.size(): " << newShape.size());
+    newShape[axis] *= 2;
+    LDBG("newShape: " << newShape[0] << "," << newShape[1]);
+    //auto newType = RankedTensorType::get(newShape, transposedType.getElementType(), transposedType.getEncoding());
+    auto newType = RankedTensorType::get(newShape, leftType.getElementType(), leftType.getEncoding());
+    Value reshaped = triton::ReshapeOp::create(builder, loc, newType, transposed);
+    LDBG("reshaped: " << reshaped);
+    auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
+    LDBG("reshapedLL: " << reshapedLL);
+
+    return reshaped;
   };
   
   // Iteratively join pairs using log2 iterations
   while (tiles.size() > 1) {
+    LDBG("while " << tiles.size() << " > 1");
     SmallVector<Value> nextTiles;
     for (size_t i = 0; i < tiles.size(); i += 2) {
       Value joined = joinOnce(tiles[i], tiles[i + 1]);
@@ -315,29 +325,11 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   int64_t totalM = aType.getShape()[0];
   int64_t totalK = aType.getShape().back();
   int64_t totalN = bType.getShape().back();
+  auto dotAttrs = dot->getAttrs();
 
 
   // Map from (M, N) offsets to accumulated dot Values
   DenseMap<std::pair<int32_t, int32_t>, Value> mnToDot;
-
-  // Check if we only have one slice (no remaining parts)
-#if 0
-  bool onlyOneSlice = (totalM <= prefetchWidthM) && 
-                       (totalN <= prefetchWidthN) && 
-                       (totalK <= prefetchWidthK);
-  if (onlyOneSlice) {
-    // There is only one dot while prefetchWidth == size so delay issuing it
-    Operation *firstDot = builder.clone(*dot, mapping);
-    if (Value a = operand2headPrefetch.lookup(dot.getA()))
-      firstDot->setOperand(
-          0, newForOp.getTiedLoopRegionIterArg(&*a.use_begin()));
-    if (Value b = operand2headPrefetch.lookup(dot.getB()))
-      firstDot->setOperand(
-          1, newForOp.getTiedLoopRegionIterArg(&*b.use_begin()));
-    builder.setInsertionPoint(firstDot);
-    return firstDot;
-  }
-  #endif
 
   // Assert that dimensions are evenly divisible by prefetch widths
   assert(totalM % prefetchWidthM == 0 && "totalM must be divisible by prefetchWidthM");
@@ -348,22 +340,17 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   // SplitOp only splits along the last dimension, so we need to use TransOp
   // to permute dimensions. We also need to reshape to add a trailing dimension of size 2.
   Value cOperand = mapping.lookup(dot.getC());
-  auto cType = cast<RankedTensorType>(cOperand.getType());
   
-  // Split along N dimension (axis 1) to get rows
+  // Split along N dimension (axis 1) to get rows.
   int32_t numRowTiles = totalM / prefetchWidthM;
   SmallVector<Value> rowTiles = splitValueAlongAxis(cOperand, numRowTiles, 1, dot.getLoc(), builder);
   
-  // Now split each row along M dimension (axis 0) to get individual tiles
+  // Now split each row along M dimension (axis 0) to get individual tiles.
   int32_t numColTiles = totalN / prefetchWidthN;
-  
   for (int32_t mIdx = 0; mIdx < numRowTiles; ++mIdx) {
     int32_t mOff = mIdx * prefetchWidthM;
-    
-    // Split this row along N dimension (axis 0) to get individual tiles
-    SmallVector<Value> colTiles = splitValueAlongAxis(rowTiles[mIdx], numColTiles, 0, dot.getLoc(), builder);
-    
-    // Store the column tiles in the map
+    SmallVector<Value> colTiles = splitValueAlongAxis(rowTiles[mIdx], numColTiles, 0, dot.getLoc(), builder);    
+    // Store tiles in map
     for (int32_t nIdx = 0; nIdx < numColTiles; ++nIdx) {
       int32_t nOff = nIdx * prefetchWidthN;
       mnToDot[{mOff, nOff}] = colTiles[nIdx];
@@ -383,7 +370,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
         Value bSlice;
         
         // For the first K slice, use prefetched values from prologue
-        if (kOff == 0) {
+        if (kOff == 0 && mOff == 0 && nOff == 0) {
           // Use the prefetched operands from the loop args
           if (Value a = operand2headPrefetch.lookup(dot.getA()))
             aSlice = newForOp.getTiedLoopRegionIterArg(&*a.use_begin());
@@ -420,18 +407,25 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
         
         // Get the accumulator for this (M,N) tile
         Value cSlice = mnToDot[{mOff, nOff}];
+        auto dType = cast<RankedTensorType>(cSlice.getType());
         LDBG("cSlice[" << mOff << "," << nOff << "]: " << cSlice);
-
-        // Create the dot operation
-        Operation *newOp = builder.clone(*dot, mapping);
-        newOp->setOperand(0, aSlice);
-        newOp->setOperand(1, bSlice);
-        newOp->setOperand(2, cSlice);
-        LDBG("newDot[" << mOff << "," << nOff << "]: " << *newOp);
+#if 1
+        Operation *newDot = DotOp::create(builder,
+            dot.getLoc(), dType,
+            ValueRange{aSlice, bSlice, cSlice},
+            dotAttrs);
+#else
+        // Clone the dot operation
+        Operation *newDot = builder.clone(*dot, mapping);
+        newDot->setOperand(0, aSlice);
+        newDot->setOperand(1, bSlice);
+        newDot->setOperand(2, cSlice);
+#endif
+        LDBG("newDot[" << mOff << "," << nOff << "]: " << *newDot);
 
         // Update the accumulator for this (M,N) tile
-        mnToDot[{mOff, nOff}] = newOp->getResult(0);
-        lastOp = newOp;
+        mnToDot[{mOff, nOff}] = newDot->getResult(0);
+        lastOp = newDot;
         
         // Delay issuing the last dot
         //bool isLastK = (kOff + prefetchWidthK == totalK);
@@ -449,30 +443,22 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   builder.setInsertionPoint(lastOp);
 
   // Concatenate all M×N tiles back into a single tensor with original shape
-  // JoinOp only joins along the last dimension (creates new trailing dim of size 2)
-  // So we need to use TransOp and ReshapeOp, similar to splitting
-  
-  // First join tiles along N dimension (within each row)
+  // First join tiles along M dimension (within each row)
   SmallVector<Value> rowResults;
   
   for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
     SmallVector<Value> rowTiles;
-    
-    // Collect all tiles in this row (along N dimension)
     for (int32_t nOff = 0; nOff < totalN; nOff += prefetchWidthN) {
       rowTiles.push_back(mnToDot[{mOff, nOff}]);
     }
-    
-    // Join tiles in this row along N dimension (axis 1)
-    Value rowResult = joinValuesAlongAxis(rowTiles, 1, dot.getLoc(), builder);
+    Value rowResult = joinValuesAlongAxis(rowTiles, 0, dot.getLoc(), builder);
     rowResults.push_back(rowResult);
   }
   
-  // Then join all rows along M dimension (axis 0)
-  Value result = joinValuesAlongAxis(rowResults, 0, dot.getLoc(), builder);
+  // Then join all rows along N dimension (axis 1)
+  Value result = joinValuesAlongAxis(rowResults, 1, dot.getLoc(), builder);
   
   Operation *newOp = result.getDefiningOp();
-  
   return newOp;
 }
 
