@@ -31,6 +31,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "tritongpu-prefetch"
@@ -45,6 +46,8 @@ namespace gpu {
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
 namespace {
+
+SmallVector<RankedTensorType> typesBeforeSplitting;
 
   // Helper function to split a value along a specific axis into numSlices pieces
 // SplitOp only splits along the last dimension, so we need to transpose, reshape, split, reshape, and transpose back
@@ -129,10 +132,16 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
   // Iteratively split in half until we have numSlices pieces
   SmallVector<Value> tiles;
   tiles.push_back(input);
+
   
   int32_t currentCount = 1;
   while (currentCount < numSlices) {
     LDBG("while " << currentCount << " < " << numSlices);
+    RankedTensorType tileType = cast<RankedTensorType>(tiles[0].getType());
+    LDBG("tileType: " << tileType);
+    auto tileTypeLL = toLinearLayout(tileType);
+    LDBG("tileTypeLL: " << tileTypeLL);
+    typesBeforeSplitting.push_back(tileType);
     SmallVector<Value> nextTiles;
     for (Value tile : tiles) {
       auto [left, right] = splitOnce(tile);
@@ -140,9 +149,14 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
       nextTiles.push_back(right);
     }
     tiles = std::move(nextTiles);
+    //tileType = cast<RankedTensorType>(tiles[0].getType());
+    //LDBG("tileType: " << tileType);
+    //tileTypeLL = toLinearLayout(tileType);
+    //LDBG("tileTypeLL: " << tileTypeLL);
+    //typesBeforeSplitting.push_back(tileType);
     currentCount *= 2;
   }
-  
+  LDBG("typesBeforeSplitting.size(): " << typesBeforeSplitting.size());
   return tiles;
 }
 
@@ -158,7 +172,7 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
   }
   
   // Lambda to perform a single binary join
-  auto joinOnce = [&](Value left, Value right) -> Value {
+  auto joinOnce = [&](Value left, Value right, RankedTensorType dstType) -> Value {
     LDBG("joinOnce");
     LDBG("left: " << left);
     LDBG("right: " << right);
@@ -199,9 +213,15 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
     LDBG("newShape.size(): " << newShape.size());
     newShape[axis] *= 2;
     LDBG("newShape: " << newShape[0] << "," << newShape[1]);
+
     //auto newType = RankedTensorType::get(newShape, transposedType.getElementType(), transposedType.getEncoding());
-    auto newType = RankedTensorType::get(newShape, leftType.getElementType(), leftType.getEncoding());
-    Value reshaped = triton::ReshapeOp::create(builder, loc, newType, transposed);
+    // TODO(dtanner)
+    //auto newType = RankedTensorType::get(newShape, leftType.getElementType(), leftType.getEncoding());
+    //auto newType = RankedTensorType::get(newShape, leftType.getElementType());
+    //auto dstTypeLL = toLinearLayout(dstType);
+    //LDBG("dstTypeLL: " << dstTypeLL);
+    Value reshaped = triton::ReshapeOp::create(builder, loc, dstType, transposed);
+    // Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, transposed);
     LDBG("reshaped: " << reshaped);
     auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
     LDBG("reshapedLL: " << reshapedLL);
@@ -212,9 +232,13 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
   // Iteratively join pairs using log2 iterations
   while (tiles.size() > 1) {
     LDBG("while " << tiles.size() << " > 1");
+    RankedTensorType dstType = typesBeforeSplitting.pop_back_val();
+    LDBG("dstType: " << dstType);
+    auto dstTypeLL = toLinearLayout(dstType);
+    LDBG("dstTypeLL: " << dstTypeLL);
     SmallVector<Value> nextTiles;
     for (size_t i = 0; i < tiles.size(); i += 2) {
-      Value joined = joinOnce(tiles[i], tiles[i + 1]);
+      Value joined = joinOnce(tiles[i], tiles[i + 1], dstType);
       nextTiles.push_back(joined);
     }
     tiles = std::move(nextTiles);
