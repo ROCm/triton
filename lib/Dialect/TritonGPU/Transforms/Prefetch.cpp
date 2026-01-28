@@ -444,7 +444,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
 
   // Generate dots[m, n, k] and local_loads[m, n, k] for all slices
   // Triple nested loop over K, M, N dimensions (K outermost)
-  Operation *lastOp = nullptr;
+  Operation *lastDotOp = nullptr;
 
   for (int32_t kOff = 0; kOff < totalK; kOff += prefetchWidthK) {
     for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
@@ -469,7 +469,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
             bSlice = mapping.lookup(dot.getB());
           LDBG("bSlice0: " << bSlice);
         } else {
-          // Generate prefetch for operand A (sliced in M and K dimensions)
+          // Generate local_loal for operand A (sliced in M and K dimensions)
           FailureOr<Value> awtA = getAsyncWaitTokenForLocalLoad(
               dot2aVals[dot].back().getDefiningOp(), false, builder, &mapping);
           aSlice = generateLocalLoadSlice(
@@ -479,7 +479,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
           cloneElementwiseOps(aSlice, dot2aVals[dot], builder);
           LDBG("aSlice: " << aSlice);
           
-          // Generate prefetch for operand B (sliced in K and N dimensions)
+          // Generate local_load for operand B (sliced in K and N dimensions)
           FailureOr<Value> awtB = getAsyncWaitTokenForLocalLoad(
               dot2bVals[dot].back().getDefiningOp(), false, builder, &mapping);
           bSlice = generateLocalLoadSlice(
@@ -510,7 +510,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
 
         // Update the accumulator for this (M,N) tile
         mnToDot[{mOff, nOff}] = newDot->getResult(0);
-        lastOp = newDot;
+        lastDotOp = newDot;
         
         // Delay issuing the last dot
         //bool isLastK = (kOff + prefetchWidthK == totalK);
@@ -525,12 +525,10 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
       }
     }
   }
-  builder.setInsertionPoint(lastOp);
 
   // Concatenate all M×N tiles back into a single tensor with original shape
   // First join tiles along M dimension (within each row)
   SmallVector<Value> rowResults;
-  
   for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
     SmallVector<Value> rowTiles;
     for (int32_t nOff = 0; nOff < totalN; nOff += prefetchWidthN) {
@@ -539,11 +537,11 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
     Value rowResult = joinValuesAlongAxis(rowTiles, 0, dot.getLoc(), builder);
     rowResults.push_back(rowResult);
   }
-  
   // Then join all rows along N dimension (axis 1)
   Value result = joinValuesAlongAxis(rowResults, 1, dot.getLoc(), builder);
   
   Operation *newOp = result.getDefiningOp();
+  builder.setInsertionPoint(lastDotOp);
   return newOp;
 }
 
