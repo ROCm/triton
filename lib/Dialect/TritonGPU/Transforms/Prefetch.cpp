@@ -469,6 +469,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
             bSlice = mapping.lookup(dot.getB());
           LDBG("bSlice0: " << bSlice);
         } else {
+          builder.setInsertionPoint(lastDotOp);
           // Generate local_loal for operand A (sliced in M and K dimensions)
           FailureOr<Value> awtA = getAsyncWaitTokenForLocalLoad(
               dot2aVals[dot].back().getDefiningOp(), false, builder, &mapping);
@@ -488,6 +489,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
               std::nullopt, std::nullopt, nOff, prefetchWidthN, kOff, prefetchWidthK);
           cloneElementwiseOps(bSlice, dot2bVals[dot], builder);
           LDBG("bSlice: " << bSlice);
+          builder.setInsertionPointAfter(lastDotOp);
         }
         
         // Get the accumulator for this (M,N) tile
@@ -539,7 +541,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   }
   // Then join all rows along N dimension (axis 1)
   Value result = joinValuesAlongAxis(rowResults, 1, dot.getLoc(), builder);
-  
+
   Operation *newOp = result.getDefiningOp();
   builder.setInsertionPoint(lastDotOp);
   return newOp;
