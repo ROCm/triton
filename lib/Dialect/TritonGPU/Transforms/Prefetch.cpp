@@ -95,7 +95,13 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, val);
     LDBG("reshaped: " << reshaped);
     auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
-    LDBG("reshapedLL: " << reshapedLL);
+    LDBG("reshapedLL: " << reshapedLL);    
+    // Verify the ReshapeOp is valid
+    auto reshapeOp = cast<triton::ReshapeOp>(reshaped.getDefiningOp());
+    if (failed(reshapeOp.verify())) {
+      reshapeOp.emitError("ReshapeOp verification failed in splitOnce");
+      assert(false && "ReshapeOp verification failed");
+    }
     
     // Permute to move the "2" dimension to last position if needed
     Value transposed = reshaped;
@@ -109,18 +115,30 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
       trans.push_back(axis);  // Move "2" dimension to end
       LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
       transposed = triton::TransOp::create(builder, loc, reshaped, trans);
+      LDBG("transposed: " << transposed);
+      auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
+      LDBG("transposedLL: " << transposedLL);      
+      // Verify the TransOp is valid
+      auto transOp = cast<triton::TransOp>(transposed.getDefiningOp());
+      if (failed(transOp.verify())) {
+        transOp.emitError("TransOp verification failed in splitOnce");
+        assert(false && "TransOp verification failed");
+      }
     }
-    LDBG("transposed: " << transposed);
-    auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
-    LDBG("transposedLL: " << transposedLL);
 
     // Split along the last dimension
-    auto split = triton::SplitOp::create(builder, loc, transposed);
+    triton::SplitOp split = triton::SplitOp::create(builder, loc, transposed);
     Value left = split.getResult(0);
     Value right = split.getResult(1);
     LDBG("left: " << left);
     auto leftLL = toLinearLayout(cast<RankedTensorType>(left.getType()));
     LDBG("leftLL: " << leftLL);
+    // Verify the SplitOp is valid
+    auto splitOp = cast<triton::SplitOp>(split.getOperation());
+    if (failed(splitOp.verify())) {
+      splitOp.emitError("SplitOp verification failed in splitOnce");
+      assert(false && "SplitOp verification failed");
+    }
     
     // Convert back to original encoding (e.g. MfmaEncodingAttr) rather than LinearEncodingAttr so the dots will work
     auto leftType = cast<RankedTensorType>(left.getType());
@@ -191,10 +209,16 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
 
     // Join creates a new trailing dimension of size 2
     // 64x64 + 64x64 -> 64x64x2 (where 2 is fastest changing dim)
-    auto joined = triton::JoinOp::create(builder, loc, left, right);
+    Value joined = triton::JoinOp::create(builder, loc, left, right);
     LDBG("joined: " << joined);
-    auto joinedLL = toLinearLayout(cast<RankedTensorType>(joined.getType()));
-    LDBG("joinedLL: " << joinedLL);
+     auto joinedLL = toLinearLayout(cast<RankedTensorType>(joined.getType()));
+    LDBG("joinedLL: " << joinedLL);   
+    // Verify the JoinOp is valid
+    auto joinOp = cast<triton::JoinOp>(joined.getDefiningOp());
+    if (failed(joinOp.verify())) {
+      joinOp.emitError("JoinOp verification failed in joinOnce");
+      assert(false && "JoinOp verification failed");
+    }
 
     // Transpose 64x64x2 -> 2x64x64
     // for axis=0, trans=2, 0, 1
@@ -209,7 +233,13 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
     Value transposed = triton::TransOp::create(builder, loc, joined, trans);
     LDBG("transposed: " << transposed);
     auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
-    LDBG("transposedLL: " << transposedLL);
+    LDBG("transposedLL: " << transposedLL);    
+    // Verify the TransOp is valid
+    auto transOp = cast<triton::TransOp>(transposed.getDefiningOp());
+    if (failed(transOp.verify())) {
+      transOp.emitError("TransOp verification failed in joinOnce");
+      assert(false && "TransOp verification failed");
+    }
 
     // Reshape 2x64x64 -> 128x64
     auto transposedType = cast<RankedTensorType>(transposed.getType());
@@ -242,6 +272,14 @@ Fix: reshape the LinearLayout from transposed to the target shape, then create t
     LDBG("linearType: " << linearType);
     Value reshaped = triton::ReshapeOp::create(builder, loc, linearType, transposed);
     LDBG("reshaped: " << reshaped);
+    auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
+    LDBG("reshapedLL: " << reshapedLL);
+    // Verify the ReshapeOp is valid
+    auto reshapeOp = cast<triton::ReshapeOp>(reshaped.getDefiningOp());
+    if (failed(reshapeOp.verify())) {
+      reshapeOp.emitError("ReshapeOp verification failed");
+      assert(false && "ReshapeOp verification failed");
+    }
     
     // Convert back to original encoding (AMDMfmaEncodingAttr)
     Value converted = triton::gpu::ConvertLayoutOp::create(builder, loc, dstType, reshaped);

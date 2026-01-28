@@ -313,7 +313,6 @@ static LinearLayout broadcastedDotOperandLayout(MLIRContext *ctx,
 LinearLayout
 AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int rank = shape.size();
-  llvm::outs() << "AMDMfmaEncodingAttr::toLinearLayout() rank=" << rank << " getRank()=" << getRank() << "\n";
   assert(rank == getRank());
 
   bool hasBatchDim = rank == 3;
