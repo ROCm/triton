@@ -1300,8 +1300,20 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
       barrierPtr = smemObj.getBase();
     }
 
-    // Verifier ensures smem is not usind a PaddedSharedEncodingAttr
-    auto sharedLayout = triton::gpu::toLinearLayout(smemTy);
+    auto paddedEnc = dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
+    unsigned padInterval = 0;
+    unsigned padAmount = 0;
+    triton::LinearLayout sharedLayout;
+
+    if (paddedEnc) {
+      // Verifier ensures that there is exactly one interval-padding pair
+      padInterval = paddedEnc.getIntervals()[0];
+      padAmount = paddedEnc.getPaddings()[0];
+      sharedLayout = paddedEnc.getLinearComponent();
+    } else {
+      sharedLayout = triton::gpu::toLinearLayout(smemTy);
+    }
+
     auto kBlock = rewriter.getStringAttr("block");
     auto cgaLayout = sharedLayout.sublayout(
         {kBlock}, to_vector(sharedLayout.getOutDimNames()));
@@ -1311,7 +1323,7 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
     mlir::LLVM::AMD::emitTDMLoadStore(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
-        /*padInterval=*/0, /*padAmount=*/0, offset, dstPtr, pred,
+        padInterval, padAmount, offset, dstPtr, pred,
         /*multicastMask=*/{}, elementType, barrierPtr,
         /*isLoad=*/false, cgaLayout, ctaId);
 
