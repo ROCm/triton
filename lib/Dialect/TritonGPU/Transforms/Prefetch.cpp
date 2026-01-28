@@ -270,7 +270,8 @@ Fix: reshape the LinearLayout from transposed to the target shape, then create t
     auto linearType = RankedTensorType::get(
         dstType.getShape(), dstType.getElementType(), linearEnc);
     LDBG("linearType: " << linearType);
-    Value reshaped = triton::ReshapeOp::create(builder, loc, linearType, transposed);
+    // First we Reshape with just the new shape; second we convert layout to the dstType encoding.
+    Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, transposed);
     LDBG("reshaped: " << reshaped);
     auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
     LDBG("reshapedLL: " << reshapedLL);
