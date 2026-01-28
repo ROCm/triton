@@ -2122,14 +2122,13 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
     num_warps: gl.constexpr = 4
 
     gLoadLayoutA: gl.constexpr = gl.DistributedLinearLayout(
-        reg_bases=[[0, 1], [0, 2], [0, 4], [0, 8], [4, 0], [8, 0], [128, 0]], lane_bases=[[0, 16], [0, 32], [0, 64],
-                                                                                          [16, 0], [32, 0], [64, 0]],
+        reg_bases=[[0, 1], [0, 2], [0, 4], [0, 8], [4, 0], [8, 0], [128, 0]],
+        lane_bases=[[0, 16], [0, 32], [0, 64], [16, 0], [32, 0], [64, 0]],
         warp_bases=[[1, 0], [2, 0]], block_bases=[], shape=[BLOCK_M, BLOCK_K])
     gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
-        reg_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 4], [0, 8]], lane_bases=[[16, 0], [32, 0], [64, 0], [0, 16],
-                                                                                [0, 32], [0, 64]], warp_bases=[[0, 1],
-                                                                                                               [0, 2]],
-        block_bases=[], shape=[BLOCK_K, BLOCK_N // 2])
+        reg_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 4], [0, 8]],
+        lane_bases=[[16, 0], [32, 0], [64, 0], [0, 16], [0, 32], [0, 64]],
+        warp_bases=[[0, 1], [0, 2]], block_bases=[], shape=[BLOCK_K, BLOCK_N // 2])
 
     offs_am = gl.arange(0, BLOCK_M, gl.SliceLayout(1, gLoadLayoutA))
     offs_ak = gl.arange(0, BLOCK_K, gl.SliceLayout(0, gLoadLayoutA))
@@ -2223,6 +2222,7 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
     a = cdna4_async_copy.load_shared_relaxed(smemA.index(l_idx), dotOpLayoutA)
     b0 = cdna4_async_copy.load_shared_relaxed(smemB0.index(l_idx), dotOpLayoutB)
 
+    cdna4_async_copy.wait_group(2)
     for k in range(0, iterMax - 1, 2):
 
         sched_barrier(0)
@@ -2231,8 +2231,6 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
         ## LR B1[0]
         ## AC (A+B0)[2]
         acc0 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b0, None, 'e5m2', acc0)
-
-        cdna4_async_copy.wait_group(2)
         b1 = cdna4_async_copy.load_shared_relaxed(smemB1.index(0), dotOpLayoutB)
 
         cdna4_async_copy.buffer_load_to_shared(smemA.index(0), a_base, a_offsets, mask=(k != (iterMax - 2)))
@@ -2247,9 +2245,8 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
         ## DOT(A, B1)[0]
         ## LR (A+B0)[1]
         ## AC B1[2]
-        acc1 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b1, None, 'e5m2', acc1)
-
         cdna4_async_copy.wait_group(2)
+        acc1 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b1, None, 'e5m2', acc1)
         a = cdna4_async_copy.load_shared_relaxed(smemA.index(1), dotOpLayoutA)
         b0 = cdna4_async_copy.load_shared_relaxed(smemB0.index(1), dotOpLayoutB)
 
@@ -2264,9 +2261,8 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
         ## DOT(A, B0)[1]
         ## LR B1[1]
         ## AC (A+B0)[3]
-        acc0 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b0, None, 'e5m2', acc0)
-
         cdna4_async_copy.wait_group(2)
+        acc0 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b0, None, 'e5m2', acc0)
         b1 = cdna4_async_copy.load_shared_relaxed(smemB1.index(1), dotOpLayoutB)
 
         cdna4_async_copy.buffer_load_to_shared(smemA.index(1), a_base, a_offsets, mask=(k != (iterMax - 2)))
@@ -2281,15 +2277,15 @@ def v10_f8(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_ak,  #
         ## DOT(A, B1)[1]
         ## LR (A+B0)[1]
         ## AC B1[3]
-        acc1 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b1, None, 'e5m2', acc1)
-
         cdna4_async_copy.wait_group(2)
+        acc1 = gl.amd.cdna4.mfma_scaled(a, None, 'e5m2', b1, None, 'e5m2', acc1)
         a = cdna4_async_copy.load_shared_relaxed(smemA.index(0), dotOpLayoutA)
         b0 = cdna4_async_copy.load_shared_relaxed(smemB0.index(0), dotOpLayoutB)
 
         cdna4_async_copy.buffer_load_to_shared(smemB1.index(1), b_base, b1_offsets, mask=(k != (iterMax - 2)))
         cdna4_async_copy.commit_group()
 
+        cdna4_async_copy.wait_group(2)
         sched_barrier(0)
 
     cdna4_async_copy.wait_group(0)

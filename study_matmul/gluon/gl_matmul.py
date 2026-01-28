@@ -62,15 +62,15 @@ def matmul(a, b, num_warps):
     assert a.is_contiguous(), "Matrix A must be contiguous"
     M, K = a.shape
     K, N = b.shape
-    # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 64
     if a.dtype == torch.float8_e5m2:
         BLOCK_K = 128
         from matmul_kernels.matmul_kernel import v10_f8 as matmul_kernel
+        c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     else:
         from matmul_kernels.matmul_kernel import v10 as matmul_kernel
+        c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     GRID_MN = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
     grid = (GRID_MN, 1)
     NUM_XCDS = 8
@@ -88,12 +88,12 @@ def matmul(a, b, num_warps):
 
 def get_x_vals():
     return [
-        #(4096, 4096, 1024),
-        #(4096, 4096, 2048),
-        #(4096, 4096, 3072),
+        (4096, 4096, 1024),
+        (4096, 4096, 2048),
+        (4096, 4096, 3072),
         (4096, 4096, 4096),
-        #(4096, 4096, 8192),
-        #(4096, 4096, 16384),
+        (4096, 4096, 8192),
+        (4096, 4096, 16384),
     ]
 
 
@@ -132,9 +132,9 @@ configs.append(
         line_arg="dtype",  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
         # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-        line_vals=["fp16"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-        line_names=["fp16"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
-        styles=[("green", "-"), ("yellow", "--")],
+        line_vals=["fp16", "bf16", "f8"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
+        line_names=["fp16", "bf16", "f8"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+        styles=[("green", "-"), ("yellow", "--"), ("red", "--")],
         ylabel="TFLOPS",  # Label name for the y-axis
         plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
         args={},
@@ -159,6 +159,7 @@ def benchmark(M, N, K, dtype):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-#test_correctness("f8")
-#test_correctness("bf16")
+test_correctness("f8")
+test_correctness("fp16")
+test_correctness("bf16")
 benchmark.run(show_plots=False, print_data=True)
