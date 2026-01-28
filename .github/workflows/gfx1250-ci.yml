@@ -33,7 +33,7 @@ jobs:
           set -xeo pipefail
           RENDER_GID=$(getent group render | cut -d: -f3)
           echo "Render group ID: ${RENDER_GID}"
-          docker run --pull=never --rm \
+          docker run --rm \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -41,13 +41,14 @@ jobs:
             -v /data/ci/llvm/a992f294-release:/llvm \
             -v /data/ci/ffm/rocm-ffmlite-mi450-1318-ce0033dd-rel-20251222:/ffm-base \
             -v /data/ci/ffm/ffmlite-main-503fe115-20260109:/ffm-update \
-            -v /data/ci/triton-cache/json:/home/mirror/.triton/json \
-            -v /data/ci/triton-cache/llvm:/home/mirror/.triton/llvm \
-            -v /data/ci/triton-cache/nvidia:/home/mirror/.triton/nvidia \
-            -v /data/ci/ccache:/home/mirror/.ccache \
+            -v /data/ci/triton-cache/json:/root/.triton/json \
+            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
+            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
+            -v /data/ci/ccache:/root/.ccache \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-env -lc "/code/.github/workflows/gluon.sh"
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-env:1.3 \
+            -lc "/code/.github/workflows/gluon.sh"
 
   gfx1250-triton:
     name: Triton
@@ -62,7 +63,7 @@ jobs:
           set -xeo pipefail
           RENDER_GID=$(getent group render | cut -d: -f3)
           echo "Render group ID: ${RENDER_GID}"
-          docker run --pull=never --rm \
+          docker run --rm \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -70,11 +71,11 @@ jobs:
             -v /data/ci/llvm/a992f294-release:/llvm \
             -v /data/ci/ffm/rocm-ffmlite-mi450-1318-ce0033dd-rel-20251222:/ffm-base \
             -v /data/ci/ffm/ffmlite-main-503fe115-20260109:/ffm-update \
-            -v /data/ci/triton-cache/json:/home/mirror/.triton/json \
-            -v /data/ci/triton-cache/llvm:/home/mirror/.triton/llvm \
-            -v /data/ci/triton-cache/nvidia:/home/mirror/.triton/nvidia \
-            -v /data/ci/ccache:/home/mirror/.ccache \
+            -v /data/ci/triton-cache/json:/root/.triton/json \
+            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
+            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
+            -v /data/ci/ccache:/root/.ccache \
             -w /code \
             --entrypoint bash \
-            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.2 \
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.3 \
             -lc "/code/.github/workflows/triton.sh"

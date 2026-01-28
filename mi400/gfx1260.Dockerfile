@@ -1,4 +1,4 @@
-# This is primarily meant as a docker image for gfx1250 CI.
+# This is primarily meant as a docker image for gfx1260 CI.
 # This docker image tries to install necessary packages to be hermetic.
 # Though in order to make updating key components easier, it expects volume
 # binding to the following directories inside docker:
@@ -10,14 +10,14 @@
 # - /root/.ccache/: ccache directory
 
 # Build docker with public PyTorch:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-env
+# docker build . -f /path/to/triton/mi400/gfx1260.Dockerfile -t ci/gfx1260-env
 
 # Build docker with NPI PyTorch:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
+# docker build . -f /path/to/triton/mi400/gfx1260.Dockerfile -t ci/gfx1260-pytorch-env \
 #   --build-arg USE_NPI_TORCH=TRUE
 
 # Build docker with NPI ROCm + roccap:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
+# docker build . -f /path/to/triton/mi400/gfx1260.Dockerfile -t ci/gfx1260-roccap \
 #   --build-arg USE_ROCCAP=TRUE
 FROM ubuntu:24.04
 
@@ -30,7 +30,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
   sudo numactl libelf1 libzstd-dev curl wget rsync && \
   apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# gfx1250 development environment
+# gfx1260 development environment
 # We are in a docker so it's fine to break system packages
 RUN pip config set global.break-system-packages true
 RUN pip install --no-cache-dir --ignore-installed --upgrade pip PyYAML
@@ -45,18 +45,16 @@ RUN pip install --no-cache-dir --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pyb
 # Switch to choose either NPI or regular torch distribution
 ARG USE_NPI_TORCH=FALSE
 
-# For NPI PyTorch, right now we need to manually install dependencies.
-# We can remove this once incoming wheels fix this issue.
-# TODO: Don't install deps and rocm-sdk-devel manually once incoming wheels fix this issue.
+# TODO: Use pip once it's ready
+COPY whls-gfx1260/ /whls/
+
 RUN set -eux; \
   if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
-    pip install --no-cache-dir typing_extensions sympy networkx jinja2 fsspec && \
-    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ --no-cache-dir torch torchaudio torchvision && \
-    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ rocm-sdk-devel && \
-    mkdir -p /opt/rocm/ && ln -s $(rocm-sdk path --root)/lib /opt/rocm/lib && \
-    # hip-python not required but needed to support current gfx1250 workarounds
+    pip install /whls/* && \
+    # hip-python not required but needed to support current gfx1260 workarounds
     pip install --no-cache-dir --upgrade hip-python -i https://test.pypi.org/simple/ && \
-    pip uninstall -y triton pytorch-triton pytorch-triton-rocm; \
+    pip uninstall -y triton pytorch-triton pytorch-triton-rocm && \
+    rm -rf /whls; \
   else \
     pip install --no-cache-dir --upgrade hip-python -i https://test.pypi.org/simple/ && \
     pip install --no-cache-dir torch -i https://download.pytorch.org/whl/nightly/rocm6.4 && \
@@ -76,18 +74,10 @@ ARG ROCPLAYCAP_VERSION="4.5.1"
 
 RUN set -eux; \
   if [ "${USE_ROCCAP}" = "TRUE" ]; then \
-    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ --no-cache-dir rocm-sdk-core && \
-    export ROCM_PATH="$(pip show torch | grep ^Location: | cut -d' ' -f2-)/_rocm_sdk_core" && \
-    export LD_LIBRARY_PATH="${ROCM_PATH}/lib/" && \
-    echo "ROCM_PATH=${ROCM_PATH}" && \
-    find ${ROCM_PATH} -name "libhsa-runtime64.so*" && \
     wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/releases/rocplaycap-${ROCPLAYCAP_VERSION}/rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     tar -xf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     cd ./rocplaycap-src-${ROCPLAYCAP_VERSION} && \
-    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$HOME/.local \
-      -DCMAKE_PREFIX_PATH=$ROCM_PATH \
-      -DHSA_LIBRARY:FILEPATH=${ROCM_PATH}/lib/libhsa-runtime64.so.1 \
-      -DHSA_INCLUDE_DIR:PATH=${ROCM_PATH}/include/ && \
+    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$HOME/.local -DCMAKE_PREFIX_PATH=/opt/rocm/ -DHSA_ROOT_DIR:PATH=/opt/rocm/hsa/ && \
     cmake --build build --target install && \
     cd .. && rm -rf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz ./rocplaycap-src-${ROCPLAYCAP_VERSION}; \
   fi
@@ -95,7 +85,6 @@ RUN set -eux; \
 RUN mkdir $HOME/.ssh && echo -e "Host github.com\n\tHostname ssh.github.com\n\tPort 443" >> $HOME/.ssh/config
 ENV CCACHE_DIR=/root/.ccache
 ENV PATH="/root/.local/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/rocm/lib"
 
 WORKDIR /code
 ENTRYPOINT /usr/bin/bash

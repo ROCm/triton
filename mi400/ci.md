@@ -44,26 +44,28 @@ consistent regarding file ownership:
 sudo chown -R $(id -u):$(id -g) /data/ci
 ```
 
+### Login to Harbor
+Log in to Harbor with your NTID, so that we can push and pull images.
+
+You need to do that on the server where you build the image and the server to host the runner.
+
+```sh
+sudo su - # Change to root on runner server since it will be run as root later
+
+docker login mkmhub.amd.com
+```
+
 ### Build docker image
 
 ```sh
-cd /data/ci/ffm/
-docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-env \
-  --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-  --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
-docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
-  --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-  --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-  --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=710
-docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
-  --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-  --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-  --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=710
-```
+cd /path/to/triton/mi400
 
-The above creates a `mirror` user account inside the docker which has the same
-UID and GID as your account. So whatever file it touches, it won't mess up
-with ownership on the host.
+# 1. Download ffmlite and place it under ./ffmlite
+
+# 2. Build and push docker images, e.g. ./build_docker.sh 1.3
+# Note: Please check the latest version in mkmhub.amd.com/sw-aiggfx1250-dev and increment.
+./build_docker.sh <version>
+```
 
 ### Configure GitHub Action runner
 
@@ -76,6 +78,8 @@ curl -o actions-runner-linux-x64-2.329.0.tar.gz -L https://github.com/actions/ru
 echo "194f1e1e4bd02f80b7e9633fc546084d8d4e19f3928a324d512ea53430102e1d  actions-runner-linux-x64-2.329.0.tar.gz" | shasum -a 256 -c
 tar xzf ./actions-runner-linux-x64-2.329.0.tar.gz
 
+# To make sure runners can successfully clean up artifacts created inside the container by root, we need to run runners as root
+export RUNNER_ALLOW_RUNASROOT=1
 ./config.sh --url https://github.amd.com/GFX-IP-Arch/triton --token <token>
 ```
 Get a token from https://github.amd.com/GFX-IP-Arch/triton/settings/actions/runners/new?arch=x64&os=linux.
@@ -94,18 +98,14 @@ can be updated via GitHub UI anyway.
 
 ### Run GitHub Action runner
 
-Finally start the runner in a `screen` to keep it always running (we might
-want to configure it as a service but maybe later):
-
 ```sh
-screen -S github-runner
-# Inside the screen:
-cd /data/ci/actions-runner
-./run.sh
-```
+sudo cp /path/to/triton/mi400/github-actions-runner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start github-actions-runner
 
-To detach from the current `screen`: press `Ctrl+A` and then press `d`.
-To reattach, run `screen -r github-runner`.
+# check status after running
+sudo systemctl status github-actions-runner -a
+```
 
 ## Update LLVM
 
@@ -134,7 +134,7 @@ Note that the package downloaded only contains `libhsakmtmodel.so`, so we
 still relying on a "base FFM Lite" that shipped to customers which bundles
 HIP runtime and so.
 
-Then send pull request to update `.github/workflows/gfx1250-ci.sh` to use
+Then send pull request to update `.github/workflows/gfx1250-ci.yml` to use
 the new path for mounting volume.
 
 Common issues you may encounter:

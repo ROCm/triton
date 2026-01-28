@@ -35,7 +35,7 @@ jobs:
           echo "Render group ID: ${RENDER_GID}"
           DIRNAME=${{ env.DIRNAME }}
           mkdir /data/ci/llir/${DIRNAME}
-          docker run --pull=never --rm \
+          docker run --rm \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -43,14 +43,15 @@ jobs:
             -v /data/ci/llvm/a992f294-debug:/llvm \
             -v /data/ci/ffm/rocm-ffmlite-mi450-1318-ce0033dd-rel-20251222:/ffm-base \
             -v /data/ci/ffm/ffmlite-main-503fe115-20260109:/ffm-update \
-            -v /data/ci/triton-cache/json:/home/mirror/.triton/json \
-            -v /data/ci/triton-cache/llvm:/home/mirror/.triton/llvm \
-            -v /data/ci/triton-cache/nvidia:/home/mirror/.triton/nvidia \
-            -v /data/ci/ccache:/home/mirror/.ccache \
+            -v /data/ci/triton-cache/json:/root/.triton/json \
+            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
+            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
+            -v /data/ci/ccache:/root/.ccache \
             -v /data/ci/llir/${DIRNAME}:/llir \
             -w /code \
             --entrypoint bash \
-            ci/gfx1250-llir -lc "/code/.github/workflows/core_kernel_llir_gen.sh"
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-env:1.3 \
+            -lc "/code/.github/workflows/core_kernel_llir_gen.sh"
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
