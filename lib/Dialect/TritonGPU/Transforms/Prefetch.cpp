@@ -49,7 +49,7 @@ namespace {
 
 SmallVector<RankedTensorType> typesBeforeSplitting;
 
-  // Helper function to split a value along a specific axis into numSlices pieces
+// Helper function to split a value along a specific axis into numSlices pieces
 // SplitOp only splits along the last dimension, so we need to transpose, reshape, split, reshape, and transpose back
 // This function recursively splits in half until numSlices pieces are created
 static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, int axis, Location loc, OpBuilder &builder) {
@@ -58,6 +58,10 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
   if (numSlices == 1) {
     return {input};
   }
+  
+  // Store the original encoding to convert back after splitting
+  RankedTensorType originalInputType = cast<RankedTensorType>(input.getType());
+  Attribute originalEncoding = originalInputType.getEncoding();
   
   // Lambda to perform a single binary split
   auto splitOnce = [&](Value val) -> std::pair<Value, Value> {
@@ -73,20 +77,12 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     int rank = shape.size();
     
     // Reshape to split the target axis into [N/2, 2]
-    // TODO(dtanner) Fred says this may be the most difficult step, so what I have may be too simple.
     SmallVector<int64_t> newShape;
     int splitDimPos = axis;  // Position of the "2" dimension after reshape
     for (int i = 0; i < rank; ++i) {
       if (i == axis) {
-        //if (axis == 1) {
-          newShape.push_back(2);
-          newShape.push_back(shape[i] / 2);
-          //splitDimPos = i;
-        //} else {
-        //  splitDimPos = i;
-        //  newShape.push_back(2);
-        //  newShape.push_back(shape[i] / 2);
-        //}
+        newShape.push_back(2);
+        newShape.push_back(shape[i] / 2);
       } else {
         newShape.push_back(shape[i]);
       }
@@ -123,17 +119,32 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     Value left = split.getResult(0);
     Value right = split.getResult(1);
     LDBG("left: " << left);
-    // LDBG("right: " << right);
     auto leftLL = toLinearLayout(cast<RankedTensorType>(left.getType()));
     LDBG("leftLL: " << leftLL);
+    
+    // Convert back to original encoding (e.g. MfmaEncodingAttr) rather than LinearEncodingAttr so the dots will work
+    auto leftType = cast<RankedTensorType>(left.getType());
+    auto rightType = cast<RankedTensorType>(right.getType());
+    
+    // Create target types with original encoding
+    auto leftTargetType = RankedTensorType::get(
+        leftType.getShape(), leftType.getElementType(), originalEncoding);
+    LDBG("leftTargetType: " << leftTargetType);
+    auto leftTargetTypeLL = toLinearLayout(cast<RankedTensorType>(leftTargetType));
+    LDBG("leftTargetTypeLL: " << leftTargetTypeLL);
+    auto rightTargetType = RankedTensorType::get(
+        rightType.getShape(), rightType.getElementType(), originalEncoding);
+    
+    // Convert from LinearEncodingAttr back to original encoding
+    left = triton::gpu::ConvertLayoutOp::create(builder, loc, leftTargetType, left);
+    right = triton::gpu::ConvertLayoutOp::create(builder, loc, rightTargetType, right);
+    LDBG("left after convert: " << left);    
     return {left, right};
   };
   
   // Iteratively split in half until we have numSlices pieces
   SmallVector<Value> tiles;
   tiles.push_back(input);
-
-  
   int32_t currentCount = 1;
   while (currentCount < numSlices) {
     LDBG("while " << currentCount << " < " << numSlices);
@@ -149,11 +160,6 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
       nextTiles.push_back(right);
     }
     tiles = std::move(nextTiles);
-    //tileType = cast<RankedTensorType>(tiles[0].getType());
-    //LDBG("tileType: " << tileType);
-    //tileTypeLL = toLinearLayout(tileType);
-    //LDBG("tileTypeLL: " << tileTypeLL);
-    //typesBeforeSplitting.push_back(tileType);
     currentCount *= 2;
   }
   LDBG("typesBeforeSplitting.size(): " << typesBeforeSplitting.size());
@@ -213,20 +219,36 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
     LDBG("newShape.size(): " << newShape.size());
     newShape[axis] *= 2;
     LDBG("newShape: " << newShape[0] << "," << newShape[1]);
-
-    //auto newType = RankedTensorType::get(newShape, transposedType.getElementType(), transposedType.getEncoding());
-    // TODO(dtanner)
-    //auto newType = RankedTensorType::get(newShape, leftType.getElementType(), leftType.getEncoding());
-    //auto newType = RankedTensorType::get(newShape, leftType.getElementType());
-    //auto dstTypeLL = toLinearLayout(dstType);
-    //LDBG("dstTypeLL: " << dstTypeLL);
-    Value reshaped = triton::ReshapeOp::create(builder, loc, dstType, transposed);
-    // Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, transposed);
+    
+    // Convert dstType (AMDMfmaEncodingAttr) to LinearEncodingAttr for the reshape.
+    /* TODO(dtanner) There may be an error here. LLM says:
+    The error is more likely from ReshapeOp, not ConvertLayoutOp.
+Reasons:
+The error format "Expected result encoding ... but was ..." matches verifyLayoutsAreEqual() called by ReshapeOp::verify() (as we saw earlier).
+Both encodings are LinearEncodingAttr, but with different LinearLayouts (register bases reordered). This suggests a mismatch during ReshapeOp verification.
+ConvertLayoutOp converts between encodings and doesn't verify structural equality like this.
+What's happening:
+linearType is created from dstType (AMDMfmaEncodingAttr) → LinearLayout A
+transposed has LinearEncodingAttr → LinearLayout B
+ReshapeOp infers the destination encoding from transposed → LinearLayout B
+ReshapeOp::verify() compares LinearLayout A (expected) vs LinearLayout B (inferred) → mismatch
+The issue: we're using the LinearLayout from dstType (AMDMfmaEncodingAttr), but ReshapeOp infers from transposed (LinearEncodingAttr), producing a different LinearLayout.
+Fix: reshape the LinearLayout from transposed to the target shape, then create the LinearEncodingAttr from that, rather than using the LinearLayout from dstType. This ensures ReshapeOp infers the same encoding we provide.
+    */
+    auto linearEnc = triton::gpu::toLinearEncoding(dstType);
+    LDBG("linearEnc: " << linearEnc);
+    auto linearType = RankedTensorType::get(
+        dstType.getShape(), dstType.getElementType(), linearEnc);
+    LDBG("linearType: " << linearType);
+    Value reshaped = triton::ReshapeOp::create(builder, loc, linearType, transposed);
     LDBG("reshaped: " << reshaped);
-    auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
-    LDBG("reshapedLL: " << reshapedLL);
-
-    return reshaped;
+    
+    // Convert back to original encoding (AMDMfmaEncodingAttr)
+    Value converted = triton::gpu::ConvertLayoutOp::create(builder, loc, dstType, reshaped);
+    LDBG("converted: " << converted);
+    auto convertedLL = toLinearLayout(cast<RankedTensorType>(converted.getType()));
+    LDBG("convertedLL: " << convertedLL);
+    return converted;
   };
   
   // Iteratively join pairs using log2 iterations
@@ -974,6 +996,7 @@ struct PrefetchPass : public impl::TritonGPUPrefetchBase<PrefetchPass> {
       prefetcher.emitPrologue();
 
       scf::ForOp newForOp = prefetcher.createNewForOp();
+      LDBG("newForOp: " << newForOp);
 
       // replace the original loop
       for (unsigned i = 0; i < forOp->getNumResults(); ++i)
