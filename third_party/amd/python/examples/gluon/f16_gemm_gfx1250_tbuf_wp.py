@@ -9,160 +9,29 @@ import torch
 
 import triton
 from triton.experimental import gluon
-from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
 
 # Handle imports for both pytest (module context) and direct execution
 try:
     from .gfx1250_utils import static_profile
+    from .f16_gemm_common_gfx1250 import (
+        create_shared_layouts,
+        create_tensor_descriptors,
+        issue_loads,
+        issue_wmma,
+        lds_load,
+        issue_wmma_compute,
+    )
 except ImportError:
     from gfx1250_utils import static_profile
-
-
-@aggregate
-class PersistentTileScheduler:
-    pid_start: ttgl.tensor
-    pid_end: ttgl.tensor
-    num_pid_m: ttgl.tensor
-
-    @gluon.constexpr_function
-    def __init__(self, pid_start, pid_end, num_pid_m):
-        self.pid_start = pid_start
-        self.pid_end = pid_end
-        self.num_pid_m = num_pid_m
-
-    @gluon.jit
-    def initialize(M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr):
-        kernel_id = ttgl.program_id(axis=0)
-        num_kernels = ttgl.num_programs(axis=0)
-        num_pid_m = ttgl.cdiv(M, BLOCK_M)
-        num_pid_n = ttgl.cdiv(N, BLOCK_N)
-        num_pid = num_pid_m * num_pid_n
-        pid_per_kernel = ttgl.cdiv(num_pid, num_kernels)
-        pid_start = kernel_id * pid_per_kernel
-        pid_end = min(pid_start + pid_per_kernel, num_pid)
-        return PersistentTileScheduler(pid_start, pid_end, num_pid_m)
-
-    @gluon.jit
-    def get_num_tiles(self):
-        return self.pid_end - self.pid_start
-
-    @gluon.jit
-    def get_tile(self, idx):
-        # Delinearize the tile ID along M.
-        pid = self.pid_start + idx
-        pid_m = pid % self.num_pid_m
-        pid_n = pid // self.num_pid_m
-        return pid_m, pid_n
-
-
-@gluon.jit
-def create_tensor_descriptors(a_ptr, b_ptr, off_am, off_bn, stride_am, stride_ak, stride_bn, stride_bk,
-                              shared_layout_a: ttgl.constexpr, shared_layout_b: ttgl.constexpr, M: ttgl.constexpr,
-                              N: ttgl.constexpr, K: ttgl.constexpr, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                              BLOCK_K: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-        base=a_ptr + off_am,  #
-        shape=(M, K),  #
-        strides=(stride_am, stride_ak),  #
-        block_shape=(BLOCK_M, BLOCK_K),  #
-        layout=shared_layout_a)
-    if not TRANSPOSE_B:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-            base=b_ptr + off_bn,  #
-            shape=(K, N),  #
-            strides=(stride_bk, stride_bn),  #
-            block_shape=(BLOCK_K, BLOCK_N),  #
-            layout=shared_layout_b)
-    else:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(  #
-            base=b_ptr + off_bn,  #
-            shape=(N, K),  #
-            strides=(stride_bn, stride_bk),  #
-            block_shape=(BLOCK_N, BLOCK_K),  #
-            layout=shared_layout_b)
-
-    return a_desc, b_desc
-
-
-@gluon.jit
-def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
-                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=1):
-    ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K],  #
-                                    a_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    if not TRANSPOSE_B:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn],  #
-                                        b_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    else:
-        ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K],  #
-                                        b_buffer.index(producer % NUM_BUFFERS), pred=pred)
-    producer += 1
-    return producer
-
-
-@gluon.jit
-def issue_wmma(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr, accumulator,
-               wait_producers_cnt, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-    ttgl.amd.gfx1250.tdm.async_wait(wait_producers_cnt)
-
-    a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
-    if not TRANSPOSE_B:
-        b = b_buffer.index(consumer % NUM_BUFFERS).load(layout=b_layout)
-    else:
-        b = b_buffer.index(consumer % NUM_BUFFERS).permute([1, 0]).load(layout=b_layout)
-
-    accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
-    consumer += 1
-    return consumer, accumulator
-
-
-@gluon.jit
-def lds_load(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr,
-             NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
-
-    a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
-    if not TRANSPOSE_B:
-        b = b_buffer.index(consumer % NUM_BUFFERS).load(layout=b_layout)
-    else:
-        b = b_buffer.index(consumer % NUM_BUFFERS).permute([1, 0]).load(layout=b_layout)
-
-    consumer += 1
-    return consumer, a, b
-
-
-@gluon.jit
-def issue_wmma_compute(a, b, accumulator):
-    accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
-    return accumulator
-
-
-@gluon.jit
-def lds_subtile_load(consumer, start, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr,
-                     NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, SUBTILE_LEN: ttgl.constexpr):
-    # Create subtile by slicing along K dimension
-    index = consumer % NUM_BUFFERS
-    a = a_buffer.index(index).slice(start, SUBTILE_LEN, 1).load(layout=a_layout)
-    if not TRANSPOSE_B:
-        b = b_buffer.index(index).slice(start, SUBTILE_LEN, 0).load(layout=b_layout)
-    else:
-        b = b_buffer.index(index).slice(start, SUBTILE_LEN, 1).permute([1, 0]).load(layout=b_layout)
-
-    return a, b
-
-
-@gluon.constexpr_function
-def create_shared_layouts(BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
-                          TRANSPOSE_B: ttgl.constexpr):
-    SHARED_LAYOUT_A: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_M, BLOCK_K],
-                                                                                [1, 0])
-    if not TRANSPOSE_B:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K, BLOCK_N],
-                                                                                    [1, 0])
-    else:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_N, BLOCK_K],
-                                                                                    [1, 0])
-
-    return (SHARED_LAYOUT_A, SHARED_LAYOUT_B)
+    from f16_gemm_common_gfx1250 import (
+        create_shared_layouts,
+        create_tensor_descriptors,
+        issue_loads,
+        issue_wmma,
+        lds_load,
+        issue_wmma_compute,
+    )
 
 
 @gluon.jit

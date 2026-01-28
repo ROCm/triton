@@ -135,16 +135,18 @@ def issue_l2_prefetches_prologue(distance, producer, a_desc, b_desc, off_am, off
 
 @gluon.jit
 def issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K: ttgl.constexpr,
-                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=True):
-    # Note: pred parameter is for conditional execution via if-statements, not passed to async_load
-    if pred:
-        ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K], a_buffer.index(producer % NUM_BUFFERS))
-        if not TRANSPOSE_B:
-            ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn],
-                                            b_buffer.index(producer % NUM_BUFFERS))
-        else:
-            ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K],
-                                            b_buffer.index(producer % NUM_BUFFERS))
+                NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr, pred=1):
+    # pred is a hardware predicate passed to async_load for conditional execution without branch divergence
+    # Convert boolean pred to i32 for hardware predicate (i1 -> i32)
+    pred_i32 = pred.to(ttgl.int32) if hasattr(pred, 'to') else pred
+    ttgl.amd.gfx1250.tdm.async_load(a_desc, [off_am, producer * BLOCK_K], a_buffer.index(producer % NUM_BUFFERS),
+                                    pred=pred_i32)
+    if not TRANSPOSE_B:
+        ttgl.amd.gfx1250.tdm.async_load(b_desc, [producer * BLOCK_K, off_bn], b_buffer.index(producer % NUM_BUFFERS),
+                                        pred=pred_i32)
+    else:
+        ttgl.amd.gfx1250.tdm.async_load(b_desc, [off_bn, producer * BLOCK_K], b_buffer.index(producer % NUM_BUFFERS),
+                                        pred=pred_i32)
     producer += 1
     return producer
 
@@ -191,6 +193,27 @@ def lds_subtile_load(consumer, start, a_buffer, a_layout: ttgl.constexpr, b_buff
         b = b_buffer.index(index).slice(start, SUBTILE_LEN, 1).permute([1, 0]).load(layout=b_layout)
 
     return a, b
+
+
+@gluon.jit
+def lds_load(consumer, a_buffer, a_layout: ttgl.constexpr, b_buffer, b_layout: ttgl.constexpr,
+             NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
+    """Load A and B tiles from shared memory (LDS) into registers."""
+    a = a_buffer.index(consumer % NUM_BUFFERS).load(layout=a_layout)
+    if not TRANSPOSE_B:
+        b = b_buffer.index(consumer % NUM_BUFFERS).load(layout=b_layout)
+    else:
+        b = b_buffer.index(consumer % NUM_BUFFERS).permute([1, 0]).load(layout=b_layout)
+
+    consumer += 1
+    return consumer, a, b
+
+
+@gluon.jit
+def issue_wmma_compute(a, b, accumulator):
+    """Perform WMMA computation on pre-loaded operands."""
+    accumulator = ttgl.amd.gfx1250.wmma(a, b, accumulator)
+    return accumulator
 
 
 @aggregate
