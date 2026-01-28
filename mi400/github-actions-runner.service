@@ -1,0 +1,32 @@
+[Unit]
+Description=GitHub Actions Runner
+After=network.target
+
+[Service]
+# Run as the dedicated runner user
+User=root
+Group=root
+WorkingDirectory=/data/ci/actions-runner
+
+# Environment variables for the runner (optional)
+#Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment="RUNNER_ALLOW_RUNASROOT=1"
+
+# The main runner process
+ExecStart=/data/ci/actions-runner/run.sh
+
+# If the runner exits, systemd restarts it
+Restart=always
+RestartSec=5
+
+# Use a simple service; run.sh is a long-running process
+Type=simple
+
+# Hardening options (tune as needed)
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=no
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

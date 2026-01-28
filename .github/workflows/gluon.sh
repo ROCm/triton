@@ -13,6 +13,8 @@ rm -rf ~/.triton/cache
 
 echo "=== Build and Install Triton ==="
 
+git config --global --add safe.directory /code
+
 export PYTHON="python3"
 export TRITON_BUILD_WITH_CLANG_LLD="TRUE"
 export TRITON_BUILD_WITH_CCACHE="TRUE"
