@@ -5,7 +5,7 @@
     "vgpr_count": 735,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 20356,
+    "code_len_in_byte": 20348,
     "occupancy": 1
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_PKWIDTH8_WARPS4": {
@@ -14,7 +14,7 @@
     "vgpr_count": 698,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 20348,
+    "code_len_in_byte": 20324,
     "occupancy": 1
   },
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_SUBTILE_PKWIDTH8_WARPS4": {
@@ -41,7 +41,7 @@
     "vgpr_count": 512,
     "vgpr_spill_count": 67,
     "scratch_size": 272,
-    "code_len_in_byte": 21948,
+    "code_len_in_byte": 21928,
     "occupancy": 2
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_PINGPONG_PKWIDTH8_WARPS8": {
@@ -50,7 +50,7 @@
     "vgpr_count": 324,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 11996,
+    "code_len_in_byte": 11992,
     "occupancy": 3
   },
   "BATCH8_SEQLENQ512_SEQLENK512_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN64_f16_attn_fwd_pipelined_kernel": {
