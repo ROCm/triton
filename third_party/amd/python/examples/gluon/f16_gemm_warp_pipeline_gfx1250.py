@@ -93,7 +93,7 @@ def gemm_tdm_pipelined_warp_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
             accumulator = issue_wmma_compute(a, b, accumulator)
 
     for i in ttgl.static_range(NUM_BUFFERS - 1):
-        # Warp-pipeline ended, wait for the ones to be consuned here.
+        # Warp-pipeline ended, wait for the ones to be consumed here.
         ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 1 - i) * 2)
         consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                            accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
@@ -108,13 +108,9 @@ def gemm_tdm_pipelined_warp_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(256, 256, 64)])
 @pytest.mark.parametrize("NUM_BUFFERS", [3])
 @pytest.mark.parametrize("TRANSPOSE_B", [True])
-@pytest.mark.parametrize("PERSISTENT", [False])
-@pytest.mark.parametrize("PREFETCH", [False])
 @pytest.mark.parametrize("M,N,K", [(2048, 2048, 2048)])
-@pytest.mark.parametrize("num_warps", [8])
 @pytest.mark.parametrize("DUMP", [False])
-def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, M, N, K,
-                                    num_warps, DUMP):
+def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, M, N, K, DUMP):
     if triton.cdiv(K, BLOCK_K) < NUM_BUFFERS:
         pytest.skip("Skip tests where K/BLOCK_K < NUM_BUFFERS")
 
@@ -133,34 +129,22 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
     b_device = b.cuda()
     c_device = c.cuda()
 
-    if num_warps == 4:
-        # warpsPerCTA = [2, 2]
-        WARP_BASES = [(0, 1), (1, 0)]
-    elif num_warps == 8:
-        # warpsPerCTA = [4, 2]
-        WARP_BASES = [(0, 1), (1, 0), (2, 0)]
-    else:
-        raise ValueError(f"unsupported num_warps={num_warps}")
+    # warpsPerCTA = [4, 2]
+    num_warps = 8
+    WARP_BASES = [(0, 1), (1, 0), (2, 0)]
 
     warp_bases = tuple(WARP_BASES)
-    if not PERSISTENT:
-        grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-        kernel = gemm_tdm_pipelined_warp_pipelined_kernel[grid](
-            a_device, b_device, c_device,  #
-            M, N, K,  #
-            stride_am, stride_ak,  #
-            stride_bk, stride_bn,  #
-            stride_cm, stride_cn,  #
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-            NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, WARP_BASES=warp_bases,  #
-            num_warps=num_warps, waves_per_eu=num_warps // 4)
-        static_profile(kernel)
-    else:
-        # num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-        # NOTE: Explicitly set num_sms to small number to ensure that each CU will compute multiple tiles.
-        num_sms = 8
-        grid = (min(num_sms, triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), 1)
-        assert 0, 'unsupported'
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+    kernel = gemm_tdm_pipelined_warp_pipelined_kernel[grid](
+        a_device, b_device, c_device,  #
+        M, N, K,  #
+        stride_am, stride_ak,  #
+        stride_bk, stride_bn,  #
+        stride_cm, stride_cn,  #
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
+        NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B, WARP_BASES=warp_bases,  #
+        num_warps=num_warps, waves_per_eu=num_warps // 4)
+    static_profile(kernel)
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))
@@ -180,27 +164,16 @@ if __name__ == "__main__":
     parser.add_argument("-M", type=int, default=256, help='problem M size')
     parser.add_argument("-N", type=int, default=256, help='problem N size')
     parser.add_argument("-K", type=int, default=1024, help='problem K size')
-    parser.add_argument("--num-warps", type=int, choices=[4, 8], default=4, help='num warps')
-    parser.add_argument("--num-buffers", type=int, choices=[1, 2, 4], default=2, help='num shared memory buffers')
-    parser.add_argument("--persistent", action="store_true", help="Use persistent variant")
-    parser.add_argument("--prefetch-lds", action="store_true", help="Enable prefetch LDS")
+    parser.add_argument("--num-buffers", type=int, choices=[2, 3, 4], default=3, help='num shared memory buffers')
     parser.add_argument("--dump", action="store_true", help="Print out result/golden tensors")
     args = parser.parse_args()
-
-    assert not (args.persistent and args.single_warp_schedule)
 
     M, N, K = args.M, args.N, args.K
     BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 64
     NUM_BUFFERS = args.num_buffers
-    NUM_WARPS = args.num_warps
+    NUM_WARPS = 8
     TRANSPOSE_B = True
-    PERSISTENT = args.persistent
-    PREFETCH = args.prefetch_lds
     DUMP = args.dump
-    print(
-        f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}"
-    )
+    print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}")
 
-    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K,  #
-                                    3, True, False, False,  #
-                                    M, N, K, 8, DUMP)
+    test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, M, N, K, DUMP)

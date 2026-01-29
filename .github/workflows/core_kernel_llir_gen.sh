@@ -44,7 +44,7 @@ export TRITON_HOME="/llir"
 rm -rf $TRITON_HOME/.triton/cache
 
 echo "=== Gathering CORE BF16 Gluon GEMM/Attention Kernels ==="
-HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_gemm_gfx1250_tbuf_wp.py -M 1024 -N 1024 -K 1024 --num-warps 8
+HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_gemm_warp_pipeline_gfx1250.py -M 1024 -N 1024 -K 1024
 HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py --num-warps=12 --num-buffers=2 --persistent --warp-specialized
 HSA_MODEL_NUM_THREADS=2 python3 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py --attention-type pipeline
 
