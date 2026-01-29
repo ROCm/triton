@@ -64,28 +64,37 @@ def get_padded_shared_layout(shape, transposed=False):
 
 
 @gluon.constexpr_function
-def get_wmma_layout(num_warps, packed=False, preshuffled=False, warp_axis=0):
-    reg_bases = []
-    tiles = 1
-    # For preshuffled case, each warp will handle 2 tiles along the M dim
-    # and 2 tiles along the N dim.
+def get_wmma_layout(shape, num_warps, packed=False, preshuffled=False, warp_axis=0):
+    warps_per_cta = [num_warps, 1] if warp_axis == 0 else [1, num_warps]
+    tiles_per_warp = [1, 1]
+
     if preshuffled:
-        reg_bases = [[0, 1], [1, 0]]
-        tiles = 2
+        if shape[1] > 16 * warps_per_cta[1]:
+            tiles_per_warp[1] = 2
+        if shape[0] > 16 * warps_per_cta[0]:
+            tiles_per_warp[0] = 2
+
+    reg_bases = []
+    if tiles_per_warp[1] > 1:
+        reg_bases.append([0, 1])
+    if tiles_per_warp[0] > 1:
+        reg_bases.append([1, 0])
 
     warp_bases = []
-    warps = 1
-    # Distribute all warps along the M dim
-    while warps < num_warps:
-        if warp_axis == 0:
-            warp_bases.append([tiles, 0])
-        else:
-            warp_bases.append([0, tiles])
-        warps <<= 1
-        tiles <<= 1
+    warps_n = 1
+    tiles_n = tiles_per_warp[1]
+    while warps_n < warps_per_cta[1]:
+        warp_bases.append([0, tiles_n])
+        warps_n <<= 1
+        tiles_n <<= 1
+    warps_m = 1
+    tiles_m = tiles_per_warp[0]
+    while warps_m < warps_per_cta[0]:
+        warp_bases.append([tiles_m, 0])
+        warps_m <<= 1
+        tiles_m <<= 1
 
     instr_shape = [16, 16, 128] if not packed else [16, 16, 64]
-
     return ttgl.amd.AMDWMMALayout(3, True, warp_bases, reg_bases, instr_shape)
 
 
@@ -444,7 +453,10 @@ class GlobalScaledAttentionConfig:
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
         warp_axis = 0 if not WARP_REDUCE else 1
-        wmma_layout: ttgl.constexpr = get_wmma_layout(NUM_WARPS, warp_axis=warp_axis)
+        wmma_shape = [BLOCK_M, min(BLOCK_N, HEAD_SZ)]
+        if SUBTILE:
+            wmma_shape = [BLOCK_M, min(BLOCK_N // 2, HEAD_SZ // 2)]
+        wmma_layout: ttgl.constexpr = get_wmma_layout(wmma_shape, NUM_WARPS, warp_axis=warp_axis)
 
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, 16))
         self.k_layout = ttgl.constexpr(ttgl.DotOperandLayout(1, wmma_layout, 16))
@@ -1158,8 +1170,11 @@ class BlockScaledAttentionConfig:
                                         BLOCK_N, NUM_BUFFERS, NUM_WARPS)
 
         warp_axis = 0 if not WARP_REDUCE else 1
-        wmma_layout = get_wmma_layout(NUM_WARPS, preshuffled=True, warp_axis=warp_axis)
-        wmma_layout_packed = get_wmma_layout(NUM_WARPS, packed=True, preshuffled=True, warp_axis=warp_axis)
+        wmma_shape = [BLOCK_M, min(BLOCK_N, HEAD_SZ)]
+        if SUBTILE:
+            wmma_shape = [BLOCK_M, min(BLOCK_N // 2, HEAD_SZ // 2)]
+        wmma_layout = get_wmma_layout(wmma_shape, NUM_WARPS, preshuffled=True, warp_axis=warp_axis)
+        wmma_layout_packed = get_wmma_layout(wmma_shape, NUM_WARPS, packed=True, preshuffled=True, warp_axis=warp_axis)
 
         self.q_layout = ttgl.constexpr(ttgl.DotOperandLayout(0, wmma_layout, k_width=16))
         if KV_TYPE == 'e2m1':
