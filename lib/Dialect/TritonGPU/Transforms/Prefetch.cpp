@@ -53,7 +53,6 @@ SmallVector<RankedTensorType> typesBeforeSplitting;
 // SplitOp only splits along the last dimension, so we need to transpose, reshape, split, reshape, and transpose back
 // This function recursively splits in half until numSlices pieces are created
 static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, int axis, Location loc, OpBuilder &builder) {
-  LDBG("splitValueAlongAxis(): n=" << numSlices << ", a=" << axis << ", op=" << input);
   // Base case: if numSlices is 1, return the input as-is
   if (numSlices == 1) {
     return {input};
@@ -65,7 +64,7 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
   
   // Lambda to perform a single binary split
   auto splitOnce = [&](Value val) -> std::pair<Value, Value> {
-    LDBG("\n\n\nsplitOnce() axis=" << axis);
+    LDBG("\n\nsplitOnce(): a=" << axis);
     LDBG("val: " << val);
     RankedTensorType inputType = cast<RankedTensorType>(val.getType());
     LDBG("inputType: " << inputType);
@@ -187,17 +186,13 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
 // Helper function to join tensors along a specific axis (inverse of splitAlongAxis)
 // JoinOp only joins along the last dimension, so we need to join, transpose, and reshape
 static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location loc, OpBuilder &builder) {
-  LDBG("\n\n\njoinValuesAlongAxis(): n=" << tiles.size() << ", a=" << axis);
-  for (auto tile : tiles) {
-    LDBG("tile: " << tile);
-  }
   if (tiles.size() == 1) {
     return tiles[0];
   }
   
   // Lambda to perform a single binary join
   auto joinOnce = [&](Value left, Value right, RankedTensorType dstType) -> Value {
-    LDBG("joinOnce");
+    LDBG("\n\njoinOnce(): a=" << axis);
     LDBG("left: " << left);
     LDBG("right: " << right);
 
@@ -425,20 +420,26 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   // SplitOp only splits along the last dimension, so we need to use TransOp
   // to permute dimensions. We also need to reshape to add a trailing dimension of size 2.
   Value cOperand = mapping.lookup(dot.getC());
+
+  int mAxis = 0;
+  int nAxis = 1;
+
+  // TODO(dtanner) whether m or n maps to axis=0, 1 may depend on isTransposed
+  // Slice M.
+  int32_t numSlicesM = totalM / prefetchWidthM;
+  LDBG("numSlicesM: " << numSlicesM);
+  SmallVector<Value> mSlices = splitValueAlongAxis(cOperand, numSlicesM, mAxis, dot.getLoc(), builder);
   
-  // Split along N dimension (axis 1) to get rows.
-  int32_t numRowTiles = totalM / prefetchWidthM;
-  SmallVector<Value> rowTiles = splitValueAlongAxis(cOperand, numRowTiles, 1, dot.getLoc(), builder);
-  
-  // Now split each row along M dimension (axis 0) to get individual tiles.
-  int32_t numColTiles = totalN / prefetchWidthN;
-  for (int32_t mIdx = 0; mIdx < numRowTiles; ++mIdx) {
+  // Slice N.
+  int32_t numSlicesN = totalN / prefetchWidthN;
+  LDBG("numSlicesN: " << numSlicesN);
+  for (int32_t mIdx = 0; mIdx < numSlicesM; ++mIdx) {
     int32_t mOff = mIdx * prefetchWidthM;
-    SmallVector<Value> colTiles = splitValueAlongAxis(rowTiles[mIdx], numColTiles, 0, dot.getLoc(), builder);    
+    SmallVector<Value> mnSlices = splitValueAlongAxis(mSlices[mIdx], numSlicesN, nAxis, dot.getLoc(), builder);    
     // Store tiles in map
-    for (int32_t nIdx = 0; nIdx < numColTiles; ++nIdx) {
+    for (int32_t nIdx = 0; nIdx < numSlicesN; ++nIdx) {
       int32_t nOff = nIdx * prefetchWidthN;
-      mnToDot[{mOff, nOff}] = colTiles[nIdx];
+      mnToDot[{mOff, nOff}] = mnSlices[nIdx];
     }
   }
 
@@ -532,18 +533,19 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   }
 
   // Concatenate all M×N tiles back into a single tensor with original shape
-  // First join tiles along M dimension (within each row)
-  SmallVector<Value> rowResults;
+
+  // Join N.
+  SmallVector<Value> mJoins;
   for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
-    SmallVector<Value> rowTiles;
+    SmallVector<Value> mnSlices;
     for (int32_t nOff = 0; nOff < totalN; nOff += prefetchWidthN) {
-      rowTiles.push_back(mnToDot[{mOff, nOff}]);
+      mnSlices.push_back(mnToDot[{mOff, nOff}]);
     }
-    Value rowResult = joinValuesAlongAxis(rowTiles, 0, dot.getLoc(), builder);
-    rowResults.push_back(rowResult);
+    Value mJoin = joinValuesAlongAxis(mnSlices, nAxis, dot.getLoc(), builder);
+    mJoins.push_back(mJoin);
   }
-  // Then join all rows along N dimension (axis 1)
-  Value result = joinValuesAlongAxis(rowResults, 1, dot.getLoc(), builder);
+  // Join M.
+  Value result = joinValuesAlongAxis(mJoins, mAxis, dot.getLoc(), builder);
 
   Operation *newOp = result.getDefiningOp();
   builder.setInsertionPoint(lastDotOp);
@@ -818,6 +820,7 @@ LogicalResult Prefetcher::initialize() {
   for (triton::DotOp dot : dotsInFor) {
     auto aType = dot.getA().getType();
     auto bType = dot.getB().getType();
+    auto dType = cast<RankedTensorType>(dot.getResult().getType());
     auto aEnc =
         mlir::cast<triton::gpu::DotOperandEncodingAttr>(aType.getEncoding());
     auto bEnc =
@@ -827,12 +830,27 @@ LogicalResult Prefetcher::initialize() {
     assert(aKWidth == bKWidth);
 
     // Get sizes for all three dimensions
-    auto mSize = aType.getShape()[0];  // M dimension from operand A
-    auto nSize = bType.getShape().back();  // N dimension from operand B
-    auto kSize = aType.getShape().back();  // K dimension
-    LDBG("mSize: " << mSize);
-    LDBG("nSize: " << nSize);
-    LDBG("kSize: " << kSize);
+    unsigned mSize = aType.getShape()[0];  // M dimension from operand A
+    unsigned nSize = bType.getShape().back();  // N dimension from operand B
+    unsigned kSize = aType.getShape().back();  // K dimension
+    LDBG("size: " << mSize << "x" << nSize << "x" << kSize);
+
+#if 0
+    // EXPERIMENT with ShapePerCtaTile
+    auto dTensorTy = cast<RankedTensorType>(dot.getResult().getType());
+    AMDMfmaEncodingAttr dLayout =
+      cast<AMDMfmaEncodingAttr>(dTensorTy.getEncoding());
+    auto sizePerThread = getContigPerThread(dTensorTy);
+    //auto numElemsPerThread = product(sizePerThread);
+    SmallVector<unsigned> shapePerCtaTile;
+    for (auto [reg, thread, warp] :
+        llvm::zip(sizePerThread, dLayout.getThreadsPerWarp(),
+                  dLayout.getWarpsPerCTA())) {
+      shapePerCtaTile.push_back(reg * thread * warp);
+    }
+    shapePerCtaTile = expandMatrixShapeWithBatch(ArrayRef(shapePerCtaTile));
+    LDBG("shapePerCtaTile: " << shapePerCtaTile[0] << ", " << shapePerCtaTile[1]);
+#endif
 
     // Get the dot result encoding to determine instruction dimensions
     Attribute dotEncoding = dot.getType().getEncoding();
@@ -856,15 +874,7 @@ LogicalResult Prefetcher::initialize() {
       // K dimension for MMA is determined by kWidth
       instrK = aKWidth > 0 ? aKWidth : 16;
     }
-    LDBG("instrM: " << instrM);
-    LDBG("instrN: " << instrN);
-    LDBG("instrK: " << instrK);
-
-    //SmallVector<int64_t> minShape =
-    //    getMinShapePerSemanticTile(
-    //    cast<RankedTensorType>(dot.getResult().getType()));
-    //LDBG("minShape[0]: " << minShape[0]);
-    //LDBG("minShape[1]: " << minShape[1]);
+    LDBG("instr: " << instrM << "x" << instrN << "x" << instrK);
 
     // Calculate prefetch widths
     unsigned elementWidthA = aType.getElementTypeBitWidth();
@@ -876,22 +886,30 @@ LogicalResult Prefetcher::initialize() {
     else
       prefetchWidthK = 8 * aKWidth;
 
-    // Skip prefetching if K dimension is less than prefetch width
-    if (kSize < prefetchWidthK)
-      continue;
-
+    // TODO(dtanner) fix prefetch, a
     // M dimension width: Use at least 2x instruction M for 2x2 assembly
     // Also ensure we don't exceed 256 bits or the actual dimension size
     // int64_t targetPrefetchM = 2 * instrM;  // 2x for 2x2 tiling
-    prefetchWidthM = mSize / 2; // std::max(mSize, targetPrefetchM);
+    prefetchWidthM = std::max(mSize / 2, instrM*1);
     
     // N dimension width: Use at least 2x instruction N for 2x2 assembly
     // Also ensure we don't exceed 256 bits or the actual dimension size
     // int64_t targetPrefetchN = 2 * instrN;  // 2x for 2x2 tiling
-    prefetchWidthN = nSize / 2; // std::max(nSize, targetPrefetchN);
-    LDBG("prefetchWidthM: " << prefetchWidthM);
-    LDBG("prefetchWidthN: " << prefetchWidthN);
-    LDBG("prefetchWidthK: " << prefetchWidthK);
+    prefetchWidthN = std::max(nSize / 2, instrN*1);
+
+
+    // Skip prefetching if K dimension is less than prefetch width
+    if (kSize < prefetchWidthK && mSize < prefetchWidthM && nSize < prefetchWidthN)
+      continue;
+    // Can't prefetch MORE than the tile size
+    prefetchWidthM = std::min<unsigned>(prefetchWidthM, mSize);
+    prefetchWidthN = std::min<unsigned>(prefetchWidthN, nSize);
+    prefetchWidthK = std::min<unsigned>(prefetchWidthK, kSize);
+
+    LDBG("prefetchWidths: " << prefetchWidthM << "x" << prefetchWidthN << "x" << prefetchWidthK);
+
+    auto shapePerCtaTile = getShapePerCTA(dType);
+
 
     auto aVals = getPrefetchSrc(dot.getA());
     auto bVals = getPrefetchSrc(dot.getB());
