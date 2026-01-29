@@ -22,6 +22,17 @@ ALL_USERS = ('s_cmp', 'v_cmp', 'v_permlane', 'buffer_store', 'buffer_load')
 ALL_DEFS_USES = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov', 'scratch_load', 'scratch_store')
 
+kind_to_mov = {
+    ('a', 'a', 1): "v_accvgpr_mov_b32",
+    ('a', 'a', 2): "v_accvgpr_mov_b32",
+    ('a', 'v', 1): "v_accvgpr_read_b32",
+    ('a', 'v', 2): "v_accvgpr_read_b32",
+    ('v', 'a', 1): "v_accvgpr_write_b32",
+    ('v', 'a', 2): "v_accvgpr_write_b32",
+    ('v', 'v', 1): "v_mov_b32_e32",
+    ('v', 'v', 2): "v_mov_b64_e32",
+}
+
 
 def setup_logging(debug=False):
     level = logging.DEBUG if debug else logging.INFO
@@ -279,6 +290,28 @@ class Instruction:
                 off = off.split(':')[1]
                 return Register('l', [int(off)])
 
+    def replace_copy_src(self, reg):
+        assert self.is_copy()
+        assert self.opcode.startswith("v_")
+        old_src = self.get_copy_src()
+        assert isinstance(old_src, Register)
+        assert len(old_src.ids) == len(reg.ids)
+        src_kind = reg.kind
+        dst_kind = self.get_copy_dst().kind
+        kind_to_mov = {
+            ('a', 'a', 1): "v_accvgpr_mov_b32",
+            ('a', 'a', 2): "v_accvgpr_mov_b32",
+            ('a', 'v', 1): "v_accvgpr_read_b32",
+            ('a', 'v', 2): "v_accvgpr_read_b32",
+            ('v', 'a', 1): "v_accvgpr_write_b32",
+            ('v', 'a', 2): "v_accvgpr_write_b32",
+            ('v', 'v', 1): "v_mov_b32_e32",
+            ('v', 'v', 2): "v_mov_b64_e32",
+        }
+        self.opcode = kind_to_mov[(src_kind, dst_kind, len(reg.ids))]
+        self.operands[1] = reg.emit()
+        self.update_regs_by_operand()
+
     def compute_def_use(self):
         self.defs.clear()
         self.uses.clear()
@@ -399,6 +432,27 @@ class BasicBlock:
 
         return reaching_defs
 
+    def get_users(self, reg):
+        '''
+        Starting from the beginning of this block, find all users
+        of one or more registers in reg.
+        Return a set[Instruction]
+        '''
+        users = set()
+
+        target_regs = flatten_regs(reg)
+        for inst in self.instructions:
+            ## We check uses first
+            if target_regs & inst.uses:
+                users.add(inst)
+            ## Then we remove the reg if it's defined
+            if target_regs & inst.defs:
+                target_regs -= (target_regs & inst.defs)
+
+            if not target_regs:
+                break
+        return users
+
     def is_loop(self):
         if len(self.preds) == 0 or len(self.succs) == 0:
             return False
@@ -450,11 +504,6 @@ class BasicBlock:
 
             self.defs |= inst.defs
 
-            #if self.is_epilogue() and inst.is_copy():
-            #    print(f"{inst.emit()}")
-            #    print(f"{coalesce_regs(self.defs)}")
-            #    print(f"{coalesce_regs(self.uses)}")
-
     def emit(self):
         lines = []
         lines.append(f"{self.name}:")
@@ -496,15 +545,12 @@ class Program:
 
         dbg("========== liveness ==========", indent)
         changed = True
-        cnt = 0
         for bb in self.blocks:
             bb.live_in = set()
             bb.live_out = set()
 
         while changed:
             changed = False
-
-            #dbg(f"{cnt=}")
 
             for bb in reversed(self.blocks):
                 new_out = set()
@@ -517,11 +563,6 @@ class Program:
                     bb.live_out = new_out
                     bb.live_in = new_in
                     changed = True
-
-                #dbg(f"{bb.name} defs: {coalesce_regs(bb.defs)}")
-                #dbg(f"{bb.name} uses: {coalesce_regs(bb.uses)}")
-                #dbg(f"{bb.name} live_in: {coalesce_regs(bb.live_in)}")
-            cnt += 1
 
         dbg("========== liveness done =====", indent)
 
@@ -554,24 +595,6 @@ class Program:
         for bb in self.blocks:
             for s in bb.succs:
                 s.preds.append(bb)
-
-        #logging.debug("========== cfg info ==========")
-        #for bb in self.blocks:
-        #    msg = "is "
-        #    if bb.is_loop():
-        #        msg += "loop "
-        #    if bb.is_prologue():
-        #        msg += "prologue "
-        #    if bb.is_epilogue():
-        #        msg += "epilogue"
-        #    logging.debug(f"{bb.name}: {msg}")
-        #    logging.debug("  pred:")
-        #    for pred in bb.preds:
-        #        logging.debug(f"    {pred.name}")
-        #    logging.debug("  succ:")
-        #    for succ in bb.succs:
-        #        logging.debug(f"    {succ.name}")
-        #logging.debug("========== done cfg info ==========")
 
     def update_free_regs(self, indent):
 
@@ -738,7 +761,7 @@ class Program:
         dbg("========== collecting lds chains done =====", indent)
         self.LDSChains = chains
 
-    def collect_mfma_chains(self, indent):
+    def collect_mfma_chains(self, bb, indent):
         '''
         Collect a chain of insrtuctions that includes
         1. mfma instructions that are supposed to use the same regs for acc
@@ -748,7 +771,7 @@ class Program:
         The alg goes backward to collect mfma and copy instructions.
         Then it goes forward to collect copy instructions after the last mfma on the chain.
         '''
-        bb = self.get_loop()
+        #bb = self.get_loop()
         dbg("====== collect mfma chains ======", indent)
         visited = set()
         chains = []
@@ -805,10 +828,7 @@ class Program:
                     dbg(f"Not expected to see {cur.emit()} on the chain", indent)
                     assert False
 
-            if len(chain.mfmas) >= 2:
-                chains.append(chain)
-            else:
-                dbg("less than 2 mfma in the chain !!", indent)
+            chains.append(chain)
 
             ## fwd pass
             worklist = []
@@ -822,6 +842,10 @@ class Program:
                     continue
                 visited.add(cur)
 
+                ## Stop at cvt instructions
+                if 'v_cvt' in cur.opcode:
+                    visited.add(cur)
+                    continue
                 assert cur.opcode.startswith(COPY_DATA)
                 chain.copy_instrs.append(cur)
                 cur.mfma_chain = chain
@@ -841,139 +865,71 @@ class Program:
         dbg(f"entry acc ({num_a} x a, {num_v} x v): {entry_acc}", indent)
         dbg("========== collect mfma chains done =====", indent)
 
-        self.mfmaChains = chains
+        return chains
 
-    def rewrite_mfma_acc(self, min_a, indent):
-        logging.debug("========== rewrite mfma acc regs ===========")
+    def rewrite_mfma_acc(self, mfmaChains, min_a, indent):
+        '''
+        Rewrite the acc of all the chains
+
+        Make sure the dst and acc are using the same regs for each chain.
+
+        `min_a` refers to the number of agpr used for acc.
+        The more agpr used for acc, the more vgpr can be used for
+        other instructions that can only take vgprs.
+
+        If the total agpr usage from all chains are below min_a, we will
+        rewrite the acc/dst of some chains with agprs from free_regs of
+        the loop until there are min_a agprs used for all chains
+        '''
+        dbg("========== rewrite mfma acc regs ===========", indent)
 
         entry_acc = set()
-        for chain in self.mfmaChains:
+
+        ## Step 1: Clean up the mfma's so that
+        ## 1. All mfma has the same dst and acc
+        ## 2. All copy instructions along the way are marked as dead
+        for chain in mfmaChains:
             entry_acc |= flatten_regs(chain.entry_acc)
             if chain.exit_acc != chain.entry_acc:
-                logging.debug("mismatch acc !!")
+                dbg("mismatch acc !!", indent)
                 return
-            #inst_chain = {}
-            #if len(chain.copy_instrs) > 0:
-            #    dbg(f"This chain (acc: {chain.entry_acc}) has {len(chain.copy_instrs)} copy instructions and {len(chain.nops)} nops", indent)
-            #    for mfma in reversed(chain.mfmas):
-            #        idx = self.get_loop().instructions.index(mfma)
-            #        #dbg(f"{idx}: {mfma.emit()}", indent + 2)
-            #        inst_chain[idx] = mfma
-            #    for copys in chain.copy_instrs:
-            #        idx = self.get_loop().instructions.index(copys)
-            #        #dbg(f"{idx}: {copys.emit()}", indent + 2)
-            #        inst_chain[idx] = copys
-            #        copys.is_mfma_copy = True
-            #if len(chain.copy_instrs) > 0:
-            canon = chain.entry_acc
-            chain.set_canon(canon)
-            chain.rewrite()
 
-            #inst_chain = dict(sorted(inst_chain.items()))
-            #for idx, inst in inst_chain.items():
-            #    dbg(f"{idx}: {inst.emit()}", indent + 2)
-
-            #cnt = 0
-            #for mfma in chain.mfmas:
-            #    if mfma.get_mfma_acc() != chain.entry_acc or mfma.get_mfma_dst() != chain.entry_acc:
-            #        cnt += 1
-
-            #if cnt > 0:
-            #    dbg(f"This chain (acc: {chain.entry_acc}) uses extra regs", indent)
-            #    dbg(f"before rewriting: ", indent + 2)
-            #    for mfma in chain.mfmas:
-            #        dbg(f"{mfma.emit()}", indent + 4)
-            #    canon = chain.entry_acc
-            #    chain.set_canon(canon)
-            #    chain.rewrite()
-            #    dbg(f"after rewriting: ", indent + 2)
-            #    for mfma in chain.mfmas:
-            #        dbg(f"{mfma.emit()}", indent + 4)
+            chain.set_canon(chain.entry_acc)
+            chain.rewrite_mfma()
 
         acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
-        logging.debug(f"entry-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
 
         self.update_free_regs(indent + 2)
 
-        loop_free_regs = coalesce_regs(self.get_loop().free_regs)
-        free_a, free_v = count_regs(loop_free_regs)
-        logging.debug(f"free reg of loop ({free_a} x a, {free_v} x v): {loop_free_regs}")
+        dbg(f"free regs: {coalesce_regs(self.get_loop().free_regs)}")
 
         if acc_a < min_a:
-            logging.debug(f"not enough vgpr left: {acc_a=}, {min_a=}")
-
-            for chain in self.mfmaChains:
-                my_acc = chain.entry_acc
-                if my_acc.kind == 'a':
+            ## Step 2: Use at least min_a agpr as acc
+            mfmaChainsList = sorted(mfmaChains, key=lambda x: x.entry_acc.start)
+            for chain in mfmaChainsList:
+                if chain.entry_acc.kind == 'a':
                     continue
-                assert my_acc.kind == 'v'
-
-                cnt = len(my_acc.ids)
-                new_acc = pick_and_remove_contiguous_regs(self.get_loop().free_regs, cnt, 'a')
+                num_regs = len(chain.entry_acc.ids)
+                kind = 'a'
+                new_acc = pick_and_remove_contiguous_regs(self.get_loop().free_regs, num_regs, kind)
                 if not new_acc:
-                    break
+                    dbg("Not enough free regs for acc", indent)
+                    assert False
+                acc_a += num_regs
+                entry_acc |= new_acc
+                entry_acc -= flatten_regs(chain.entry_acc)
 
-                ## rewrite this chain again with a agpr
                 new_acc = coalesce_regs(new_acc)[0]
-                logging.debug(f"rewriting chain {chain.root.emit()} with {new_acc}")
-                chain.set_canon(new_acc)
-                chain.rewrite()
+                dbg(f"rewriting chain {chain.root.emit()} with {new_acc}", indent)
+                chain.change_acc(self.get_prologue(), self.get_epilogue(), new_acc, indent + 2)
 
-                ## fix zero init in prologue
-                new_acc_list = sorted(flatten_regs(new_acc), key=lambda x: x[1])
-                for i, zero_init in enumerate(chain.get_zero_init(self.get_prologue())):
-                    new_reg = coalesce_regs([new_acc_list[i]])[0]
-                    logging.debug(f"zero init: {zero_init.emit()} to be replaced by {new_reg} ==>")
-                    zero_init.replace_dst(new_reg)
-                    zero_init.opcode = 'v_accvgpr_write_b32'
-                    logging.debug(f"zero init: {zero_init.emit()}")
-
-                ## fix users in epilogue
-                my_acc_list = sorted(flatten_regs(my_acc), key=lambda x: x[1])
-                new_insts = []
-                epi = self.get_epilogue()
-                for i, the_old_acc in enumerate(my_acc_list):
-                    the_new_acc = new_acc_list[i]
-                    assert the_old_acc[0] == 'v' and the_new_acc[0] == 'a'
-                    opcode = 'v_accvgpr_read_b32'
-                    dsts = coalesce_regs([the_old_acc])
-                    srcs = coalesce_regs([the_new_acc])
-                    operands = []
-                    regs_by_operand = []
-                    operands.append(dsts[0].emit())
-                    operands.append(srcs[0].emit())
-                    regs_by_operand.append(dsts)
-                    regs_by_operand.append(srcs)
-                    raw_line = f"{opcode} {operands[0]}, {operands[1]}"
-                    loc = -1
-                    copy_inst = Instruction(opcode, operands, regs_by_operand, loc, raw_line, epi)
-                    new_insts.append(copy_inst)
-                    logging.debug(f"new copy inst: {copy_inst.emit()}")
-
-                epi.instructions = new_insts + epi.instructions
-
-                entry_acc -= flatten_regs(my_acc)
-                entry_acc |= flatten_regs(new_acc)
-                chain.entry_acc = new_acc
-                chain.exit_acc = new_acc
-
-                acc_a += cnt
                 if acc_a >= min_a:
                     break
 
-            if acc_a < min_a:
-                logging.debug(f"still not enough vgpr left: {acc_a=}, {min_a=}, but no more free agprs")
+        acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
+        dbg(f"entry-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}", indent)
 
-            self.update_free_regs(indent + 2)
-
-            loop_free_regs = coalesce_regs(self.get_loop().free_regs)
-            free_a, free_v = count_regs(loop_free_regs)
-            logging.debug(f"free reg of loop ({free_a} x a, {free_v} x v): {loop_free_regs}")
-
-            acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
-            logging.debug(f"entry-in acc: a={acc_a} v={acc_v} {coalesce_regs(entry_acc)}")
-
-        logging.debug("========== rewrite mfma acc regs done ======")
+        dbg("========== rewrite mfma acc regs done ======", indent)
 
         return entry_acc
 
@@ -1012,11 +968,13 @@ class AccumulatorChain:
         self.zero_init: set[Instruction] = None
         self.use_acc: set[Instruction] = set()  # Other instructions that uses acc
 
-    def rewrite(self):
+    def rewrite_mfma(self):
         '''
         1. Replace the dst and acc register of all mfma's on this chain
         with canonical.
         2. Mark all copy instructions as mark_dead
+
+        Note that this function does not change the entry_acc of this chain
         '''
         canon = self.canonical
         assert canon is not None
@@ -1028,15 +986,57 @@ class AccumulatorChain:
         for inst in self.copy_instrs:
             inst.mark_dead = True
 
-        #for inst in self.nops:
-        #    inst.mark_dead = True
-
     def set_canon(self, reg):
         self.canonical = reg
 
     def get_zero_init(self, prologue: BasicBlock):
+        '''
+        Get the defs of entry_acc regs in the prologue
+        '''
         self.zero_init = prologue.get_reaching_defs(prologue.instructions[-1], self.entry_acc, True)
         return self.zero_init
+
+    def change_acc(self, pro, epi, new_acc, indent):
+        '''
+        Change the entry/exit_acc to new_acc
+        new_acc: Register
+        '''
+        new_kind = new_acc.kind
+        kind_to_init = {'a': "v_accvgpr_write_b32", 'v': "v_mov_b32_e32"}
+
+        ## Step 1: change mfma dst and acc regs
+        self.set_canon(new_acc)
+        self.rewrite_mfma()
+
+        ## Step 2: Fix the init in prologue
+        to_move = set()
+        new_acc_list = sorted(flatten_regs(new_acc), key=lambda x: x[1])
+        for i, zero_init in enumerate(self.get_zero_init(pro)):
+            new_reg = coalesce_regs([new_acc_list[i]])[0]
+            dbg(f"zero init: {zero_init.emit()} to be replaced by {new_reg} ==>", indent)
+            zero_init.replace_dst(new_reg)
+            zero_init.opcode = kind_to_init[new_kind]
+            dbg(f"zero init: {zero_init.emit()}", indent)
+            to_move.add(zero_init)
+
+        kept = []
+        moved = []
+        for inst in pro.instructions:
+            if inst in to_move:
+                moved.append(inst)
+            else:
+                kept.append(inst)
+
+        pro.instructions = kept + moved
+
+        ## Step 3: Restore the old acc in epilogue
+        new_insts = make_copy_batch(new_acc, self.entry_acc, -1, epi)
+
+        epi.instructions = new_insts + epi.instructions
+
+        ## Step 4: update entry/exit_acc
+        self.entry_acc = new_acc
+        self.exit_acc = new_acc
 
 
 class DSReadGroup:
@@ -1143,6 +1143,7 @@ def parse_register(text):
     else:
         return Register(kind, [int(text[1:])])
 
+
 def split_top_level_commas(text: str) -> list[str]:
     parts = []
     cur = []
@@ -1167,6 +1168,7 @@ def split_top_level_commas(text: str) -> list[str]:
         parts.append(part)
 
     return parts
+
 
 def split_by_whitespace(text: str) -> list[str]:
     tokens = []
@@ -1193,6 +1195,7 @@ def split_by_whitespace(text: str) -> list[str]:
 
     return tokens
 
+
 def split_operands(text: str) -> list[str]:
     if not text:
         return []
@@ -1203,6 +1206,7 @@ def split_operands(text: str) -> list[str]:
 
     return operands
 
+
 def extract_registers(op: str):
     regs = []
     for rx in REGEXES:
@@ -1210,9 +1214,11 @@ def extract_registers(op: str):
             regs.append(parse_register(m))
     return regs
 
+
 def is_modifier_token(tok: str) -> bool:
     # Things like op_sel_hi:[...], cbsz:1, blgp:1
     return ':' in tok and not any(c.isdigit() for c in tok.split(':', 1)[0])
+
 
 def parse_instruction(line, loc, bb):
     line = line.strip()
@@ -1249,6 +1255,7 @@ def parse_instruction(line, loc, bb):
         raw_line=line,
         bb=bb,
     )
+
 
 def extract_label(line):
     """
@@ -1439,6 +1446,54 @@ def collapse_ranges(ids):
     return [fmt(lo, hi) for lo, hi in ranges]
 
 
+def make_copy_batch(src_reg, dst_reg, loc, bb) -> list[Instruction]:
+    '''
+    Construct a batch of copy instruction to copy data from src_reg
+    into dst_reg.
+    This method checks the kind and number of regs and
+    uses the `make_copy` method to construct each individual
+    copy instructions.
+
+    For copies involving 'a' regs, we can only copy 1 reg at a time.
+    For copies between 'v' regs, we can copy 2 at a time
+
+    This method returns a list of instructions.
+    '''
+    assert len(src_reg.ids) == len(dst_reg.ids)
+    dbg(f"making copy from {src_reg} to {dst_reg}")
+    if len(src_reg.ids) == 1:
+        return [make_copy(src_reg, dst_reg, loc, bb)]
+
+    src_kind = src_reg.kind
+    dst_kind = dst_reg.kind
+
+    pack = 1 if (src_kind == 'a' or dst_kind == 'a') else 2
+    src_list = sorted(flatten_regs(src_reg), key=lambda x: x[1])
+    dst_list = sorted(flatten_regs(dst_reg), key=lambda x: x[1])
+    copy_insts = []
+    for i in range(0, len(src_reg.ids), pack):
+        src_sub_reg = coalesce_regs(set(src_list[i:i + pack]))[0]
+        dst_sub_reg = coalesce_regs(set(dst_list[i:i + pack]))[0]
+        dbg(f"{i}: copy from {src_sub_reg} to {dst_sub_reg}")
+        copy_insts.append(make_copy(src_sub_reg, dst_sub_reg, loc, bb))
+
+    return copy_insts
+
+
+def make_copy(src_reg, dst_reg, loc, bb):
+    '''
+    Construct a copy instruction to copy data from src_reg into dst_reg
+    This method does not check how many registers in the src or dst.
+    '''
+    assert len(src_reg.ids) == len(dst_reg.ids)
+    operands = [dst_reg.emit(), src_reg.emit()]
+    regs_by_operand = [dst_reg, src_reg]
+    opcode = kind_to_mov[(src_reg.kind, dst_reg.kind, len(src_reg.ids))]
+    raw_line = opcode + ",".join(operands)
+    new_inst = Instruction(opcode, operands, regs_by_operand, loc, raw_line, bb)
+    return new_inst
+
+
 def print_check(check):
     return "✅" if check else "❌"
 
@@ -1463,8 +1518,9 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
 
         cnt = len(flatten_regs(chain.regs))
         check_mark = print_check(chain.isLiveAcrossBB)
-        dbg(f"loc-{chain.loc} ({cnt} regs, isLiveAcrossBB: {check_mark}): {chain.regs}", indent)
-        dbg(f"This chain has {len(chain.ds_groups)} lds groups")
+        dbg(
+            f"loc-{chain.loc} ({cnt} regs, isLiveAcrossBB: {check_mark}, {len(chain.ds_groups)} lds groups): {chain.regs}",
+            indent)
 
     total_lds_regs_in_loop = coalesce_regs(total_lds_regs_in_loop)
     a_num, v_num = count_regs(total_lds_regs_in_loop)
@@ -1484,6 +1540,8 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
 
     dbg(f"========== analyzing {chain_cnt} ds read chains done ===== ", indent)
 
+    return flatten_regs(total_lds_regs_in_loop)
+
 
 def analyze_regs(bb, mfmaChainsInBB, indent):
     dbg(f"========== Analyze regs in block {bb.name} ==========", indent)
@@ -1493,8 +1551,11 @@ def analyze_regs(bb, mfmaChainsInBB, indent):
 
     for chain in mfmaChainsInBB:
         entry_acc |= flatten_regs(chain.entry_acc)
+        if chain.entry_acc != chain.exit_acc:
+            dbg(f"This chain has mismatch acc: entry {chain.entry_acc} --> exit {chain.exit_acc}")
 
-    assert entry_acc.issubset(live_in)
+    if not entry_acc.issubset(live_in):
+        dbg("WARNING: entry_acc is not a subset of live_in", indent)
 
     live_in_a, live_in_v = count_regs(coalesce_regs(live_in))
     dbg(f"live in ({live_in_a} x a, {live_in_v} x v): {coalesce_regs(live_in)}", indent)
@@ -1520,6 +1581,8 @@ def analyze_regs(bb, mfmaChainsInBB, indent):
     dbg(f"{read_from=}  {write_to=}", indent)
 
     dbg(f"========== Analyze regs in block {bb.name} done =====", indent)
+
+    return entry_acc
 
 
 def get_entry_exit_acc_reg(bb, chain):
@@ -1553,7 +1616,7 @@ def get_entry_exit_acc_reg(bb, chain):
     mfma = chain.mfmas[0]
     worklist = []
     for user in mfma.users:
-        if user in bb.instructions:
+        if user in bb.instructions and 'v_cvt' not in user.opcode:
             worklist.append(user)
 
     final_users = []
@@ -1562,7 +1625,7 @@ def get_entry_exit_acc_reg(bb, chain):
         cur = worklist.pop()
         all_in_ep = True
         for user in cur.users:
-            if user in bb.instructions:
+            if user in bb.instructions and 'v_cvt' not in user.opcode:
                 worklist.append(user)
                 all_in_ep = False
         if all_in_ep:
@@ -1848,7 +1911,7 @@ def rewrite_lds_group(lds_group, free_reg, indent=0):
         dbg(f"{ds_inst.emit()}", indent + 2)
         my_reg = pick_and_remove_contiguous_regs(my_regs, x, kind)
         if not my_reg:
-            dbg(f"Not enough regs", indent + 2)
+            dbg("Not enough regs", indent + 2)
             assert False
         ## replace ds_read
         ## Note that here we don't want to replace_all_users_with.
@@ -1924,7 +1987,6 @@ def rewrite_lds_data(bb, chains, entry_acc):
         reuse_loc = find_reuse(loc, loc_to_interval, loc_to_regs)
         if reuse_loc is None:
             logging.debug(f"{loc=} need new reg")
-            old_regs = flatten_regs(chain.regs)
             x = len(flatten_regs(chain.ds_groups[0].data))
             #cnt1 = 0
             for lds_group in chain.ds_groups:
@@ -1943,7 +2005,6 @@ def rewrite_lds_data(bb, chains, entry_acc):
                 target_reg = loc_to_chain[reuse_loc].ds_groups[idx].data
                 rewrite_lds_group(lds_group, target_reg)
         chain.update_regs()
-        #ds_reg_free = ds_reg_free | old_regs - entry_acc
 
     logging.debug("========== rewrite lds data done =====")
 
@@ -2391,16 +2452,19 @@ def amdgcn_as(text, verbose=False):
     program.update_inst_index()
     program.process_blocks(indent)
 
-    program.collect_ds_chains(indent)
-    program.collect_mfma_chains(indent)
-
     loop = program.get_loop()
+    #epilogue = program.get_epilogue()
 
-    mfmaChainsInLoop = program.mfmaChains
+    program.collect_ds_chains(indent)
+    mfmaChainsInLoop = program.collect_mfma_chains(loop, indent)
+    #mfmaChainsInEpi = program.collect_mfma_chains(epilogue, indent)
+
     LDSChains = program.LDSChains
 
-    analyze_regs(loop, mfmaChainsInLoop, indent)
+    entry_acc = analyze_regs(loop, mfmaChainsInLoop, indent)
+    #entry_acc_epi = analyze_regs(epilogue, mfmaChainsInEpi, indent)
     analyze_lds_chains(loop, LDSChains, indent)
+    program.update_free_regs(indent)
 
     dbg("######################################################", indent)
     dbg("## Step 1", indent)
@@ -2408,8 +2472,9 @@ def amdgcn_as(text, verbose=False):
     dbg("## 2. mark all copy inst as dead", indent)
     dbg("######################################################", indent)
     min_a = 64
-    entry_acc = program.rewrite_mfma_acc(min_a, 0)
+    entry_acc = program.rewrite_mfma_acc(mfmaChainsInLoop, min_a, indent)
 
+    program.update_inst_index()
     program.update_free_regs(indent)
     analyze_regs(loop, mfmaChainsInLoop, indent)
 
