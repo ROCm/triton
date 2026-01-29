@@ -537,3 +537,9 @@ But we have 4 waves issuing `ds_read_b128` at the same time.
   2 `ds_read_b128`. The key is to keep the rate of 1 `ds_read_b128` with 16-cycle gap.
 - If there are 2-way conflicts, now data serving time becomes 32 cycles.
   Now we need 2 16-cycle mfma to interleave with 1 `ds_read_b128`.
+
+## [amdgcnas] v5 and v6
+
+To support f8 kernel
+
+v6 is a refactored version of v5
