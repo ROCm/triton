@@ -525,7 +525,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
         }
         if (lastDotOp)
           builder.setInsertionPointAfter(lastDotOp);
-#if 0
+#if 1
         insertDotLocalLoadSchedBarrier(builder, dot.getLoc());
 #endif
         // Get the accumulator for this (M,N) tile
@@ -541,23 +541,11 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
         // Update the accumulator for this (M,N) tile
         mnToDot[{mOff, nOff}] = newDot->getResult(0);
         lastDotOp = newDot;
-        
-        // Delay issuing the last dot
-        //bool isLastK = (kOff + prefetchWidthK == totalK);
-        //bool isLastM = (mOff + prefetchWidthM == totalM);
-        //bool isLastN = (nOff + prefetchWidthN == totalN);
-        //if (isLastK && isLastM && isLastN) {
-          // We want to delay issuing the last dot as long as possible, ideally
-          // until after the prefetch.  To accomplish this, set the insertion
-          // point above the dot.  If we find anything dependent on the dot (at
-          // the top of this loop), we resume inserting after it.
-        //}
       }
     }
   }
 
   // Concatenate all M×N tiles back into a single tensor with original shape
-
   // Join N.
   SmallVector<Value> mJoins;
   for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
@@ -570,7 +558,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   }
   // Join M.
   Value result = joinValuesAlongAxis(mJoins, mAxis, dot.getLoc(), builder);
-
+  // Set insertion point to before the last dot for the prefetched local loads
   Operation *newOp = result.getDefiningOp();
   builder.setInsertionPoint(lastDotOp);
   return newOp;
@@ -869,14 +857,19 @@ LogicalResult Prefetcher::initialize() {
       LDBG("instrShape: " << instrShape[0] << "x" << instrShape[1] << "x" << instrShape[2]);
       LDBG("warpsPerCta: " << warpsPerCta[0] << "x" << warpsPerCta[1]);
       LDBG("numInsts: " << numInsts);
-      // Tile spanned by single instruction
-      unsigned m = instrShape[0]*warpsPerCta[0];
-      unsigned n = instrShape[1]*warpsPerCta[1];
+      // Square-ish tile of num mma instructions; want m >= n because splitting m first (fat rows).
+      unsigned m = 1, n = 1;
+      while (numInsts > 1) {
+        if (m <= n)
+          m *= 2;
+        else
+          n *= 2;
+        numInsts /= 2;
+      }
+      LDBG("instr tile m: " << m << ", n: " << n);
+      m *= instrShape[0]*warpsPerCta[0];
+      n *= instrShape[1]*warpsPerCta[1];
       unsigned k = instrShape[2];
-      // Expand tile squarely to number of mma instructions.
-      unsigned instM = static_cast<unsigned>(std::sqrt(numInsts));
-      m *= instM;
-      n *= (numInsts / instM);
       return {m, n, k};
     };
 
@@ -911,11 +904,10 @@ LogicalResult Prefetcher::initialize() {
       // Prefetch whole MxN tile
       prefetchWidthM = mSize;
       prefetchWidthN = nSize;
+      if (kSize < prefetchWidthK)
+        continue;
     }
 
-    // Skip prefetching if K dimension is less than prefetch width
-    //if (kSize < prefetchWidthK && mSize < prefetchWidthM && nSize < prefetchWidthN)
-    //  continue;
     // Can't prefetch MORE than the tile size
     prefetchWidthM = std::min<unsigned>(prefetchWidthM, mSize);
     prefetchWidthN = std::min<unsigned>(prefetchWidthN, nSize);
