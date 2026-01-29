@@ -166,7 +166,7 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
         consumer = 0
         accumulator = ttgl.zeros((BLOCK_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=ACCUMULATOR_LAYOUT)
 
-        for _ in range(0, ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)):
+        for _ in range(0, ttgl.cdiv(K, BLOCK_K) - NUM_BUFFERS):
             producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
                                    TRANSPOSE_B)
             # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
@@ -175,24 +175,21 @@ def persistent_gemm_tdm_pipelined_lds_prefetch_kernel(a_ptr, b_ptr, c_ptr,  #
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
                                                accumulator, (NUM_BUFFERS - 1) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
-        producer = 0
-        for i in ttgl.static_range(NUM_BUFFERS - 1):
-            producer = issue_loads(producer, a_desc, b_desc, off_am_next, off_bn_next, a_buffer, b_buffer, BLOCK_K,
-                                   NUM_BUFFERS, TRANSPOSE_B, pred=tile_idx + num_sms < num_tiles)
-            # We prefetch distance - 1 iterations ahead because producer is already incremented by 1
-            issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, off_am_next, off_bn_next, BLOCK_K,
-                                TRANSPOSE_B)
+        # Last load for current tile and L2 prefetch for next tile
+        producer = issue_loads(producer, a_desc, b_desc, off_am, off_bn, a_buffer, b_buffer, BLOCK_K, NUM_BUFFERS,
+                               TRANSPOSE_B)
+        issue_l2_prefetches(L2_PREFETCH_DISTANCE - 1, producer, a_desc, b_desc, off_am_next, off_bn_next, BLOCK_K,
+                            TRANSPOSE_B)
+
+        for i in ttgl.static_range(NUM_BUFFERS):
             consumer, accumulator = issue_wmma(consumer, a_buffer, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B,
-                                               accumulator, (NUM_BUFFERS - 2 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
+                                               accumulator, (NUM_BUFFERS - 1 - i) * 2, NUM_BUFFERS, TRANSPOSE_B)
 
         offs_cm = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, ACCUMULATOR_LAYOUT))
         offs_cn = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, ACCUMULATOR_LAYOUT))
         offs_c = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
-
-        pid_m, pid_n = pid_m_next, pid_n_next
-        off_am, off_bn = off_am_next, off_bn_next
 
 
 def _build_gemm_layouts(BLOCK_M, BLOCK_N, BLOCK_K, cga_layout_a, cga_layout_b, cga_layout_c, WARP_BASES, TRANSPOSE_B):
@@ -386,7 +383,7 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(32, 32, 64)])
-@pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3, 4])
 @pytest.mark.parametrize("TRANSPOSE_B", [False, True])
 @pytest.mark.parametrize("PERSISTENT", [False, True])
 @pytest.mark.parametrize("PREFETCH", [False, True])
@@ -1484,11 +1481,14 @@ if __name__ == "__main__":
     parser.add_argument("-M", type=int, default=256, help='problem M size')
     parser.add_argument("-N", type=int, default=256, help='problem N size')
     parser.add_argument("-K", type=int, default=1024, help='problem K size')
+    parser.add_argument("--block_m", type=int, default=256, help='Block M size')
+    parser.add_argument("--block_n", type=int, default=256, help='Block N size')
+    parser.add_argument("--block_k", type=int, default=128, help='Block K size')
     parser.add_argument("--num-warps", type=int, choices=[4, 8, 12, 16], default=4,
                         help='num warps (for warp specialized, this is num total warps)')
     parser.add_argument("--ctas-per-cga", type=int, nargs=2, default=[1, 1],
                         help='CTA arrangement per CGA as [M, N]. Defaults to [1, 1]')
-    parser.add_argument("--num-buffers", type=int, choices=[1, 2, 4], default=2, help='num shared memory buffers')
+    parser.add_argument("--num-buffers", type=int, choices=[1, 2, 3, 4], default=2, help='num shared memory buffers')
     parser.add_argument("--persistent", action="store_true", help="Use persistent variant")
     parser.add_argument("--prefetch-lds", action="store_true", help="Enable prefetch LDS")
     parser.add_argument(
@@ -1512,7 +1512,7 @@ if __name__ == "__main__":
         assert args.num_warps != 16
 
     M, N, K = args.M, args.N, args.K
-    BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
+    BLOCK_M, BLOCK_N, BLOCK_K = args.block_m, args.block_n, args.block_k
     NUM_BUFFERS = args.num_buffers
     NUM_WARPS = args.num_warps
     CTAS_PER_CGA = args.ctas_per_cga
@@ -1531,6 +1531,7 @@ if __name__ == "__main__":
         # For warp specialized, allow larger blocks with subtiled variant
         if args.subtiled:
             BLOCK_M, BLOCK_N, BLOCK_K = 256, 256, 128
+            print(f"Limited block size support; resetting to {BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}")
             kernel_type = "persistent" if PERSISTENT else "non-persistent"
             print(f"Running {kernel_type} warp specialized GEMM kernel (subtiled):")
             print(
@@ -1541,6 +1542,7 @@ if __name__ == "__main__":
                                                             M, N, K, NUM_WARPS)
         else:
             BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
+            print(f"Limited block size support; resetting to {BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}")
             kernel_type = "persistent" if PERSISTENT else "non-persistent"
             print(f"Running {kernel_type} warp specialized GEMM kernel:")
             print(
