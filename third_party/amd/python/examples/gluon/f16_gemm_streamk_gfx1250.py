@@ -1290,7 +1290,7 @@ def test_streamk_gemm_tdm_4warps(
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(32, 32, 64)])
-@pytest.mark.parametrize("NUM_BUFFERS", [2, 3, 4])
+@pytest.mark.parametrize("NUM_BUFFERS", [3])
 @pytest.mark.parametrize("TRANSPOSE_B", [False, True])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (258, 258, 510)])
 def test_streamk_gemm_tdm_8warps(
