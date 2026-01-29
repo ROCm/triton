@@ -29,11 +29,13 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Debug.h"
 
+#undef DEBUG_TYPE
 #define DEBUG_TYPE "tritongpu-prefetch"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -313,6 +315,7 @@ class Prefetcher {
   unsigned prefetchWidthM = 64;
   unsigned prefetchWidthN = 64;
   unsigned prefetchWidthK = 32;
+  unsigned kWidth = 8;
 
   /// dots to be prefetched
   SetVector<triton::DotOp> dots;
@@ -391,6 +394,33 @@ void Prefetcher::cloneElementwiseOps(Value &ret, const SmallVector<Value> &vals,
   }
   if (vals.size() > 1)
     ret = mapping.lookup(vals.back());
+}
+
+// Bitmask that encodes instruction types for LLVM AMD scheduling hints.
+enum InstructionKindMask {
+  NONE =        0x0000,
+  ALL_ALU =     0x0001,
+  VALU =        0x0002,
+  SALU =        0x0004,
+  MFMA =        0x0008,
+  ALL_VMEM =    0x0010,
+  VMEM_READ =   0x0020,
+  VMEM_WRITE =  0x0040,
+  ALL_DS =      0x0080,
+  DS_READ =     0x0100,
+  DS_WRITE =    0x0200,
+  TRANSCEND =   0x0400
+};
+
+void insertDotLocalLoadSchedBarrier(OpBuilder &builder, Location loc) {
+  int32_t mask = 0
+      | InstructionKindMask::VALU
+      | InstructionKindMask::SALU
+      | InstructionKindMask::ALL_VMEM
+      | InstructionKindMask::VMEM_READ
+      | InstructionKindMask::VMEM_WRITE
+      | InstructionKindMask::TRANSCEND;
+  ROCDL::SchedBarrier::create(builder, loc, mask);
 }
 
 // Generates all dots and first N-1 local_loads.
@@ -495,23 +525,17 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
         }
         if (lastDotOp)
           builder.setInsertionPointAfter(lastDotOp);
-        
+#if 0
+        insertDotLocalLoadSchedBarrier(builder, dot.getLoc());
+#endif
         // Get the accumulator for this (M,N) tile
         Value cSlice = mnToDot[{mOff, nOff}];
         auto dType = cast<RankedTensorType>(cSlice.getType());
         LDBG("cSlice[" << mOff << "," << nOff << "]: " << cSlice);
-#if 1
         Operation *newDot = DotOp::create(builder,
             dot.getLoc(), dType,
             ValueRange{aSlice, bSlice, cSlice},
             dotAttrs);
-#else
-        // Clone the dot operation
-        Operation *newDot = builder.clone(*dot, mapping);
-        newDot->setOperand(0, aSlice);
-        newDot->setOperand(1, bSlice);
-        newDot->setOperand(2, cSlice);
-#endif
         LDBG("newDot[" << mOff << "," << nOff << "]: " << *newDot);
 
         // Update the accumulator for this (M,N) tile
@@ -724,9 +748,8 @@ Value Prefetcher::generateLocalLoadSlice(Value v, unsigned opIdx, bool isPrologu
           shape, elementType, type.getEncoding(), type.getMemorySpace(),
           type.getMutableMemory(), type.getAllocShape()),
       v, offset);
-
   auto dotOperandEnc = triton::gpu::DotOperandEncodingAttr::get(
-      builder.getContext(), opIdx, dotEncoding, prefetchWidthK / 8);
+      builder.getContext(), opIdx, dotEncoding, kWidth);
   Value prefetchSlice;
   if (asyncWaitToken) {
     prefetchSlice = triton::gpu::LocalLoadOp::create(
@@ -825,9 +848,13 @@ LogicalResult Prefetcher::initialize() {
         mlir::cast<triton::gpu::DotOperandEncodingAttr>(aType.getEncoding());
     auto bEnc =
         mlir::cast<triton::gpu::DotOperandEncodingAttr>(bType.getEncoding());
-    int aKWidth = aEnc.getKWidth();
-    int bKWidth = bEnc.getKWidth();
-    assert(aKWidth == bKWidth);
+    assert(aEnc.getKWidth() == bEnc.getKWidth());
+    kWidth = aEnc.getKWidth();
+    LDBG("kWidth: " << kWidth);
+
+    // Calculate prefetch widths
+    unsigned elementWidthA = aType.getElementTypeBitWidth();
+    unsigned elementWidthB = bType.getElementTypeBitWidth();
 
     // Get sizes for all three dimensions
     unsigned mSize = aType.getShape()[0];  // M dimension from operand A
@@ -835,81 +862,65 @@ LogicalResult Prefetcher::initialize() {
     unsigned kSize = aType.getShape().back();  // K dimension
     LDBG("size: " << mSize << "x" << nSize << "x" << kSize);
 
-#if 0
-    // EXPERIMENT with ShapePerCtaTile
-    auto dTensorTy = cast<RankedTensorType>(dot.getResult().getType());
-    AMDMfmaEncodingAttr dLayout =
-      cast<AMDMfmaEncodingAttr>(dTensorTy.getEncoding());
-    auto sizePerThread = getContigPerThread(dTensorTy);
-    //auto numElemsPerThread = product(sizePerThread);
-    SmallVector<unsigned> shapePerCtaTile;
-    for (auto [reg, thread, warp] :
-        llvm::zip(sizePerThread, dLayout.getThreadsPerWarp(),
-                  dLayout.getWarpsPerCTA())) {
-      shapePerCtaTile.push_back(reg * thread * warp);
-    }
-    shapePerCtaTile = expandMatrixShapeWithBatch(ArrayRef(shapePerCtaTile));
-    LDBG("shapePerCtaTile: " << shapePerCtaTile[0] << ", " << shapePerCtaTile[1]);
-#endif
+    auto shapePerCta = getShapePerCTA(dType);
+    LDBG("shapePerCta: " << shapePerCta[0] << "x" << shapePerCta[0]);
+
+    auto prefetchWidthAMD = [&](ArrayRef<unsigned> instrShape, ArrayRef<unsigned> warpsPerCta, unsigned numInsts) -> std::tuple<unsigned, unsigned, unsigned> {
+      LDBG("instrShape: " << instrShape[0] << "x" << instrShape[1] << "x" << instrShape[2]);
+      LDBG("warpsPerCta: " << warpsPerCta[0] << "x" << warpsPerCta[1]);
+      LDBG("numInsts: " << numInsts);
+      // Tile spanned by single instruction
+      unsigned m = instrShape[0]*warpsPerCta[0];
+      unsigned n = instrShape[1]*warpsPerCta[1];
+      unsigned k = instrShape[2];
+      // Expand tile squarely to number of mma instructions.
+      unsigned instM = static_cast<unsigned>(std::sqrt(numInsts));
+      m *= instM;
+      n *= (numInsts / instM);
+      return {m, n, k};
+    };
 
     // Get the dot result encoding to determine instruction dimensions
     Attribute dotEncoding = dot.getType().getEncoding();
-    unsigned instrM = 16, instrN = 16, instrK = 16;  // Default values
     if (auto mfmaEnc = dyn_cast<AMDMfmaEncodingAttr>(dotEncoding)) {
-      auto instrShape = mfmaEnc.getInstrShape();
-      instrM = instrShape[0];
-      instrN = instrShape[1];
-      instrK = instrShape[2];
+      unsigned numInsts = 8;
+      auto [m, n, k] = prefetchWidthAMD(mfmaEnc.getInstrShape(), mfmaEnc.getWarpsPerCTA(), numInsts);
+      prefetchWidthM = m;
+      prefetchWidthN = n;
+      prefetchWidthK = k;
     } else if (auto wmmaEnc = dyn_cast<AMDWmmaEncodingAttr>(dotEncoding)) {
-      auto instrShape = wmmaEnc.getInstrShape();
-      instrM = instrShape[0];
-      instrN = instrShape[1];
-      instrK = instrShape[2];
+      unsigned numInsts = 8;
+      auto warpsPerCTA = getWarpsPerCTA(wmmaEnc, dType.getShape());
+      auto [m, n, k] = prefetchWidthAMD(wmmaEnc.getInstrShape(), warpsPerCTA, numInsts);
+      prefetchWidthM = m;
+      prefetchWidthN = n;
+      prefetchWidthK = k;
     } else if (auto mmaEnc = dyn_cast<NvidiaMmaEncodingAttr>(dotEncoding)) {
       // For NVIDIA MMA, instruction shape depends on version
       // MMAv2: typically 16x8 or similar
       auto instrShape = mmaEnc.getInstrShape();
-      instrM = instrShape[0];
-      instrN = instrShape[1];
+      auto instrM = instrShape[0];
+      auto instrN = instrShape[1];
       // K dimension for MMA is determined by kWidth
-      instrK = aKWidth > 0 ? aKWidth : 16;
+      auto instrK = kWidth > 0 ? kWidth : 16;
+      // K dimension width: Use 8x instruction K width for better tensor core utilization
+      if (kWidth == 0)
+        prefetchWidthK = 256 / elementWidthA;
+      else
+        prefetchWidthK = 8 * kWidth;
+      // Prefetch whole MxN tile
+      prefetchWidthM = mSize;
+      prefetchWidthN = nSize;
     }
-    LDBG("instr: " << instrM << "x" << instrN << "x" << instrK);
-
-    // Calculate prefetch widths
-    unsigned elementWidthA = aType.getElementTypeBitWidth();
-    unsigned elementWidthB = bType.getElementTypeBitWidth();
-    
-    // K dimension width: Use 8x instruction K width for better tensor core utilization
-    if (aKWidth == 0)
-      prefetchWidthK = 256 / elementWidthA;
-    else
-      prefetchWidthK = 8 * aKWidth;
-
-    // TODO(dtanner) fix prefetch, a
-    // M dimension width: Use at least 2x instruction M for 2x2 assembly
-    // Also ensure we don't exceed 256 bits or the actual dimension size
-    // int64_t targetPrefetchM = 2 * instrM;  // 2x for 2x2 tiling
-    prefetchWidthM = std::max(mSize / 2, instrM*1);
-    
-    // N dimension width: Use at least 2x instruction N for 2x2 assembly
-    // Also ensure we don't exceed 256 bits or the actual dimension size
-    // int64_t targetPrefetchN = 2 * instrN;  // 2x for 2x2 tiling
-    prefetchWidthN = std::max(nSize / 2, instrN*1);
-
 
     // Skip prefetching if K dimension is less than prefetch width
-    if (kSize < prefetchWidthK && mSize < prefetchWidthM && nSize < prefetchWidthN)
-      continue;
+    //if (kSize < prefetchWidthK && mSize < prefetchWidthM && nSize < prefetchWidthN)
+    //  continue;
     // Can't prefetch MORE than the tile size
     prefetchWidthM = std::min<unsigned>(prefetchWidthM, mSize);
     prefetchWidthN = std::min<unsigned>(prefetchWidthN, nSize);
     prefetchWidthK = std::min<unsigned>(prefetchWidthK, kSize);
-
     LDBG("prefetchWidths: " << prefetchWidthM << "x" << prefetchWidthN << "x" << prefetchWidthK);
-
-    auto shapePerCtaTile = getShapePerCTA(dType);
-
 
     auto aVals = getPrefetchSrc(dot.getA());
     auto bVals = getPrefetchSrc(dot.getB());

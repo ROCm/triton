@@ -759,7 +759,7 @@ public:
                              oldRetType.getElementType());
 
     rewriter.replaceOp(dotOp, dotOutput);
-
+    llvm::outs() << "kWidth=" << kWidth << "\n";
     return success();
   }
 };
@@ -1817,6 +1817,8 @@ struct TritonAMDGPUAccelerateMatmulPass
       mfmaPatterns.add<BlockedToWMMA>(context, wmmaVersion, 16, /*benefit=*/2);
       break;
     case ISAFamily::CDNA4:
+      llvm::outs() << "cdna4: kPack=" << kPack << "\n";
+
       mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize,
           /*benefit=*/4);
