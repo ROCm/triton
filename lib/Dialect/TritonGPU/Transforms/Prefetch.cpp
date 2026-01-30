@@ -478,6 +478,8 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   Operation *lastDotOp = nullptr;
 
   for (int32_t kOff = 0; kOff < totalK; kOff += prefetchWidthK) {
+    DenseMap<int32_t, Value> aSlices;
+    DenseMap<int32_t, Value> bSlices;
     for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
       for (int32_t nOff = 0; nOff < totalN; nOff += prefetchWidthN) {
         LDBG("MNK: " << mOff << ", " << nOff << ", " << kOff);
@@ -493,27 +495,39 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
             aSlice = newForOp.getTiedLoopRegionIterArg(&*a.use_begin());
           else
             aSlice = mapping.lookup(dot.getA());
+          aSlices[mOff] = aSlice;
           LDBG("aSlice0: " << aSlice);
         } else {
-          // Create local_load.
-          FailureOr<Value> awtA = getAsyncWaitTokenForLocalLoad(
-            dot2aVals[dot].back().getDefiningOp(), false, builder, &mapping);
-          aSlice = generateLocalLoadSlice(
-              mapping.lookup(dot2aLoopArg[dot]), 0, false, dotEncoding, builder,
-              failed(awtA) ? std::nullopt : std::optional<Value>(*awtA),
-              mOff, prefetchWidthM, std::nullopt, std::nullopt, kOff, prefetchWidthK);
-          cloneElementwiseOps(aSlice, dot2aVals[dot], builder);
-          LDBG("aSlice: " << aSlice);
+          if (nOff == 0) {
+            // Create local_load for new kOff>0 and nOff=0.
+            FailureOr<Value> awtA = getAsyncWaitTokenForLocalLoad(
+              dot2aVals[dot].back().getDefiningOp(), false, builder, &mapping);
+            aSlice = generateLocalLoadSlice(
+                mapping.lookup(dot2aLoopArg[dot]), 0, false, dotEncoding, builder,
+                failed(awtA) ? std::nullopt : std::optional<Value>(*awtA),
+                mOff, prefetchWidthM, std::nullopt, std::nullopt, kOff, prefetchWidthK);
+            cloneElementwiseOps(aSlice, dot2aVals[dot], builder);
+            aSlices[mOff] = aSlice;
+            LDBG("aSliceNew: " << aSlice);
+          } else {
+            // Need to reuse the data from nOff=0.
+            aSlice = aSlices[mOff];
+            LDBG("aSliceReused: " << aSlice);
+          }
         }
 
         Value bSlice;
         if (kOff == 0 && nOff == 0) {
+          // Prefetched in prior iter.
           if (Value b = operand2headPrefetch.lookup(dot.getB()))
             bSlice = newForOp.getTiedLoopRegionIterArg(&*b.use_begin());
           else
             bSlice = mapping.lookup(dot.getB());
+          bSlices[nOff] = bSlice;
           LDBG("bSlice0: " << bSlice);
         } else {          
+          if (mOff == 0) {
+            // Create local_load for new kOff>0 and mOff=0.
           FailureOr<Value> awtB = getAsyncWaitTokenForLocalLoad(
               dot2bVals[dot].back().getDefiningOp(), false, builder, &mapping);
           bSlice = generateLocalLoadSlice(
@@ -521,7 +535,13 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
               failed(awtB) ? std::nullopt : std::optional<Value>(*awtB),
               std::nullopt, std::nullopt, nOff, prefetchWidthN, kOff, prefetchWidthK);
           cloneElementwiseOps(bSlice, dot2bVals[dot], builder);
-          LDBG("bSlice: " << bSlice);
+          bSlices[nOff] = bSlice;
+          LDBG("bSliceNew: " << bSlice);
+          } else {
+            // Need to reuse the data from mOff=0.
+            bSlice = bSlices[nOff];
+            LDBG("bSliceReused: " << bSlice);
+          }
         }
         if (lastDotOp)
           builder.setInsertionPointAfter(lastDotOp);
