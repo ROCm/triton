@@ -82,28 +82,17 @@ def store_quadrant_to_p_buffer(
 
 
 @gluon.jit
-def load_quadrant_from_p_buffer(
-    p_ptr,
-    next_pid,
-    BLOCK_M: ttgl.constexpr,
-    BLOCK_N: ttgl.constexpr,
-    HALF_M: ttgl.constexpr,
-    HALF_N: ttgl.constexpr,
-    rm_q,
-    rn_q,
-    qm: ttgl.constexpr,
-    qn: ttgl.constexpr,
-    QUAD_WMMA: ttgl.constexpr,
-):
+def load_quadrant_from_p_buffer(p_ptr, next_pid, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                                HALF_M: ttgl.constexpr, HALF_N: ttgl.constexpr, rm_q, rn_q, qm: ttgl.constexpr,
+                                qn: ttgl.constexpr):
     """
-    Load a single quadrant from P buffer using buffer_load + convert_layout.
+    Load a single quadrant from P buffer using buffer_load.
     """
     P_base_offs = next_pid * BLOCK_M * BLOCK_N
     row_offs = rm_q + (qm * HALF_M)
     col_offs = rn_q + (qn * HALF_N)
     p_offs = P_base_offs + row_offs[:, None] * BLOCK_N + col_offs[None, :]
-    contrib_q = ttgl.amd.gfx1250.buffer_load(p_ptr, p_offs)
-    return ttgl.convert_layout(contrib_q, QUAD_WMMA)
+    return ttgl.amd.gfx1250.buffer_load(p_ptr, p_offs)
 
 
 @gluon.jit
@@ -229,7 +218,6 @@ def process_streamk_tiles(
         # Shared quadrant setup for 256x256 tiles
         HALF_M: ttgl.constexpr = BLOCK_M // 2
         HALF_N: ttgl.constexpr = BLOCK_N // 2
-        QUAD_WMMA: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
 
         # Contributor or Owner logic
         if current_start_iter != tile_iter:
@@ -243,22 +231,22 @@ def process_streamk_tiles(
                 acc_01, acc_11 = acc_n1.split()
 
                 # Use WMMA layout offsets for buffer_store
-                rm_q = ttgl.arange(0, HALF_M, layout=ttgl.SliceLayout(1, QUAD_WMMA))
-                rn_q = ttgl.arange(0, HALF_N, layout=ttgl.SliceLayout(0, QUAD_WMMA))
+                rm_q = ttgl.arange(0, HALF_M)
+                rn_q = ttgl.arange(0, HALF_N)
                 P_base_offs = pid * BLOCK_M * BLOCK_N
 
-                # Store each quadrant with buffer_store + convert_layout
+                # Store each quadrant with buffer_store
                 p00_offs = P_base_offs + rm_q[:, None] * BLOCK_N + rn_q[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_00, QUAD_WMMA), p_ptr, p00_offs)
+                ttgl.amd.gfx1250.buffer_store(acc_00, p_ptr, p00_offs)
 
                 p01_offs = P_base_offs + rm_q[:, None] * BLOCK_N + (rn_q[None, :] + HALF_N)
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_01, QUAD_WMMA), p_ptr, p01_offs)
+                ttgl.amd.gfx1250.buffer_store(acc_01, p_ptr, p01_offs)
 
                 p10_offs = P_base_offs + (rm_q[:, None] + HALF_M) * BLOCK_N + rn_q[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_10, QUAD_WMMA), p_ptr, p10_offs)
+                ttgl.amd.gfx1250.buffer_store(acc_10, p_ptr, p10_offs)
 
                 p11_offs = P_base_offs + (rm_q[:, None] + HALF_M) * BLOCK_N + (rn_q[None, :] + HALF_N)
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_11, QUAD_WMMA), p_ptr, p11_offs)
+                ttgl.amd.gfx1250.buffer_store(acc_11, p_ptr, p11_offs)
             else:
                 # Full tile store for smaller tiles
                 rm1 = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
@@ -282,15 +270,9 @@ def process_streamk_tiles(
                 acc_00, acc_10 = acc_n0.split()
                 acc_01, acc_11 = acc_n1.split()
 
-                # Cache split layouts for convert_layout
-                layout_00: ttgl.constexpr = acc_00.type.layout
-                layout_01: ttgl.constexpr = acc_01.type.layout
-                layout_10: ttgl.constexpr = acc_10.type.layout
-                layout_11: ttgl.constexpr = acc_11.type.layout
-
                 # Use WMMA layout offsets for buffer_load
-                rm_q = ttgl.arange(0, HALF_M, layout=ttgl.SliceLayout(1, QUAD_WMMA))
-                rn_q = ttgl.arange(0, HALF_N, layout=ttgl.SliceLayout(0, QUAD_WMMA))
+                rm_q = ttgl.arange(0, HALF_M)
+                rn_q = ttgl.arange(0, HALF_N)
 
                 while end < tile_iter + iters_per_tile and next_pid < num_sms:
                     while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
@@ -298,23 +280,23 @@ def process_streamk_tiles(
 
                     P_base_offs = next_pid * BLOCK_M * BLOCK_N
 
-                    # Load and accumulate quadrants with buffer_load + convert_layout
+                    # Load and accumulate quadrants with buffer_load
                     p00_offs = P_base_offs + rm_q[:, None] * BLOCK_N + rn_q[None, :]
-                    acc_00 += ttgl.convert_layout(ttgl.amd.gfx1250.buffer_load(p_ptr, p00_offs), layout_00)
+                    acc_00 += ttgl.amd.gfx1250.buffer_load(p_ptr, p00_offs)
 
                     p01_offs = P_base_offs + rm_q[:, None] * BLOCK_N + (rn_q[None, :] + HALF_N)
-                    acc_01 += ttgl.convert_layout(ttgl.amd.gfx1250.buffer_load(p_ptr, p01_offs), layout_01)
+                    acc_01 += ttgl.amd.gfx1250.buffer_load(p_ptr, p01_offs)
 
                     p10_offs = P_base_offs + (rm_q[:, None] + HALF_M) * BLOCK_N + rn_q[None, :]
-                    acc_10 += ttgl.convert_layout(ttgl.amd.gfx1250.buffer_load(p_ptr, p10_offs), layout_10)
+                    acc_10 += ttgl.amd.gfx1250.buffer_load(p_ptr, p10_offs)
 
                     p11_offs = P_base_offs + (rm_q[:, None] + HALF_M) * BLOCK_N + (rn_q[None, :] + HALF_N)
-                    acc_11 += ttgl.convert_layout(ttgl.amd.gfx1250.buffer_load(p_ptr, p11_offs), layout_11)
+                    acc_11 += ttgl.amd.gfx1250.buffer_load(p_ptr, p11_offs)
 
                     end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
                     next_pid += 1
 
-                # Store quadrants to output C with buffer_store + convert_layout
+                # Store quadrants to output C with buffer_store
                 rm_top = pid_m * BLOCK_M + rm_q
                 rm_bottom = pid_m * BLOCK_M + (rm_q + HALF_M)
                 rn_left = pid_n * BLOCK_N + rn_q
@@ -322,19 +304,19 @@ def process_streamk_tiles(
 
                 mask00 = (rm_top[:, None] < M) & (rn_left[None, :] < N)
                 offs00 = stride_cm * rm_top[:, None] + stride_cn * rn_left[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_00, QUAD_WMMA), c_ptr, offs00, mask=mask00)
+                ttgl.amd.gfx1250.buffer_store(acc_00, c_ptr, offs00, mask=mask00)
 
                 mask01 = (rm_top[:, None] < M) & (rn_right[None, :] < N)
                 offs01 = stride_cm * rm_top[:, None] + stride_cn * rn_right[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_01, QUAD_WMMA), c_ptr, offs01, mask=mask01)
+                ttgl.amd.gfx1250.buffer_store(acc_01, c_ptr, offs01, mask=mask01)
 
                 mask10 = (rm_bottom[:, None] < M) & (rn_left[None, :] < N)
                 offs10 = stride_cm * rm_bottom[:, None] + stride_cn * rn_left[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_10, QUAD_WMMA), c_ptr, offs10, mask=mask10)
+                ttgl.amd.gfx1250.buffer_store(acc_10, c_ptr, offs10, mask=mask10)
 
                 mask11 = (rm_bottom[:, None] < M) & (rn_right[None, :] < N)
                 offs11 = stride_cm * rm_bottom[:, None] + stride_cn * rn_right[None, :]
-                ttgl.amd.gfx1250.buffer_store(ttgl.convert_layout(acc_11, QUAD_WMMA), c_ptr, offs11, mask=mask11)
+                ttgl.amd.gfx1250.buffer_store(acc_11, c_ptr, offs11, mask=mask11)
             else:
                 # Full accumulator for smaller tiles
                 rm = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
@@ -456,17 +438,14 @@ def process_streamk_tiles_8warps(
         if BLOCK_M == 256 and BLOCK_N == 256:
             HALF_M: ttgl.constexpr = BLOCK_M // 2
             HALF_N: ttgl.constexpr = BLOCK_N // 2
-            # Use same WARP_BASES as full layout to maintain consistency
-            QUAD_WMMA: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, WARP_BASES, [], [16, 16, 32])
-            rm_q = ttgl.arange(0, HALF_M, layout=ttgl.SliceLayout(1, QUAD_WMMA))
-            rn_q = ttgl.arange(0, HALF_N, layout=ttgl.SliceLayout(0, QUAD_WMMA))
+            rm_q = ttgl.arange(0, HALF_M)
+            rn_q = ttgl.arange(0, HALF_N)
 
             if current_start_iter != tile_iter:
                 # Contributor: store quadrants to P buffer sequentially
                 for qm in ttgl.static_range(2):
                     for qn in ttgl.static_range(2):
                         acc_q = split_accumulator_quadrant(accumulator, HALF_M, HALF_N, qm, qn)
-                        acc_q = ttgl.convert_layout(acc_q, QUAD_WMMA)
                         store_quadrant_to_p_buffer(
                             acc_q,
                             p_ptr,
@@ -487,7 +466,6 @@ def process_streamk_tiles_8warps(
                 for qm in ttgl.static_range(2):
                     for qn in ttgl.static_range(2):
                         acc_q = split_accumulator_quadrant(accumulator, HALF_M, HALF_N, qm, qn)
-                        acc_q = ttgl.convert_layout(acc_q, QUAD_WMMA)
 
                         next_pid = pid + 1
                         end = end_iter
@@ -505,7 +483,6 @@ def process_streamk_tiles_8warps(
                                 rn_q,
                                 qm,
                                 qn,
-                                QUAD_WMMA,
                             )
                             acc_q = acc_q + contrib_q
                             end += streamk_iters_pcu + (next_pid < streamk_remainder_iters)
@@ -531,8 +508,8 @@ def process_streamk_tiles_8warps(
                         )
         else:
             # Full accumulator for smaller tiles
-            rm_full = ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, WMMA_LAYOUT))
-            rn_full = ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, WMMA_LAYOUT))
+            rm_full = ttgl.arange(0, BLOCK_M)
+            rn_full = ttgl.arange(0, BLOCK_N)
             if current_start_iter != tile_iter:
                 p_off = (pid * BLOCK_M * BLOCK_N + rm_full[:, None] * BLOCK_N + rn_full[None, :])
                 ttgl.amd.gfx1250.buffer_store(accumulator, p_ptr, p_off)
