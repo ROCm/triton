@@ -873,23 +873,65 @@ LogicalResult Prefetcher::initialize() {
     auto shapePerCta = getShapePerCTA(dType);
     LDBG("shapePerCta: " << shapePerCta[0] << "x" << shapePerCta[0]);
 
+    // Larger prefetch widths means more mfmas in a dot-tile, more prefetching and fewer slices.
+    // This determines how to slice a dot into sub-dots. We want to prefetch the least ammount possible,
+    // therefore we calculate the smallest tile possible.
+    // Transposing A or B means not wanting to slice the respective dimension, so we only slice the other.
+    // If we want to bring in more logic, then depending on aspect ratio of warp tile, then that will
+    // change whether we want to slice axis 0 or 1 first, and what we want this rectangularity to look like.
     auto prefetchWidthAMD = [&](ArrayRef<unsigned> instrShape, ArrayRef<unsigned> warpsPerCta, unsigned numInsts) -> std::tuple<unsigned, unsigned, unsigned> {
+      bool hasTransA = false; // this should almost always be true for ML workloads.
+      bool hasTransB = true;
       LDBG("instrShape: " << instrShape[0] << "x" << instrShape[1] << "x" << instrShape[2]);
       LDBG("warpsPerCta: " << warpsPerCta[0] << "x" << warpsPerCta[1]);
       LDBG("numInsts: " << numInsts);
-      // Square-ish tile of num mma instructions; want m >= n because splitting m first (fat rows).
+      unsigned k = (hasTransA || hasTransB) ? kSize : instrShape[2];
       unsigned m = 1, n = 1;
+      // If transpose, then k dim has more instructions.
+      if (hasTransA) {
+        m = mSize / (instrShape[0]*warpsPerCta[0]); // Final!
+        // n = nSize / instrShape[1];
+        numInsts /= m;
+      }
+      if (hasTransB) { // n is final;
+        // m = mSize / instrShape[0];
+        n = nSize / (instrShape[1]*warpsPerCta[1]); // Final!
+        numInsts /= n;
+      }
+      if (hasTransA || hasTransB) {
+        k = kSize / instrShape[2];
+        numInsts /= k;
+      }
+      // Square-ish tile of num mma instructions; want m >= n because splitting m first (fat rows).
       while (numInsts > 1) {
-        if (m <= n)
+        if (hasTransA && hasTransB) {
+          // Both transposed so don't slice at all.
+          break;
+        } else if (!hasTransA && !hasTransB) {
+          // Neither is transposed, so slice towards square.
+          if (m <= n) {
+            m *= 2;
+          } else {
+            n *= 2;
+          }
+        } else if (hasTransB) {
+          // B is transposed, n fixed, so increase m.
           m *= 2;
-        else
+        } else if (hasTransA){
+          // A is transposed, M fixed, so increase n.
           n *= 2;
+        }
         numInsts /= 2;
       }
-      LDBG("instr tile m: " << m << ", n: " << n);
+      LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
       m *= instrShape[0]*warpsPerCta[0];
       n *= instrShape[1]*warpsPerCta[1];
-      unsigned k = instrShape[2];
+      k *= instrShape[2];
+      // As fa
+      // override for testing
+      //m = mSize;
+      //n = nSize/2;
+      //k = kSize;
       return {m, n, k};
     };
 

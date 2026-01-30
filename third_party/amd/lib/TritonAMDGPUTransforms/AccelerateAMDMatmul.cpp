@@ -133,11 +133,11 @@ warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
       ret[1] *= 2;
     }
   } while (true);
-
   if (ret[1] * shapePerWarp.second > tensorShape[1]) {
+    //llvm::outs() << "warpsPerTile0: " << ret[1] << "x" << ret[0] << "\n";
     return {ret[1], ret[0]};
   }
-
+  //llvm::outs() << "warpsPerTile1: " << ret[0] << "x" << ret[1] << "\n";
   return ret;
 }
 
@@ -555,6 +555,7 @@ public:
 
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
+    llvm::outs() << "BlockedToMFMA()\n";
     using TensorValue = TypedValue<RankedTensorType>;
     RankedTensorType oldRetType = dotOp.getType();
     if (!oldRetType.getEncoding() ||
@@ -1817,7 +1818,7 @@ struct TritonAMDGPUAccelerateMatmulPass
       mfmaPatterns.add<BlockedToWMMA>(context, wmmaVersion, 16, /*benefit=*/2);
       break;
     case ISAFamily::CDNA4:
-      llvm::outs() << "cdna4: kPack=" << kPack << "\n";
+      // llvm::outs() << "cdna4: kPack=" << kPack << "\n";
 
       mfmaPatterns.add<::ScaledBlockedToScaledMFMAF8F6F4>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize,
