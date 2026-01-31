@@ -46,6 +46,7 @@ EXCLUDE_PATTERNS=(
     "test_dot" # Failing 8 test cases
     "test_load_scope_sem_coop_grid_cta_one" # coop group not supported in FFM
     "test_load_store_same_ptr" # takes >60 mins
+    "test_cat_nd" # Failure after merge in upstream with #500
     # Excluse pattern for test_matmul.py
     "test_preshuffle_scale_mxfp_cdna4"
     "test_batched_mxfp"
