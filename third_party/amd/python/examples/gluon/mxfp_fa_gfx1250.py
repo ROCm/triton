@@ -376,7 +376,7 @@ def initialize_kv_scale_mem(base, shape, block_shape, layout, num_buffers=1, pre
 
 
 @gluon.jit
-def get_kv_scale_buffer(mem, buf, block_shape, preshuffle_factor=128):
+def get_kv_scale_buffer(mem, buf, block_shape, preshuffle_factor=128, slice=None):
     """ Get the shared memory buffer for K or V scales
 
     This function should be used in pair with `initialize_kv_scale_mem` to get the correct shared memory buffer by
@@ -385,6 +385,8 @@ def get_kv_scale_buffer(mem, buf, block_shape, preshuffle_factor=128):
     smem = mem.smem
     buffer = smem.index(buf)
     buffer = unshuffle_scale(buffer, block_shape[0], block_shape[1], preshuffle_factor)
+    if slice is not None:
+        buffer = buffer.slice(slice * (block_shape[0] // 2), (block_shape[0] // 2))
     return buffer
 
 
@@ -1414,19 +1416,21 @@ class BlockScaledAttentionProgram:
         return v
 
     @gluon.jit
-    def shared_load_k_scale(self, buf=0):
+    def shared_load_k_scale(self, buf=0, slice=None):
         cfg = self.cfg
 
-        k_scale_buffer = get_kv_scale_buffer(self.k_scale_mem, buf, [cfg.BLOCK_N, cfg.HEAD_SZ // 32])
+        k_scale_buffer = get_kv_scale_buffer(self.k_scale_mem, buf, [cfg.BLOCK_N, cfg.HEAD_SZ // 32],  #
+                                             slice=slice)
         k_scale = k_scale_buffer.load(cfg.k_scale_layout)
         return k_scale
 
     @gluon.jit
-    def shared_load_v_scale(self, buf=0):
+    def shared_load_v_scale(self, buf=0, slice=None):
         cfg = self.cfg
 
         v_scale_buffer = get_kv_scale_buffer(self.v_scale_mem, buf, [cfg.HEAD_SZ, cfg.BLOCK_N // 32],
-                                             preshuffle_factor=128 if cfg.HEAD_SZ == 128 else 64)
+                                             preshuffle_factor=128 if cfg.HEAD_SZ == 128 else 64,  #
+                                             slice=slice)
         v_scale = v_scale_buffer.load(cfg.v_scale_layout)
         return v_scale
 
@@ -1518,14 +1522,6 @@ class BlockScaledAttentionProgram:
     def split_subtile(self, x):
         layout: ttgl.constexpr = x.type.layout
         a0, a1 = x.reshape([x.shape[0], 2, x.shape[1] // 2]).permute(0, 2, 1).split()
-        a0 = ttgl.convert_layout(a0, layout, assert_trivial=True)
-        a1 = ttgl.convert_layout(a1, layout, assert_trivial=True)
-        return a0, a1
-
-    @gluon.jit
-    def split_scale(self, x):
-        layout: ttgl.constexpr = x.type.layout
-        a0, a1 = x.reshape([2, x.shape[0] // 2, x.shape[1]]).permute(1, 2, 0).split()
         a0 = ttgl.convert_layout(a0, layout, assert_trivial=True)
         a1 = ttgl.convert_layout(a1, layout, assert_trivial=True)
         return a0, a1
@@ -1731,8 +1727,8 @@ class BlockScaledAttentionProgram:
         self.async_wait(4)  # ................................................. iter 0
         k0 = self.shared_load_k(sub_idx=0, buf=0)
         self.async_wait(3)  # ................................................. iter 0
-        k_scale = self.shared_load_k_scale(buf=0)
-        k0_scale, k1_scale = self.split_scale(k_scale)
+        k0_scale = self.shared_load_k_scale(buf=0, slice=0)
+        k1_scale = self.shared_load_k_scale(buf=0, slice=1)
         self.issue_global_load_k(1, sub_idx=1, buf=1)  # ...................... iter 1
 
         # pipeline prologue, iter -1
@@ -1755,8 +1751,8 @@ class BlockScaledAttentionProgram:
         self.async_wait(6)  # ................................................. iter 1
         k0 = self.shared_load_k(sub_idx=0, buf=1)
         self.async_wait(5)  # ................................................. iter 1
-        k_scale = self.shared_load_k_scale(buf=1)
-        k0_scale, k1_scale = self.split_scale(k_scale)
+        k0_scale = self.shared_load_k_scale(buf=1, slice=0)
+        k1_scale = self.shared_load_k_scale(buf=1, slice=1)
         qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
@@ -1785,8 +1781,8 @@ class BlockScaledAttentionProgram:
             self.async_wait(6)  # ............................................. iter i
             v0 = self.shared_load_v(sub_idx=0, buf=a)
             self.async_wait(5)  # ............................................. iter i
-            v_scale = self.shared_load_v_scale(buf=a)
-            v0_scale, v1_scale = self.split_scale(v_scale)
+            v0_scale = self.shared_load_v_scale(buf=a, slice=0)
+            v1_scale = self.shared_load_v_scale(buf=a, slice=1)
             p = self.concat_subtile(p0, p1)  # ................................ iter i
             l_ij = ttgl.sum(p, 1)
             l_i = l_i * alpha + l_ij
@@ -1807,8 +1803,8 @@ class BlockScaledAttentionProgram:
             self.async_wait(6)  # ............................................. iter i+2
             k0 = self.shared_load_k(sub_idx=0, buf=a)
             self.async_wait(5)  # ............................................. iter i+2
-            k_scale = self.shared_load_k_scale(buf=a)
-            k0_scale, k1_scale = self.split_scale(k_scale)
+            k0_scale = self.shared_load_k_scale(buf=a, slice=0)
+            k1_scale = self.shared_load_k_scale(buf=a, slice=1)
             qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ............ iter i+1
             qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
             p0 = ttgl.exp2(qk0_shifted)
@@ -1834,8 +1830,8 @@ class BlockScaledAttentionProgram:
         self.async_wait(3)
         v0 = self.shared_load_v(sub_idx=0, buf=0)
         v1 = self.shared_load_v(sub_idx=1, buf=0)
-        v_scale = self.shared_load_v_scale(buf=0)
-        v0_scale, v1_scale = self.split_scale(v_scale)
+        v0_scale = self.shared_load_v_scale(buf=0, slice=0)
+        v1_scale = self.shared_load_v_scale(buf=0, slice=1)
 
         acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
         acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
@@ -1869,8 +1865,8 @@ class BlockScaledAttentionProgram:
         self.async_wait(0)
         v0 = self.shared_load_v(sub_idx=0, buf=1)
         v1 = self.shared_load_v(sub_idx=1, buf=1)
-        v_scale = self.shared_load_v_scale(buf=1)
-        v0_scale, v1_scale = self.split_scale(v_scale)
+        v0_scale = self.shared_load_v_scale(buf=1, slice=0)
+        v1_scale = self.shared_load_v_scale(buf=1, slice=1)
 
         acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
         acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)

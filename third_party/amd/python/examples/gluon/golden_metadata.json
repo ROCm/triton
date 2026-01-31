@@ -23,7 +23,7 @@
     "vgpr_count": 1024,
     "vgpr_spill_count": 2,
     "scratch_size": 12,
-    "code_len_in_byte": 36292,
+    "code_len_in_byte": 36288,
     "occupancy": 1
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_SUBTILE_PKWIDTH8_WARPS4": {
