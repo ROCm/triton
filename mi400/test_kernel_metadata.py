@@ -12,10 +12,17 @@ hip.hip.hipInit(0)
 import json
 import re
 import os
+import sys
 import pytest
 
-from .f16_fa_gfx1250 import run_attention as run_f16_attention
-from .mxfp_fa_gfx1250 import run_attention as run_mxfp_attention
+# Add gluon directory to path for imports
+_gluon_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "third_party", "amd", "python",
+                          "examples", "gluon")
+if _gluon_dir not in sys.path:
+    sys.path.insert(0, _gluon_dir)
+
+from f16_fa_gfx1250 import run_attention as run_f16_attention
+from mxfp_fa_gfx1250 import run_attention as run_mxfp_attention
 
 GOLDEN_METADATA_OVERWRITE = (os.getenv('GOLDEN_METADATA_OVERWRITE', 'False').lower() in ('true', '1'))
 
