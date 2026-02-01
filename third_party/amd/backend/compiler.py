@@ -10,6 +10,8 @@ import tempfile
 import re
 import functools
 import warnings
+from dataclasses import replace
+
 from pathlib import Path
 
 
@@ -236,6 +238,14 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
 
         use_async_copy = is_async_copy_enabled(options.arch)
+
+        if not use_async_copy and amd.supports_tdm(options.arch):
+            warnings.warn(
+                "Software pipelining only supported with async load right now; so disabling it given async load is turned off"
+            )
+            new_options = replace(options, num_stages=0)
+            options = new_options
+
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch, use_async_copy)
 
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
