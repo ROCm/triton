@@ -9,7 +9,6 @@ from triton.runtime.jit import JITFunction
 from triton.experimental.gluon.language.amd.gfx1250 import tdm
 import triton.experimental.gluon.language as gl
 from triton.experimental.gluon._runtime import GluonJITFunction, jit
-from triton.experimental.gluon.language.amd.gfx1250 import async_copy as cp
 from triton.language.core import _aggregate as aggregate
 
 from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor, Storage
@@ -173,6 +172,7 @@ class MoEConfig:
         self.EVEN_K = gl.constexpr(EVEN_K)
         self.USE_GATHER = gl.constexpr(USE_GATHER)
         self.NUM_WARPS = gl.constexpr(NUM_WARPS)
+
         BLOCK_K_SCALE = BLOCK_K // SCALE_BLOCK
         self.index_type = gl.constexpr(index_type)
         self.SCALE_KWIDTH = gl.constexpr(4 if BLOCK_K_SCALE >= 4 else BLOCK_K_SCALE)
@@ -227,17 +227,10 @@ class MoEConfig:
                 gl.PaddedSharedLayout.with_identity_for([[BLOCK_N // NUM_SUBTILES_N, 16]],
                                                         [BLOCK_K_PACKED_W, BLOCK_N // NUM_SUBTILES_N], [1, 0]))
 
-        if USE_GATHER:
-            self.shared_layout_x_scale = gl.constexpr(
-                gl.PaddedSharedLayout.with_identity_for([[256, 16]],
-                                                        [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE // NUM_SUBTILES_K],
-                                                        [1, 0]))
-        else:
-            self.shared_layout_x_scale = gl.constexpr(
-                gl.PaddedSharedLayout.with_identity_for(
-                    [[256, 16]],
-                    [self.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
-                    [1, 0]))
+        self.shared_layout_x_scale = gl.constexpr(
+            gl.PaddedSharedLayout.with_identity_for(
+                [[256, 16]],
+                [self.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K], [1, 0]))
         self.shared_layout_w_scale = gl.constexpr(
             gl.PaddedSharedLayout.with_identity_for(
                 [[256, 16]],
@@ -256,23 +249,29 @@ def create_descriptor(cfg: MoEConfig, x_ptr, w_ptr, x_scale_ptr, w_scale_ptr, of
     NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
 
     if cfg.USE_GATHER:
-        # TODO: Use TDM Gather once available
-        blocked_layout: gl.constexpr = get_blocked_layout([cfg.BLOCK_M, cfg.BLOCK_K // cfg.DIV_FACTOR_X], x_ptr.dtype,
-                                                          cfg.NUM_WARPS)
-        GatherIndx_ptr = GatherIndx + start_m
-        offs_m_gather = off_m + gl.arange(0, cfg.BLOCK_M, gl.SliceLayout(1, blocked_layout))
-        gathered_m = gl.load(GatherIndx_ptr + offs_m_gather)
-        gathered_m = gathered_m.to(cfg.index_type)[:, None]
+        # For gather indices, use a layout where all indices are available per thread.
+        NUM_INDICES: gl.constexpr = cfg.BLOCK_M // NUM_SUBTILES_M
+        IDX_BASE_LAYOUT: gl.constexpr = gl.BlockedLayout([NUM_INDICES, 1], [1, 32], [1, cfg.NUM_WARPS], [1, 0])
+        IDX_LAYOUT: gl.constexpr = gl.SliceLayout(1, IDX_BASE_LAYOUT)
 
-        x_desc = AsyncCopyDescriptor.initialize(cfg, x_ptr, off_k_x // cfg.DIV_FACTOR_X, stride_xm, stride_xk,
-                                                gathered_m, cfg.DIV_FACTOR_X)
+        GatherIndx_ptr = GatherIndx + start_m
+        offs_m_gather = off_m + gl.arange(0, NUM_INDICES, IDX_LAYOUT)
+        gathered_m = gl.load(GatherIndx_ptr + offs_m_gather).to(gl.int32)
+
+        x_desc = tdm.make_tensor_descriptor(
+            base=x_ptr, shape=(M, K // cfg.DIV_FACTOR_X), strides=(stride_xm, stride_xk),
+            block_shape=(NUM_INDICES, cfg.BLOCK_K // cfg.DIV_FACTOR_X // NUM_SUBTILES_K), layout=cfg.shared_layout_x)
 
         if cfg.WITH_X_MX_SCALE:
-            x_scale_desc = AsyncCopyDescriptor.initialize(cfg, x_scale_ptr, off_k_x // SCALE_BLOCK, stride_x_scale_m,
-                                                          stride_x_scale_k, gathered_m, SCALE_BLOCK)
+            BLOCK_K_SCALE: gl.constexpr = cfg.BLOCK_K // SCALE_BLOCK // NUM_SUBTILES_K
+            x_scale_desc = tdm.make_tensor_descriptor(base=x_scale_ptr, shape=(M, K // SCALE_BLOCK),
+                                                      strides=(stride_x_scale_m, stride_x_scale_k),
+                                                      block_shape=(NUM_INDICES, BLOCK_K_SCALE),
+                                                      layout=cfg.shared_layout_x_scale)
         else:
             x_scale_desc = gl.constexpr(0)
     else:
+        gathered_m = gl.constexpr(0)
         x_offs = off_m * stride_xm
         x_desc = tdm.make_tensor_descriptor(
             base=x_ptr + x_offs, shape=(M, K // cfg.DIV_FACTOR_X), strides=(stride_xm, stride_xk),
@@ -310,56 +309,7 @@ def create_descriptor(cfg: MoEConfig, x_ptr, w_ptr, x_scale_ptr, w_scale_ptr, of
         block_shape=(cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K),
         layout=cfg.shared_layout_w_scale)
 
-    return x_desc, w_desc, x_scale_desc, w_scale_desc
-
-
-@aggregate
-class AsyncCopyDescriptor:
-    cfg: MoEConfig
-    ptr: gl.tensor
-    offs: gl.tensor
-    offs_k: gl.tensor
-    step_k: gl.tensor
-    BLOCK_M: gl.constexpr
-    BLOCK_K: gl.constexpr
-    dtype: gl.constexpr
-
-    @gluon.constexpr_function
-    def __init__(self, cfg: MoEConfig, ptr, offs, offs_k, step_k, BLOCK_M, BLOCK_K):
-        self.cfg = cfg
-        self.ptr = ptr
-        self.offs = offs
-        self.offs_k = offs_k
-        self.step_k = step_k
-        self.BLOCK_M = gl.constexpr(BLOCK_M)
-        self.BLOCK_K = gl.constexpr(BLOCK_K)
-        self.dtype = gl.constexpr(ptr.dtype.element_ty)
-
-    @gluon.jit
-    def initialize(cfg: MoEConfig, ptr, off_k, stride_m, stride_k, gathered_m, DIV_FACTOR: gl.constexpr):
-        NUM_SUBTILES_M: gl.constexpr = cfg.NUM_SUBTILES[0]
-        NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
-        # We only use AsyncCopyDescriptor for X and X_scale, so we use BLOCK_M directly.
-        BLOCK_M: gl.constexpr = cfg.BLOCK_M // NUM_SUBTILES_M
-        BLOCK_K: gl.constexpr = cfg.BLOCK_K // DIV_FACTOR // NUM_SUBTILES_K
-
-        blocked_layout: gl.constexpr = get_blocked_layout([BLOCK_M, BLOCK_K], ptr.dtype, cfg.NUM_WARPS)
-        offs_k = off_k + gl.arange(0, BLOCK_K, gl.SliceLayout(0, blocked_layout))
-        step_k = BLOCK_K * stride_k
-
-        offs = gathered_m * stride_m + offs_k.to(cfg.index_type)[None, :] * stride_k
-
-        return AsyncCopyDescriptor(cfg, ptr, offs, offs_k, step_k, BLOCK_M, BLOCK_K)
-
-    @gluon.jit
-    def issue_async_load(self, idx: int, buffer, k_limit):
-        offs = self.offs + idx * self.step_k
-        if k_limit is not None:
-            mask_k = (self.offs_k + idx * self.BLOCK_K) < k_limit
-            cp.global_to_shared(buffer, self.ptr + offs, mask=mask_k[None, :], other=0.0)
-        else:
-            cp.global_to_shared(buffer, self.ptr + offs)
-        cp.commit_group()
+    return x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m
 
 
 @aggregate
@@ -370,32 +320,32 @@ class MoEPipelinedProgram:
     x_scale_buffer: gl.shared_memory_descriptor | gl.constexpr
     w_scale_buffer: gl.shared_memory_descriptor
 
-    x_desc: tdm.tensor_descriptor | AsyncCopyDescriptor
+    x_desc: tdm.tensor_descriptor
     w_desc: tdm.tensor_descriptor
-    x_scale_desc: tdm.tensor_descriptor | AsyncCopyDescriptor | gl.constexpr
+    x_scale_desc: tdm.tensor_descriptor | gl.constexpr
     w_scale_desc: tdm.tensor_descriptor
+
+    gathered_m: gl.tensor | gl.constexpr
+    off_k_x: gl.tensor
 
     @gluon.constexpr_function
     def __init__(self, cfg: MoEConfig, x_buffer, w_buffer, x_scale_buffer, w_scale_buffer, x_desc, w_desc, x_scale_desc,
-                 w_scale_desc):
+                 w_scale_desc, gathered_m, off_k_x):
         self.cfg = cfg
         self.x_buffer = x_buffer
         self.w_buffer = w_buffer
-        if cfg.WITH_X_MX_SCALE:
-            self.x_scale_buffer = x_scale_buffer
-        else:
-            self.x_scale_buffer = gl.constexpr(x_scale_buffer)
+        self.x_scale_buffer = gl.constexpr(x_scale_buffer)
         self.w_scale_buffer = w_scale_buffer
         self.x_desc = x_desc
         self.w_desc = w_desc
-        if cfg.WITH_X_MX_SCALE:
-            self.x_scale_desc = x_scale_desc
-        else:
-            self.x_scale_desc = gl.constexpr(x_scale_desc)
+        self.x_scale_desc = gl.constexpr(x_scale_desc)
         self.w_scale_desc = w_scale_desc
 
+        self.gathered_m = gathered_m
+        self.off_k_x = off_k_x
+
     @gluon.jit
-    def initialize(cfg: MoEConfig, x_desc, w_desc, x_scale_desc, w_scale_desc):
+    def initialize(cfg: MoEConfig, x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m, off_k_x):
         NUM_BUFFERS: gl.constexpr = cfg.NUM_BUFFERS
         NUM_SUBTILES_M: gl.constexpr = cfg.NUM_SUBTILES[0]
         NUM_SUBTILES_N: gl.constexpr = cfg.NUM_SUBTILES[1]
@@ -432,49 +382,42 @@ class MoEPipelinedProgram:
             ], layout=cfg.shared_layout_w_scale)
 
         return MoEPipelinedProgram(cfg, x_buffer, w_buffer, x_scale_buffer, w_scale_buffer, x_desc, w_desc,
-                                   x_scale_desc, w_scale_desc)
+                                   x_scale_desc, w_scale_desc, gathered_m, off_k_x)
 
     @gluon.jit
-    def issue_global_loads(self, load_idx, K):
+    def issue_global_loads(self, load_idx):
         cfg = self.cfg
         NUM_SUBTILES_K: gl.constexpr = cfg.NUM_SUBTILES[2]
         BLOCK_K_PACKED_X: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_X // NUM_SUBTILES_K
         BLOCK_K_PACKED_W: gl.constexpr = cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K
-
-        if cfg.USE_GATHER and not cfg.EVEN_K:
-            k_limit_x = K // cfg.DIV_FACTOR_X
-            k_limit_x_scale = K // cfg.SCALE_BLOCK if cfg.WITH_X_MX_SCALE else None
-        else:
-            k_limit_x = None
-            k_limit_x_scale = None
+        BLOCK_K_SCALE: gl.constexpr = cfg.BLOCK_K // cfg.SCALE_BLOCK // NUM_SUBTILES_K
 
         if cfg.USE_GATHER:
-            self.x_desc.issue_async_load(load_idx, self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS),
-                                         k_limit_x)
+            col_offset_x = self.off_k_x + load_idx * BLOCK_K_PACKED_X
+            tdm.async_gather(self.x_desc, self.gathered_m, col_offset_x,
+                             self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
         else:
-            gl.amd.gfx1250.tdm.async_load(self.x_desc, [0, load_idx * BLOCK_K_PACKED_X],
-                                          self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+            tdm.async_load(self.x_desc, [0, load_idx * BLOCK_K_PACKED_X],
+                           self.x_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
         if cfg.W_TRANSPOSE:
-            gl.amd.gfx1250.tdm.async_load(self.w_desc, [0, load_idx * BLOCK_K_PACKED_W],
-                                          self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+            tdm.async_load(self.w_desc, [0, load_idx * BLOCK_K_PACKED_W],
+                           self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
         else:
-            gl.amd.gfx1250.tdm.async_load(self.w_desc, [load_idx * BLOCK_K_PACKED_W, 0],
-                                          self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+            tdm.async_load(self.w_desc, [load_idx * BLOCK_K_PACKED_W, 0],
+                           self.w_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
         if cfg.WITH_X_MX_SCALE:
             if cfg.USE_GATHER:
-                self.x_scale_desc.issue_async_load(
-                    load_idx, self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS),
-                    k_limit_x_scale)
+                col_offset_x_scale = self.off_k_x * cfg.DIV_FACTOR_X // cfg.SCALE_BLOCK + load_idx * BLOCK_K_SCALE
+                tdm.async_gather(self.x_scale_desc, self.gathered_m, col_offset_x_scale,
+                                 self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
             else:
-                gl.amd.gfx1250.tdm.async_load(self.x_scale_desc,
-                                              [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
-                                              self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+                tdm.async_load(self.x_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                               self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
-        gl.amd.gfx1250.tdm.async_load(self.w_scale_desc,
-                                      [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
-                                      self.w_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+        tdm.async_load(self.w_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                       self.w_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
         return load_idx + 1
 
@@ -513,18 +456,10 @@ class MoEPipelinedProgram:
 
     @gluon.jit
     def async_wait(self, waitcnt):
-        cfg = self.cfg
-        if cfg.USE_GATHER:
-            gl.amd.gfx1250.tdm.async_wait(waitcnt * 2)
-            if cfg.WITH_X_MX_SCALE:
-                cp.wait_group(waitcnt * 2)
-            else:
-                cp.wait_group(waitcnt)
-        else:
-            gl.amd.gfx1250.tdm.async_wait(waitcnt * cfg.NUM_LOADS_IN_BATCH)
+        tdm.async_wait(waitcnt * self.cfg.NUM_LOADS_IN_BATCH)
 
     @gluon.jit
-    def pipeline(self, loop_k, K):
+    def pipeline(self, loop_k):
         cfg = self.cfg
         # Index of global loads. It increments by 1 every time we issue a set of global loads.
         load_idx = 0
@@ -533,7 +468,7 @@ class MoEPipelinedProgram:
 
         # prologue
         for _ in gl.static_range(cfg.NUM_BUFFERS - 1):
-            load_idx = self.issue_global_loads(load_idx, K)
+            load_idx = self.issue_global_loads(load_idx)
 
         accumulator = gl.zeros((cfg.BLOCK_M, cfg.BLOCK_N), dtype=gl.float32, layout=cfg.acc_layout)
         loop_ub = gl.cdiv(loop_k, cfg.BLOCK_K) - (cfg.NUM_BUFFERS - 1)
@@ -541,7 +476,7 @@ class MoEPipelinedProgram:
 
         # loop
         for i in range(0, loop_ub):
-            load_idx = self.issue_global_loads(load_idx, K)
+            load_idx = self.issue_global_loads(load_idx)
             self.async_wait(cfg.NUM_BUFFERS - 1)
 
             x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
@@ -596,6 +531,13 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
 
     DTYPE_X: gl.constexpr = get_scaled_dot_format_string(X.dtype.element_ty)
     DTYPE_W: gl.constexpr = get_scaled_dot_format_string(W.dtype.element_ty)
+
+    if GatherIndx is not None:
+        # In triton_kernels, when indices exceed int32 range, they are upcasted to int64. TDM Gather doesn't
+        # support int64 indices. Only int16 or int32 are supported. In that case, we need to fall back to
+        # AsyncCopy. Fortunately in the GPT-OSS example, we don't need to upcast.
+        gl.static_assert(not UPCAST_INDICES,
+                         "TDM Gather doesn't support int64 indices. Only int16 or int32 are supported.")
 
     index_type: gl.constexpr = gl.int64 if UPCAST_INDICES else gl.int32
     USE_GATHER: gl.constexpr = GatherIndx is not None
@@ -675,11 +617,10 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
         WMxScale_ptr = WMxScale
         w_scale_offs = 0
 
-    x_desc, w_desc, x_scale_desc, w_scale_desc = create_descriptor(cfg, X_ptr, W_ptr, XMxScale_ptr, WMxScale_ptr, off_m,
-                                                                   off_k_x, w_offs, w_scale_offs, eM, N, K, stride_x_m,
-                                                                   stride_x_k, stride_w_k, stride_w_n, stride_x_mx_m,
-                                                                   stride_x_mx_k, stride_w_mx_n, stride_w_mx_k,
-                                                                   GatherIndx, start_m)
+    x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m = create_descriptor(
+        cfg, X_ptr, W_ptr, XMxScale_ptr, WMxScale_ptr, off_m, off_k_x, w_offs, w_scale_offs, M, N, K, stride_x_m,
+        stride_x_k, stride_w_k, stride_w_n, stride_x_mx_m, stride_x_mx_k, stride_w_mx_n, stride_w_mx_k, GatherIndx,
+        start_m)
 
     BLOCKED_LAYOUT_Y: gl.constexpr = get_blocked_layout([OUT_BLOCK_N, BLOCK_K], Y.dtype, cfg.NUM_WARPS)
     BLOCKED_LAYOUT_SCATTER_INDX: gl.constexpr = get_blocked_layout([BLOCK_M], cfg.index_type, cfg.NUM_WARPS, 1)
@@ -706,9 +647,10 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
     y_offs = offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n.to(cfg.index_type)[None, :] * stride_y_n
     y_mask = mask_m[:, None] & mask_n[None, :]
 
-    pgm = MoEPipelinedProgram.initialize(cfg, x_desc, w_desc, x_scale_desc, w_scale_desc)
+    pgm = MoEPipelinedProgram.initialize(cfg, x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m,
+                                         off_k_x // cfg.DIV_FACTOR_X)
     loop_k = K - off_k_x
-    acc = pgm.pipeline(loop_k, K)
+    acc = pgm.pipeline(loop_k)
 
     # bias
     b_dtype = B.dtype if B is not None else gl.float32
