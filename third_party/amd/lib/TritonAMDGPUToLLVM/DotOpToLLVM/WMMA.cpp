@@ -27,8 +27,6 @@
 #include "TritonAMDGPUTransforms/WmmaGroup.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypes.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Tools/LayoutUtils.h"
@@ -682,9 +680,8 @@ LogicalResult convertScaledWMMA(triton::DotScaledOp op,
 
   auto cTensorTy = op.getC().getType();
   auto dTensorTy = op.getD().getType();
-
   assert(isa<AMDWmmaEncodingAttr>(cTensorTy.getEncoding()) &&
-         "Currently, we only support C with a mfma layout.");
+         "Currently, we only support C with a wmma layout.");
 
   assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
          cTensorTy.getShape()[1] == dTensorTy.getShape()[1] &&

@@ -39,12 +39,8 @@ Attribute findEncodingFromUsers(Operation *op) {
 
 struct MakeTensorDescOpConversion
     : public ConvertOpToLLVMPattern<triton::MakeTensorDescOp> {
-  MakeTensorDescOpConversion(LLVMTypeConverter &typeConverter,
-                             const AMD::TargetInfo &targetInfo,
-                             PatternBenefit benefit)
-      : ConvertOpToLLVMPattern<triton::MakeTensorDescOp>(typeConverter,
-                                                         benefit),
-        targetInfo(targetInfo) {}
+  using ConvertOpToLLVMPattern<
+      triton::MakeTensorDescOp>::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(triton::MakeTensorDescOp op, OpAdaptor adaptor,
@@ -96,15 +92,12 @@ struct MakeTensorDescOpConversion
     rewriter.replaceOp(op, desc);
     return success();
   }
-
-private:
-  const AMD::TargetInfo &targetInfo;
 };
 } // namespace
 
 void mlir::triton::AMD::populateTensorPtrOpsToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    const AMD::TargetInfo &targetInfo, PatternBenefit benefit) {
-  patterns.add<MakeTensorDescOpConversion>(typeConverter, targetInfo, benefit);
+    PatternBenefit benefit) {
+  patterns.add<MakeTensorDescOpConversion>(typeConverter, benefit);
   return;
 }

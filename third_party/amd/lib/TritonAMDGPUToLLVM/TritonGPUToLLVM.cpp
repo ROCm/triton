@@ -188,7 +188,7 @@ struct ConvertTritonAMDGPUToLLVM
                                            axisInfoAnalysis, AMDBenefit);
     AMD::populateMaskedOpsToLLVMPatterns(patterns, targetInfo);
     AMD::populateBarrierOpToLLVMPatterns(typeConverter, patterns, AMDBenefit);
-    AMD::populateTensorPtrOpsToLLVMPatterns(typeConverter, patterns, targetInfo,
+    AMD::populateTensorPtrOpsToLLVMPatterns(typeConverter, patterns,
                                             AMDBenefit);
 
     populatePatterns7(mlir::triton::populateReduceOpToLLVMPatterns,

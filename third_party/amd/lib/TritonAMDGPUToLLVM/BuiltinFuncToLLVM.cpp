@@ -1,18 +1,12 @@
-#include "Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 
 #include "AsyncUtility.h"
-#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-
 namespace mlir::triton {
 #define GEN_PASS_DEF_CONVERTBUILTINFUNCTOLLVM
 #include "TritonAMDGPUToLLVM/Passes.h.inc"

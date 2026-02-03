@@ -2,28 +2,19 @@
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "TritonAMDGPUTransforms/WmmaGroup.h"
-#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/DecomposeScaledBlocked.h"
 #include "triton/Dialect/TritonGPU/Transforms/LayoutPropagationUtility.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/TypeSwitch.h"
-
-#include "llvm/TargetParser/TargetParser.h"
-#include <memory>
 
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
@@ -159,8 +150,7 @@ warpsPerTileMFMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
 SmallVector<unsigned, 3>
 warpsPerTileWMMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
                  std::pair<int64_t, int64_t> shapePerWarp) {
-  // auto mnk = ttg::AMDWmmaEncodingAttr::getMNKDimPerInstr();
-  return warpsPerTile(dotOp, shape, numWarps, {16, 16});
+  return warpsPerTile(dotOp, shape, numWarps, shapePerWarp);
 }
 
 // Chooses a proper MFMA instruction that can used to compute the given dot op.
@@ -858,7 +848,7 @@ public:
     bool isBPacked = bElemType == ScaleDotElemType::E2M1;
     bool isPacked = isAPacked || isBPacked;
     unsigned kWidths[] = {isPacked ? (isAPacked ? 4 : 8) : kBase * kPack,
-                          isPacked ? (isBPacked ? 8 : 4) : kBase * kPack};
+                          isPacked ? (isAPacked ? 8 : 4) : kBase * kPack};
 
     // For A/B tensor, 32 consecutive elements along K dim share the same scale.
     // We'd like to keep the scale values together with the base values in the

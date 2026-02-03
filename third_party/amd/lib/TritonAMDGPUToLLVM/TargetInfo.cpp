@@ -114,11 +114,6 @@ bool TargetInfo::supportMaximumMinimum() const {
          getISAFamily() == ISAFamily::GFX1250;
 }
 
-bool TargetInfo::supportLDSLoadTransposed() const {
-  return getISAFamily() == ISAFamily::CDNA4 ||
-         getISAFamily() == ISAFamily::GFX1250;
-}
-
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   if (triton::gpu::lookupNumCTAs(&rewriter.getInsertionBlock()->front()) == 1)
     return arith::ConstantIntOp::create(rewriter, loc, 0, 32);

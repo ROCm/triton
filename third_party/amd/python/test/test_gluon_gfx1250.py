@@ -1449,6 +1449,25 @@ def test_tensor_descriptor_load_store_nd(dtype_str, ndim, INNER_BLOCK, TDM_TYPE)
     _run_tensor_descriptor_load_store_test(dtype_str, ndim, INNER_BLOCK, TDM_TYPE, SHARED_LAYOUT)
 
 
+@pytest.mark.parametrize("ndim", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("INNER_BLOCK", [16, 64])
+@pytest.mark.parametrize("dtype_str", ["float16", "int32"])
+def test_tensor_descriptor_load_store_nd_with_padding(dtype_str, ndim, INNER_BLOCK):
+    """Test TDM load/store with padded shared memory layout.
+    TDM store only supports padding when:
+    1. There is a single padding interval
+    2. The padding interval equals the innermost block dimension
+    """
+    # Create padded shared layout where padding interval = innermost block dimension
+    BLOCK_SHAPE = (2, 2, 4, 8, INNER_BLOCK)[-ndim:]
+    PADDED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[INNER_BLOCK, 8]], BLOCK_SHAPE,
+                                                                              [ndim - 1 - i
+                                                                               for i in range(ndim)]  # standard order
+                                                                              )
+
+    _run_tensor_descriptor_load_store_test(dtype_str, ndim, INNER_BLOCK, "DEVICE_TDM", PADDED_LAYOUT)
+
+
 def test_tensor_descriptor_load_store_invalid_blocksize():
     """Test that TDM operations fail when block size exceeds 2^16 (65536)"""
     ndim = 2
@@ -2150,9 +2169,6 @@ def test_runtime_wmma_scale_preshuffle(M, N, K, type_a, type_b, TRANSPOSED_WMMA)
                                         type_a, type_b, TRANSPOSED_WMMA)
 
     torch.testing.assert_close(c.cpu(), c_torch, rtol=1e-5, atol=1e-5)
-
-
-# ported from test_core.py to test dpp_ctrl codegen
 
 
 @gluon.jit
@@ -3524,25 +3540,7 @@ def test_runtime_tdm_gather_multiple_instructions(BLOCK_M, BLOCK_N, src_col_offs
     torch.testing.assert_close(out_result.view(torch.uint8), ref_bytes)
 
 
-@pytest.mark.parametrize("ndim", [1, 2, 3, 4, 5])
-@pytest.mark.parametrize("INNER_BLOCK", [16, 64])
-@pytest.mark.parametrize("dtype_str", ["float16", "int32"])
-def test_tensor_descriptor_load_store_nd_with_padding(dtype_str, ndim, INNER_BLOCK):
-    """Test TDM load/store with padded shared memory layout.
-    TDM store only supports padding when:
-    1. There is a single padding interval
-    2. The padding interval equals the innermost block dimension
-    """
-    # Create padded shared layout where padding interval = innermost block dimension
-    BLOCK_SHAPE = (2, 2, 4, 8, INNER_BLOCK)[-ndim:]
-    PADDED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[INNER_BLOCK, 8]], BLOCK_SHAPE,
-                                                                              [ndim - 1 - i
-                                                                               for i in range(ndim)]  # standard order
-                                                                              )
-
-    _run_tensor_descriptor_load_store_test(dtype_str, ndim, INNER_BLOCK, "DEVICE_TDM", PADDED_LAYOUT)
-
-
+# ported from test_core.py to test dpp_ctrl codegen
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
 def test_2d_tensor_early_return():
 

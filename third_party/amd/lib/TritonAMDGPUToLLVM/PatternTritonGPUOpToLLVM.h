@@ -60,7 +60,6 @@ void populateMaskedOpsToLLVMPatterns(RewritePatternSet &patterns,
 
 void populateTensorPtrOpsToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                         RewritePatternSet &patterns,
-                                        const AMD::TargetInfo &targetInfo,
                                         PatternBenefit benefit);
 
 void populateBarrierOpToLLVMPatterns(LLVMTypeConverter &typeConverter,

@@ -6,7 +6,6 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
 
 #include <memory>
 
@@ -30,7 +29,6 @@ std::unique_ptr<OperationPass<ModuleOp>>
 createConvertWarpPipelinePass(StringRef targetArch);
 std::unique_ptr<OperationPass<ModuleOp>>
 createTritonAMDGPUConvertWarpSpecializeToLLVMPass(StringRef arch);
-
 void runScalarizePackedFOpsPass(llvm::Function &F);
 
 } // namespace mlir::triton::AMD

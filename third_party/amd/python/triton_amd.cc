@@ -121,8 +121,6 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_1("add_coalesce_async_copy",
                             mlir::createTritonAMDGPUCoalesceAsyncCopy,
                             const std::string &);
-  // ADD_PASS_WRAPPER_1("add_plan_cta", mlir::createTritonAMDGPUPlanCTAPass,
-  //                   mlir::triton::amdgpu::ClusterInfo *);
   m.def("add_in_thread_transpose", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUInThreadTranspose());
@@ -532,15 +530,6 @@ void init_triton_amd(py::module &&m) {
     return false;
   });
 
-  m.def("has_cluster_feature", [](const std::string &arch) {
-    using mlir::triton::AMD::ISAFamily;
-    switch (mlir::triton::AMD::deduceISAFamily(arch)) {
-    case ISAFamily::GFX1250:
-      return true;
-    default:
-      return false;
-    }
-  });
   m.def("set_all_fn_arg_inreg", [](llvm::Function *fn) {
     for (llvm::Argument &arg : fn->args()) {
       // Check for incompatible attributes.
@@ -549,6 +538,7 @@ void init_triton_amd(py::module &&m) {
       arg.addAttr(llvm::Attribute::InReg);
     }
   });
+
   m.def("link_hsaco",
         [](const std::string &inPath, const std::string &outPath) {
           if (auto errString = lldInvoke(inPath.c_str(), outPath.c_str()))
