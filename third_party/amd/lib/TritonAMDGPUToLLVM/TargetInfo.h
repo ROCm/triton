@@ -23,6 +23,7 @@ public:
   int getSharedMemorySize() const;
 
   bool supportLDSLoadTransposed() const;
+  size_t getSharedMemoryPartitionSize() const override;
 
   bool supportMaximumMinimum() const override;
 

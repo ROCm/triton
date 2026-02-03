@@ -536,10 +536,10 @@ class PaddedSharedLayout(SharedLayout):
     Some concrete examples using `xN` and `yN` to mean the logical n-D tensor elements
     and `pN` to mean padding:
 
-    After padding for shape = [8] with interval-padding list [[2, 2]], offset_bases = [[2], [1]] and block_bases = []:
+    After padding for shape = [8] with interval-padding list [[2, 2]], offset_bases = [[2], [1]] and cga_layout = []:
     [x0, x2, p0 p1, x1, x3]
 
-    After padding for shape = [8, 4] with interval_padding_pairs = [[8, 1]], offset_bases = [[0, 1], [0, 2], /*gap, stride by 2 rows*/[2, 0], [4, 0], [1, 0]]] and block_bases = []:
+    After padding for shape = [8, 4] with interval_padding_pairs = [[8, 1]], offset_bases = [[0, 1], [0, 2], /*gap, stride by 2 rows*/[2, 0], [4, 0], [1, 0]]] and cga_layout = []:
     [
         x0y0, x0y1, x0y2, x0y3,
         x2y0, x2y1, x2y2, x2y3,
@@ -557,7 +557,7 @@ class PaddedSharedLayout(SharedLayout):
     Args:
         interval_padding_pairs (List[int]): List of [interval, padding] pair and both interval and padding must be powers of 2.
         offset_bases (List[int]): Bases for shared memory offsets
-        block_bases (List[List[int]]): Bases for block-level shared memory offsets.
+        cga_layout (List[List[int]]): Bases for block-level shared memory offsets.
         shape (List[int]): n-D logical shared memory shape
     """
     interval_padding_pairs: List[List[int]]
@@ -614,7 +614,6 @@ class PaddedSharedLayout(SharedLayout):
 
         rank = len(shape)
         shape_per_cta = _get_shape_per_cta(shape, cga_layout) if cga_layout else shape
-
         # Create a idendity mapping based on shape_per_cta + order
         offset_bases = []
         for dim in order:
