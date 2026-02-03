@@ -1297,11 +1297,10 @@ def test_runtime_tensor_load_and_store_multi_cta(M, N, BLOCK_M, BLOCK_N, NUM_WAR
 
 
 @gluon.jit
-def tensor_async_copy_mbarrier_kernel(a_ptr, b_ptr, M, N,  #
-                                      BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr,
-                                      BLOCKED_LAYOUT: ttgl.constexpr, NUM_WARPS: ttgl.constexpr):
-    SHARED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [BLOCK_M, BLOCK_N], [1, 0])
-    WARP_SIZE: ttgl.constexpr = 32
+def tensor_fill_kernel(a_ptr, M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr):
+    SHARED_LAYOUT: ttgl.constexpr = ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0])
+    BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
+
     pid = ttgl.program_id(axis=0)
     num_pid_m = ttgl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
@@ -1309,33 +1308,22 @@ def tensor_async_copy_mbarrier_kernel(a_ptr, b_ptr, M, N,  #
 
     a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
                                                          block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT)
-    bars = ttgl.allocate_shared_memory(ttgl.int64, [NUM_BUFFERS, 1], ttgl.amd.gfx1250.mbarrier.MBarrierLayout())
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, [NUM_BUFFERS] + a_desc.block_shape, a_desc.layout)
-
-    # NOTE: barrier count takes into account both warp count (NUM_WARPS which is used for TDM) + thread count (NUM_WARPS * WARP_SIZE which is used for mbarrier.arrive)
-    # NOTE: Setting count = NUM_WARPS + NUM_WARPS * WARP_SIZE is only for testing purposes, in order to also exercise the ttgl.amd.gfx1250.mbarrier.arrive API.
-    # In practice, since we know that phase is initialized to 0, we can just set count = NUM_WARPS and call directly ttgl.amd.gfx1250.mbarrier.wait(bars.index(i), 0).
-
-    for i in ttgl.static_range(0, NUM_BUFFERS):
-        ttgl.amd.gfx1250.mbarrier.init(bars.index(i), count=NUM_WARPS + NUM_WARPS * WARP_SIZE)
 
     idx_m = pid_m * BLOCK_M
     for i in ttgl.static_range(0, NUM_BUFFERS):
         idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
-        ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer.index(i), mbarrier=bars.index(i))
+        vm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
+        vn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
+        v = (vm[:, None] * N) + vn[None, :]
+        v = v.to(a_desc.dtype)
+        a_buffer.index(i).store(v)
 
     for i in ttgl.static_range(0, NUM_BUFFERS):
-        prior_phase = ttgl.amd.gfx1250.mbarrier.arrive(bars.index(i))
-        ttgl.amd.gfx1250.mbarrier.wait(bars.index(i), prior_phase)
         idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
-        a = a_buffer.index(i).load(layout=BLOCKED_LAYOUT)
+        ttgl.amd.gfx1250.tdm.async_store(a_desc, [idx_m, idx_n], a_buffer.index(i))
 
-        offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
-        offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
-        offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
-        mask_b = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
-
-        ttgl.store(b_ptr + offs_b, a, mask=mask_b)
+    ttgl.amd.gfx1250.tdm.async_wait(0)
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
@@ -1981,45 +1969,6 @@ def async_load_and_write_back_kernel(a_ptr, out_ptr, M, N, BLOCK_M: ttgl.constex
     ttgl.store(out_ptrs, res, mask)
 
 
-@gluon.jit
-def async_copy_mbarrier_kernel(a_ptr, out_ptr, M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                               shared_layout: ttgl.constexpr):
-
-    ASYNC_LOAD_BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
-    BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [2, 2], [1, 0])
-    NUM_WARPS: ttgl.constexpr = 4
-    WARP_SIZE: ttgl.constexpr = 32
-
-    pid = ttgl.program_id(axis=0)
-    num_pid_m = ttgl.cdiv(M, BLOCK_M)
-    pid_m = pid % num_pid_m
-    pid_n = pid // num_pid_m
-
-    offs_m = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, ASYNC_LOAD_BLOCKED_LAYOUT))
-    offs_n = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, ASYNC_LOAD_BLOCKED_LAYOUT))
-
-    out_offs_m = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
-    out_offs_n = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
-
-    a_ptrs = a_ptr + offs_m[:, None] * N + offs_n[None, :]
-    mask = (out_offs_m[:, None] < M) & (out_offs_n[None, :] < N)
-
-    mbar = ttgl.allocate_shared_memory(ttgl.int64, [1], ttgl.amd.gfx1250.mbarrier.MBarrierLayout())
-    buffer = ttgl.allocate_shared_memory(a_ptr.type.element_ty, [BLOCK_M, BLOCK_N], shared_layout)
-    # NOTE: Setting count = NUM_WARPS * WARP_SIZE * 2 is only for testing purposes, in order to also exercise the ttgl.amd.gfx1250.mbarrier.arrive API.
-    # In practice, since we know that phase is initialized to 0, we can just set count = NUM_WARPS * WARP_SIZE and call directly ttgl.amd.gfx1250.mbarrier.wait(mbar, 0).
-    ttgl.amd.gfx1250.mbarrier.init(mbar, count=NUM_WARPS * WARP_SIZE * 2)
-    ttgl.amd.gfx1250.async_copy.global_to_shared(buffer, a_ptrs)
-    ttgl.amd.gfx1250.async_copy.mbarrier_arrive(mbar)
-    prior_phase = ttgl.amd.gfx1250.mbarrier.arrive(mbar)
-    ttgl.amd.gfx1250.mbarrier.wait(mbar, prior_phase)
-
-    res = buffer.load(BLOCKED_LAYOUT)
-
-    out_ptrs = out_ptr + out_offs_m[:, None] * N + out_offs_n[None, :]
-    ttgl.store(out_ptrs, res, mask)
-
-
 ASYNC_COPY_TEST_PARAM_SIZE = pytest.mark.parametrize("M,N", [(128, 128), (1024, 1024), (1008, 1008)])
 # We require the vec size to determine if we can use async_copy (>=4bytes), if it's a coalesced layout just assume 16
 ASYNC_COPY_TEST_PARAM_SHARED_LAYOUT = pytest.mark.parametrize("vec_size, shared_layout", [
@@ -2206,6 +2155,45 @@ def test_runtime_wmma_scale_preshuffle(M, N, K, type_a, type_b, TRANSPOSED_WMMA)
 # ported from test_core.py to test dpp_ctrl codegen
 
 
+@gluon.jit
+def async_copy_mbarrier_kernel(a_ptr, out_ptr, M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                               shared_layout: ttgl.constexpr):
+
+    ASYNC_LOAD_BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
+    BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [2, 2], [1, 0])
+    NUM_WARPS: ttgl.constexpr = 4
+    WARP_SIZE: ttgl.constexpr = 32
+
+    pid = ttgl.program_id(axis=0)
+    num_pid_m = ttgl.cdiv(M, BLOCK_M)
+    pid_m = pid % num_pid_m
+    pid_n = pid // num_pid_m
+
+    offs_m = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, ASYNC_LOAD_BLOCKED_LAYOUT))
+    offs_n = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, ASYNC_LOAD_BLOCKED_LAYOUT))
+
+    out_offs_m = pid_m * BLOCK_M + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
+    out_offs_n = pid_n * BLOCK_N + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
+
+    a_ptrs = a_ptr + offs_m[:, None] * N + offs_n[None, :]
+    mask = (out_offs_m[:, None] < M) & (out_offs_n[None, :] < N)
+
+    mbar = ttgl.allocate_shared_memory(ttgl.int64, [1], ttgl.amd.gfx1250.mbarrier.MBarrierLayout())
+    buffer = ttgl.allocate_shared_memory(a_ptr.type.element_ty, [BLOCK_M, BLOCK_N], shared_layout)
+    # NOTE: Setting count = NUM_WARPS * WARP_SIZE * 2 is only for testing purposes, in order to also exercise the ttgl.amd.gfx1250.mbarrier.arrive API.
+    # In practice, since we know that phase is initialized to 0, we can just set count = NUM_WARPS * WARP_SIZE and call directly ttgl.amd.gfx1250.mbarrier.wait(mbar, 0).
+    ttgl.amd.gfx1250.mbarrier.init(mbar, count=NUM_WARPS * WARP_SIZE * 2)
+    ttgl.amd.gfx1250.async_copy.global_to_shared(buffer, a_ptrs)
+    ttgl.amd.gfx1250.async_copy.mbarrier_arrive(mbar)
+    prior_phase = ttgl.amd.gfx1250.mbarrier.arrive(mbar)
+    ttgl.amd.gfx1250.mbarrier.wait(mbar, prior_phase)
+
+    res = buffer.load(BLOCKED_LAYOUT)
+
+    out_ptrs = out_ptr + out_offs_m[:, None] * N + out_offs_n[None, :]
+    ttgl.store(out_ptrs, res, mask)
+
+
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
 def test_compile_async_copy_mbarrier(BLOCK_M, BLOCK_N):
     SHARED_LAYOUT = ttgl.SwizzledSharedLayout(8, 2, 4, [1, 0])
@@ -2316,6 +2304,48 @@ def scaled_wmma_scale_preshuffle(a_base, stride_am, stride_ak, a_scale, b_base, 
     ttgl.store(out, c)
 
 
+@gluon.jit
+def tensor_async_copy_mbarrier_kernel(a_ptr, b_ptr, M, N,  #
+                                      BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr,
+                                      BLOCKED_LAYOUT: ttgl.constexpr, NUM_WARPS: ttgl.constexpr):
+    SHARED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [BLOCK_M, BLOCK_N], [1, 0])
+    WARP_SIZE: ttgl.constexpr = 32
+    pid = ttgl.program_id(axis=0)
+    num_pid_m = ttgl.cdiv(M, BLOCK_M)
+    pid_m = pid % num_pid_m
+    pid_n = pid // num_pid_m
+
+    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
+                                                         block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT)
+    bars = ttgl.allocate_shared_memory(ttgl.int64, [NUM_BUFFERS, 1], ttgl.amd.gfx1250.mbarrier.MBarrierLayout())
+    a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, [NUM_BUFFERS] + a_desc.block_shape, a_desc.layout)
+
+    # NOTE: barrier count takes into account both warp count (NUM_WARPS which is used for TDM) + thread count (NUM_WARPS * WARP_SIZE which is used for mbarrier.arrive)
+    # NOTE: Setting count = NUM_WARPS + NUM_WARPS * WARP_SIZE is only for testing purposes, in order to also exercise the ttgl.amd.gfx1250.mbarrier.arrive API.
+    # In practice, since we know that phase is initialized to 0, we can just set count = NUM_WARPS and call directly ttgl.amd.gfx1250.mbarrier.wait(bars.index(i), 0).
+
+    for i in ttgl.static_range(0, NUM_BUFFERS):
+        ttgl.amd.gfx1250.mbarrier.init(bars.index(i), count=NUM_WARPS + NUM_WARPS * WARP_SIZE)
+
+    idx_m = pid_m * BLOCK_M
+    for i in ttgl.static_range(0, NUM_BUFFERS):
+        idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
+        ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer.index(i), mbarrier=bars.index(i))
+
+    for i in ttgl.static_range(0, NUM_BUFFERS):
+        prior_phase = ttgl.amd.gfx1250.mbarrier.arrive(bars.index(i))
+        ttgl.amd.gfx1250.mbarrier.wait(bars.index(i), prior_phase)
+        idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
+        a = a_buffer.index(i).load(layout=BLOCKED_LAYOUT)
+
+        offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
+        offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
+        offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
+        mask_b = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
+
+        ttgl.store(b_ptr + offs_b, a, mask=mask_b)
+
+
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64)])
 @pytest.mark.parametrize("NUM_BUFFERS", [1, 2])
 @pytest.mark.parametrize("NUM_WARPS", [4])
@@ -2364,36 +2394,6 @@ def test_runtime_tensor_copy_mbarrier(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, NUM_W
 
     b_triton = b_device.cpu()
     assert torch.equal(b_triton, a)
-
-
-@gluon.jit
-def tensor_fill_kernel(a_ptr, M, N, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr):
-    SHARED_LAYOUT: ttgl.constexpr = ttgl.SwizzledSharedLayout(1, 1, 1, [1, 0])
-    BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
-
-    pid = ttgl.program_id(axis=0)
-    num_pid_m = ttgl.cdiv(M, BLOCK_M)
-    pid_m = pid % num_pid_m
-    pid_n = pid // num_pid_m
-
-    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
-                                                         block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT)
-    a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, [NUM_BUFFERS] + a_desc.block_shape, a_desc.layout)
-
-    idx_m = pid_m * BLOCK_M
-    for i in ttgl.static_range(0, NUM_BUFFERS):
-        idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
-        vm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, BLOCKED_LAYOUT))
-        vn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, BLOCKED_LAYOUT))
-        v = (vm[:, None] * N) + vn[None, :]
-        v = v.to(a_desc.dtype)
-        a_buffer.index(i).store(v)
-
-    for i in ttgl.static_range(0, NUM_BUFFERS):
-        idx_n = pid_n * (BLOCK_N * NUM_BUFFERS) + i * BLOCK_N
-        ttgl.amd.gfx1250.tdm.async_store(a_desc, [idx_m, idx_n], a_buffer.index(i))
-
-    ttgl.amd.gfx1250.tdm.async_wait(0)
 
 
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
