@@ -209,8 +209,9 @@ struct DotOpMFMAConversionHelper {
                  "MFMA uses signed accumulator");
           accElem = tb.ashr(accElem, tb.i32_val(shiftSize));
         } else {
+          float factor = 1.0 / duplicationRate;
           auto multiplierAttr =
-              rewriter.getFloatAttr(dstElemTy, 1.0 / duplicationRate);
+              rewriter.getFloatAttr(dstElemTy, factor);
           auto multiplierVal = LLVM::ConstantOp::create(
               rewriter, loc, dstElemTy, multiplierAttr);
           accElem = tb.fmul(accElem, multiplierVal);
@@ -221,6 +222,34 @@ struct DotOpMFMAConversionHelper {
       fc[linearIdx] = accElem;
     }
   }
+
+  Value preAdjustOneAccElem(Value &acc, Type dstElemTy,
+                             int64_t kDimInstrSize,
+                             int64_t kDimOperandSize) const {
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
+    Value accElem = acc;
+    if (kDimInstrSize > kDimOperandSize) {
+      assert(kDimInstrSize % kDimOperandSize == 0);
+      int duplicationRate = kDimInstrSize / kDimOperandSize;
+      assert(llvm::isPowerOf2_32(duplicationRate));
+      if (dstElemTy.isInteger()) {
+        auto shiftSize = llvm::Log2_32(duplicationRate);
+        assert(!accElem.getType().isUnsignedInteger() &&
+                "MFMA uses signed accumulator");
+        return tb.lshr(accElem, tb.i32_val(shiftSize));
+      } else {
+        float factor = 1.0 * duplicationRate;
+        auto multiplierAttr =
+            rewriter.getFloatAttr(dstElemTy, factor);
+        auto multiplierVal = LLVM::ConstantOp::create(
+            rewriter, loc, dstElemTy, multiplierAttr);
+        return tb.fmul(accElem, multiplierVal);
+      }
+    }
+
+    return acc;
+  }
+
 
   template <typename T>
   void packAndReplaceResult(T &op, SmallVector<Value> &fc,
@@ -339,8 +368,12 @@ struct DotOpMFMAConversionHelper {
           for (int v = 0; v < elemsPerVec; ++v) {
             int linearIdx = linearize({b, m, n, v}, fcStrides);
             Value c = fc[linearIdx];
+            c = preAdjustOneAccElem(c, dstElemTy,
+                                  kDimInstrSize, kDimOperandSize);
+
             acc = tb.insert_element(vecTy, acc, c, tb.i32_val(v));
           }
+
 
           for (int k = 0; k < numVecInKBase; ++k) {
             Value op1 = operandA[{b, m, k}];
