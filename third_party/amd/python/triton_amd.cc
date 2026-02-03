@@ -561,21 +561,6 @@ void init_triton_amd(py::module &&m) {
     mlir::triton::AMD::runScalarizePackedFOpsPass(*fn);
   });
 
-  py::class_<mlir::triton::amdgpu::ClusterInfo>(m, "ClusterInfo")
-      .def(py::init<>())
-      .def_readwrite("clusterDimX",
-                     &mlir::triton::amdgpu::ClusterInfo::clusterDimX)
-      .def_readwrite("clusterDimY",
-                     &mlir::triton::amdgpu::ClusterInfo::clusterDimY)
-      .def_readwrite("clusterDimZ",
-                     &mlir::triton::amdgpu::ClusterInfo::clusterDimZ)
-      .def("__repr__", [](mlir::triton::amdgpu::ClusterInfo &self) {
-        std::ostringstream oss;
-        oss << "(" << self.clusterDimX << ", " << self.clusterDimY << ", "
-            << self.clusterDimZ << ")";
-        return oss.str();
-      });
-
   auto hipBlas = m.def_submodule("hipblas");
   py::class_<HipblasLtInstance>(hipBlas, "HipblasLt")
       .def(py::init<>([&](py::object &workspace) {

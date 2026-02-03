@@ -20,29 +20,6 @@ def TritonAMDGPUScheduleLoops : Pass<"tritonamdgpu-schedule-loops", "mlir::Modul
   ];
 }
 
-// def TritonAMDGPUMultiBufferPipeline : Pass<"tritonamdgpu-multibuffer-pipeline", "mlir::ModuleOp"> {
-//   let summary = "multibuffer pipeline";
-
-//   let options = [
-//     Option<"numStages", "num_stages",
-//            "int32_t", /*default*/"2",
-//            "Number of Pipeline stages">,
-//   ];
-
-//   let constructor = "mlir::createTritonAMDGPUMultiBufferPipelinePass()";
-
-//   let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
-
-//   // let options = [
-//   //   Option<"numStages", "num_stages",
-//   //          "int32_t", /*default*/"2",
-//   //          "Number of Pipeline stages">,
-//   //   Option<"prefetch", "prefetch",
-//   //          "int32_t", /*default*/"0",
-//   //          "Enable prefetch from shared memory">
-//   // ];
-// }
-
 def TritonAMDGPUPipeline : Pass<"tritonamdgpu-pipeline", "mlir::ModuleOp"> {
   let summary = "pipeline";
   let description = [{
@@ -296,21 +273,6 @@ def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async-copy", "mli
            "GFX generation name of target device.">,
   ];
 }
-// def TritonAMDGPUPlanCTAPass : Pass<"triton-amd-gpu-plan-cta", "mlir::ModuleOp"> {
-//   let summary = "plan CTA";
-//
-//   let description = [{
-//     This pass computes and applies "optimized" CTA tilings to DotOp, ReduceOp
-//     and StoreLikeOps operations.
-//   }];
-//
-//   let constructor = "mlir::createTritonAMDGPUPlanCTAPass()";
-//
-//   let dependentDialects = [
-//     "mlir::triton::gpu::TritonGPUDialect",
-//     "mlir::triton::amdgpu::TritonAMDGPUDialect"
-//   ];
-// }
 
 def TritonAMDGPUUpdateAsyncWaitCount: Pass<"tritonamdgpu-update-async-wait-count", "mlir::ModuleOp"> {
   let summary = "Adjust async wait count to allow prefetching over multiple loop iterations";

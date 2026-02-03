@@ -76,7 +76,6 @@ SmallVector<int> getWarpDistribution(ArrayRef<int64_t> blockShape,
 
   return warps;
 }
-
 } // namespace
 
 SmallVector<Value> TDMDescriptor::getAllGroups() const {

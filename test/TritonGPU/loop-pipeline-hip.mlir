@@ -1106,7 +1106,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %0 = scf.for %arg3 = %c0_i32 to %arg0 step %c1_i32 iter_args(%arg4 = %cst) -> (tensor<16x16xf32, #mma>)  : i32 {
       %1 = tt.load %arg1 : tensor<16x128x!tt.ptr<f32>, #blocked>
       %2 = ttg.convert_layout %1 : tensor<16x128xf32, #blocked> -> tensor<16x128xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>>
-      %3 = tt.dot %2, %cst_0, %arg4 : tensor<16x128xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>> * tensor<128x16xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>> -> tensor<16x16xf32, #mma>
+      %3 = tt.dot %2, %cst_0, %arg4, inputPrecision = tf32 : tensor<16x128xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>> * tensor<128x16xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>> -> tensor<16x16xf32, #mma>
       scf.yield %3 : tensor<16x16xf32, #mma>
     }
     tt.store %arg2, %0 : tensor<16x16x!tt.ptr<f32>, #mma>

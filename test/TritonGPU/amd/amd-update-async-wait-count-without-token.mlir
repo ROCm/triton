@@ -23,7 +23,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     ttg.async_commit_group
 
-    // waitCnt 0 should always yield 0
     // CHECK: amdg.async_wait {num_inst = 0
     ttg.async_wait {num = 0 : i32}
     // CHECK: amdg.async_wait {num_inst = 2
@@ -33,6 +32,27 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     ttg.async_wait {num = 2 : i32}
     // CHECK: amdg.async_wait {num_inst = 3
     ttg.async_wait {num = 3 : i32}
+
+    tt.return
+  }
+
+  // CHECK-LABEL: simple_waitcnt_non_committed_async_ops
+  tt.func public @simple_waitcnt_non_committed_async_ops(
+        %cond: i1,
+        %arg0: i32,
+        %memDesc2Inst: !ttg.memdesc<128x16xf16, #shared, #smem, mutable>,
+        %ptr2Inst: tensor<128x16x!tt.ptr<f16>, #blocked>  {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>},
+        %memDesc1Inst: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,
+        %ptr1Inst: tensor<64x16x!tt.ptr<f16>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>}) {
+    // Emit 1 instruction
+    ttg.async_copy_global_to_local %ptr1Inst, %memDesc1Inst : tensor<64x16x!tt.ptr<f16>, #blocked> -> <64x16xf16, #shared, #smem, mutable>
+
+    // We expect 1 because the async copy above has not been committed yet
+    // CHECK: amdg.async_wait {num_inst = 1
+    ttg.async_wait {num = 0 : i32}
+    // -1 can be used to wait on all, even non committed async ops
+    // CHECK: amdg.async_wait {num_inst = 0
+    ttg.async_wait {num = -1 : i32}
 
     tt.return
   }

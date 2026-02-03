@@ -129,7 +129,6 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
   mlir::registerTritonAMDFoldTrueCmpI();
   mlir::triton::amdgpu::registerTritonAMDGPUOptimizeDotOperands();
-  mlir::registerTritonAMDGPUConvertToTensorOps();
 
   // NVWS passes
   mlir::triton::registerNVWSTransformsPasses();
