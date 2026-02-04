@@ -18,21 +18,21 @@
     "occupancy": 1
   },
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_WARPS4": {
-    "sgpr_count": 102,
+    "sgpr_count": 90,
     "sgpr_spill_count": 0,
-    "vgpr_count": 1001,
+    "vgpr_count": 1005,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 36628,
+    "code_len_in_byte": 36508,
     "occupancy": 1
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_WARPS4": {
-    "sgpr_count": 77,
+    "sgpr_count": 66,
     "sgpr_spill_count": 0,
     "vgpr_count": 1008,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 36296,
+    "code_len_in_byte": 36096,
     "occupancy": 1
   },
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_WARPS8": {

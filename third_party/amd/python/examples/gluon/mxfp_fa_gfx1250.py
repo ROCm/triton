@@ -290,82 +290,93 @@ def unshuffle_scale(buffer, non_k_dim, k_dim, preshuffle_factor=128):
             .reshape((non_k_dim, k_dim)))
 
 
-def preshuffle_operand(x: torch.Tensor, subtile: bool, block_elems: int = 256):
+def preshuffle_operand(x: torch.Tensor, block_shape: list[int], sub_axis: int | None = None):
     """ Preshuffle operand for better TDM performance.
 
-    To get better performance from TDM, we need to make sure the dim0 (inner-most dim) of the target block is 256B.
-    We will reshape it back inside the kernel.
+    To get better performance from TDM, we need to make sure the inner-most dim of the target block is 256B.
+    For a given tensor `x` with shape [*, dim_outer, dim_inner], we will reshape it into
+    [*, dim_outer * dim_inner // 256, 256] from the host side, then restore it inside the kernel (`unshuffle_operand`).
+
+    When we do subtile for the operand (sux_axis is not None), depending on the sub_axis:
+    - When `sub_axis==0`, we are subtiling the outer dim, this works the same as no subtile case.
+    - When `sub_axis==1`, we are subtiling the inner dim, we need to first permute subtiles before reshaping.
     """
-    # TODO: Support subtile case
-    if subtile:
-        return x.contiguous()
+    block_dim_outer, block_dim_inner = block_shape
 
     elem_bits = x.element_size() * 8
     assert elem_bits == 8  # Only support 8-bit elements for now
-    *prefix, dim1, dim0 = x.shape
+    elems = 256
+    *prefix, dim_outer, dim_inner = x.shape
+    assert block_dim_inner == dim_inner
 
-    total = dim1 * dim0
-    assert total % block_elems == 0
+    if sub_axis == 0 or sub_axis is None:
+        x = x.contiguous().reshape(*prefix, dim_outer * dim_inner // elems, elems)
+        return x
+    else:
+        assert sub_axis == 1
+        batch = 1
+        for d in prefix:
+            batch *= d
+        x = x.reshape(batch, dim_outer, dim_inner)
 
-    new_dim1 = total // block_elems
-    x = x.contiguous().reshape(*prefix, new_dim1, block_elems)
-    return x
+        x = x.view(batch, dim_outer // block_dim_outer, block_dim_outer, 2, dim_inner // 2)
+        x = x.permute(0, 1, 3, 2, 4).contiguous()
+        x = x.reshape(*prefix, dim_outer * dim_inner // elems, elems)
+        return x
 
 
 @gluon.jit
-def unshuffle_operand(buffer, dim1, dim0, block_elems=256):
-    """ Unshuffle operand inside the kernel to restore the original shape. """
-    return buffer.reshape((dim1, dim0))
-
-
-@gluon.jit
-def initialize_kv_mem(base, shape, block_shape, layout, num_buffers=1, sub_axis=None, block_elems=256):
-    """ Initialize the MemoryUnit for K or V.
-
-    This is a specialized version for MemoryUnit initialization for K or V. It considers the preshuffle and subtile
-    for K, V, and will deduce the correct block shape accordingly.
+def unshuffle_operand(buffer, block_shape, sub_axis=None):
+    """
+    Unshuffle the operand's shared memory to restore the original shape. Use in pair with `preshuffle_operand`. The
+    `block_shape` and `sub_axis` should be the same as those used in `preshuffle_operand` to get the correct original
+    shape.
     """
     if sub_axis is None:
-        return MemoryUnit.initialize(  #
-            base=base,  #
-            shape=[shape[0] * shape[1] // block_elems, block_elems],  #
-            block_shape=[block_shape[0] * block_shape[1] // block_elems, block_elems],  #
-            layout=layout,  #
-            padding=True,  #
-            num_buffers=num_buffers)
+        return buffer.reshape(block_shape)
+    elif sub_axis == 0:
+        return buffer.reshape([block_shape[0] // 2, block_shape[1]])
     else:
-        return MemoryUnit.initialize(  #
-            base=base,  #
-            shape=shape,  #
-            block_shape=block_shape,  #
-            layout=layout,  #
-            padding=True,  #
-            num_buffers=num_buffers,  #
-            sub_axis=sub_axis)
+        return buffer.reshape([block_shape[0], block_shape[1] // 2])
 
 
 @gluon.jit
-def get_kv_buffer(mem, sub_idx, buf, block_shape):
-    """ Get the shared memory buffer for K or V.
+def initialize_kv_mem(base, shape, block_shape, layout, num_buffers=1, subtile=False):
+    """
+    Initialize the MemoryUnit for K or V. This is a specialized version of MemoryUnit for K or V. It considers the
+    preshuffle and subtile logic, and will deduce the correct block shape accordingly. After preshuffling, a block
+    is always subtiled along the outer dim (sub_axis=0).
+    """
+    elem_bits: ttgl.constexpr = base.dtype.element_ty.primitive_bitwidth
+    ttgl.static_assert(elem_bits == 8)  # Only support 8-bit elements for now
+    elems: ttgl.constexpr = 256
+    return MemoryUnit.initialize(  #
+        base=base,  #
+        shape=[shape[0] * shape[1] // elems, elems],  #
+        block_shape=[block_shape[0] * block_shape[1] // elems, elems],  #
+        layout=layout,  #
+        padding=True,  #
+        num_buffers=num_buffers,  #
+        sub_axis=0 if subtile else None)
 
-    This function should be used in pair with `initialize_kv_mem` to get the correct shared memory buffer by
-    reshaping the preshuffled data.
+
+@gluon.jit
+def get_kv_buffer(mem, sub_idx, buf, block_shape, sub_axis=None):
+    """
+    Get the shared memory buffer from K/V memory unit. This function should be used in pair with `initialize_kv_mem` to
+    get the correct shared memory shape.
     """
     smem = mem.smem
-    if mem.sub_axis is None:
-        buffer = smem.index(buf)
-        buffer = unshuffle_operand(buffer, block_shape[0], block_shape[1])
-    else:
-        buffer = smem.index(buf * 2 + sub_idx)
+    buffer = smem.index((buf * 2 + sub_idx) if sub_axis is not None else buf)
+    buffer = unshuffle_operand(buffer, block_shape, sub_axis)
     return buffer
 
 
 @gluon.jit
 def initialize_kv_scale_mem(base, shape, block_shape, layout, num_buffers=1, preshuffle_factor=128):
-    """ Initialize the MemoryUnit for K or V scales.
-
-    This is a specialized version for MemoryUnit initialization for K or V scales. It considers the preshuffle for
-    K, V scales and will deduce the correct block shape accordingly. We don't do subtile for scales.
+    """
+    Initialize the MemoryUnit for K or V scales. This is a specialized version of MemoryUnit for K or V scales. It
+    considers the preshuffle for K, V scales and will deduce the correct block shape accordingly.
     """
     return MemoryUnit.initialize(  #
         base=base,  #
@@ -377,10 +388,9 @@ def initialize_kv_scale_mem(base, shape, block_shape, layout, num_buffers=1, pre
 
 @gluon.jit
 def get_kv_scale_buffer(mem, buf, block_shape, preshuffle_factor=128, slice=None):
-    """ Get the shared memory buffer for K or V scales
-
-    This function should be used in pair with `initialize_kv_scale_mem` to get the correct shared memory buffer by
-    reshaping the preshuffled data.
+    """
+    Get the shared memory buffer for K or V scales. This function should be used in pair with `initialize_kv_scale_mem`
+    to get the correct shared memory buffer by reshaping the preshuffled data.
     """
     smem = mem.smem
     buffer = smem.index(buf)
@@ -576,7 +586,7 @@ class GlobalScaledAttentionProgram:
             block_shape=[BLOCK_N, HEAD_SZ],  #
             layout=cfg.k_layout,  #
             num_buffers=NUM_BUFFERS,  #
-            sub_axis=0 if SUBTILE else None)
+            subtile=SUBTILE)
 
         v_off = k_off
         v_mem = initialize_kv_mem(  #
@@ -585,7 +595,7 @@ class GlobalScaledAttentionProgram:
             block_shape=[BLOCK_N, HEAD_SZ],  #
             layout=cfg.v_layout,  #
             num_buffers=NUM_BUFFERS,  #
-            sub_axis=1 if SUBTILE else None)
+            subtile=SUBTILE)
 
         return GlobalScaledAttentionProgram(  #
             cfg,  #
@@ -613,7 +623,9 @@ class GlobalScaledAttentionProgram:
     def shared_load_k(self, sub_idx=0, buf=0):
         cfg = self.cfg
 
-        k_buffer = get_kv_buffer(self.k_mem, sub_idx, buf, [cfg.BLOCK_N, cfg.HEAD_SZ])
+        k_buffer = get_kv_buffer(self.k_mem, sub_idx, buf,  #
+                                 block_shape=[cfg.BLOCK_N, cfg.HEAD_SZ],  #
+                                 sub_axis=0 if cfg.SUBTILE else None)
         k_buffer = k_buffer.permute((1, 0))
         k = k_buffer.load(cfg.k_layout)
         return k
@@ -622,7 +634,9 @@ class GlobalScaledAttentionProgram:
     def shared_load_v(self, sub_idx=0, buf=0):
         cfg = self.cfg
 
-        v_buffer = get_kv_buffer(self.v_mem, sub_idx, buf, [cfg.BLOCK_N, cfg.HEAD_SZ])
+        v_buffer = get_kv_buffer(self.v_mem, sub_idx, buf,  #
+                                 block_shape=[cfg.BLOCK_N, cfg.HEAD_SZ],  #
+                                 sub_axis=1 if cfg.SUBTILE else None)
         v = v_buffer.load(cfg.v_layout)
         return v
 
@@ -1340,7 +1354,7 @@ class BlockScaledAttentionProgram:
             block_shape=[BLOCK_N, HEAD_SZ // KV_PACK_DIV],  #
             layout=cfg.k_layout,  #
             num_buffers=NUM_BUFFERS,  #
-            sub_axis=0 if SUBTILE else None)
+            subtile=SUBTILE)
 
         k_scale_off = (SEQLEN_K) * (HEAD_SZ // 32) * (NUM_K_HEADS * off_z + off_hk)
         k_scale_mem = initialize_kv_scale_mem(  #
@@ -1357,7 +1371,7 @@ class BlockScaledAttentionProgram:
             block_shape=[BLOCK_N // KV_PACK_DIV, HEAD_SZ],  #
             layout=cfg.v_layout,  #
             num_buffers=NUM_BUFFERS,  #
-            sub_axis=1 if SUBTILE else None)
+            subtile=SUBTILE)
 
         v_scale_off = (SEQLEN_K // 32) * (HEAD_SZ) * (NUM_K_HEADS * off_z + off_hk)
         v_scale_mem = initialize_kv_scale_mem(  #
@@ -1408,7 +1422,9 @@ class BlockScaledAttentionProgram:
     def shared_load_k(self, sub_idx=0, buf=0):
         cfg = self.cfg
 
-        k_buffer = get_kv_buffer(self.k_mem, sub_idx, buf, [cfg.BLOCK_N, cfg.HEAD_SZ // cfg.KV_PACK_DIV])
+        k_buffer = get_kv_buffer(self.k_mem, sub_idx, buf,  #
+                                 block_shape=[cfg.BLOCK_N, cfg.HEAD_SZ // cfg.KV_PACK_DIV],  #
+                                 sub_axis=0 if cfg.SUBTILE else None)
         k_buffer = k_buffer.permute((1, 0))
         k = k_buffer.load(cfg.k_layout)
         return k
@@ -1417,7 +1433,9 @@ class BlockScaledAttentionProgram:
     def shared_load_v(self, sub_idx=0, buf=0):
         cfg = self.cfg
 
-        v_buffer = get_kv_buffer(self.v_mem, sub_idx, buf, [cfg.BLOCK_N // cfg.KV_PACK_DIV, cfg.HEAD_SZ])
+        v_buffer = get_kv_buffer(self.v_mem, sub_idx, buf,  #
+                                 block_shape=[cfg.BLOCK_N // cfg.KV_PACK_DIV, cfg.HEAD_SZ],  #
+                                 sub_axis=1 if cfg.SUBTILE else None)
         v = v_buffer.load(cfg.v_layout)
         return v
 
@@ -1425,7 +1443,8 @@ class BlockScaledAttentionProgram:
     def shared_load_k_scale(self, buf=0, slice=None):
         cfg = self.cfg
 
-        k_scale_buffer = get_kv_scale_buffer(self.k_scale_mem, buf, [cfg.BLOCK_N, cfg.HEAD_SZ // 32],  #
+        k_scale_buffer = get_kv_scale_buffer(self.k_scale_mem, buf,  #
+                                             [cfg.BLOCK_N, cfg.HEAD_SZ // 32],  #
                                              slice=slice)
         k_scale = k_scale_buffer.load(cfg.k_scale_layout)
         return k_scale
@@ -1434,7 +1453,8 @@ class BlockScaledAttentionProgram:
     def shared_load_v_scale(self, buf=0, slice=None):
         cfg = self.cfg
 
-        v_scale_buffer = get_kv_scale_buffer(self.v_scale_mem, buf, [cfg.HEAD_SZ, cfg.BLOCK_N // 32],
+        v_scale_buffer = get_kv_scale_buffer(self.v_scale_mem, buf,  #
+                                             [cfg.HEAD_SZ, cfg.BLOCK_N // 32],
                                              preshuffle_factor=128 if cfg.HEAD_SZ == 128 else 64,  #
                                              slice=slice)
         v_scale = v_scale_buffer.load(cfg.v_scale_layout)
@@ -2128,6 +2148,7 @@ def attn_fwd(  #
         q_type, kv_type, seqlen_q, seqlen_k, num_q_heads, num_k_heads, head_sz, block_scaling, p_scaling,  #
         block_m, block_n, pipelined, num_warps)
     subtile = cfg.SUBTILE
+    kv_pack_div = 2 if kv_type == 'e2m1' else 1
 
     if seqlen_q == seqlen_k:
         # q: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
@@ -2135,8 +2156,12 @@ def attn_fwd(  #
         # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
         # o: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ]
         q = q.permute(0, 2, 1, 3).contiguous()
-        k = preshuffle_operand(k.permute(0, 2, 1, 3), subtile)
-        v = preshuffle_operand(v.permute(0, 2, 1, 3), subtile)
+        k = preshuffle_operand(k.permute(0, 2, 1, 3),  #
+                               block_shape=[block_n, head_sz // kv_pack_div],  #
+                               sub_axis=0 if subtile else None)
+        v = preshuffle_operand(v.permute(0, 2, 1, 3),  #
+                               block_shape=[block_n // kv_pack_div, head_sz],  #
+                               sub_axis=1 if subtile else None)
         o = torch.zeros_like(q, dtype=dtype)
 
         # q_scale: [BATCH, NUM_Q_HEADS, SEQLEN_Q, HEAD_SZ / 32]
@@ -2156,8 +2181,12 @@ def attn_fwd(  #
         # v: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ]
         # o: [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ]
         q = q.permute(0, 2, 1, 3).view(batch, num_groups, group_sz, head_sz).contiguous()
-        k = preshuffle_operand(k.permute(0, 2, 1, 3), subtile)
-        v = preshuffle_operand(v.permute(0, 2, 1, 3), subtile)
+        k = preshuffle_operand(k.permute(0, 2, 1, 3),  #
+                               block_shape=[block_n, head_sz // kv_pack_div],  #
+                               sub_axis=0 if subtile else None)
+        v = preshuffle_operand(v.permute(0, 2, 1, 3),  #
+                               block_shape=[block_n // kv_pack_div, head_sz],  #
+                               sub_axis=1 if subtile else None)
         o = torch.zeros_like(q, dtype=dtype)
 
         # q_scale: [BATCH, NUM_GROUPS, GROUP_SZ, HEAD_SZ / 32]
