@@ -90,6 +90,11 @@ def get_blocked_layout(shape, dtype, num_warps, ndim=2):
                             [1, 0])
 
 
+@gluon.constexpr_function
+def get_tdm_gather_scatter_idx_layout(NUM_INDICES, NUM_WARPS):
+    return gl.BlockedLayout([NUM_INDICES, 1], [1, 32], [1, NUM_WARPS], [1, 0])
+
+
 def routing(x, logits, n_expts_act, apply_softmax: bool = True):
     logits = topk(logits, n_expts_act, apply_softmax=apply_softmax)
     dispatch_indx = logits.mask_metadata.row_sorted_indx
@@ -215,6 +220,7 @@ class MoEConfig:
         BLOCK_K_PACKED_W = BLOCK_K // self.DIV_FACTOR_W // NUM_SUBTILES_K
         PAD_INTERVAL_X = 256 if BLOCK_K_PACKED_X <= 256 else BLOCK_K_PACKED_X
         PAD_INTERVAL_W = 256 if BLOCK_K_PACKED_W <= 256 else BLOCK_K_PACKED_W
+
         self.shared_layout_x = gl.constexpr(
             gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_X, 16]],
                                                     [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_PACKED_X], [1, 0]))
@@ -251,7 +257,7 @@ def create_descriptor(cfg: MoEConfig, x_ptr, w_ptr, x_scale_ptr, w_scale_ptr, of
     if cfg.USE_GATHER:
         # For gather indices, use a layout where all indices are available per thread.
         NUM_INDICES: gl.constexpr = cfg.BLOCK_M // NUM_SUBTILES_M
-        IDX_BASE_LAYOUT: gl.constexpr = gl.BlockedLayout([NUM_INDICES, 1], [1, 32], [1, cfg.NUM_WARPS], [1, 0])
+        IDX_BASE_LAYOUT: gl.constexpr = get_tdm_gather_scatter_idx_layout(NUM_INDICES, cfg.NUM_WARPS)
         IDX_LAYOUT: gl.constexpr = gl.SliceLayout(1, IDX_BASE_LAYOUT)
 
         GatherIndx_ptr = GatherIndx + start_m
@@ -622,30 +628,7 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
         stride_x_k, stride_w_k, stride_w_n, stride_x_mx_m, stride_x_mx_k, stride_w_mx_n, stride_w_mx_k, GatherIndx,
         start_m)
 
-    BLOCKED_LAYOUT_Y: gl.constexpr = get_blocked_layout([OUT_BLOCK_N, BLOCK_K], Y.dtype, cfg.NUM_WARPS)
-    BLOCKED_LAYOUT_SCATTER_INDX: gl.constexpr = get_blocked_layout([BLOCK_M], cfg.index_type, cfg.NUM_WARPS, 1)
-
-    offs_m = off_m + gl.arange(0, BLOCK_M, BLOCKED_LAYOUT_SCATTER_INDX)
-    offs_y_n = BLOCK_N * pid_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-    mask_m = offs_m < eM
-    mask_n = offs_y_n < N
-
     Y_ptr = Y + start_z_out.to(cfg.index_type) * stride_y_z
-    if WriteBackIndx is not None:
-        WriteBackIndx += start_m
-        dst_idx = gl.load(WriteBackIndx + offs_m, mask=start_m + offs_m < writeback_size, other=-1)
-        mask_m = mask_m & (dst_idx != -1)
-        offs_y_m = dst_idx
-    else:
-        Y_ptr += start_m * stride_y_m
-        offs_y_m = offs_m
-
-    mask_m = gl.convert_layout(mask_m, gl.SliceLayout(1, BLOCKED_LAYOUT_Y))
-    mask_n = gl.convert_layout(mask_n, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-    offs_y_m = gl.convert_layout(offs_y_m, gl.SliceLayout(1, BLOCKED_LAYOUT_Y))
-    offs_y_n = gl.convert_layout(offs_y_n, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-    y_offs = offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n.to(cfg.index_type)[None, :] * stride_y_n
-    y_mask = mask_m[:, None] & mask_n[None, :]
 
     pgm = MoEPipelinedProgram.initialize(cfg, x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m,
                                          off_k_x // cfg.DIV_FACTOR_X)
@@ -674,20 +657,47 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
         gl.static_assert(
             out.shape[1] == OUT_BLOCK_N,
             f"Activation fn out.shape[1] ({out.shape[1]}) doesn't match computed OUT_BLOCK_N ({OUT_BLOCK_N})")
-        out = gl.convert_layout(out, BLOCKED_LAYOUT_Y)
-        offs_y_n_act = OUT_BLOCK_N * pid_n + gl.arange(0, OUT_BLOCK_N, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-        mask_n_act = offs_y_n_act < yN
-        offs_y_n_final = gl.convert_layout(offs_y_n_act, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-        mask_n_final = gl.convert_layout(mask_n_act, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
-        YPtrs_final = Y_ptr + offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n_final.to(
-            cfg.index_type)[None, :] * stride_y_n
-        mask_final = mask_m[:, None] & mask_n_final[None, :]
-        gl.store(YPtrs_final, out, mask=mask_final)
     else:
+        out = acc
         gl.static_assert(ACTIVATION_REDUCTION_N == 1, "Activation reduction must be 1 if no activation fn is provided")
-        out = gl.convert_layout(acc, BLOCKED_LAYOUT_Y)
-        YPtrs = Y_ptr + y_offs
-        gl.store(YPtrs, out, mask=y_mask)
+
+    BLOCKED_LAYOUT_Y: gl.constexpr = get_blocked_layout([BLOCK_M, OUT_BLOCK_N], Y.dtype, cfg.NUM_WARPS)
+    out = out.to(Y.dtype.element_ty)
+    out = gl.convert_layout(out, BLOCKED_LAYOUT_Y)
+
+    if WriteBackIndx is not None:
+        WriteBackIndx += start_m
+
+        SCATTER_SHARED_LAYOUT: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
+
+        IDX_BASE_LAYOUT: gl.constexpr = get_tdm_gather_scatter_idx_layout(BLOCK_M, cfg.NUM_WARPS)
+        IDX_LAYOUT: gl.constexpr = gl.SliceLayout(1, IDX_BASE_LAYOUT)
+
+        idx_offs = gl.arange(0, BLOCK_M, IDX_LAYOUT)
+        idx_mask = (off_m + idx_offs < eM) & (start_m + off_m + idx_offs < writeback_size)
+        dst_row_indices = gl.load(WriteBackIndx + off_m + idx_offs, mask=idx_mask, other=writeback_size)
+        dst_row_indices = dst_row_indices.to(cfg.index_type)
+
+        out_smem = gl.allocate_shared_memory(Y.dtype.element_ty, (BLOCK_M, OUT_BLOCK_N), SCATTER_SHARED_LAYOUT)
+        out_smem.store(out)
+
+        y_desc = tdm.make_tensor_descriptor(base=Y_ptr, shape=(writeback_size, yN), strides=(stride_y_m, stride_y_n),
+                                            block_shape=(BLOCK_M, OUT_BLOCK_N), layout=SCATTER_SHARED_LAYOUT)
+
+        col_offset = (OUT_BLOCK_N * pid_n).to(cfg.index_type)
+        tdm.async_scatter(y_desc, dst_row_indices, col_offset, out_smem)
+        tdm.async_wait(0)
+    else:
+        offs_y_m = off_m + gl.arange(0, BLOCK_M, gl.SliceLayout(1, BLOCKED_LAYOUT_Y))
+        offs_y_n = OUT_BLOCK_N * pid_n + gl.arange(0, OUT_BLOCK_N, gl.SliceLayout(0, BLOCKED_LAYOUT_Y))
+        mask_m = offs_y_m < eM
+        mask_n = offs_y_n < yN
+
+        Y_ptr += start_m * stride_y_m
+
+        y_offs = offs_y_m.to(cfg.index_type)[:, None] * stride_y_m + offs_y_n.to(cfg.index_type)[None, :] * stride_y_n
+        y_mask = mask_m[:, None] & mask_n[None, :]
+        gl.amd.gfx1250.buffer_store(out, Y_ptr, y_offs, mask=y_mask)
 
 
 class SpecializationModule:
