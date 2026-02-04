@@ -88,7 +88,7 @@ int TargetInfo::getWarpSize() const {
 }
 
 int TargetInfo::getSharedMemorySize() const {
-  // Should return the maximum capacity in bytes
+  // Should return the maximum capacity in kbyte
   switch (getISAFamily()) {
   case ISAFamily::GFX1250:
     return 320 * 1024;
@@ -96,16 +96,6 @@ int TargetInfo::getSharedMemorySize() const {
     return 160 * 1024;
   default:
     return 64 * 1024;
-  }
-}
-
-size_t TargetInfo::getSharedMemoryPartitionSize() const {
-  switch (getISAFamily()) {
-  case ISAFamily::GFX1250:
-    return 64 * 1024;
-  default:
-    // No partitioning on other targets
-    return 0;
   }
 }
 

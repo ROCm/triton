@@ -1314,6 +1314,7 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
       sharedLayout = triton::gpu::toLinearLayout(smemTy);
     }
 
+    // Verifier ensures smem is not usind a PaddedSharedEncodingAttr
     auto kBlock = rewriter.getStringAttr("block");
     auto cgaLayout = sharedLayout.sublayout(
         {kBlock}, to_vector(sharedLayout.getOutDimNames()));

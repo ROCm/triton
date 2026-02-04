@@ -637,6 +637,14 @@ void fillTDMDescriptor(
     group1[0] = b.and_(group1[0], b.i32_val(0xFFFBFFFF));
   }
 
+  if (adjustedBlockShape) {
+    // Re-encode the adjusted tile_dim0 (block shape) into upper 16 bits of
+    // group1[3]. This is the same for 1D-5D tensors.
+    group1[3] = b.and_(group1[3], b.i32_val(0xFFFF));
+    group1[3] =
+        b.or_(group1[3], b.shl(decodedBlockShape[numDims - 1], b.i32_val(16)));
+  }
+
   // Update group2/group3 for higher dimensions
   if (numDims >= 3) {
     group2.value().get()[0] = tensorShape[numDims - 3];

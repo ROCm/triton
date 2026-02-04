@@ -18,8 +18,8 @@ namespace {
 
 class CallOpConversion : public OpRewritePattern<LLVM::CallOp> {
 public:
-  CallOpConversion(mlir::MLIRContext *context, AMD::TargetInfo targetInfo,
-                   bool ftz)
+  CallOpConversion(mlir::MLIRContext *context,
+                   const AMD::TargetInfo &targetInfo, bool ftz)
       : OpRewritePattern(context, 1), targetInfo(targetInfo), ftz(ftz) {}
 
   LogicalResult
@@ -187,14 +187,14 @@ private:
   }
 
 private:
-  AMD::TargetInfo targetInfo;
+  const AMD::TargetInfo &targetInfo;
   bool ftz;
 };
 
 struct ConvertBuiltinFuncToLLVM
     : public triton::impl::ConvertBuiltinFuncToLLVMBase<
           ConvertBuiltinFuncToLLVM> {
-  explicit ConvertBuiltinFuncToLLVM(StringRef targetArch, bool ftz) {
+  ConvertBuiltinFuncToLLVM(StringRef targetArch, bool ftz) {
     this->arch = targetArch.str();
     this->ftz = ftz;
   }
@@ -210,8 +210,7 @@ struct ConvertBuiltinFuncToLLVM
     RewritePatternSet patterns(context);
     patterns.add<CallOpConversion>(context, targetInfo, this->ftz);
 
-    if (mlir::applyPatternsGreedily(mod, std::move(patterns), config)
-            .failed()) {
+    if (failed(applyPatternsGreedily(mod, std::move(patterns), config))) {
       signalPassFailure();
     }
   }
