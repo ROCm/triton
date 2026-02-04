@@ -174,10 +174,7 @@ def generate_mxfp_attention_configs():
             "block_m": 128,
             "block_n": 128,
             "scale_type": "block",
-            "pingpong": False,
-            "subtile": False,
             "num_warps": 4,
-            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
@@ -191,12 +188,9 @@ def generate_mxfp_attention_configs():
             "block_m": 128,
             "block_n": 128,
             "scale_type": "global",
-            "pingpong": False,
-            "subtile": False,
             "num_warps": 4,
-            "p_k_width": 8,
         }),
-        # 4-warp subtile pipelined kernel with block size 256x128
+        # 4-warp pipelined kernel with block size 256x128
         pytest.param({
             "q_type": "e4m3",
             "kv_type": "e4m3",
@@ -209,10 +203,7 @@ def generate_mxfp_attention_configs():
             "block_m": 256,
             "block_n": 128,
             "scale_type": "block",
-            "pingpong": False,
-            "subtile": True,
             "num_warps": 4,
-            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
@@ -226,12 +217,9 @@ def generate_mxfp_attention_configs():
             "block_m": 256,
             "block_n": 128,
             "scale_type": "global",
-            "pingpong": False,
-            "subtile": True,
             "num_warps": 4,
-            "p_k_width": 8,
         }),
-        # 8-warp pingpong pipelined kernel with block size 128x128
+        # 8-warp pipelined kernel with block size 128x128
         pytest.param({
             "q_type": "e4m3",
             "kv_type": "e4m3",
@@ -244,10 +232,7 @@ def generate_mxfp_attention_configs():
             "block_m": 128,
             "block_n": 128,
             "scale_type": "block",
-            "pingpong": True,
-            "subtile": False,
             "num_warps": 8,
-            "p_k_width": 8,
         }),
         pytest.param({
             "q_type": "e4m3",
@@ -261,10 +246,7 @@ def generate_mxfp_attention_configs():
             "block_m": 128,
             "block_n": 128,
             "scale_type": "global",
-            "pingpong": True,
-            "subtile": False,
             "num_warps": 8,
-            "p_k_width": 8,
         }),
     ]
     return base_configs
@@ -274,7 +256,6 @@ def generate_mxfp_attention_configs():
 def test_mxfp_attention_kernel_metadata(config):
     config["pipelined"] = True
     config["disable_p_scaling"] = True
-    config["warp_reduce"] = False
     attn_kernel = run_mxfp_attention(**config)
 
     config_name = "mxfp_attn_fwd_"
@@ -288,11 +269,6 @@ def test_mxfp_attention_kernel_metadata(config):
     config_name += f"HEADSZ{config['head_sz']}_"
     config_name += f"BM{config['block_m']}_"
     config_name += f"BN{config['block_n']}_"
-    if config["pingpong"]:
-        config_name += "PINGPONG_"
-    if config["subtile"]:
-        config_name += "SUBTILE_"
-    config_name += f"PKWIDTH{config['p_k_width']}_"
     config_name += f"WARPS{config['num_warps']}"
 
     static_metadata_check(attn_kernel, config_name)
