@@ -363,10 +363,6 @@ private:
     auto bitWidth = llvmElemTy.getIntOrFloatBitWidth();
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
-
-    auto dstLL =
-        triton::gpu::toLinearLayout(srcTy.getShape(), dstTy.getEncoding());
-
     mlir::Type retTy = dstTy;
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     auto affineOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
@@ -384,7 +380,6 @@ private:
         dstTy.getEncoding(), shape, llBitWidth,
         ldsTransLoadParams->instBitWidth,
         ldsTransLoadParams->numLanesInShuffleGroup);
-
     // Check that we have computed a layout
     if (!ldsTransLayout) {
       return failure();

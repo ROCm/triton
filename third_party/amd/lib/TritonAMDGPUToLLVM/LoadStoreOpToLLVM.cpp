@@ -2320,7 +2320,6 @@ struct AsyncWaitOpConversion
 
     // Drop the result AsyncToken
     rewriter.replaceOp(op, b.i32_val(0));
-
     return success();
   }
 

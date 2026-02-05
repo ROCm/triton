@@ -220,6 +220,12 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   auto ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
+  // Define common values for better readability
+  Value v16 = b.i32_val(16);
+  Value v32 = b.i64_val(32);
+  Value mask16 = b.i32_val(0xFFFF);
+  Value mask31 = b.i32_val(0x7FFFFFFF);
+
   auto elementBitWidth = elementType.getIntOrFloatBitWidth();
   auto elementSizeInBytes = elementBitWidth / 8;
 
@@ -247,7 +253,7 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   SmallVector<Value> group0(4, b.i32_val(0));
   Value globalAddr = b.ptrtoint(i64_ty, srcPtr);
   group0[2] = b.trunc(i32_ty, globalAddr);
-  group0[3] = b.trunc(i32_ty, b.lshr(globalAddr, b.i64_val(32)));
+  group0[3] = b.trunc(i32_ty, b.lshr(globalAddr, v32));
   group0[3] = b.or_(group0[3], b.i32_val(1 << 31));
 
   /* group1 bit-field definition:
@@ -306,13 +312,12 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     group1[0] = b.or_(group1[0], b.i32_val((padAmountInDwords - 1) << 25));
   }
   // Encode 32-bit tensor shapes
-  group1[1] = b.shl(tensorShape[numDims - 1], b.i32_val(16));
-  group1[2] = b.lshr(tensorShape[numDims - 1], b.i32_val(16));
+  group1[1] = b.shl(tensorShape[numDims - 1], v16);
+  group1[2] = b.lshr(tensorShape[numDims - 1], v16);
 
   if (numDims >= 2) {
-    group1[2] =
-        b.or_(group1[2], b.shl(tensorShape[numDims - 2], b.i32_val(16)));
-    group1[3] = b.lshr(tensorShape[numDims - 2], b.i32_val(16));
+    group1[2] = b.or_(group1[2], b.shl(tensorShape[numDims - 2], v16));
+    group1[3] = b.lshr(tensorShape[numDims - 2], v16);
   }
 
   // Block shapes
@@ -329,9 +334,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   if (numDims >= 2) {
     group1[5] = tensorStride[numDims - 2];
     if (numDims >= 3) {
-      group1[6] =
-          b.or_(group1[6], b.shl(tensorStride[numDims - 3], b.i32_val(16)));
-      group1[7] = b.lshr(tensorStride[numDims - 3], b.i32_val(16));
+      group1[6] = b.or_(group1[6], b.shl(tensorStride[numDims - 3], v16));
+      group1[7] = b.lshr(tensorStride[numDims - 3], v16);
     }
   }
 
@@ -392,15 +396,15 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     // tensor_dim3 (4th dimension from the end)
     if (numDims >= 4) {
       group2[1] = tensorShape[numDims - 4];
-      // tensor_dim2_stride (48 bits: lower 32 bits in group2[2], upper 16
-      // bits in group2[3])
+      // tensor_dim2_stride (48 bits: lower 32 bits in group2[2], upper 16 bits
+      // in group2[3])
       group2[2] = tensorStride[numDims - 4];
     }
 
     // tile_dim3 (upper 16 bits of group2[3])
     if (numDims >= 4) {
-      group2[3] = b.or_(
-          group2[3], b.shl(b.i32_val(blockShape[numDims - 4]), b.i32_val(16)));
+      group2[3] =
+          b.or_(group2[3], b.shl(b.i32_val(blockShape[numDims - 4]), v16));
     }
   }
 
@@ -450,11 +454,9 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     // upper 16 bits of group3[1] and lower 16 bits of group3[2])
     if (numDims == 5) {
       // Lower 16 bits go into upper 16 bits of group3[1]
-      group3[1] =
-          b.or_(group3[1], b.shl(tensorShape[numDims - 5], b.i32_val(16)));
+      group3[1] = b.or_(group3[1], b.shl(tensorShape[numDims - 5], v16));
       // Upper 16 bits go into lower 16 bits of group3[2]
-      group3[2] =
-          b.or_(group3[2], b.lshr(tensorShape[numDims - 5], b.i32_val(16)));
+      group3[2] = b.or_(group3[2], b.lshr(tensorShape[numDims - 5], v16));
     }
 
     // tile_dim4 (16 bits starting at bit 80: upper 16 bits of group3[2])
@@ -462,8 +464,8 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
       // tensor_dim3_stride (4th dimension from the end) (48 bits split across
       // group3[0] and lower 16 bits of group3[1])
       group3[0] = tensorStride[numDims - 5];
-      group3[2] = b.or_(
-          group3[2], b.shl(b.i32_val(blockShape[numDims - 5]), b.i32_val(16)));
+      group3[2] =
+          b.or_(group3[2], b.shl(b.i32_val(blockShape[numDims - 5]), v16));
     }
   }
 
@@ -563,7 +565,7 @@ void fillTDMDescriptor(
   }
   dstPtr = b.gep(sharedPtrTy, elementType, dstPtr, dstOffset);
 
-  // Update tensor shapes based on offset and cga offset
+  // Update tensor shapes based on offset and cgaOffset
   for (size_t i = 0; i < numDims; ++i) {
     auto fullOffset = b.add(offset[i], cgaOffsets[i].second);
     tensorShape[i] = b.smax(b.i32_val(0), b.sub(tensorShape[i], fullOffset));

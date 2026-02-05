@@ -4,11 +4,8 @@
 #include "Utility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-#include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "llvm/TargetParser/TargetParser.h"
 
 using mlir::triton::AMD::DppCtrl;
 namespace mlir::triton::AMD {

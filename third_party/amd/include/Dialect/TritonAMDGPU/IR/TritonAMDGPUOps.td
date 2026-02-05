@@ -28,7 +28,6 @@
 include "mlir/IR/OpBase.td"
 include "triton/Dialect/Triton/IR/TritonDialect.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
-include "triton/Dialect/TritonGPU/IR/TritonGPUTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
 include "triton/Dialect/Triton/IR/TritonOpInterfaces.td"
