@@ -32,7 +32,9 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/Support/Debug.h"
 
 #undef DEBUG_TYPE
@@ -66,13 +68,13 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
   
   // Lambda to perform a single binary split
   auto splitOnce = [&](Value val) -> std::pair<Value, Value> {
-    LDBG("\n\nsplitOnce(): a=" << axis);
-    LDBG("val: " << val);
+    //LDBG("\n\nsplitOnce(): a=" << axis);
+    //LDBG("val: " << val);
     RankedTensorType inputType = cast<RankedTensorType>(val.getType());
-    LDBG("inputType: " << inputType);
+    //LDBG("inputType: " << inputType);
 
     auto inputLL = toLinearLayout(inputType);
-    LDBG("inputLL: " << inputLL);
+    //LDBG("inputLL: " << inputLL);
 
     auto shape = inputType.getShape();
     int rank = shape.size();
@@ -88,15 +90,15 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
         newShape.push_back(shape[i]);
       }
     }
-    LDBG("newShape: " << newShape[0] << ", " << newShape[1] << ", " << newShape[2]);
+    //LDBG("newShape: " << newShape[0] << ", " << newShape[1] << ", " << newShape[2]);
 
     // Use ReshapeOp builder that infers encoding automatically
     // When rank changes, some encodings (like AMDMfmaEncodingAttr) may not support it,
     // so we need to handle encoding inference carefully
     Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, val);
-    LDBG("reshaped: " << reshaped);
+    //LDBG("reshaped: " << reshaped);
     auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
-    LDBG("reshapedLL: " << reshapedLL);    
+    //LDBG("reshapedLL: " << reshapedLL);    
     // Verify the ReshapeOp is valid
     auto reshapeOp = cast<triton::ReshapeOp>(reshaped.getDefiningOp());
     if (failed(reshapeOp.verify())) {
@@ -108,17 +110,17 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     Value transposed = reshaped;
     int newRank = rank + 1;  // After reshape, we have one more dimension
     if (axis != newRank - 1) {
-      LDBG("transposing");
+      //LDBG("transposing");
       SmallVector<int32_t> trans;
       for (int i = 0; i < newRank; ++i) {
         if (i != axis) trans.push_back(i);
       }
       trans.push_back(axis);  // Move "2" dimension to end
-      LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
+      //LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
       transposed = triton::TransOp::create(builder, loc, reshaped, trans);
-      LDBG("transposed: " << transposed);
+      //LDBG("transposed: " << transposed);
       auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
-      LDBG("transposedLL: " << transposedLL);      
+      //LDBG("transposedLL: " << transposedLL);      
       // Verify the TransOp is valid
       auto transOp = cast<triton::TransOp>(transposed.getDefiningOp());
       if (failed(transOp.verify())) {
@@ -131,9 +133,9 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     triton::SplitOp split = triton::SplitOp::create(builder, loc, transposed);
     Value left = split.getResult(0);
     Value right = split.getResult(1);
-    LDBG("left: " << left);
+    //LDBG("left: " << left);
     auto leftLL = toLinearLayout(cast<RankedTensorType>(left.getType()));
-    LDBG("leftLL: " << leftLL);
+    //LDBG("leftLL: " << leftLL);
     // Verify the SplitOp is valid
     auto splitOp = cast<triton::SplitOp>(split.getOperation());
     if (failed(splitOp.verify())) {
@@ -148,16 +150,16 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     // Create target types with original encoding
     auto leftTargetType = RankedTensorType::get(
         leftType.getShape(), leftType.getElementType(), originalEncoding);
-    LDBG("leftTargetType: " << leftTargetType);
+    //LDBG("leftTargetType: " << leftTargetType);
     auto leftTargetTypeLL = toLinearLayout(cast<RankedTensorType>(leftTargetType));
-    LDBG("leftTargetTypeLL: " << leftTargetTypeLL);
+    //LDBG("leftTargetTypeLL: " << leftTargetTypeLL);
     auto rightTargetType = RankedTensorType::get(
         rightType.getShape(), rightType.getElementType(), originalEncoding);
     
     // Convert from LinearEncodingAttr back to original encoding
     left = triton::gpu::ConvertLayoutOp::create(builder, loc, leftTargetType, left);
     right = triton::gpu::ConvertLayoutOp::create(builder, loc, rightTargetType, right);
-    LDBG("left after convert: " << left);    
+    //LDBG("left after convert: " << left);    
     return {left, right};
   };
   
@@ -166,11 +168,11 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
   tiles.push_back(input);
   int32_t currentCount = 1;
   while (currentCount < numSlices) {
-    LDBG("while " << currentCount << " < " << numSlices);
+    //LDBG("while " << currentCount << " < " << numSlices);
     RankedTensorType tileType = cast<RankedTensorType>(tiles[0].getType());
-    LDBG("tileType: " << tileType);
+    //LDBG("tileType: " << tileType);
     auto tileTypeLL = toLinearLayout(tileType);
-    LDBG("tileTypeLL: " << tileTypeLL);
+    //LDBG("tileTypeLL: " << tileTypeLL);
     typesBeforeSplitting.push_back(tileType);
     SmallVector<Value> nextTiles;
     for (Value tile : tiles) {
@@ -181,7 +183,7 @@ static SmallVector<Value> splitValueAlongAxis(Value input, int32_t numSlices, in
     tiles = std::move(nextTiles);
     currentCount *= 2;
   }
-  LDBG("typesBeforeSplitting.size(): " << typesBeforeSplitting.size());
+  //LDBG("typesBeforeSplitting.size(): " << typesBeforeSplitting.size());
   return tiles;
 }
 
@@ -194,22 +196,22 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
   
   // Lambda to perform a single binary join
   auto joinOnce = [&](Value left, Value right, RankedTensorType dstType) -> Value {
-    LDBG("\n\njoinOnce(): a=" << axis);
-    LDBG("left: " << left);
-    LDBG("right: " << right);
+    //LDBG("\n\njoinOnce(): a=" << axis);
+    //LDBG("left: " << left);
+    //LDBG("right: " << right);
 
     auto leftType = cast<RankedTensorType>(left.getType());
     auto shape = leftType.getShape();
     int rank = shape.size();
-    LDBG("rank: " << rank);
+    //LDBG("rank: " << rank);
     assert(axis < rank);
 
     // Join creates a new trailing dimension of size 2
     // 64x64 + 64x64 -> 64x64x2 (where 2 is fastest changing dim)
     Value joined = triton::JoinOp::create(builder, loc, left, right);
-    LDBG("joined: " << joined);
+    //LDBG("joined: " << joined);
      auto joinedLL = toLinearLayout(cast<RankedTensorType>(joined.getType()));
-    LDBG("joinedLL: " << joinedLL);   
+    //LDBG("joinedLL: " << joinedLL);   
     // Verify the JoinOp is valid
     auto joinOp = cast<triton::JoinOp>(joined.getDefiningOp());
     if (failed(joinOp.verify())) {
@@ -221,16 +223,16 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
     // for axis=0, trans=2, 0, 1
     // for axis=1, trans=0, 2, 1
     SmallVector<int32_t> trans(rank+1);
-    LDBG("trans.size(): " << trans.size());
+    //LDBG("trans.size(): " << trans.size());
     for (int j = 0; j < rank; ++j) {
       trans[j < axis ? j : j + 1] = j;
     }
     trans[axis] = rank;
-    LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
+    //LDBG("trans: " << trans[0] << "," << trans[1] << "," << trans[2]);
     Value transposed = triton::TransOp::create(builder, loc, joined, trans);
-    LDBG("transposed: " << transposed);
+    //LDBG("transposed: " << transposed);
     auto transposedLL = toLinearLayout(cast<RankedTensorType>(transposed.getType()));
-    LDBG("transposedLL: " << transposedLL);    
+    //LDBG("transposedLL: " << transposedLL);    
     // Verify the TransOp is valid
     auto transOp = cast<triton::TransOp>(transposed.getDefiningOp());
     if (failed(transOp.verify())) {
@@ -241,11 +243,11 @@ static Value joinValuesAlongAxis(SmallVector<Value> tiles, int axis, Location lo
     // Reshape 2x64x64 -> 128x64
     auto transposedType = cast<RankedTensorType>(transposed.getType());
     auto transposedShape = transposedType.getShape();
-    LDBG("transposedShape.size(): " << transposedShape.size());
+    //LDBG("transposedShape.size(): " << transposedShape.size());
     SmallVector<int64_t> newShape(shape.begin(), shape.end());
-    LDBG("newShape.size(): " << newShape.size());
+    //LDBG("newShape.size(): " << newShape.size());
     newShape[axis] *= 2;
-    LDBG("newShape: " << newShape[0] << "," << newShape[1]);
+    //LDBG("newShape: " << newShape[0] << "," << newShape[1]);
     
     // Convert dstType (AMDMfmaEncodingAttr) to LinearEncodingAttr for the reshape.
     /* TODO(dtanner) There may be an error here. LLM says:
@@ -263,15 +265,15 @@ The issue: we're using the LinearLayout from dstType (AMDMfmaEncodingAttr), but 
 Fix: reshape the LinearLayout from transposed to the target shape, then create the LinearEncodingAttr from that, rather than using the LinearLayout from dstType. This ensures ReshapeOp infers the same encoding we provide.
     */
     auto linearEnc = triton::gpu::toLinearEncoding(dstType);
-    LDBG("linearEnc: " << linearEnc);
+    //LDBG("linearEnc: " << linearEnc);
     auto linearType = RankedTensorType::get(
         dstType.getShape(), dstType.getElementType(), linearEnc);
-    LDBG("linearType: " << linearType);
+    //LDBG("linearType: " << linearType);
     // First we Reshape with just the new shape; second we convert layout to the dstType encoding.
     Value reshaped = triton::ReshapeOp::create(builder, loc, newShape, transposed);
-    LDBG("reshaped: " << reshaped);
+    //LDBG("reshaped: " << reshaped);
     auto reshapedLL = toLinearLayout(cast<RankedTensorType>(reshaped.getType()));
-    LDBG("reshapedLL: " << reshapedLL);
+    //LDBG("reshapedLL: " << reshapedLL);
     // Verify the ReshapeOp is valid
     auto reshapeOp = cast<triton::ReshapeOp>(reshaped.getDefiningOp());
     if (failed(reshapeOp.verify())) {
@@ -281,19 +283,19 @@ Fix: reshape the LinearLayout from transposed to the target shape, then create t
     
     // Convert back to original encoding (AMDMfmaEncodingAttr)
     Value converted = triton::gpu::ConvertLayoutOp::create(builder, loc, dstType, reshaped);
-    LDBG("converted: " << converted);
+    //LDBG("converted: " << converted);
     auto convertedLL = toLinearLayout(cast<RankedTensorType>(converted.getType()));
-    LDBG("convertedLL: " << convertedLL);
+    //LDBG("convertedLL: " << convertedLL);
     return converted;
   };
   
   // Iteratively join pairs using log2 iterations
   while (tiles.size() > 1) {
-    LDBG("while " << tiles.size() << " > 1");
+    //LDBG("while " << tiles.size() << " > 1");
     RankedTensorType dstType = typesBeforeSplitting.pop_back_val();
-    LDBG("dstType: " << dstType);
+    //LDBG("dstType: " << dstType);
     auto dstTypeLL = toLinearLayout(dstType);
-    LDBG("dstTypeLL: " << dstTypeLL);
+    //LDBG("dstTypeLL: " << dstTypeLL);
     SmallVector<Value> nextTiles;
     for (size_t i = 0; i < tiles.size(); i += 2) {
       Value joined = joinOnce(tiles[i], tiles[i + 1], dstType);
@@ -436,7 +438,10 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   int64_t totalK = aType.getShape().back();
   int64_t totalN = bType.getShape().back();
   auto dotAttrs = dot->getAttrs();
-
+  bool insertSchedBarriers = tools::getBoolEnv("TRITON_PREFETCH_INSERT_SCHED_BARRIER");
+  if (insertSchedBarriers) {
+    LDBG("Inserting sched barrier");
+  }
 
   // Map from (M, N) offsets to accumulated dot Values
   DenseMap<std::pair<int32_t, int32_t>, Value> mnToDot;
@@ -446,9 +451,6 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   assert(totalN % prefetchWidthN == 0 && "totalN must be divisible by prefetchWidthN");
   assert(totalK % prefetchWidthK == 0 && "totalK must be divisible by prefetchWidthK");
 
-  // Split the accumulator operand (c) into M×N tiles using vendor-neutral SplitOp
-  // SplitOp only splits along the last dimension, so we need to use TransOp
-  // to permute dimensions. We also need to reshape to add a trailing dimension of size 2.
   Value cOperand = mapping.lookup(dot.getC());
 
   int mAxis = 0;
@@ -457,12 +459,12 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   // TODO(dtanner) whether m or n maps to axis=0, 1 may depend on isTransposed
   // Slice M.
   int32_t numSlicesM = totalM / prefetchWidthM;
-  LDBG("numSlicesM: " << numSlicesM);
+  //LDBG("numSlicesM: " << numSlicesM);
   SmallVector<Value> mSlices = splitValueAlongAxis(cOperand, numSlicesM, mAxis, dot.getLoc(), builder);
   
   // Slice N.
   int32_t numSlicesN = totalN / prefetchWidthN;
-  LDBG("numSlicesN: " << numSlicesN);
+  //LDBG("numSlicesN: " << numSlicesN);
   for (int32_t mIdx = 0; mIdx < numSlicesM; ++mIdx) {
     int32_t mOff = mIdx * prefetchWidthM;
     SmallVector<Value> mnSlices = splitValueAlongAxis(mSlices[mIdx], numSlicesN, nAxis, dot.getLoc(), builder);    
@@ -472,7 +474,6 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
       mnToDot[{mOff, nOff}] = mnSlices[nIdx];
     }
   }
-
   // Generate dots[m, n, k] and local_loads[m, n, k] for all slices
   // Triple nested loop over K, M, N dimensions (K outermost)
   Operation *lastDotOp = nullptr;
@@ -480,9 +481,11 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
   for (int32_t kOff = 0; kOff < totalK; kOff += prefetchWidthK) {
     DenseMap<int32_t, Value> aSlices;
     DenseMap<int32_t, Value> bSlices;
+
+    // Outer loop is M dimension
     for (int32_t mOff = 0; mOff < totalM; mOff += prefetchWidthM) {
       for (int32_t nOff = 0; nOff < totalN; nOff += prefetchWidthN) {
-        LDBG("MNK: " << mOff << ", " << nOff << ", " << kOff);
+        //LDBG("MNK: " << mOff << ", " << nOff << ", " << kOff);
 
         // local_loads should be inserted before the previous dot.
         if (lastDotOp)
@@ -496,7 +499,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
           else
             aSlice = mapping.lookup(dot.getA());
           aSlices[mOff] = aSlice;
-          LDBG("aSlice0: " << aSlice);
+          //LDBG("aSlice0: " << aSlice);
         } else {
           if (nOff == 0) {
             // Create local_load for new kOff>0 and nOff=0.
@@ -508,11 +511,11 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
                 mOff, prefetchWidthM, std::nullopt, std::nullopt, kOff, prefetchWidthK);
             cloneElementwiseOps(aSlice, dot2aVals[dot], builder);
             aSlices[mOff] = aSlice;
-            LDBG("aSliceNew: " << aSlice);
+            //LDBG("aSliceNew: " << aSlice);
           } else {
             // Need to reuse the data from nOff=0.
             aSlice = aSlices[mOff];
-            LDBG("aSliceReused: " << aSlice);
+            //LDBG("aSliceReused: " << aSlice);
           }
         }
 
@@ -524,7 +527,7 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
           else
             bSlice = mapping.lookup(dot.getB());
           bSlices[nOff] = bSlice;
-          LDBG("bSlice0: " << bSlice);
+          //LDBG("bSlice0: " << bSlice);
         } else {          
           if (mOff == 0) {
             // Create local_load for new kOff>0 and mOff=0.
@@ -536,28 +539,28 @@ Operation *Prefetcher::generateDotsAndNonPrefetchingLocalLoads(triton::DotOp dot
               std::nullopt, std::nullopt, nOff, prefetchWidthN, kOff, prefetchWidthK);
           cloneElementwiseOps(bSlice, dot2bVals[dot], builder);
           bSlices[nOff] = bSlice;
-          LDBG("bSliceNew: " << bSlice);
+          //LDBG("bSliceNew: " << bSlice);
           } else {
             // Need to reuse the data from mOff=0.
             bSlice = bSlices[nOff];
-            LDBG("bSliceReused: " << bSlice);
+            //LDBG("bSliceReused: " << bSlice);
           }
         }
         if (lastDotOp)
           builder.setInsertionPointAfter(lastDotOp);
-#if 1
-        insertDotLocalLoadSchedBarrier(builder, dot.getLoc());
-#endif
+        if (insertSchedBarriers) {
+          insertDotLocalLoadSchedBarrier(builder, dot.getLoc());
+        }
         // Get the accumulator for this (M,N) tile
         Value cSlice = mnToDot[{mOff, nOff}];
         auto dType = cast<RankedTensorType>(cSlice.getType());
-        LDBG("cSlice[" << mOff << "," << nOff << "]: " << cSlice);
+        //LDBG("cSlice[" << mOff << "," << nOff << "]: " << cSlice);
         Operation *newDot = DotOp::create(builder,
             dot.getLoc(), dType,
             ValueRange{aSlice, bSlice, cSlice},
             dotAttrs);
-        LDBG("newDot[" << mOff << "," << nOff << "]: " << *newDot);
-
+        //LDBG("newDot[" << mOff << "," << nOff << "]: " << *newDot);
+        //printContiguity(cast<RankedTensorType>(aSlice.getType()), cast<RankedTensorType>(bSlice.getType()));
         // Update the accumulator for this (M,N) tile
         mnToDot[{mOff, nOff}] = newDot->getResult(0);
         lastDotOp = newDot;
@@ -775,7 +778,7 @@ Value Prefetcher::generateLocalLoadSlice(Value v, unsigned opIdx, bool isPrologu
 
 LogicalResult Prefetcher::initialize() {
   Block *loop = forOp.getBody();
-
+  
   auto getEncoding = [](Value v) {
     return cast<TensorOrMemDesc>(v.getType()).getEncoding();
   };
@@ -812,7 +815,7 @@ LogicalResult Prefetcher::initialize() {
     bool foundConvertFromShared = false;
     SmallVector<Value> rets;
     rets.push_back(op->getResult(0));
-    LDBG("Prefetch src: " << *op);
+    // LDBG("Prefetch src: " << *op);
     while (op) {
       if (!op->getResult(0).hasOneUse())
         break;
@@ -849,8 +852,10 @@ LogicalResult Prefetcher::initialize() {
   };
 
   for (triton::DotOp dot : dotsInFor) {
-    auto aType = dot.getA().getType();
-    auto bType = dot.getB().getType();
+    auto aOpd = dot.getA();
+    auto bOpd = dot.getB();
+    auto aType = aOpd.getType();
+    auto bType = bOpd.getType();
     auto dType = cast<RankedTensorType>(dot.getResult().getType());
     auto aEnc =
         mlir::cast<triton::gpu::DotOperandEncodingAttr>(aType.getEncoding());
@@ -859,6 +864,19 @@ LogicalResult Prefetcher::initialize() {
     assert(aEnc.getKWidth() == bEnc.getKWidth());
     kWidth = aEnc.getKWidth();
     LDBG("kWidth: " << kWidth);
+
+    auto transOp = [&](Operation *op, int opdIdx) -> bool {
+      if (auto localLoad = dyn_cast<triton::gpu::LocalLoadOp>(op)) {
+        auto srcType = localLoad.getSrc().getType();
+        auto order = getOrder(srcType);
+        return (order[0] == opdIdx);
+      }
+      return true;
+    };
+    bool transA = transOp(aOpd.getDefiningOp(), 0);
+    bool transB = transOp(bOpd.getDefiningOp(), 1);
+    LDBG("transA: " << transA);
+    LDBG("transB: " << transB);
 
     // Calculate prefetch widths
     unsigned elementWidthA = aType.getElementTypeBitWidth();
@@ -870,8 +888,8 @@ LogicalResult Prefetcher::initialize() {
     unsigned kSize = aType.getShape().back();  // K dimension
     LDBG("size: " << mSize << "x" << nSize << "x" << kSize);
 
-    auto shapePerCta = getShapePerCTA(dType);
-    LDBG("shapePerCta: " << shapePerCta[0] << "x" << shapePerCta[0]);
+    //auto shapePerCta = getShapePerCTA(dType);
+    //LDBG("shapePerCta: " << shapePerCta[0] << "x" << shapePerCta[1]);
 
     // Larger prefetch widths means more mfmas in a dot-tile, more prefetching and fewer slices.
     // This determines how to slice a dot into sub-dots. We want to prefetch the least ammount possible,
@@ -880,65 +898,88 @@ LogicalResult Prefetcher::initialize() {
     // If we want to bring in more logic, then depending on aspect ratio of warp tile, then that will
     // change whether we want to slice axis 0 or 1 first, and what we want this rectangularity to look like.
     auto prefetchWidthAMD = [&](ArrayRef<unsigned> instrShape, ArrayRef<unsigned> warpsPerCta, unsigned numInsts) -> std::tuple<unsigned, unsigned, unsigned> {
-      bool hasTransA = false; // this should almost always be true for ML workloads.
-      bool hasTransB = true;
       LDBG("instrShape: " << instrShape[0] << "x" << instrShape[1] << "x" << instrShape[2]);
       LDBG("warpsPerCta: " << warpsPerCta[0] << "x" << warpsPerCta[1]);
-      LDBG("numInsts: " << numInsts);
-      unsigned k = (hasTransA || hasTransB) ? kSize : instrShape[2];
-      unsigned m = 1, n = 1;
-      // If transpose, then k dim has more instructions.
-      if (hasTransA) {
-        m = mSize / (instrShape[0]*warpsPerCta[0]); // Final!
-        // n = nSize / instrShape[1];
-        numInsts /= m;
+      LDBG("TotalInsts: " << mSize / (instrShape[0]*warpsPerCta[0])
+          << "x" << nSize / (instrShape[1]*warpsPerCta[1])
+          << "x" << kSize / instrShape[2] << " (" << numInsts << ")");
+
+      // TODO(dtanner) need better logic here because the directory doesn't use target info.
+      // Get Transpose shape from target info.
+      //auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
+      //triton::AMD::TargetInfo targetInfo(arch ? arch->str() : "");
+      //const auto isaFamily = targetInfo.getISAFamily();
+      //unsigned minTransposeWidth =
+      //  isaFamily == AMD::ISAFamily::GFX1250 ? 128 :
+      //  isaFamily == AMD::ISAFamily::CDNA4 ? 64 :
+      //  16;
+      unsigned minTransposeWidth = 64;
+      unsigned m = 1, n = 1, k = 1;
+      if (transA) {
+        // M, K must be at least minTransposeWidth for lowerDsReadTr
+        m = std::max<unsigned>(1, minTransposeWidth / instrShape[0]);
+        k = std::max<unsigned>(1, minTransposeWidth / instrShape[2]);
       }
-      if (hasTransB) { // n is final;
-        // m = mSize / instrShape[0];
-        n = nSize / (instrShape[1]*warpsPerCta[1]); // Final!
-        numInsts /= n;
+      if (transB) {
+        // N, K must be at least minTransposeWidth for lowerDsReadTr
+        n = std::max<unsigned>(1, minTransposeWidth / instrShape[1]);
+        k = std::max<unsigned>(1, minTransposeWidth / instrShape[2]);
       }
-      if (hasTransA || hasTransB) {
-        k = kSize / instrShape[2];
-        numInsts /= k;
-      }
+      numInsts /= (m*n*k);
+      LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
+
       // Square-ish tile of num mma instructions; want m >= n because splitting m first (fat rows).
       while (numInsts > 1) {
-        if (hasTransA && hasTransB) {
+        if (transA && transB) {
           // Both transposed so don't slice at all.
           break;
-        } else if (!hasTransA && !hasTransB) {
+        } else if (!transA && !transB) {
           // Neither is transposed, so slice towards square.
           if (m <= n) {
             m *= 2;
           } else {
             n *= 2;
           }
-        } else if (hasTransB) {
+        } else if (transB) {
           // B is transposed, n fixed, so increase m.
           m *= 2;
-        } else if (hasTransA){
+        } else if (transA){
           // A is transposed, M fixed, so increase n.
           n *= 2;
         }
         numInsts /= 2;
       }
       LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
+      // override for testing via environment variables
+      unsigned mOverride = tools::getIntEnv("TRITON_PREFETCH_M_OVERRIDE");
+      unsigned nOverride = tools::getIntEnv("TRITON_PREFETCH_N_OVERRIDE");
+      unsigned kOverride = tools::getIntEnv("TRITON_PREFETCH_K_OVERRIDE");
+      if (mOverride > 0) {
+        m = mOverride;
+      }
+      if (nOverride > 0) {
+        n = nOverride;
+      }
+      if (kOverride > 0) {
+        k = kOverride;
+      }
+      LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
       m *= instrShape[0]*warpsPerCta[0];
       n *= instrShape[1]*warpsPerCta[1];
       k *= instrShape[2];
-      // As fa
-      // override for testing
-      //m = mSize;
-      //n = nSize/2;
-      //k = kSize;
+
       return {m, n, k};
     };
+
+      
+    // Query contiguity properties from encodings
+    //printContiguity(aType, bType);
+    
 
     // Get the dot result encoding to determine instruction dimensions
     Attribute dotEncoding = dot.getType().getEncoding();
     if (auto mfmaEnc = dyn_cast<AMDMfmaEncodingAttr>(dotEncoding)) {
-      unsigned numInsts = 8;
+      unsigned numInsts = 4;
       auto [m, n, k] = prefetchWidthAMD(mfmaEnc.getInstrShape(), mfmaEnc.getWarpsPerCTA(), numInsts);
       prefetchWidthM = m;
       prefetchWidthN = n;
@@ -975,7 +1016,7 @@ LogicalResult Prefetcher::initialize() {
     prefetchWidthN = std::min<unsigned>(prefetchWidthN, nSize);
     prefetchWidthK = std::min<unsigned>(prefetchWidthK, kSize);
     LDBG("prefetchWidths: " << prefetchWidthM << "x" << prefetchWidthN << "x" << prefetchWidthK);
-
+    LDBG("NumSlices: " << mSize / prefetchWidthM << "x" << nSize / prefetchWidthN << "x" << kSize / prefetchWidthK);
     auto aVals = getPrefetchSrc(dot.getA());
     auto bVals = getPrefetchSrc(dot.getB());
 
@@ -1121,7 +1162,7 @@ struct PrefetchPass : public impl::TritonGPUPrefetchBase<PrefetchPass> {
       prefetcher.emitPrologue();
 
       scf::ForOp newForOp = prefetcher.createNewForOp();
-      LDBG("newForOp: " << newForOp);
+      //LDBG("newForOp: " << newForOp);
 
       // replace the original loop
       for (unsigned i = 0; i < forOp->getNumResults(); ++i)

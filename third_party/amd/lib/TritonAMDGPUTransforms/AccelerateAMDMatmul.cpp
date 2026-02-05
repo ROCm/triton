@@ -555,7 +555,6 @@ public:
 
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
-    llvm::outs() << "BlockedToMFMA()\n";
     using TensorValue = TypedValue<RankedTensorType>;
     RankedTensorType oldRetType = dotOp.getType();
     if (!oldRetType.getEncoding() ||
@@ -760,7 +759,6 @@ public:
                              oldRetType.getElementType());
 
     rewriter.replaceOp(dotOp, dotOutput);
-    llvm::outs() << "kWidth=" << kWidth << "\n";
     return success();
   }
 };

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <assert.h>
+#include <cerrno>
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -50,6 +51,10 @@ inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     "TRITON_PARTITION_SCHEDULING_ENABLE_DUMP_DOT",
     "TRITON_PARTITION_SCHEDULING_DUMP_DATA_ONLY",
     "TRITON_PARTITION_SCHEDULING_DUMP_LOOP_ONLY",
+    "TRITON_PREFETCH_M_OVERRIDE",
+    "TRITON_PREFETCH_N_OVERRIDE",
+    "TRITON_PREFETCH_K_OVERRIDE",
+    "TRITON_PREFETCH_INSERT_SCHED_BARRIER",
     // clang-format on
 };
 
@@ -93,6 +98,23 @@ inline bool getBoolEnv(const std::string &env) {
   std::transform(str.begin(), str.end(), str.begin(),
                  [](unsigned char c) { return std::tolower(c); });
   return str == "on" || str == "true" || str == "1";
+}
+
+// return value of a cache-invalidating integer environment variable
+// Returns 0 if the environment variable is not set or cannot be parsed
+inline int getIntEnv(const std::string &env) {
+  std::lock_guard<std::mutex> lock(getenv_mutex);
+  assertIsRecognized(env);
+  const char *s = std::getenv(env.c_str());
+  if (!s)
+    return 0;
+  errno = 0;
+  char *end;
+  long val = std::strtol(s, &end, 10);
+  // Check if the entire string was consumed and no error occurred
+  if (*end != '\0' || errno == ERANGE)
+    return 0;
+  return static_cast<int>(val);
 }
 
 inline std::optional<bool> isEnvValueBool(std::string str) {
