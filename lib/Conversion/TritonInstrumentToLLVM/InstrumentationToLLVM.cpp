@@ -7,7 +7,6 @@
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/TritonGPUInterfaces.h"
 #include "triton/Dialect/TritonInstrument/IR/Dialect.h"
 #include "triton/Dialect/TritonInstrument/IR/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
@@ -43,29 +42,125 @@ Value createMemDescToI32(RewriterBase &rewriter, Location loc,
   return b.add(offset, b.ptrtoint(i32Ty, smemObj.getBase()));
 }
 
+std::tuple<Block *, Block *, Block *>
+createIfBlock(ConversionPatternRewriter &b, Location loc, Value cnd) {
+  // #prevBlock
+  // if (condition) {
+  //   #ifBlock
+  // }
+  // #thenBlock
+  Block *prevBlock = b.getInsertionBlock();
+  Block *ifBlock = b.splitBlock(prevBlock, b.getInsertionPoint());
+
+  // Split a block after the call.
+  Block *thenBlock = b.splitBlock(ifBlock, ifBlock->begin());
+  b.setInsertionPointToEnd(ifBlock);
+  LLVM::BrOp::create(b, loc, thenBlock);
+  b.setInsertionPointToEnd(prevBlock);
+  LLVM::CondBrOp::create(b, loc, cnd, ifBlock, thenBlock);
+  b.setInsertionPointToStart(thenBlock);
+
+  return {prevBlock, ifBlock, thenBlock};
+}
+
 ////////////////////////////////////////////
 // Patterns
 ////////////////////////////////////////////
 
-struct AssertUniformOpConversion
-    : public ConvertOpToLLVMPattern<tti::ExperimentalAssertUniformOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-  LogicalResult
-  matchAndRewrite(tti::ExperimentalAssertUniformOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    TritonLLVMIRRewriter b(op.getLoc(), rewriter);
-    Value tid = getThreadId(b, op.getLoc());
-    Value threadIdIsZero = b.icmp_eq(tid, b.i32_val(0));
+struct AssertInThreadOpConversion
+    : public ConvertOpToLLVMPattern<tti::ExperimentalAssertInThreadOp> {
+  explicit AssertInThreadOpConversion(LLVMTypeConverter &typeConverter,
+                                      const TargetInfoBase &targetInfo,
+                                      PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<tti::ExperimentalAssertInThreadOp>(typeConverter,
+                                                                  benefit),
+        targetInfo(targetInfo) {}
 
-    auto [prevBlock, ifBlock, thenBlock] =
-        createIfBlock(rewriter, op.getLoc(), threadIdIsZero);
-    rewriter.setInsertionPointToStart(ifBlock);
-    AssertOp::create(rewriter, op.getLoc(), adaptor.getCondition(),
-                     adaptor.getMessage());
+  LogicalResult
+  matchAndRewrite(tti::ExperimentalAssertInThreadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    SmallVector<Value> condElems =
+        unpackLLElements(loc, adaptor.getCondition(), rewriter);
+    auto condTy = condElems[0].getType();
+    bool check_any = adaptor.getCheckAny();
+
+    // TODO: Check that all the values are available in the current thread
+
+    Value condition = check_any ? b.int_val(condTy.getIntOrFloatBitWidth(), 0)
+                                : b.int_val(condTy.getIntOrFloatBitWidth(), 1);
+
+    assert(condTy.isSignedInteger() ||
+           condTy.isSignlessInteger() &&
+               "Unsupported type for assert_in_thread");
+    Value zero = LLVM::ConstantOp::create(rewriter, loc, condTy,
+                                          rewriter.getZeroAttr(condTy));
+    for (auto elem : condElems) {
+      if (check_any) {
+        condition = b.or_(condition, elem);
+      } else {
+        condition = b.and_(condition, elem);
+      }
+    }
+
+    // Invert the condition - assert will be hit if the condition is true
+    condition = b.xor_(condition, b.int_val(condTy.getIntOrFloatBitWidth(), 1));
+
+    llAssert(op, condition, adaptor.getMessage(), rewriter);
+    if (isa<RankedTensorType>(op.getCondition().getType())) {
+      // Add a barrier to avoid a race condition in case an assert is followed
+      // by an op that may trap if the assert condition is true. Since the
+      // tensor in those two operations may have different layout we need to
+      // make sure all the threads are done executing the assert before going to
+      // the next op.
+
+      b.barrier(ttg::AddrSpace::None);
+    }
     rewriter.eraseOp(op);
-    rewriter.setInsertionPointToStart(thenBlock);
     return success();
   }
+
+  void llAssert(Operation *op, Value condition, StringRef message,
+                ConversionPatternRewriter &rewriter) const {
+
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+    StringRef file = "unknown";
+    StringRef func = "unknown";
+    int line = 0;
+    int col = 0;
+
+    while (auto callLoc = dyn_cast<CallSiteLoc>(loc))
+      loc = callLoc.getCallee();
+
+    while (auto nameLoc = dyn_cast<NameLoc>(loc))
+      loc = nameLoc.getChildLoc();
+
+    if (auto fileLineColLoc = dyn_cast<FileLineColLoc>(loc)) {
+      file = fileLineColLoc.getFilename();
+      line = fileLineColLoc.getLine();
+      col = fileLineColLoc.getColumn();
+    }
+
+    // Print the message only for the first thread
+    Value threadId = getThreadId(*b.builder, loc);
+    Value zero = b.int_val(threadId.getType().getIntOrFloatBitWidth(), 0);
+    Value threadIdIsZero = b.icmp_eq(threadId, zero);
+    condition = b.and_(condition, threadIdIsZero);
+
+    auto [prevBlock, ifBlock, thenBlock] =
+        createIfBlock(rewriter, loc, condition);
+
+    rewriter.setInsertionPointToStart(ifBlock);
+    targetInfo.assertFail(rewriter, loc, message, file, func, line);
+
+    rewriter.setInsertionPointToStart(thenBlock);
+  }
+
+protected:
+  const TargetInfoBase &targetInfo;
 };
 
 struct BufferDescriptorsOpConversion
@@ -76,8 +171,8 @@ struct BufferDescriptorsOpConversion
   matchAndRewrite(tti::ExperimentalBufferDescriptorsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto encoding = cast<ttg::DistributedEncodingTrait>(
-        op.getResult().getType().getEncoding());
+    auto encoding =
+        cast<ttg::BlockedEncodingAttr>(op.getResult().getType().getEncoding());
     auto offsets = adaptor.getOffsets();
     auto lengths = adaptor.getLengths();
     assert(offsets.size() == lengths.size() && "Mismatched descriptor arrays");
@@ -131,7 +226,7 @@ struct BufferDescriptorsOpConversion
   }
 
   Value createInitializedIntArrayTensor(OpBuilder &builder, Location loc,
-                                        ttg::DistributedEncodingTrait encoding,
+                                        BlockedEncodingAttr encoding,
                                         ArrayRef<uint64_t> values) const {
     int64_t size = values.size();
     assert(llvm::isPowerOf2_64(size) && "Expected power of 2");
@@ -264,8 +359,9 @@ public:
 } // namespace
 
 void mlir::triton::populateInstrumentationToLLVMPatterns(
-    LLVMTypeConverter &typeConverter, RewritePatternSet &patterns) {
-  patterns.add<AssertUniformOpConversion>(typeConverter);
+    LLVMTypeConverter &typeConverter, const TargetInfoBase &targetInfo,
+    RewritePatternSet &patterns, PatternBenefit benefit) {
+  patterns.add<AssertInThreadOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<BufferDescriptorsOpConversion>(typeConverter);
   patterns.add<LockAcquireOpConversion>(typeConverter);
   patterns.add<LockReleaseOpConversion>(typeConverter);

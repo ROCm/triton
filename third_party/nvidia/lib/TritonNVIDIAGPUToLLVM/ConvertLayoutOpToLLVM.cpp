@@ -50,7 +50,7 @@ struct ConvertLayoutOpSwizzlingConversion
     assert(to_vector(conversion.getInDimNames()) ==
            to_vector(conversion.getOutDimNames()));
     auto dims = conversion.getInDimNames();
-    if (!llvm::is_contained(dims, kBlock) && !cvtAlwaysUseWarpShuffle(op) &&
+    if (!llvm::is_contained(dims, kBlock) &&
         cvtNeedsSharedMemory(srcTy, dstTy)) {
       auto loc = op.getLoc();
       // Remove the kBlock dimension from the layout as it's the identity in the

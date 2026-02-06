@@ -103,7 +103,9 @@ void populatePrintOpToLLVMPattern(LLVMTypeConverter &typeConverter,
                                   PatternBenefit benefit);
 
 void populateInstrumentationToLLVMPatterns(LLVMTypeConverter &typeConverter,
-                                           RewritePatternSet &patterns);
+                                           const TargetInfoBase &targetInfo,
+                                           RewritePatternSet &patterns,
+                                           PatternBenefit benefit);
 
 } // namespace triton
 } // namespace mlir
