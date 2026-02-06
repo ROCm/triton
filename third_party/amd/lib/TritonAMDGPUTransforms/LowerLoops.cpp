@@ -196,24 +196,21 @@ static triton::gpu::PaddedSharedEncodingAttr
 getPaddedEncoding(mlir::MLIRContext *context, int opIdx,
                   ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
                   triton::gpu::CGAEncodingAttr CGALayout,
-                  unsigned typeBitWidth) {
-  // This is the padding strategy for TDM. We need to know here if this is going
-  // to be transposed or not. I think NVIDIA has this exposed in the IR, but we
-  // have to infer it in different places.
-  bool loadTransposed = (order[0] != (1 - opIdx));
-  const int bankBitWidth = 32;
-  const int numBanks = 64;
+                  unsigned typeWidthInBit) {
+  // LDS padding strategy to reduce bank conflicts for dot operand loads.
+  //
+  // Both ds_load_tr (transposed) and ds_load (non-transposed) use 128-bit
+  // loads where 16 lanes cooperatively access 16 different rows. The bank
+  // conflict pattern is identical for both instructions since each lane
+  // reads contiguously within its row.
+  //
+  // Always pad by maxVecSize (128 bits / element size) to spread accesses
+  // across different banks.
   auto blockShapePerCTA =
       triton::gpu::getShapePerCTA(CGALayout.getCTASplitNum(), shape);
   int innerDimLength = blockShapePerCTA[order[0]];
-  unsigned maxVecSize = 128 / typeBitWidth;
-  // unsigned vecSize = std::min(maxVecSize, kWidth);
-  // This is the width loaded in a single instruction from the same LDS row.
-  // For transposed loads, this is twice the size, because there are two threads
-  // loading from the same LDS row.
-  unsigned padAmount = (loadTransposed ? 2 * maxVecSize : maxVecSize);
-
-  // This is the row we are reading from
+  unsigned maxVecSize = 128 / typeWidthInBit;
+  unsigned padAmount = maxVecSize;
   unsigned padInterval = innerDimLength;
   return triton::gpu::PaddedSharedEncodingAttr::get(
       context, {{padInterval, padAmount}}, order, shape, CGALayout);
