@@ -90,17 +90,17 @@ static void createAllBarrier(TritonLLVMIRRewriter &b) {
 static LogicalResult rewriteWarpGroupBarriers(
     LLVM::LLVMFuncOp func, ArrayRef<WarpSpecializeOp> wsOps,
     unsigned defaultNumWarps, const AMD::TargetInfo &targetInfo) {
-
+  // HACK: Turn all `rocdl.barrier` ops into warp group barriers.
   func.walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
     // Walk into default regions but not partition regions.
     if (isa<WarpSpecializePartitionsOp>(op))
       return WalkResult::skip();
 
-    if (isa<ROCDL::BarrierOp, ROCDL::SBarrierOp>(op)) {
-      TritonLLVMIRRewriter b(op->getLoc(), op);
+    if (auto bar = dyn_cast<ROCDL::BarrierOp>(op)) {
+      TritonLLVMIRRewriter b(bar.getLoc(), bar);
       createBarrier(b, kDefaultWarpGroupBarrierIdx, defaultNumWarps,
                     targetInfo);
-      op->erase();
+      bar.erase();
       return WalkResult::skip();
     }
     return WalkResult::advance();
@@ -119,13 +119,11 @@ static LogicalResult rewriteWarpGroupBarriers(
                << " warp group partitions";
       }
 
-      partition->walk([&](Operation *barOp) {
-        if (isa<ROCDL::BarrierOp, ROCDL::SBarrierOp>(barOp)) {
-          TritonLLVMIRRewriter b(barOp->getLoc(), barOp);
-          unsigned partitionNumWarps = op.getPartitionNumWarps()[idx];
-          createBarrier(b, barIdx, partitionNumWarps, targetInfo);
-          barOp->erase();
-        }
+      partition->walk([&](ROCDL::BarrierOp bar) {
+        TritonLLVMIRRewriter b(bar.getLoc(), bar);
+        unsigned partitionNumWarps = op.getPartitionNumWarps()[idx];
+        createBarrier(b, barIdx, partitionNumWarps, targetInfo);
+        bar.erase();
       });
     }
   }
