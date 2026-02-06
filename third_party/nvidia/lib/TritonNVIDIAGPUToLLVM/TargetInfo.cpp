@@ -86,9 +86,9 @@ LLVM::LLVMFuncOp getAssertfailDeclaration(RewriterBase &rewriter) {
 namespace mlir::triton::NVIDIA {
 
 // Check if the reduction can use a redux op and return the kind.
-static std::optional<NVVM::ReductionKind>
-matchReduxKind(triton::ReduceOp op, int computeCapability,
-               bool &useNanQualifier) {
+static std::optional<NVVM::ReduxKind> matchReduxKind(triton::ReduceOp op,
+                                                     int computeCapability,
+                                                     bool &useNanQualifier) {
   useNanQualifier = false;
   if (computeCapability < 80)
     return std::nullopt;
@@ -99,29 +99,29 @@ matchReduxKind(triton::ReduceOp op, int computeCapability,
     if (isa<arith::MinimumFOp, arith::MaximumFOp>(reduceOp))
       useNanQualifier = true;
     if (isa<arith::MaxNumFOp, arith::MaximumFOp>(reduceOp))
-      return NVVM::ReductionKind::FMAX;
+      return NVVM::ReduxKind::FMAX;
     if (isa<arith::MinNumFOp, arith::MinimumFOp>(reduceOp))
-      return NVVM::ReductionKind::FMIN;
+      return NVVM::ReduxKind::FMIN;
   }
   auto intType = dyn_cast<IntegerType>(reduceOp->getResultTypes()[0]);
   if (!intType || intType.getWidth() > 32)
     return std::nullopt;
   if (isa<arith::AddIOp>(reduceOp))
-    return NVVM::ReductionKind::ADD;
+    return NVVM::ReduxKind::ADD;
   if (isa<arith::AndIOp>(reduceOp))
-    return NVVM::ReductionKind::AND;
+    return NVVM::ReduxKind::AND;
   if (isa<arith::OrIOp>(reduceOp))
-    return NVVM::ReductionKind::OR;
+    return NVVM::ReduxKind::OR;
   if (isa<arith::XOrIOp>(reduceOp))
-    return NVVM::ReductionKind::XOR;
+    return NVVM::ReduxKind::XOR;
   if (isa<arith::MinSIOp>(reduceOp))
-    return NVVM::ReductionKind::MIN;
+    return NVVM::ReduxKind::MIN;
   if (isa<arith::MinUIOp>(reduceOp))
-    return NVVM::ReductionKind::UMIN;
+    return NVVM::ReduxKind::UMIN;
   if (isa<arith::MaxSIOp>(reduceOp))
-    return NVVM::ReductionKind::MAX;
+    return NVVM::ReduxKind::MAX;
   if (isa<arith::MaxUIOp>(reduceOp))
-    return NVVM::ReductionKind::UMAX;
+    return NVVM::ReduxKind::UMAX;
   return std::nullopt;
 }
 
@@ -489,8 +489,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
         unsigned bitwidth = acc[i].getType().getIntOrFloatBitWidth();
         if (acc[i].getType().isInteger()) {
           if (bitwidth < 32) {
-            if (*kind == NVVM::ReductionKind::MIN ||
-                *kind == NVVM::ReductionKind::MAX)
+            if (*kind == NVVM::ReduxKind::MIN || *kind == NVVM::ReduxKind::MAX)
               acc[i] = b.sext(i32_ty, acc[i]);
             else
               acc[i] = b.zext(i32_ty, acc[i]);
