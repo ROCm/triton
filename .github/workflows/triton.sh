@@ -69,7 +69,7 @@ K_EXPR="$K_EXPR)"
 echo "Running pytest with filter: $K_EXPR"
 
 # Use -p no:forked to disable forking to avoid RuntimeError: Cannot re-initialize CUDA in forked subprocess.
-pytest -n 64 \
+pytest -n 80 \
     --durations=20 \
     -k "$K_EXPR" \
     -p no:forked \
@@ -87,4 +87,4 @@ echo "=== Run Gluon MoE Tests ==="
 # MoE tests require NPI PyTorch, so we test them in Triton pipeline.
 # TODO: FFM can't fully clean up the model at this moment, so we need to use --forked to run each test in a separate subprocess.
 # Otherwise there will be segfaults when running multiple tests in the same process.
-HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --forked --durations=10 third_party/amd/python/examples/gluon/moe_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --forked --durations=10 third_party/amd/python/examples/gluon/moe_gfx1250.py

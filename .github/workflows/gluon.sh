@@ -48,18 +48,18 @@ make test-nogpu
 
 echo "=== Run Gluon Unit Tests ==="
 
-pytest --count=1 -n 32 --durations=10 third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=1 -n 48 --durations=10 third_party/amd/python/test/test_gluon_gfx1250.py
 pytest --count=1 -n 16 --durations=10 python/test/gluon/test_frontend.py
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 32 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/stream_copy_gfx1250.py
 
 unset HSA_MODEL_ARGS
 # TODO: Fix failues in test_runtime_mxgemm_tdm_8warps_pipeline
-HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --durations=10 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py
 # TODO: Fix failure in test_block_scaled_attn_fwd[e4m3-e4m3-1-1024-1024-1-1-128-128-128-True-True-False-8-8] when ffm_enable_time_slicing is enabled.
 # It seems ffm_enable_time_slicing gives incorrect numerics when >~70 VGPR spills.
 HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
