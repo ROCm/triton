@@ -913,6 +913,9 @@ LogicalResult Prefetcher::initialize() {
       //  isaFamily == AMD::ISAFamily::GFX1250 ? 128 :
       //  isaFamily == AMD::ISAFamily::CDNA4 ? 64 :
       //  16;
+      unsigned maxM = mSize / (instrShape[0] * warpsPerCta[0]);
+      unsigned maxN = nSize / (instrShape[1] * warpsPerCta[1]);
+      unsigned maxK = kSize / (instrShape[2]);
       unsigned minTransposeWidth = 64;
       unsigned m = 1, n = 1, k = 1;
       if (transA) {
@@ -926,29 +929,27 @@ LogicalResult Prefetcher::initialize() {
         k = std::max<unsigned>(1, minTransposeWidth / instrShape[2]);
       }
       numInsts /= (m*n*k);
+      // At this point, we've made the tiles the minimum size needed for transposing to work well,
+      // so we can keep increasing their size to reach the desired number of instructions.
       LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
 
       // Square-ish tile of num mma instructions; want m >= n because splitting m first (fat rows).
       while (numInsts > 1) {
-        if (transA && transB) {
-          // Both transposed so don't slice at all.
-          break;
-        } else if (!transA && !transB) {
-          // Neither is transposed, so slice towards square.
-          if (m <= n) {
-            m *= 2;
-          } else {
-            n *= 2;
-          }
-        } else if (transB) {
-          // B is transposed, n fixed, so increase m.
+        bool preferSquare = false;
+        if ((m <= n || !preferSquare) && m < maxM && !transA) {
           m *= 2;
-        } else if (transA){
-          // A is transposed, M fixed, so increase n.
+        } else if (n < maxN) {
           n *= 2;
+        } else if (k < maxK) {
+          k *= 2;
+        } else {
+          // Want to prefetch more but tile already same size as dot.
+          break;
         }
         numInsts /= 2;
       }
+      // By this point our tile is at lease the size needed for transposing,
+      // and has at least the number of instructions.
       LDBG("instr tile m: " << m << ", n: " << n << ", k: " << k);
       // override for testing via environment variables
       unsigned mOverride = tools::getIntEnv("TRITON_PREFETCH_M_OVERRIDE");
@@ -967,7 +968,6 @@ LogicalResult Prefetcher::initialize() {
       m *= instrShape[0]*warpsPerCta[0];
       n *= instrShape[1]*warpsPerCta[1];
       k *= instrShape[2];
-
       return {m, n, k};
     };
 
