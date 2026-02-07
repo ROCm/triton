@@ -380,6 +380,7 @@ private:
         dstTy.getEncoding(), shape, llBitWidth,
         ldsTransLoadParams->instBitWidth,
         ldsTransLoadParams->numLanesInShuffleGroup);
+
     // Check that we have computed a layout
     if (!ldsTransLayout) {
       return failure();
@@ -396,7 +397,6 @@ private:
       auto sharedLL = triton::gpu::toLinearLayout(srcTy);
       cvt = ldsTransLayout->invertAndCompose(sharedLL);
     }
-
     // Check that we will be able to vectorize the load.
     // Need to have exactly ldsTransLoadParams->tileSize,
     // otherwise we can't use ds_read_tr
@@ -473,7 +473,9 @@ public:
     IntegerAttr zero = rewriter.getI32IntegerAttr(0);
     bool localBarrier = op.hasLocal();
     bool globalBarrier = op.hasGlobalRead() || op.hasGlobalWrite();
-    if (localBarrier || globalBarrier) {
+    if (globalBarrier)
+      return failure();
+    if (localBarrier) {
       amdgpu::MemoryCounterWaitOp::create(
           rewriter, op->getLoc(),
           /* load= */ op.hasGlobalRead() ? zero : nullptr,
