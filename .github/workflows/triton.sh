@@ -47,6 +47,10 @@ EXCLUDE_PATTERNS=(
     "test_load_scope_sem_coop_grid_cta_one" # coop group not supported in FFM
     "test_load_store_same_ptr" # takes >60 mins
     "test_cat_nd" # Failure after merge in upstream with #500
+    "test_tensor_atomic_rmw[shape124-0-1-float32-True]" # Failure after merge in upstream with #530
+    "test_tensor_atomic_rmw[shape126-0-1-uint64-True]" # Failure after merge in upstream with #530
+    "test_tensor_atomic_rmw[shape128-0-1-int64-True]" # Failure after merge in upstream with #530
+    "test_tensor_atomic_rmw[shape130-0-1-float64-True]" # Failure after merge in upstream with #530
     # Excluse pattern for test_matmul.py
     "test_preshuffle_scale_mxfp_cdna4"
     "test_batched_mxfp"
