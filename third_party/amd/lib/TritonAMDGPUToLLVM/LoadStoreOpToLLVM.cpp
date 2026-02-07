@@ -5,26 +5,19 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TDMUtility.h"
 #include "TargetInfo.h"
-#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
-#include "mlir/IR/Types.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
@@ -37,14 +30,6 @@ using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 namespace {
-// Createa a LLVM vector of type `vecTy` containing all zeros
-Value createZeroVector(OpBuilder &builder, Location loc, VectorType vecTy) {
-  mlir::Attribute zeroAttr = builder.getZeroAttr(vecTy.getElementType());
-  auto denseValue =
-      DenseElementsAttr::get(cast<mlir::ShapedType>(vecTy), zeroAttr);
-  Value zeroVal = LLVM::ConstantOp::create(builder, loc, vecTy, denseValue);
-  return zeroVal;
-}
 
 std::optional<const char *> getAMDGPUMemScopeStr(MemSyncScope scope) {
   switch (scope) {
@@ -236,6 +221,16 @@ struct LoadStoreConversionBase {
   explicit LoadStoreConversionBase(const AMD::TargetInfo &targetInfo,
                                    ModuleAxisInfoAnalysis &axisAnalysisPass)
       : targetInfo(targetInfo), axisAnalysisPass(axisAnalysisPass) {}
+
+  // Create a LLVM vector of type `vecTy` containing all zeros
+  Value createZeroVector(OpBuilder &builder, Location loc,
+                         VectorType vecTy) const {
+    mlir::Attribute zeroAttr = builder.getZeroAttr(vecTy.getElementType());
+    auto denseValue =
+        DenseElementsAttr::get(cast<mlir::ShapedType>(vecTy), zeroAttr);
+    Value zeroVal = LLVM::ConstantOp::create(builder, loc, vecTy, denseValue);
+    return zeroVal;
+  }
 
   // Given a vector of values `elems` and a starting point `start`, create a
   // LLVM vector of length `vec` whose elements are `elems[start, ...,

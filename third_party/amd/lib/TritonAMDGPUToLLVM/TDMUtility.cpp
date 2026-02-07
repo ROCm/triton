@@ -621,14 +621,6 @@ void fillTDMDescriptor(
         b.or_(group1[3], b.lshr(tensorShape[numDims - 2], b.i32_val(16)));
   }
 
-  if (adjustedBlockShape) {
-    // Re-encode the adjusted tile_dim0 (block shape) into upper 16 bits of
-    // group1[3]. This is the same for 1D-5D tensors.
-    group1[3] = b.and_(group1[3], b.i32_val(0xFFFF));
-    group1[3] =
-        b.or_(group1[3], b.shl(decodedBlockShape[numDims - 1], b.i32_val(16)));
-  }
-
   // Configure barrier
   if (barrierPtr) {
     group1[0] = b.or_(group1[0], b.shl(b.i32_val(1), b.i32_val(18)));
