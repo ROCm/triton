@@ -46,9 +46,8 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_
            ):
 
     pid_m, pid_n = get_pids(M, N, BLOCK_M, BLOCK_N, GRID_MN, NUM_XCDS, GROUP_SIZE_M)
-    num_warps: gl.constexpr = gl.cdiv(BLOCK_N, 128)
 
-    if num_warps == 1: ## 128 x 256
+    if BLOCK_N == 256: ## 128 x 256
         gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
             reg_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 1], [0, 2], [0, 4], [0, 8], [0, 128]],
             lane_bases=[[16, 0], [32, 0], [64, 0], [0, 16], [0, 32], [0, 64]], warp_bases=[],
@@ -58,18 +57,8 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_
              [0, 16], [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8],
              [0, 128]], [],
             [BLOCK_K, BLOCK_N])
-    elif num_warps == 2: ## 128 x 512
-        gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
-            reg_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 2], [0, 4], [0, 8], [0, 128], [0, 256]],
-            lane_bases=[[16, 0], [32, 0], [64, 0], [0, 16], [0, 32], [0, 64]],
-            warp_bases=[[0, 1]],
-            block_bases=[], shape=[BLOCK_K, BLOCK_N])
-        sharedLayoutB: gl.constexpr = gl.PaddedSharedLayout([[1024, 32]],
-            [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0], [64, 0],
-             [0, 16], [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8],
-             [0, 128], [0, 256]], [],
-            [BLOCK_K, BLOCK_N])
-    elif num_warps == 4: ## 128 x 512
+        num_warps: gl.constexpr = 1
+    elif BLOCK_N == 512: ## 128 x 512
         gLoadLayoutB: gl.constexpr = gl.DistributedLinearLayout(
             reg_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 4], [0, 8], [0, 128], [0, 256]],
             lane_bases=[[16, 0], [32, 0], [64, 0], [0, 16], [0, 32], [0, 64]],
@@ -80,6 +69,7 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K: gl.constexpr, stride_am, stride_
              [0, 16], [0, 32], [0, 64], [0, 1], [0, 2], [0, 4], [0, 8],
              [0, 128], [0, 256]], [],
             [BLOCK_K, BLOCK_N])
+        num_warps: gl.constexpr = 4
 
     mfmaLayout: gl.constexpr = gl.amd.AMDMFMALayout(version=4, instr_shape=[16, 16, 128], transposed=True,
                                                     tiles_per_warp=[1, 1], warps_per_cta=[1, num_warps])
@@ -137,6 +127,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 name_to_torch_type = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
+## Change this to 1 or 4 to run different experiments
 num_warps = 4
 
 def matmul(a, b, num_warps):
@@ -148,8 +139,11 @@ def matmul(a, b, num_warps):
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
-    BLOCK_M, BLOCK_N, BLOCK_K = 16, 512, 128
-    BLOCK_N = num_warps * 128
+    BLOCK_M, BLOCK_K = 16, 128
+    if num_warps == 1:
+        BLOCK_N = 256
+    elif num_warps == 4:
+        BLOCK_N = 512
     assert K == BLOCK_K
     if a.dtype == torch.float8_e5m2:
         BLOCK_K = 128
@@ -172,17 +166,11 @@ def matmul(a, b, num_warps):
 
 def get_x_vals():
     return [
-        #(4096, 4096, 1024),
-        #(4096, 4096, 2048),
-        #(4096, 4096, 3072),
         (4096, 4096, 128),
-        #(4096, 4096, 8192),
-        #(4096, 4096, 16384),
     ]
 
 
 def test_correctness(dtype):
-    #num_warps = 1
 
     if dtype == 'f8':
         torch_dtype = torch.float16
@@ -205,22 +193,18 @@ def test_correctness(dtype):
         else:
             print(f"{M=} {N=} {K=}: ❌ Triton and Torch differ")
 
-        #print(f"max diff = {torch.max(triton_output-torch_output)}")
-
 
 configs = []
 configs.append(
     triton.testing.Benchmark(
-        x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
+        x_names=["M", "N", "K"],
         x_vals=get_x_vals(),
-        line_arg="dtype",  # Argument name whose value corresponds to a different line in the plot
-        # Possible values for `line_arg`
-        # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-        line_vals=["f8"],  # if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
-        line_names=["f8"],  # if fp8_inputs else [ref_lib, "Triton"],  # Line styles
+        line_arg="dtype",
+        line_vals=["f8"],
+        line_names=["f8"],
         styles=[("green", "-"), ("yellow", "--")],
-        ylabel="TFLOPS",  # Label name for the y-axis
-        plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
+        ylabel="TFLOPS",
+        plot_name="matmul-performance",
         args={},
     ))
 
@@ -236,7 +220,6 @@ def benchmark(M, N, K, dtype):
     if dtype == 'f8':
         a = a.to(torch.float8_e5m2)
         b = b.to(torch.float8_e5m2)
-    #num_warps = 4
     quantiles = [0.5, 0.2, 0.8]
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, num_warps), quantiles=quantiles)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
@@ -244,5 +227,4 @@ def benchmark(M, N, K, dtype):
 
 
 test_correctness("f8")
-#test_correctness("bf16")
 benchmark.run(show_plots=False, print_data=True)
