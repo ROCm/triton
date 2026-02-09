@@ -73,8 +73,9 @@ pytest --count=1 -n 16 --durations=10 python/test/unit/language/test_conversions
 
 echo "=== Run Triton GEMM/Attention Tests ==="
 
+pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py
+
 PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
     mi400/test_gemm_hipdriver.py \
     mi400/test_mxgemm_hipdriver.py \
-    mi400/test_mxfa_hipdriver.py \
     mi400/test_softmax_hipdriver.py

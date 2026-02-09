@@ -5,6 +5,31 @@
 #   - aiter/ops/triton/mha.py
 #   - aiter/test_mha_common.py
 
+# Example of the driver file
+'''
+#!/bin/bash
+
+ROCPLAY_PATH=$(realpath ../../rocplay/rocplaycap-src-4.*)
+ROCCAP_BIN=${ROCPLAY_PATH}/bin/roccap
+ROCCAP_OPTIONS="capture --loglevel trace"
+
+CURR_DIR=$PWD
+TOP_OUTPUT_DIR="${CURR_DIR}/cap-mxfa"
+rm -rf ${TOP_OUTPUT_DIR}
+mkdir -p ${TOP_OUTPUT_DIR}
+
+for CASE in 0 1 2 3; do
+  for Q_TYPE in "e4m3"; do
+    for KV_TYPE in "e4m3" "e2m1"; do
+      ${ROCCAP_BIN} ${ROCCAP_OPTIONS} python3 ./test_mxfp_fa.py --case ${CASE} --q-type ${Q_TYPE} --kv-type ${KV_TYPE}
+      dir_name=${TOP_OUTPUT_DIR}/${CASE}/${Q_TYPE}-${KV_TYPE}
+      mkdir -p ${dir_name}
+      mv ./roc_capture* ${dir_name}
+    done
+  done
+done
+'''
+
 import os
 # ruff: noqa: E402
 import hip
@@ -20,6 +45,7 @@ from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 import argparse
 import math
 from einops import repeat
+from triton._internal_testing import is_hip
 
 # For FA, the P=softmax(S) is performed very accurately in fp32 and
 # P is in range [0, 1]; these then get down-cast to e4m3 which only has
@@ -50,7 +76,7 @@ ATOL = RTOL / 10
 # Therefore the overall strategy for FA accuracy is to make sure most
 # elements are highly accurate, rather than checking that all elements
 # are barely accurate.
-PTOL = .9
+PTOL = .95
 
 # Tolerances which 100% of elements must meet.
 RTOL_100 = 0.15
@@ -292,14 +318,25 @@ def _attn_fwd(
     # write back O
     overflow_size = end_m_idx - seqlen_q
 
-    offs_out = (off_z * stride_oz + off_q_head * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_on)
+    if USE_TDM:
+        o_desc_or_ptrs = tl.make_tensor_descriptor(
+            base=out_ptr + off_z * stride_oz + off_q_head * stride_oh + start_m * BLOCK_M * stride_om,
+            shape=(BATCH * seqlen_q * NUM_Q_HEADS, BLOCK_DMODEL), strides=(stride_om, stride_on),
+            block_shape=(BLOCK_M, BLOCK_DMODEL))
+
+    else:
+        offs_out = (off_z * stride_oz + off_q_head * stride_oh + offs_m[:, None] * stride_om +
+                    offs_d[None, :] * stride_on)
     out_mask = tl.full([BLOCK_M, BLOCK_DMODEL], 1, dtype=tl.int1)
     if overflow_size > 0:
         out_mask = out_mask & (offs_m[:, None] < seqlen_q)
 
     out_mask = True if DISABLE_MASKING else out_mask
     op = acc.to(out_ptr.dtype.element_ty)
-    tl.store(out_ptr + offs_out, op, mask=out_mask)
+    if USE_TDM:
+        o_desc_or_ptrs.store([0, 0], op)
+    else:
+        tl.store(out_ptr + offs_out, op, mask=out_mask)
 
 
 def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
@@ -455,6 +492,8 @@ def run_mha(config, args):
 @pytest.mark.parametrize("num_stages", [1, 3])
 @pytest.mark.parametrize("USE_TDM", [True, False])
 def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_stages, USE_TDM):
+    if not is_hip():
+        pytest.skip("MXFP FA kernels are only tested on AMD backend.")
     if kv_type == "e2m1" and USE_TDM:
         pytest.skip("Numerical failures need investigation.")
     block_n = head_sz
@@ -540,7 +579,7 @@ if __name__ == "__main__":
 
     print(f'{config=}')
     curr_dir = os.path.dirname(os.path.abspath(__file__))
-    filename = f'mxfa-curr-config.txt'
+    filename = 'mxfa-curr-config.txt'
     with open(os.path.join(curr_dir, filename), "w") as file:
         file.write(f'{config=}\n')
         file.write(f'{args.q_type=}\n')
