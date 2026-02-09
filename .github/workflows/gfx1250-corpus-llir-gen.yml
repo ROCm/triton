@@ -1,0 +1,76 @@
+name: Corpus Kernels LLIR Generator
+
+on:
+  # Trigger on PR when 'corpus' label is added
+  pull_request:
+    types: [labeled]
+    branches:
+      - shared/gfx1250*
+
+  # Manual trigger with branch specification
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to run the workflow on'
+        required: true
+        default: 'shared/gfx1250'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  gfx1250:
+    name: gfx1250 Corpus LLIR Generator
+    runs-on: ['self-hosted', 'ffm']
+    timeout-minutes: 30
+    # Run on manual trigger OR when 'corpus' label is added to PR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'corpus')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          # Use input branch for workflow_dispatch, otherwise use PR ref
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+
+      - name: Set environment variables
+        run: |
+          COMMIT=$(git rev-parse --short=8 HEAD)
+          RUN_ID=${{ github.run_id }}
+          DIRNAME="corpus-${COMMIT}-run-${RUN_ID}"
+          echo "DIRNAME=${DIRNAME}" >> $GITHUB_ENV
+
+      - name: Generating LLIR
+        run: |
+          set -xeo pipefail
+          RENDER_GID=$(getent group render | cut -d: -f3)
+          echo "Render group ID: ${RENDER_GID}"
+          DIRNAME=${{ env.DIRNAME }}
+          mkdir -p /data/ci/llir/${DIRNAME}
+          docker run --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v /data/ci/actions-runner/_work/triton/triton:/code \
+            -v /data/ci/llvm/2eb709b9-release:/llvm \
+            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r2.03:/ffm-base \
+            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r2.03:/ffm-update \
+            -v /data/ci/triton-cache/json:/root/.triton/json \
+            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
+            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
+            -v /data/ci/ccache:/root/.ccache \
+            -v /data/ci/llir/${DIRNAME}:/llir \
+            -w /code \
+            --entrypoint bash \
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-env:1.3 \
+            -lc "/code/.github/workflows/corpus_kernel_llir_gen.sh"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: corpus-kernels-${{ env.DIRNAME }}
+          path: /data/ci/llir/${{ env.DIRNAME }}/corpus_kernels
+          retention-days: 7

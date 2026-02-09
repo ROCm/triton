@@ -963,17 +963,17 @@ def run_decode_attention(config, q, k, v, o, sm_scale):
     mid_m = torch.full((BATCH, NUM_Q_HEADS, split_factor, BLOCK_M), float("-inf"), dtype=torch.float32).cuda()
 
     print(f"Launching Decode FWD: Split Factor {split_factor}, Chunk Size {chunk_size}")
-    attn_decode_fwd_kernel[(BATCH, NUM_Q_HEADS, split_factor)](q, k, v, mid_o, mid_l, mid_m, *q.stride(), *k.stride(),
-                                                               *v.stride(), *mid_o.stride(), *mid_l.stride(),
-                                                               *mid_m.stride(), sm_scale, SEQLEN_Q, SEQLEN_K, BLOCK_M,
-                                                               BLOCK_N, HEAD_SZ, split_factor, chunk_size, num_warps=4,
-                                                               waves_per_eu=1)
+    attn_stage1 = attn_decode_fwd_kernel[(BATCH, NUM_Q_HEADS,
+                                          split_factor)](q, k, v, mid_o, mid_l, mid_m, *q.stride(), *k.stride(),
+                                                         *v.stride(), *mid_o.stride(), *mid_l.stride(), *mid_m.stride(),
+                                                         sm_scale, SEQLEN_Q, SEQLEN_K, BLOCK_M, BLOCK_N, HEAD_SZ,
+                                                         split_factor, chunk_size, num_warps=4, waves_per_eu=1)
 
-    attn_decode_reduce_kernel[(BATCH, NUM_Q_HEADS, 1)](mid_o, mid_l, mid_m, o, *mid_o.stride(), *mid_l.stride(),
-                                                       *mid_m.stride(), *o.stride(), sm_scale, split_factor, 16,
-                                                       HEAD_SZ, SEQLEN_Q, SEQLEN_K, BLOCK_N, num_warps=4,
-                                                       waves_per_eu=1)
-    return None
+    attn_stage2 = attn_decode_reduce_kernel[(BATCH, NUM_Q_HEADS, 1)](mid_o, mid_l, mid_m, o, *mid_o.stride(),
+                                                                     *mid_l.stride(), *mid_m.stride(), *o.stride(),
+                                                                     sm_scale, split_factor, 16, HEAD_SZ, SEQLEN_Q,
+                                                                     SEQLEN_K, BLOCK_N, num_warps=4, waves_per_eu=1)
+    return (attn_stage1, attn_stage2)
 
 
 def run_prefill_attention(config, q, k, v, o, sm_scale):
@@ -1002,7 +1002,7 @@ def run_prefill_attention(config, q, k, v, o, sm_scale):
         sm_scale, SEQLEN_Q, SEQLEN_K,  #
         BLOCK_M, BLOCK_N,  #
         HEAD_SZ, num_warps=num_warps, waves_per_eu=1)
-    return attn_kernel
+    return (attn_kernel, )
 
 
 def run_attention(config, check=True):
@@ -1079,4 +1079,4 @@ if __name__ == "__main__":
     }
     print(config)
     attn_kernel = run_attention(config)
-    static_profile(attn_kernel)
+    [static_profile(kernel) for kernel in attn_kernel]

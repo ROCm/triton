@@ -142,7 +142,9 @@ def generate_f16_attention_configs():
 def test_f16_attention_kernel_metadata(config):
     # TODO: figure out correctness issue and re-enable testing
     CHECK_NUMERIC = config["CHECK_NUMERIC"]
-    attn_kernel = run_f16_attention(config, check=CHECK_NUMERIC)
+    attn_kernels = run_f16_attention(config, check=CHECK_NUMERIC)
+    assert len(attn_kernels) == 1, "NYI: Add support for 2 stage FA kernel checks."
+    attn_kernel = attn_kernels[0]
 
     BATCH = config["BATCH"]
     SEQLEN_Q = config["SEQLEN_Q"]
