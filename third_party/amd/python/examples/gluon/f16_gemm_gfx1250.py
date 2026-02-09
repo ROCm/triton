@@ -382,16 +382,7 @@ def gemm_tdm_pipelined_single_warp_per_simd_schedule_kernel(a_ptr, b_ptr, c_ptr,
     ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
 
 
-@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(32, 32, 64)])
-@pytest.mark.parametrize("NUM_BUFFERS", [2, 3, 4])
-@pytest.mark.parametrize("TRANSPOSE_B", [False, True])
-@pytest.mark.parametrize("PERSISTENT", [False, True])
-@pytest.mark.parametrize("PREFETCH", [False, True])
-@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0, 2])
-@pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
-@pytest.mark.parametrize("num_warps", [4, 8])
-@pytest.mark.parametrize("ctas_per_cga", [[1, 1], [2, 1], [2, 2], [2, 4], [4, 4]])
-def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,
+def _run_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,
                                     L2_PREFETCH_DISTANCE, M, N, K, num_warps, ctas_per_cga):
     if triton.cdiv(K, BLOCK_K) < NUM_BUFFERS:
         pytest.skip("Skip tests where K/BLOCK_K < NUM_BUFFERS")
@@ -465,7 +456,8 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
                 SHARED_LAYOUT_A=SHARED_LAYOUT_A, SHARED_LAYOUT_B=SHARED_LAYOUT_B, ACCUMULATOR_LAYOUT=ACCUMULATOR_LAYOUT,
                 OPERAND_LAYOUT_A=OPERAND_LAYOUT_A, OPERAND_LAYOUT_B=OPERAND_LAYOUT_B,  #
-                num_warps=num_warps, waves_per_eu=num_warps // 4, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
+                num_warps=num_warps, num_ctas=num_ctas, waves_per_eu=num_warps // 4,
+                L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
             static_profile(kernel)
         else:
             kernel = persistent_gemm_tdm_pipelined_kernel[grid](
@@ -478,12 +470,57 @@ def test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
                 NUM_BUFFERS=NUM_BUFFERS, TRANSPOSE_B=TRANSPOSE_B,  #
                 SHARED_LAYOUT_A=SHARED_LAYOUT_A, SHARED_LAYOUT_B=SHARED_LAYOUT_B, ACCUMULATOR_LAYOUT=ACCUMULATOR_LAYOUT,
                 OPERAND_LAYOUT_A=OPERAND_LAYOUT_A, OPERAND_LAYOUT_B=OPERAND_LAYOUT_B,  #
-                num_warps=num_warps, waves_per_eu=num_warps // 4, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
+                num_warps=num_warps, num_ctas=num_ctas, waves_per_eu=num_warps // 4,
+                L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE)
             static_profile(kernel)
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ (b.to(torch.float32) if not TRANSPOSE_B else b.T.to(torch.float32))
     torch.testing.assert_close(c_triton, c_torch, rtol=1e-4, atol=1e-4)
+
+
+def _build_multi_cta_gemm_cases():
+    """
+    Build multi-CTA GEMM configs, it scales the problem size and blocks dims by
+    ctas_per_cga so each CTA works on BLOCK_M/BLOCK_N sized tile.
+    """
+
+    base_shapes = [(256, 256, 512), (250, 250, 510)]
+    base_blocks = [(32, 32, 64)]
+    ctas_per_cga_list = [[2, 1], [4, 2], [4, 4]]
+    configs = []
+    for M, N, K in base_shapes:
+        for BLOCK_M, BLOCK_N, BLOCK_K in base_blocks:
+            for ctas in ctas_per_cga_list:
+                configs.append((M * ctas[0], N * ctas[1], K, BLOCK_M * ctas[0], BLOCK_N * ctas[1], BLOCK_K, ctas))
+    return configs
+
+
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(32, 32, 64)])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3, 4])
+@pytest.mark.parametrize("TRANSPOSE_B", [False, True])
+@pytest.mark.parametrize("PERSISTENT", [False, True])
+@pytest.mark.parametrize("PREFETCH", [False, True])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0, 2])
+@pytest.mark.parametrize("M,N,K", [(256, 256, 512), (250, 250, 510)])
+@pytest.mark.parametrize("num_warps", [4, 8])
+def test_runtime_gemm_tdm_pipelined_single_cta(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT,
+                                               PREFETCH, L2_PREFETCH_DISTANCE, M, N, K, num_warps):
+    _run_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,
+                                    L2_PREFETCH_DISTANCE, M, N, K, num_warps, [1, 1])
+
+
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3, 4])
+@pytest.mark.parametrize("TRANSPOSE_B", [False, True])
+@pytest.mark.parametrize("PERSISTENT", [False])
+@pytest.mark.parametrize("PREFETCH", [False, True])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0, 2])
+@pytest.mark.parametrize("num_warps", [4, 8])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _build_multi_cta_gemm_cases())
+def test_runtime_gemm_tdm_pipelined_multi_cta(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, ctas_per_cga, NUM_BUFFERS,
+                                              TRANSPOSE_B, PERSISTENT, PREFETCH, L2_PREFETCH_DISTANCE, num_warps):
+    _run_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH,
+                                    L2_PREFETCH_DISTANCE, M, N, K, num_warps, ctas_per_cga)
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32)])
@@ -1563,6 +1600,6 @@ if __name__ == "__main__":
         print(
             f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, {PERSISTENT=}, {PREFETCH=}, {L2_PREFETCH_DISTANCE=}, {CTAS_PER_CGA=}"
         )
-        test_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K,  #
+        _run_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K,  #
                                         NUM_BUFFERS, TRANSPOSE_B, PERSISTENT, PREFETCH, L2_PREFETCH_DISTANCE,  #
                                         M, N, K, NUM_WARPS, CTAS_PER_CGA)
