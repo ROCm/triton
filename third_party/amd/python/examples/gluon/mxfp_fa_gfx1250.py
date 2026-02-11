@@ -1012,13 +1012,14 @@ class GlobalScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_pipeline_pingpong(self):
+    def fwd_pipeline_subtile_pingpong(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
         l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N], 0.0, ttgl.float32, cfg.acc_layout)
-        acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N // 2], 0.0, ttgl.float32, cfg.acc_layout)
+        acc0 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
+        acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
         q_scale = self.q_scale
@@ -1029,36 +1030,39 @@ class GlobalScaledAttentionProgram:
         q = self.global_load_q()
 
         # pipeline prologue, iter -3
-        self.issue_global_load_k(0, buf=0)  # ................................. iter 0
+        self.issue_global_load_k(0, sub_idx=0, buf=0)  # ...................... iter 0
+
+        self.issue_global_load_k(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         # pipeline prologue, iter -2
-        self.issue_global_load_k(1, buf=1)  # ................................. iter 1
+        self.issue_global_load_k(1, sub_idx=0, buf=1)  # ...................... iter 1
 
-        self.async_wait(1)  # ................................................. iter 0
-        k = self.shared_load_k(buf=0)
-        self.issue_global_load_v(0, buf=0)  # ................................. iter 0
+        self.async_wait(2)
+        k0 = self.shared_load_k(sub_idx=0, buf=0)  # .......................... iter 0
+        self.issue_global_load_k(1, sub_idx=1, buf=1)  # ...................... iter 1
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
+        qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)  # ............... iter 0
+        self.async_wait(2)
+        k1 = self.shared_load_k(sub_idx=1, buf=0)  # .......................... iter 0
+        self.issue_global_load_v(0, sub_idx=0, buf=0)  # ...................... iter 0
 
-        self.issue_global_load_k(2, buf=0)  # ................................. iter 2
+        qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ............... iter 0
+        self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
+        m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk0, qk1 = self.split_subtile(qk)
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
+
+        self.async_wait(4)
+        k0 = self.shared_load_k(sub_idx=0, buf=1)  # .......................... iter 1
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
-        m_diff = m_i * sm_scale - m_ij_scaled
-        alpha = ttgl.exp2(m_diff)
-        m_i = m_ij
+        self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
-        self.async_wait(2)  # ................................................. iter 0
-        k = self.shared_load_k(buf=1)
-        self.issue_global_load_v(1, buf=1)  # ................................. iter 1
-
-        # main loop from 0 to end-3
         end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
         for i in range(0, end - 2):
             a = i % 2
@@ -1066,76 +1070,112 @@ class GlobalScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            with warp_pipeline_stage("stage0"):
-                qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ......... iter i+1
+            with warp_pipeline_stage("compute0"):
+                qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)  # ....... iter i+1
                 p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
-                p = self.concat_subtile(p0, p1)
+                m_diff = m_i * sm_scale - m_ij_scaled
+                m_i = m_ij
+                alpha = ttgl.exp2(m_diff)
+                acc0 = acc0 * alpha[:, None]
+                acc1 = acc1 * alpha[:, None]
+
+            self.async_wait(4)
+            with warp_pipeline_stage("memory0"):
+                k1 = self.shared_load_k(sub_idx=1, buf=b)  # .................. iter i+1
+                self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .......... iter i+1
+
+            with warp_pipeline_stage("compute1"):
+                qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ....... iter i+1
+                p = self.concat_subtile(p0, p1)  # ............................ iter i
                 l_ij = ttgl.sum(p, 1)
-                acc = acc * alpha[:, None]
                 l_i = l_i * alpha + l_ij
                 p = self.downcast_p(p)
 
-            self.async_wait(2)
-            with warp_pipeline_stage("stage1"):
-                v = self.shared_load_v(buf=a)  # .............................. iter i
-                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .......... iter i+3
+            self.async_wait(4)
+            with warp_pipeline_stage("memory1"):
+                v0 = self.shared_load_v(sub_idx=0, buf=a)  # .................. iter i
+                self.issue_global_load_v(i + 1, sub_idx=1, buf=b)  # .......... iter i+1
 
-            with warp_pipeline_stage("stage2"):
-                acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ......... iter i
-                m = ttgl.max(qk, 1)  # ........................................ iter i+1
+            with warp_pipeline_stage("compute2"):
+                acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)  # ...... iter i
+                qk = self.concat_subtile(qk0, qk1)  # .......................... iter i+1
+                m = ttgl.max(qk, 1)
                 m_ij = ttgl.maximum(m_i, m)
                 m_ij_scaled = m_ij * sm_scale
-                qk0, qk1 = self.split_subtile(qk)
-                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+
+            self.async_wait(4)
+            with warp_pipeline_stage("memory2"):
+                v1 = self.shared_load_v(sub_idx=1, buf=a)  # .................. iter i
+                self.issue_global_load_k(i + 3, sub_idx=0, buf=b, pred=pred)  # iter i+3
+
+            with warp_pipeline_stage("compute3"):
+                acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)  # ...... iter i
+                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ........ iter i+1
                 qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
                 p0 = ttgl.exp2(qk0_shifted)
-                m_diff = m_i * sm_scale - m_ij_scaled
-                alpha = ttgl.exp2(m_diff)
-                m_i = m_ij
 
-            self.async_wait(2)
-            with warp_pipeline_stage("stage3"):
-                k = self.shared_load_k(buf=a)  # .............................. iter i+2
-                self.issue_global_load_v(i + 2, buf=a)  # ..................... iter i+2
+            self.async_wait(4)
+            with warp_pipeline_stage("memory3"):
+                k0 = self.shared_load_k(sub_idx=0, buf=a)  # .................. iter i+2
+                self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # iter i+3
 
-        # pipeline epilogue, iter end-2
-        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        # pipeline epilogue iter end-2
+        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)
+        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)
+
+        p1 = ttgl.exp2(qk1_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        m_i = m_ij
+        alpha = ttgl.exp2(m_diff)
+        acc0 = acc0 * alpha[:, None]
+        acc1 = acc1 * alpha[:, None]
+
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
-        acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
-        self.async_wait(2)  # ................................................. iter end-2
-        v = self.shared_load_v(buf=0)
+        self.async_wait(2)
+        v0 = self.shared_load_v(sub_idx=0, buf=0)
+        v1 = self.shared_load_v(sub_idx=1, buf=0)
 
-        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
+
+        # pipeline epilogue iter end-1
+        qk0 = self.compute_qk(q, q_scale, k0, k_scale, zero)
+        k1 = self.shared_load_k(sub_idx=1, buf=1)
+        qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)
+
+        qk = self.concat_subtile(qk0, qk1)
+        m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk0, qk1 = self.split_subtile(qk)
+
         qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
-        m_diff = m_i * sm_scale - m_ij_scaled
-        alpha = ttgl.exp2(m_diff)
-        m_i = m_ij
 
-        # pipeline epilogue, iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p1 = ttgl.exp2(qk1_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        m_i = m_ij
+        alpha = ttgl.exp2(m_diff)
+        acc0 = acc0 * alpha[:, None]
+        acc1 = acc1 * alpha[:, None]
+
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
-        acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
-        self.async_wait(0)  # ................................................. iter end-1
-        v = self.shared_load_v(buf=1)
+        self.async_wait(0)
+        v0 = self.shared_load_v(sub_idx=0, buf=1)
+        v1 = self.shared_load_v(sub_idx=1, buf=1)
 
-        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)
 
-        # write output
+        acc = self.concat_subtile(acc0, acc1)
         l_recip = 1 / l_i
         acc = acc * l_recip[:, None]
         self.store_output(acc)
@@ -1904,59 +1944,61 @@ class BlockScaledAttentionProgram:
         self.store_output(acc)
 
     @gluon.jit
-    def fwd_pipeline_pingpong(self):
+    def fwd_pipeline_subtile_pingpong(self):
         cfg = self.cfg
 
         m_i = ttgl.full([cfg.BLOCK_M], float("-inf"), ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
         l_i = ttgl.full([cfg.BLOCK_M], 1.0, ttgl.float32, ttgl.SliceLayout(1, cfg.acc_layout))
-        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N], 0.0, ttgl.float32, cfg.acc_layout)
-        acc = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ], 0.0, ttgl.float32, cfg.acc_layout)
+        zero = ttgl.full([cfg.BLOCK_M, cfg.BLOCK_N // 2], 0.0, ttgl.float32, cfg.acc_layout)
+        acc0 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
+        acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
         sm_scale = self.sm_scale
 
         q = self.global_load_q()
         q_scale = self.global_load_q_scale()
 
         # pipeline prologue, iter -3
-        self.issue_global_load_k(0, buf=0)  # ................................. iter 0
+        self.issue_global_load_k(0, sub_idx=0, buf=0)  # ...................... iter 0
         self.issue_global_load_k_scale(0, buf=0)  # ........................... iter 0
 
+        self.issue_global_load_k(0, sub_idx=1, buf=0)  # ...................... iter 0
+
         # pipeline prologue, iter -2
-        self.issue_global_load_k(1, buf=1)  # ................................. iter 1
+        self.issue_global_load_k(1, sub_idx=0, buf=1)  # ...................... iter 1
         self.issue_global_load_k_scale(1, buf=1)  # ........................... iter 1
 
-        self.async_wait(2)  # ................................................. iter 0
-        k = self.shared_load_k(buf=0)
-        k_scale = self.shared_load_k_scale(buf=0)
-        self.issue_global_load_v(0, buf=0)  # ................................. iter 0
-        self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
+        self.async_wait(5)
+        k0 = self.shared_load_k(sub_idx=0, buf=0)  # .......................... iter 0
+        k0_scale = self.shared_load_k_scale(buf=0, slice=0)
+        k1_scale = self.shared_load_k_scale(buf=0, slice=1)
+        self.issue_global_load_k(1, sub_idx=1, buf=1)  # ...................... iter 1
 
         # pipeline prologue, iter -1
-        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter 0
+        qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)  # .............. iter 0
+        self.async_wait(5)
+        k1 = self.shared_load_k(sub_idx=1, buf=0)  # .......................... iter 0
+        self.issue_global_load_v(0, sub_idx=0, buf=0)  # ...................... iter 0
+        self.issue_global_load_v_scale(0, buf=0)  # ........................... iter 0
 
-        self.issue_global_load_k(2, buf=0)  # ................................. iter 2
-        self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
+        qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)  # .............. iter 0
+        self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
+        m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk0, qk1 = self.split_subtile(qk)
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+        self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
+        self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
+
+        self.async_wait(7)
+        k0 = self.shared_load_k(sub_idx=0, buf=1)  # .......................... iter 1
+        k0_scale = self.shared_load_k_scale(buf=1, slice=0)
+        k1_scale = self.shared_load_k_scale(buf=1, slice=1)
+        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
-        m_diff = m_i * sm_scale - m_ij_scaled
-        alpha = ttgl.exp2(m_diff)
-        m_i = m_ij
+        self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
-        self.async_wait(4)  # ................................................. iter 0
-        k = self.shared_load_k(buf=1)
-        k_scale = self.shared_load_k_scale(buf=1)
-        self.issue_global_load_v(1, buf=1)  # ................................. iter 1
-        self.issue_global_load_v_scale(1, buf=1)  # ........................... iter 1
-
-        # main loop from 0 to end-3
-        # TODO: Ideally we should unroll the loop by 2 to remove the buffer index
-        # update, but our current codegen in llvm does not perform well. Re-enable
-        # unroll when fixed.
         end = ttgl.cdiv(cfg.SEQLEN_K, cfg.BLOCK_N)
         for i in range(0, end - 2):
             a = i % 2
@@ -1964,82 +2006,124 @@ class BlockScaledAttentionProgram:
             pred = i - end + 3
             pred = (pred >> 31) & 1
 
-            with warp_pipeline_stage("stage0"):
-                qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ......... iter i+1
+            with warp_pipeline_stage("compute0"):
+                qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)  # ...... iter i+1
                 p1 = ttgl.exp2(qk1_shifted)  # ................................ iter i
-                p = self.concat_subtile(p0, p1)
+                m_diff = m_i * sm_scale - m_ij_scaled
+                m_i = m_ij
+                alpha = ttgl.exp2(m_diff)
+                acc0 = acc0 * alpha[:, None]
+                acc1 = acc1 * alpha[:, None]
+
+            self.async_wait(7)
+            with warp_pipeline_stage("memory0"):
+                k1 = self.shared_load_k(sub_idx=1, buf=b)  # .................. iter i+1
+                self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .......... iter i+1
+                self.issue_global_load_v_scale(i + 1, buf=b)  # ............... iter i+1
+
+            with warp_pipeline_stage("compute1"):
+                qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)  # ...... iter i+1
+                p = self.concat_subtile(p0, p1)  # ............................ iter i
                 l_ij = ttgl.sum(p, 1)
-                acc = acc * alpha[:, None]
                 l_i = l_i * alpha + l_ij
                 p, p_scale = self.downcast_p(p)
 
-            self.async_wait(4)
-            with warp_pipeline_stage("stage1"):
-                v = self.shared_load_v(buf=a)  # .............................. iter i
-                v_scale = self.shared_load_v_scale(buf=a)
-                self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .......... iter i+3
-                self.issue_global_load_k_scale(i + 3, buf=b, pred=pred)
+            self.async_wait(7)
+            with warp_pipeline_stage("memory1"):
+                v0 = self.shared_load_v(sub_idx=0, buf=a)  # .................. iter i
+                v0_scale = self.shared_load_v_scale(buf=a, slice=0)  # ........ iter i
+                v1_scale = self.shared_load_v_scale(buf=a, slice=1)
+                self.issue_global_load_v(i + 1, sub_idx=1, buf=b)  # .......... iter i+1
 
-            with warp_pipeline_stage("stage2"):
-                acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ......... iter i
-                m = ttgl.max(qk, 1)  # ........................................ iter i+1
+            with warp_pipeline_stage("compute2"):
+                acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)  # ..... iter i
+                qk = self.concat_subtile(qk0, qk1)  # .......................... iter i+1
+                m = ttgl.max(qk, 1)
                 m_ij = ttgl.maximum(m_i, m)
                 m_ij_scaled = m_ij * sm_scale
-                qk0, qk1 = self.split_subtile(qk)
-                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
+
+            self.async_wait(7)
+            with warp_pipeline_stage("memory2"):
+                v1 = self.shared_load_v(sub_idx=1, buf=a)  # .................. iter i
+                self.issue_global_load_k(i + 3, sub_idx=0, buf=b, pred=pred)  # iter i+3
+                self.issue_global_load_k_scale(i + 3, buf=b, pred=pred)  # .... iter i+3
+
+            with warp_pipeline_stage("compute3"):
+                acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)  # ..... iter i
+                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ........ iter i+1
                 qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
                 p0 = ttgl.exp2(qk0_shifted)
-                m_diff = m_i * sm_scale - m_ij_scaled
-                alpha = ttgl.exp2(m_diff)
-                m_i = m_ij
 
-            self.async_wait(4)
-            with warp_pipeline_stage("stage3"):
-                k = self.shared_load_k(buf=a)  # .............................. iter i+2
-                k_scale = self.shared_load_k_scale(buf=a)
-                self.issue_global_load_v(i + 2, buf=a)  # ..................... iter i+2
-                self.issue_global_load_v_scale(i + 2, buf=a)
+            self.async_wait(7)
+            with warp_pipeline_stage("memory3"):
+                k0 = self.shared_load_k(sub_idx=0, buf=a)  # .................. iter i+2
+                k0_scale = self.shared_load_k_scale(buf=a, slice=0)  # ........ iter i+2
+                k1_scale = self.shared_load_k_scale(buf=a, slice=1)
+                self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # iter i+3
 
-        # pipeline epilogue, iter end-2
-        qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-2
+        # pipeline epilogue iter end-2
+        self.issue_global_load_v(end - 1, sub_idx=0, buf=1)
+        self.issue_global_load_v(end - 1, sub_idx=1, buf=1)
+        self.issue_global_load_v_scale(end - 1, buf=1)
+
+        p1 = ttgl.exp2(qk1_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        m_i = m_ij
+        alpha = ttgl.exp2(m_diff)
+        acc0 = acc0 * alpha[:, None]
+        acc1 = acc1 * alpha[:, None]
+
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
-        acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
-        self.async_wait(4)  # ................................................. iter end-2
-        v = self.shared_load_v(buf=0)
-        v_scale = self.shared_load_v_scale(buf=0)
+        self.async_wait(5)
+        v0 = self.shared_load_v(sub_idx=0, buf=0)
+        v1 = self.shared_load_v(sub_idx=1, buf=0)
+        v0_scale = self.shared_load_v_scale(buf=0, slice=0)
+        v1_scale = self.shared_load_v_scale(buf=0, slice=1)
 
-        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
+
+        # pipeline epilogue iter end-1
+        k1 = self.shared_load_k(sub_idx=1, buf=1)
+
+        qk0 = self.compute_qk(q, q_scale, k0, k0_scale, zero)
+        qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)
+
+        qk = self.concat_subtile(qk0, qk1)
+        m = ttgl.max(qk, 1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk0, qk1 = self.split_subtile(qk)
+
         qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
         qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
         p0 = ttgl.exp2(qk0_shifted)
-        m_diff = m_i * sm_scale - m_ij_scaled
-        alpha = ttgl.exp2(m_diff)
-        m_i = m_ij
 
-        # pipeline epilogue, iter end-1
-        p1 = ttgl.exp2(qk1_shifted)  # ........................................ iter end-1
+        p1 = ttgl.exp2(qk1_shifted)
+        m_diff = m_i * sm_scale - m_ij_scaled
+        m_i = m_ij
+        alpha = ttgl.exp2(m_diff)
+        acc0 = acc0 * alpha[:, None]
+        acc1 = acc1 * alpha[:, None]
+
         p = self.concat_subtile(p0, p1)
         l_ij = ttgl.sum(p, 1)
-        acc = acc * alpha[:, None]
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
-        self.async_wait(0)  # ................................................. iter end-1
-        v = self.shared_load_v(buf=1)
-        v_scale = self.shared_load_v_scale(buf=1)
+        self.async_wait(0)
+        v0 = self.shared_load_v(sub_idx=0, buf=1)
+        v1 = self.shared_load_v(sub_idx=1, buf=1)
+        v0_scale = self.shared_load_v_scale(buf=1, slice=0)
+        v1_scale = self.shared_load_v_scale(buf=1, slice=1)
 
-        acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-1
+        acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)
+        acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)
 
-        # write output
+        acc = self.concat_subtile(acc0, acc1)
         l_recip = 1 / l_i
         acc = acc * l_recip[:, None]
         self.store_output(acc)
@@ -2072,9 +2156,10 @@ def mxfp_attn_fwd_kernel(  #
         pgm.fwd_loop()
     elif cfg.NUM_BUFFERS == 2:
         if cfg.SUBTILE:
-            pgm.fwd_pipeline_subtile()
-        elif cfg.PINGPONG:
-            pgm.fwd_pipeline_pingpong()
+            if cfg.PINGPONG:
+                pgm.fwd_pipeline_subtile_pingpong()
+            else:
+                pgm.fwd_pipeline_subtile()
         else:
             pgm.fwd_pipeline()
 
@@ -2089,9 +2174,10 @@ def get_attn_schedule(cfg):
         return pgm.fwd_loop
     elif cfg.NUM_BUFFERS == 2:
         if cfg.SUBTILE:
-            return pgm.fwd_pipeline_subtile
-        elif cfg.PINGPONG:
-            return pgm.fwd_pipeline_pingpong
+            if cfg.PINGPONG:
+                return pgm.fwd_pipeline_subtile_pingpong
+            else:
+                return pgm.fwd_pipeline_subtile
         else:
             return pgm.fwd_pipeline
 
@@ -2110,10 +2196,6 @@ def get_attn_config(  #
     p_k_width = 16 if kv_type == 'e2m1' else 8
     # We can use pingpong schedule where there are 8 or more warps
     pingpong = pipelined and num_warps >= 8
-    # TODO: Currently pingpong schedule will have register spill for
-    # block_m=256.
-    if block_m >= 256:
-        pingpong = False
     # Disable warp reduce as it does not show performance benefit.
     warp_reduce = False
 
@@ -2383,6 +2465,7 @@ def get_attn_fwd_configs():
         "4warp_128x128_loop": [128, 128, False, 4],
         "4warp_128x128_pipeline": [128, 128, True, 4],
         "4warp_256x128_pipeline": [256, 128, True, 4],
+        "8warp_256x128_pipeline": [256, 128, True, 8],
         "1warp_16x128_loop": [16, 128, False, 1],
         "1warp_16x128_pipeline": [16, 128, True, 1],
         "4warp_64x128_loop": [64, 128, False, 4],
@@ -2413,6 +2496,7 @@ def get_fwd_test_cases(block_scaling: bool):
             param.append((*test, *configs["4warp_128x128_loop"]))
             param.append((*test, *configs["4warp_128x128_pipeline"]))
             param.append((*test, *configs["4warp_256x128_pipeline"]))
+            param.append((*test, *configs["8warp_256x128_pipeline"]))
         else:
             assert seqlen_q == 1
             if num_q_heads == num_k_heads:
