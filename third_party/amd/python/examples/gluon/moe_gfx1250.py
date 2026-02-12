@@ -455,7 +455,8 @@ class MoEPipelinedProgram:
         if cfg.WITH_X_MX_SCALE:
             scale_x = x_scale_buffer_slice.load(layout=cfg.layout_x_scale)
         else:
-            scale_x = gl.constexpr(0)
+            scale_x = 0
+            scale_x = scale_x.to(gl.uint8)
         scale_w = w_scale_buffer_slice.load(layout=cfg.layout_w_scale)
 
         return x, w, scale_x, scale_w
