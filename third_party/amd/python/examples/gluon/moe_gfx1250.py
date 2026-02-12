@@ -988,9 +988,13 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
     if swiglu_opts is not None:
         fused_activation = FusedActivation(FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2), swiglu_opts)
 
-    flex_a = InFlexData()
-    flex_b = InFlexData()
-    flex_c = OutFlexData()
+    # Use identity global scale (1.0) to satisfy matmul_torch
+    wrap_list = lambda vals: torch.tensor(vals, dtype=torch.float32, device=device)
+    wrap_identity_flex_data = lambda dtype, FlexDataClass: FlexDataClass(dtype.torch_dtype, wrap_list(
+        [1.00])) if dtype.has_global_scale else FlexDataClass()
+    flex_a = wrap_identity_flex_data(c_dtype, InFlexData)
+    flex_b = wrap_identity_flex_data(b_dtype, InFlexData)
+    flex_c = wrap_identity_flex_data(c_dtype, OutFlexData)
     precision_opt = PrecisionConfig(
         flex_ctx=FlexCtx(flex_a, flex_b, flex_c),
         acc_scale=1.0,
@@ -1000,10 +1004,18 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
     )
 
     ref_y = matmul_torch(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt)
-    tri_y = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
-                   fused_activation=fused_activation, num_buffers=num_buffers)
     if swiglu_opts is not None:
         ref_y = swiglu(ref_y.cuda(), alpha=swiglu_opts[0], precision_config=SwiGLUPrecisionConfig(swiglu_opts[1])).cpu()
+
+    precision_opt = PrecisionConfig(
+        flex_ctx=FlexCtx(InFlexData(), InFlexData(), OutFlexData()),
+        acc_scale=1.0,
+        out_dtype=c_dtype.torch_dtype,
+        a_mx_scale=a_scales,
+        b_mx_scale=b_scale_tri,
+    )
+    tri_y = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
+                   fused_activation=fused_activation, num_buffers=num_buffers)
 
     if c_dtype.has_mx_scale:
         tri_y = upcast_from_mxfp(tri_y, precision_opt.c_mx_scale, target_dtype=torch.bfloat16, axis=-1).to(ref_y.dtype)

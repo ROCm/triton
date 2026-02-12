@@ -601,8 +601,7 @@ def apply_precision(x_tri, w_tri, precision_config):
 
     def apply(x, scale):
         if scale is None:
-            # revert after supporting global scale
-            return x.clone().float()
+            return x.clone()
         return x.float() * scale
 
     if precision_config.a_mx_scale is not None:
