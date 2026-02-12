@@ -1,6 +1,6 @@
 from ..._core import ir, builtin, _unwrap_if_constexpr
 from ..._semantic import _check
-from ..._layouts import BlockedLayout, SliceLayout
+from ..._layouts import BlockedLayout, SliceLayout, DistributedLinearLayout
 from ..cdna3 import _verify_buffer_ops
 
 __all__ = [
@@ -102,7 +102,7 @@ def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modif
         other (tensor or scalar, optional): Tensor or scalar providing default values for masked elements. Defaults to None.
         cache_modifier (str): Cache modifier specifier. Defaults to "".
     """
-    _check(isinstance(offsets.type.layout, (BlockedLayout, SliceLayout)),
+    _check(isinstance(offsets.type.layout, (BlockedLayout, SliceLayout, DistributedLinearLayout)),
            lambda: "expected offsets type layout to be BlockedLayout or SliceLayout")
     _verify_buffer_ops(ptr, offsets, mask, other)
 
