@@ -71,8 +71,8 @@ using InstRegionMap = DenseMap<const Instruction *, unsigned>;
 
 struct BBRegion {
   BasicBlock *BB = nullptr;
-  Instruction *Begin = nullptr; // sched.barrier starting the region (exclusive)
-  Instruction *End = nullptr;   // next sched.barrier or nullptr (exclusive)
+  Instruction *Begin = nullptr; // First instruction in region (inclusive)
+  Instruction *End = nullptr;   // First instruction of next region or nullptr (exclusive)
 };
 
 struct MFMARegionCollectResult {
@@ -256,7 +256,8 @@ struct Utils {
   static iterator_range<BasicBlock::iterator>
   instructionsInRegion(const BBRegion &R) {
     BasicBlock *BB = R.BB;
-    auto ItBegin = R.Begin ? std::next(R.Begin->getIterator()) : BB->begin();
+    // Begin is now inclusive (region starts at this instruction)
+    auto ItBegin = R.Begin ? R.Begin->getIterator() : BB->begin();
     auto ItEnd = R.End ? R.End->getIterator() : BB->end();
     return make_range(ItBegin, ItEnd);
   }
@@ -369,21 +370,85 @@ public:
   }
 
 private:
+  // Helper: trace back from MFMA operands (0 and 1) to find the first
+  // shuffle or insert instruction that prepares the input
+  static Instruction *findMFMAInputPrep(CallInst *MFMA) {
+    if (!MFMA || MFMA->arg_size() < 2)
+      return nullptr;
+
+    SmallPtrSet<Value *, 16> Visited;
+    SmallVector<Value *, 8> Worklist;
+
+    // Only check operands 0 and 1 as instructed
+    Worklist.push_back(MFMA->getArgOperand(0));
+    Worklist.push_back(MFMA->getArgOperand(1));
+
+    Instruction *FirstPrep = nullptr;
+
+    while (!Worklist.empty()) {
+      Value *V = Worklist.pop_back_val();
+      if (!Visited.insert(V).second)
+        continue;
+
+      auto *I = dyn_cast<Instruction>(V);
+      if (!I)
+        continue;
+
+      // Found a shuffle or insert - candidate for region start
+      if (isa<ShuffleVectorInst>(I) || isa<InsertElementInst>(I)) {
+        // Keep the earliest one (in program order)
+        if (!FirstPrep || I->comesBefore(FirstPrep))
+          FirstPrep = I;
+        // Continue tracing to find earlier ones
+        for (Value *Op : I->operands())
+          Worklist.push_back(Op);
+      } else if (isa<ExtractElementInst>(I)) {
+        // Trace through extract as well
+        for (Value *Op : I->operands())
+          Worklist.push_back(Op);
+      }
+    }
+
+    return FirstPrep;
+  }
+
+  // Automatic region detection based on MFMA + memory operation patterns
   static unsigned assignRegions(BasicBlock &BB, InstRegionMap &RegionMap) {
     unsigned CurRegion = 0;
-    bool SeenFirstBarrier = false;
+    bool SeenMemoryOps = false;
+    Instruction *RegionStart = nullptr;
 
     for (Instruction &I : BB) {
-      if (Utils::isSchedBarrier(I)) {
-        SeenFirstBarrier = true;
-        CurRegion++;
-        continue;
+      // Check if this is a memory operation (buffer.load.lds or ds_read)
+      auto SK = Utils::classifySchedInst(I);
+      if (SK == SchedKind::BufferLoadLDS || SK == SchedKind::LDSLoad) {
+        SeenMemoryOps = true;
       }
-      if (!SeenFirstBarrier)
-        continue; // ignore prologue
-      RegionMap[&I] = CurRegion;
+
+      // Check if this is an MFMA/WMMA
+      if (Utils::isMFMAorWMMA(I)) {
+        // If we've seen memory ops and already have a region, start a new one
+        if (SeenMemoryOps && RegionStart != nullptr) {
+          CurRegion++;
+          SeenMemoryOps = false;
+          RegionStart = nullptr;
+        }
+
+        // If this is the first MFMA in the current region, find its prep instructions
+        if (RegionStart == nullptr) {
+          RegionStart = findMFMAInputPrep(cast<CallInst>(&I));
+          if (!RegionStart)
+            RegionStart = &I; // Fallback: use MFMA itself as region start
+        }
+      }
+
+      // Assign current instruction to the current region
+      if (RegionStart != nullptr) {
+        RegionMap[&I] = CurRegion;
+      }
     }
-    return CurRegion; // number of regions
+
+    return CurRegion; // number of regions (0-indexed, so actual count is CurRegion + 1 if any)
   }
 
   static MFMAInputSource
@@ -425,25 +490,43 @@ private:
 
   static void analyzeBBMFMA(BasicBlock &BB, BBMFMAAnalysisMap &Out) {
     InstRegionMap RegionMap;
-    unsigned NumRegions = assignRegions(BB, RegionMap);
-    if (NumRegions == 0)
+    unsigned MaxRegion = assignRegions(BB, RegionMap);
+
+    // If no regions detected, return early
+    if (RegionMap.empty())
       return;
 
     MFMARegionList Regions;
-    Regions.resize(NumRegions + 1);
+    Regions.resize(MaxRegion + 1);
 
-    // Identify region barriers: barrier starts next region
-    unsigned RegionID = 0;
-    for (Instruction &I : BB) {
-      if (!Utils::isSchedBarrier(I))
-        continue;
-      if (RegionID + 1 < Regions.size()) {
-        Regions[RegionID + 1].Barrier = &I;
-        RegionID++;
+    // Identify region start instructions (barriers)
+    // Track which instruction starts each region
+    DenseMap<unsigned, Instruction *> RegionStarts;
+
+    for (auto &Entry : RegionMap) {
+      Instruction *I = Entry.first;
+      unsigned RegionID = Entry.second;
+
+      // Find the first instruction in each region to use as the "barrier"
+      if (RegionStarts.find(RegionID) == RegionStarts.end()) {
+        RegionStarts[RegionID] = I;
+      } else {
+        // Keep the earliest instruction
+        if (I->comesBefore(RegionStarts[RegionID]))
+          RegionStarts[RegionID] = I;
       }
     }
 
-    // Count MFMA
+    // Set the barriers in the region list
+    for (auto &Entry : RegionStarts) {
+      unsigned RegionID = Entry.first;
+      Instruction *StartInst = Entry.second;
+      if (RegionID < Regions.size()) {
+        Regions[RegionID].Barrier = StartInst;
+      }
+    }
+
+    // Count MFMA and analyze their inputs
     for (Instruction &I : BB) {
       if (!Utils::isMFMAorWMMA(I))
         continue;
@@ -471,12 +554,12 @@ private:
     Out[&BB] = std::move(Regions);
 
     // print info
-    for (unsigned i = 1; i < Out[&BB].size(); ++i) {
+    for (unsigned i = 0; i < Out[&BB].size(); ++i) {
       const MFMARegionInfo &R = Out[&BB][i];
       if (!R.Barrier)
         continue;
 
-      LLVM_DEBUG(dbgs() << i << ": total MFMA: " << R.TotalMFMA
+      LLVM_DEBUG(dbgs() << "Region " << i << ": total MFMA: " << R.TotalMFMA
                         << ", fully prefetch: " << R.FullyPrefetchedMFMA
                         << "\n");
     }
@@ -570,11 +653,14 @@ private:
     if (Res.Hoist.empty() && Res.Sink.empty())
       return Res;
 
-    Instruction *HoistPos = R.Begin;       // first in region: sched.barrier
+    Instruction *HoistPos = R.Begin;       // Region start (shuffle/insert feeding MFMA)
     Instruction *SinkPos = Res.LastAnchor; // last anchor in region
 
-    for (Instruction *I : llvm::reverse(Res.Hoist))
-      I->moveAfter(HoistPos);
+    for (Instruction *I : llvm::reverse(Res.Hoist)) {
+      // Don't hoist R.Begin after itself
+      if (I != HoistPos)
+        I->moveAfter(HoistPos);
+    }
 
     for (Instruction *I : llvm::reverse(Res.Sink))
       I->moveAfter(SinkPos);
@@ -639,7 +725,7 @@ private:
     unsigned X = 4;       // mfma between buffer.load.lds
     const unsigned Y = 1; // mfma between lds load
 
-    for (unsigned i = 1; i < Regions.size(); ++i) {
+    for (unsigned i = 0; i < Regions.size(); ++i) {
       const MFMARegionInfo &R = Regions[i];
       if (!R.Barrier)
         continue;
@@ -674,12 +760,13 @@ private:
 
     const MFMARegionList &Regions = It->second;
 
-    for (unsigned i = 1; i < Regions.size(); ++i) {
+    for (unsigned i = 0; i < Regions.size(); ++i) {
       const MFMARegionInfo &R = Regions[i];
       if (!R.Barrier)
         continue;
 
-      LLVM_DEBUG(dbgs() << i << ": total MFMA: " << R.TotalMFMA
+      LLVM_DEBUG(dbgs() << "Epilogue region " << i
+                        << ": total MFMA: " << R.TotalMFMA
                         << ", fully prefetch: " << R.FullyPrefetchedMFMA
                         << "\n");
     }
