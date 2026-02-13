@@ -504,16 +504,16 @@ private:
     DenseMap<unsigned, Instruction *> RegionStarts;
 
     for (auto &Entry : RegionMap) {
-      Instruction *I = Entry.first;
+      const Instruction *I = Entry.first;
       unsigned RegionID = Entry.second;
 
       // Find the first instruction in each region to use as the "barrier"
       if (RegionStarts.find(RegionID) == RegionStarts.end()) {
-        RegionStarts[RegionID] = I;
+        RegionStarts[RegionID] = const_cast<Instruction *>(I);
       } else {
         // Keep the earliest instruction
         if (I->comesBefore(RegionStarts[RegionID]))
-          RegionStarts[RegionID] = I;
+          RegionStarts[RegionID] = const_cast<Instruction *>(I);
       }
     }
 
