@@ -66,6 +66,10 @@ class HIPOptions:
     # attention: enables a bunch of optimizations for attention kernels, including:
     #            - iglp 2 and sched.barrier around it
     #            - sink-insts-to-avoid-spills flag to avoid register spills
+    # iterative-ilp-scheduler: enables custom instruction scheduler in backend
+    #
+    # Option allows to set multiple variants divided by commas:
+    # schedule_hint="attention,iterative-ilp-scheduler"
     schedule_hint: str = 'none'
 
     def __post_init__(self):
@@ -231,7 +235,8 @@ class HIPBackend(BaseBackend):
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
         passes.common.add_canonicalizer(pm)
         if options.schedule_hint.lower() != "none":
-            amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.schedule_hint)
+            for hint in options.schedule_hint.split(","):
+                amd.passes.ttgpuir.insert_instruction_sched_hints(pm, hint)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
         if is_in_thread_transpose_enabled(options.arch):
@@ -417,8 +422,12 @@ class HIPBackend(BaseBackend):
         # into loops to avoid register spills in the MachineSinking pass, while it
         # can also lead to regression in some cases. But from current observation,
         # the regression is not significant. It would be better to have some heuristics.
-        if options.schedule_hint == 'attention':
-            flags.append('sink-insts-to-avoid-spills')
+
+        for hint in options.schedule_hint.split(","):
+            if hint == 'attention':
+                flags.append(('sink-insts-to-avoid-spills', True))
+            if hint == 'iterative-ilp-scheduler':
+                flags.append(('amdgpu-sched-strategy', 'iterative-ilp'))
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")
