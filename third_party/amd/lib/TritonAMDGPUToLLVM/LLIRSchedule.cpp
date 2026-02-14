@@ -10,7 +10,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
-#define DEBUG_TYPE "tritonamdgpu-prera-llir-schedule"
+#define DEBUG_TYPE "tritonamdgpu-llir-schedule"
 
 namespace {
 
@@ -72,7 +72,8 @@ using InstRegionMap = DenseMap<const Instruction *, unsigned>;
 struct BBRegion {
   BasicBlock *BB = nullptr;
   Instruction *Begin = nullptr; // First instruction in region (inclusive)
-  Instruction *End = nullptr;   // First instruction of next region or nullptr (exclusive)
+  Instruction *End =
+      nullptr; // First instruction of next region or nullptr (exclusive)
 };
 
 struct MFMARegionCollectResult {
@@ -434,7 +435,8 @@ private:
           RegionStart = nullptr;
         }
 
-        // If this is the first MFMA in the current region, find its prep instructions
+        // If this is the first MFMA in the current region, find its prep
+        // instructions
         if (RegionStart == nullptr) {
           RegionStart = findMFMAInputPrep(cast<CallInst>(&I));
           if (!RegionStart)
@@ -448,7 +450,8 @@ private:
       }
     }
 
-    return CurRegion; // number of regions (0-indexed, so actual count is CurRegion + 1 if any)
+    return CurRegion; // number of regions (0-indexed, so actual count is
+                      // CurRegion + 1 if any)
   }
 
   static MFMAInputSource
@@ -653,7 +656,8 @@ private:
     if (Res.Hoist.empty() && Res.Sink.empty())
       return Res;
 
-    Instruction *HoistPos = R.Begin;       // Region start (shuffle/insert feeding MFMA)
+    Instruction *HoistPos =
+        R.Begin; // Region start (shuffle/insert feeding MFMA)
     Instruction *SinkPos = Res.LastAnchor; // last anchor in region
 
     for (Instruction *I : llvm::reverse(Res.Hoist)) {
@@ -765,21 +769,20 @@ private:
       if (!R.Barrier)
         continue;
 
-      LLVM_DEBUG(dbgs() << "Epilogue region " << i
-                        << ": total MFMA: " << R.TotalMFMA
-                        << ", fully prefetch: " << R.FullyPrefetchedMFMA
-                        << "\n");
+      LLVM_DEBUG(
+          dbgs() << "Epilogue region " << i << ": total MFMA: " << R.TotalMFMA
+                 << ", fully prefetch: " << R.FullyPrefetchedMFMA << "\n");
     }
   }
 };
 
 // Pass wrapper
 
-struct PreRALLIRSchedulePass : FunctionPass {
+struct LLIRSchedulePass : FunctionPass {
   static char ID;
   PreRAScheduler Scheduler;
 
-  PreRALLIRSchedulePass() : FunctionPass(ID) {}
+  LLIRSchedulePass() : FunctionPass(ID) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<LoopInfoWrapperPass>();
@@ -806,13 +809,13 @@ struct PreRALLIRSchedulePass : FunctionPass {
 
 } // end anonymous namespace
 
-char PreRALLIRSchedulePass::ID = 0;
+char LLIRSchedulePass::ID = 0;
 
 namespace mlir::triton::AMD {
 
-void runPreRALLIRSchedulePass(llvm::Function &F) {
+void runLLIRSchedulePass(llvm::Function &F) {
   llvm::legacy::FunctionPassManager FPM(F.getParent());
-  FPM.add(new PreRALLIRSchedulePass());
+  FPM.add(new LLIRSchedulePass());
   FPM.doInitialization();
   FPM.run(F);
   FPM.doFinalization();

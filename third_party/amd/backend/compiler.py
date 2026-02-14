@@ -492,7 +492,8 @@ class HIPBackend(BaseBackend):
         if knobs.amd.scalarize_packed_fops:
             amd.add_scalarize_packed_fops_llvm_pass(fns[0])
 
-        amd.add_pre_RA_llir_schedule_pass(fns[0])
+        if os.environ.get("TRITON_ENABLE_LLIR_SCHED"):
+            amd.add_llir_schedule_pass(fns[0])
 
         # Get some metadata
         metadata["num_warps"] = total_warps_num
