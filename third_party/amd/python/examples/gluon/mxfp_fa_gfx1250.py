@@ -1021,10 +1021,11 @@ class GlobalScaledAttentionProgram:
         acc1 = ttgl.full([cfg.BLOCK_M, cfg.HEAD_SZ // 2], 0.0, ttgl.float32, cfg.acc_layout)
 
         sm_scale = self.sm_scale
-        q_scale = self.q_scale
-        k_scale = self.k_scale
+        q_scale = self.q_scale.to(ttgl.uint8)
+        k_scale = self.k_scale.to(ttgl.uint8)
         p_scale = 0x7F
-        v_scale = self.v_scale
+        p_scale = p_scale.to(ttgl.uint8)
+        v_scale = self.v_scale.to(ttgl.uint8)
 
         q = self.global_load_q()
 
