@@ -536,8 +536,11 @@ class HIPBackend(BaseBackend):
             amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags,
                                            options.enable_fp_fusion, False)
 
-        if os.environ.get("TRITON_ENABLE_AMDGCN_AS"):
+        amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
+        if amdgcn_as_level == "1":
             amdgcn = amdgcn_as(amdgcn, False)
+        elif amdgcn_as_level == "2":
+            amdgcn = amdgcn_as(amdgcn, True)
 
         if "AMD_INSERT_AMDGCN" in os.environ.keys():
             insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
