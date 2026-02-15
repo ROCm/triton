@@ -1726,6 +1726,116 @@ def pick_and_remove_contiguous_regs(reg_pool: Set[Tuple[str, int]], x: int,
     return None
 
 
+def eliminate_save_restore(bb):
+    """
+    Eliminate save-modify-restore patterns:
+        v_mov tmp, orig         ; save
+        <op>  orig, tmp, ...    ; modify (overwrites orig, reads tmp)
+        ...                     ; uses of orig
+        v_mov orig, tmp         ; restore
+
+    Transform to:
+        <op>  tmp, orig, ...    ; write to tmp instead
+        ...                     ; replace uses of orig with tmp
+        ; save and restore movs are dead
+    """
+    changed = True
+    while changed:
+        changed = False
+        for i, save_mov in enumerate(bb.instructions):
+            if save_mov.mark_dead:
+                continue
+            # Step 1: Find a v_mov tmp, orig (save instruction)
+            if not save_mov.opcode.startswith('v_mov'):
+                continue
+            tmp_reg = save_mov.get_dst_regs()
+            src_regs = save_mov.get_src_regs()
+            if not tmp_reg or not src_regs:
+                continue
+            orig_reg = src_regs[0]
+            if tmp_reg.kind != orig_reg.kind:
+                continue
+            if tmp_reg.size != 1 or orig_reg.size != 1:
+                continue
+
+            # Step 2: Find the next instruction that defines orig and uses tmp
+            orig_flat = flatten_regs(orig_reg)
+            tmp_flat = flatten_regs(tmp_reg)
+            modify_inst = None
+            modify_idx = None
+            for j in range(i + 1, len(bb.instructions)):
+                candidate = bb.instructions[j]
+                if candidate.mark_dead:
+                    continue
+                if (orig_flat & candidate.defs) and (tmp_flat & candidate.uses):
+                    modify_inst = candidate
+                    modify_idx = j
+                    break
+                # If something else defines tmp or orig before we find the modify, abort
+                if (tmp_flat & candidate.defs) or (orig_flat & candidate.defs):
+                    break
+
+            if modify_inst is None:
+                continue
+
+            # Step 3: Find the restore mov: v_mov orig, tmp
+            restore_mov = None
+            restore_idx = None
+            for j in range(modify_idx + 1, len(bb.instructions)):
+                candidate = bb.instructions[j]
+                if candidate.mark_dead:
+                    continue
+                if (candidate.opcode.startswith('v_mov')
+                    and candidate.get_dst_regs() == orig_reg
+                    and candidate.get_src_regs()
+                    and candidate.get_src_regs()[0] == tmp_reg):
+                    restore_mov = candidate
+                    restore_idx = j
+                    break
+                # If tmp is redefined before we find restore, abort
+                if tmp_flat & candidate.defs:
+                    break
+
+            if restore_mov is None:
+                continue
+
+            # Step 4: Verify tmp has no other uses between save and restore
+            #         (besides the modify instruction and the restore mov)
+            other_use = False
+            for j in range(i + 1, restore_idx):
+                candidate = bb.instructions[j]
+                if candidate.mark_dead or candidate is modify_inst:
+                    continue
+                if tmp_flat & candidate.uses:
+                    other_use = True
+                    break
+            if other_use:
+                continue
+
+            # All conditions met — apply transformation
+            logging.debug(f"eliminate_save_restore: save={save_mov.emit()}, "
+                          f"modify={modify_inst.emit()}, restore={restore_mov.emit()}")
+
+            # 4a. In modify_inst, swap dst from orig to tmp, and replace use of tmp with orig
+            modify_inst.replace_dst(tmp_reg)
+            modify_inst.replace_use_reg(tmp_reg, orig_reg)
+
+            # 4b. Replace uses of orig with tmp between modify and restore
+            for j in range(modify_idx + 1, restore_idx):
+                candidate = bb.instructions[j]
+                if candidate.mark_dead:
+                    continue
+                if orig_flat & candidate.uses:
+                    candidate.replace_use_reg(orig_reg, tmp_reg)
+
+            # 4c. Mark save and restore as dead
+            save_mov.mark_dead = True
+            restore_mov.mark_dead = True
+
+            changed = True
+            break  # restart scan since indices may have shifted
+
+
 def optimize_buffer_load_m0(bb):
     logging.debug("========== optimize buffer load m0 ==========")
 
@@ -2209,6 +2319,31 @@ def remove_debug_info_section(asm_text: str) -> str:
     return "".join(output)
 
 
+def remove_debug_ranges_section(asm_text: str) -> str:
+    """
+    Remove the .debug_ranges section from an AMDGPU assembly file.
+    """
+    lines = asm_text.splitlines(keepends=True)
+    output = []
+
+    in_debug_section = False
+
+    for line in lines:
+        if line.strip().startswith(".section") and ".debug_ranges" in line:
+            in_debug_section = True
+            continue
+
+        if in_debug_section:
+            if line.strip().startswith(".section"):
+                in_debug_section = False
+            else:
+                continue
+
+        output.append(line)
+
+    return "".join(output)
+
+
 def rewrite_next_free_vgpr(text: str, new_value: int = 512) -> str:
     lines = text.splitlines(keepends=True)
     out = []
@@ -2521,8 +2656,9 @@ def amdgcn_as(text, verbose=False):
 
     dbg("######################################################", indent)
     dbg("## Step 6", indent)
-    dbg("## optimize nops and insert mfma between m0 and buffer_load", indent)
+    dbg("## eliminate save-restore, optimize nops, insert mfma between m0 and buffer_load", indent)
     dbg("######################################################", indent)
+    eliminate_save_restore(loop)
     optimize_nops(loop)
     optimize_buffer_load_m0(loop)
 
@@ -2557,6 +2693,7 @@ def amdgcn_as(text, verbose=False):
     loop.cleanup_bb()
     emitted_text = emit_program(program)
     emitted_text = remove_debug_info_section(emitted_text)
+    emitted_text = remove_debug_ranges_section(emitted_text)
     emitted_text = rewrite_next_free_vgpr(emitted_text, 512)
     setup_logging(debug=False)
     return emitted_text
