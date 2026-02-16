@@ -77,7 +77,7 @@ jobs:
             -v /data/ci/actions-runner/_work/triton/triton:/code \
             -v /data/ci/llvm/979132a0-release:/llvm \
             -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r2.03:/ffm-base \
-            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r2.03:/ffm-update \
+            -v /data/ci/ffm/ffmlite-main-186-25f7800e-20260216:/ffm-update \
             -v /data/ci/triton-cache/json:/root/.triton/json \
             -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
             -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
