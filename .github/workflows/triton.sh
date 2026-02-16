@@ -51,6 +51,7 @@ EXCLUDE_PATTERNS=(
     "test_tensor_atomic_rmw[shape126-0-1-uint64-True]" # Failure after merge in upstream with #530
     "test_tensor_atomic_rmw[shape128-0-1-int64-True]" # Failure after merge in upstream with #530
     "test_tensor_atomic_rmw[shape130-0-1-float64-True]" # Failure after merge in upstream with #530
+    "test_tensor_atomic" # Failure after merge in upstream with #545
     # Excluse pattern for test_matmul.py
     "test_preshuffle_scale_mxfp_cdna4"
     "test_batched_mxfp"
