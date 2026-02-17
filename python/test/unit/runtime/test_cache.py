@@ -1,6 +1,7 @@
 import importlib.util
 import itertools
 import os
+import gc
 import shutil
 import pathlib
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
@@ -798,3 +799,35 @@ def test_async_compile(device, fresh_triton_cache):
         assert a[0, 0] == 1
         kernel[(1, )](a, 2)
         assert a[0, 0] == 2
+
+
+def test_module_load_unload(device, fresh_knobs):
+
+    @triton.jit
+    def kernel(out_ptr, val) -> None:
+        tl.store(out_ptr, val)
+
+    # we should hit the module unload call to decrese the counter from 1 to 0
+    counter = 1
+
+    def module_unload(*args, **kwargs):
+        nonlocal counter
+        counter -= 1
+
+    # turn off python garbage collector, so the callback is not called
+    # in the garbage collector
+    gc.disable()
+    triton.knobs.runtime.module_unload_hook.add(module_unload)
+
+    out = torch.randn(1, dtype=torch.float32, device=device)
+    pre_compile = kernel.warmup(out, 1, grid=(1, ))
+    pre_compile._init_handles()
+
+    assert counter == 1
+    assert pre_compile.module is not None
+    pre_compile.__del__()
+
+    assert counter == 0
+    assert pre_compile.module is None
+    # turn on garbage collector
+    gc.enable()

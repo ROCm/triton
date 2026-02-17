@@ -22,6 +22,7 @@ static const char *hipLibSearchPaths[] = {"/*py_libhip_search_path*/"};
   FOR_EACH_ERR_FN(hipModuleLoadDataEx, hipModule_t *module, const void *image, \
                   unsigned int numOptions, hipJitOption *options,              \
                   void **optionValues)                                         \
+  FOR_EACH_ERR_FN(hipModuleUnload, hipModule_t module)                         \
   FOR_EACH_ERR_FN(hipModuleGetFunction, hipFunction_t *function,               \
                   hipModule_t module, const char *kname)                       \
   FOR_EACH_ERR_FN(hipFuncGetAttribute, int *, hipFunction_attribute attr,      \
@@ -255,9 +256,22 @@ static PyObject *loadBinary(PyObject *self, PyObject *args) {
                        n_spills, n_max_threads);
 }
 
+static PyObject *unloadModule(PyObject *self, PyObject *args) {
+  hipModule_t mod;
+  if (!PyArg_ParseTuple(args, "K", &mod)) {
+    return NULL;
+  }
+
+  HIP_CHECK(hipSymbolTable.hipModuleUnload(mod))
+
+  return Py_None;
+}
+
 static PyMethodDef ModuleMethods[] = {
     {"load_binary", loadBinary, METH_VARARGS,
      "Load provided hsaco into HIP driver"},
+    {"unload_module", unloadModule, METH_VARARGS,
+     "unload provided module to free memory"},
     {"get_device_properties", getDeviceProperties, METH_VARARGS,
      "Get the properties for a given device"},
     {NULL, NULL, 0, NULL} // sentinel
