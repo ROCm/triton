@@ -671,7 +671,10 @@ def test_runtime_gemm_async(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, a_dtype, b_dtype
     b_dtype = getattr(torch, b_dtype)
 
     a = create_operand((M, K), a_dtype)
-    b = create_operand((K, N), b_dtype)
+    if b_dtype == torch.float8_e5m2:
+        b = create_operand((K, N), b_dtype)
+    else:
+        b = torch.randn((N, K), dtype=b_dtype).T
     c = torch.zeros((M, N), dtype=torch.float32)
     stride_am, stride_ak = a.stride(0), a.stride(1)
     stride_bk, stride_bn = b.stride(0), b.stride(1)
