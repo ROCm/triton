@@ -1,8 +1,6 @@
 #include "TritonAMDGPUTransforms/Passes.h"
-#include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
-#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 #define DEBUG_TYPE "tritonamdgpu-pipeline-expand-loops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -66,13 +64,9 @@ void expandLoops(ModuleOp moduleOp) {
     // stages and order of operations to the pipeline expander.
     auto coarseSchedule = schedule.createFinalSchedule(forOp);
 
-    auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
-    triton::AMD::ISAFamily isaFamily = triton::AMD::ISAFamily::Unknown;
-    if (arch)
-      isaFamily = triton::AMD::deduceISAFamily(*arch);
     tt::PipeliningOption options;
     options.supportDynamicLoops = true;
-    options.peelEpilogue = isaFamily != triton::AMD::ISAFamily::GFX1250;
+    options.peelEpilogue = true;
     options.predicateFn = streamPredication;
     // Annotate loadOp in prologue for further moving up
     options.annotateFn = [](Operation *op,

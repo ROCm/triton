@@ -463,7 +463,6 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     if (targetInfo.getIsaVersion().Major < 9)
       return failure();
-
     // Check no other memory addrspaces are selected.
     // TensorRead/Write are allowed but noop.
     auto mask = triton::gpu::AddrSpace::Local |
