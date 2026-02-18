@@ -258,6 +258,7 @@ def generate_mxfp_attention_configs():
 def test_mxfp_attention_kernel_metadata(config):
     config["pipelined"] = True
     config["disable_p_scaling"] = True
+    config["split_k"] = 1
     attn_kernel = run_mxfp_attention(**config)
 
     config_name = "mxfp_attn_fwd_"
