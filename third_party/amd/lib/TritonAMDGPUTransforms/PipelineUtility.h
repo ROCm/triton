@@ -45,6 +45,7 @@ struct LoadInfo {
   int distToUse = 0;
   Operation *use = nullptr;
 };
+
 using LoadToInfoMap = llvm::MapVector<Operation *, LoadInfo>;
 
 // A slim wrapper of ttg::loadOpsToIndirectionLevel, to get the indirection
