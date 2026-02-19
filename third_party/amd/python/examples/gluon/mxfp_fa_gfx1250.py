@@ -118,23 +118,28 @@ def get_store_layout(block_shape, num_warps):
     """
     dim_outer, dim_inner = block_shape
 
-    if dim_inner == 64:
-        reg = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16]]
-        lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 32]]
-    else:
-        assert dim_inner == 128
-        reg = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 32]]
-        lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 64]]
-
-    warp = []
+    # Ensure storing 4 contiguous elements = 128 bits
+    reg = [[0, 1], [0, 2]]
+    tile_inner = 4
+    # Distribute 16 lanes for outer dim to align with the wmma layout
+    lane = [[1, 0], [2, 0], [4, 0], [8, 0]]
     tile_outer = 16
+    # Let each lane store half of inner dim.
+    assert tile_inner <= dim_inner // 2
+    while tile_inner < dim_inner // 2:
+        reg.append([0, tile_inner])
+        tile_inner <<= 1
+    # Let the other 16 lanes store the other half of inner dim.
+    lane.append([0, tile_inner])
+    # Distribute warps for outer dim.
+    warp = []
     while 2**len(warp) < num_warps:
         if tile_outer <= dim_outer:
             warp.append([tile_outer, 0])
             tile_outer <<= 1
         else:
             warp.append([0, 0])
-
+    # Repeat the layout to cover the rest of outer dim.
     while tile_outer < dim_outer:
         reg.append([tile_outer, 0])
         tile_outer <<= 1
@@ -2561,21 +2566,19 @@ def mxfp_attn_reduce_kernel(  #
     HEAD_SZ: ttgl.constexpr = cfg.HEAD_SZ
     BLOCK_M: ttgl.constexpr = cfg.BLOCK_M
     SPLIT_K: ttgl.constexpr = cfg.SPLIT_K
+    GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
+    NUM_GROUPS: ttgl.constexpr = NUM_K_HEADS
+    ttgl.static_assert(BLOCK_M == GROUP_SZ)
     ttgl.static_assert(SPLIT_K > 1)
     ttgl.static_assert(SEQLEN_Q == 1)
 
     off_h = ttgl.program_id(0)
+    off_s = ttgl.program_id(1) % SPLIT_K
     off_z = ttgl.program_id(2)
 
-    num_warps: ttgl.constexpr = ttgl.num_warps()
-    acc_layout: ttgl.constexpr = get_store_layout([BLOCK_M, HEAD_SZ], num_warps)
-    smem_layout: ttgl.constexpr = get_shared_layout([BLOCK_M, HEAD_SZ])
-
-    GROUP_SZ: ttgl.constexpr = NUM_Q_HEADS // NUM_K_HEADS
-    NUM_GROUPS: ttgl.constexpr = NUM_K_HEADS
-    ttgl.static_assert(BLOCK_M == GROUP_SZ)
-
-    acc = ttgl.full([BLOCK_M, HEAD_SZ], 0.0, ttgl.float32, acc_layout)
+    acc_layout: ttgl.constexpr = get_store_layout([BLOCK_M, HEAD_SZ // SPLIT_K], cfg.NUM_WARPS)
+    smem_layout: ttgl.constexpr = get_shared_layout([BLOCK_M, HEAD_SZ // SPLIT_K])
+    dtype: ttgl.constexpr = o_ptr.dtype.element_ty
 
     # l_off =
     #   off_z * stride_z (NUM_GROUPS * GROUP_SZ * SPLIT_K) +
@@ -2596,18 +2599,19 @@ def mxfp_attn_reduce_kernel(  #
     o_off = SPLIT_K * GROUP_SZ * HEAD_SZ * (NUM_GROUPS * off_z + off_h)
     o_ptr = o_ptr + o_off
     o_smem = ttgl.allocate_shared_memory(  #
-        o_ptr.dtype.element_ty,  #
-        [SPLIT_K] + [BLOCK_M, HEAD_SZ],  #
+        dtype,  #
+        [SPLIT_K] + [BLOCK_M, HEAD_SZ // SPLIT_K],  #
         smem_layout)
     o_desc = tdm.make_tensor_descriptor(  #
         base=o_ptr,  #
-        shape=[SPLIT_K * BLOCK_M, HEAD_SZ],  #
+        shape=[SPLIT_K * GROUP_SZ, HEAD_SZ],  #
         strides=[HEAD_SZ, 1],  #
-        block_shape=[BLOCK_M, HEAD_SZ],  #
+        block_shape=[BLOCK_M, HEAD_SZ // SPLIT_K],  #
         layout=smem_layout)
 
+    acc = ttgl.full([BLOCK_M, HEAD_SZ // SPLIT_K], 0, dtype, acc_layout)
     for i in ttgl.static_range(SPLIT_K):
-        tdm.async_load(o_desc, [i * BLOCK_M, 0], o_smem.index(i))
+        tdm.async_load(o_desc, [i * BLOCK_M, off_s * (HEAD_SZ // SPLIT_K)], o_smem.index(i))
 
     m_ij = ttgl.max(m, 1)
     m_ij_scaled = m_ij * sm_scale
@@ -2619,15 +2623,18 @@ def mxfp_attn_reduce_kernel(  #
     for i in ttgl.static_range(SPLIT_K):
         tdm.async_wait(SPLIT_K - 1 - i)
         o = o_smem.index(i).load(acc_layout)
-        alpha_i = ttgl.convert_layout(alpha_s[i], acc_layout)
-        acc += o * alpha_i
+        acc += o * alpha_s[i]
 
     l_recip = 1 / l_i
     acc = acc * l_recip[:, None]
 
-    o_ffs = ttgl.arange(0, BLOCK_M, ttgl.SliceLayout(1, acc_layout))[:, None] * HEAD_SZ + \
-            ttgl.arange(0, HEAD_SZ, ttgl.SliceLayout(0, acc_layout))[None, :]
-    buffer_store(acc, o_ptr, o_ffs)
+    o_blk = MemoryBlock.initialize(  #
+        o_ptr + off_s * (HEAD_SZ // SPLIT_K),  #
+        shape=[GROUP_SZ, HEAD_SZ],  #
+        block_shape=[BLOCK_M, HEAD_SZ // SPLIT_K],  #
+        layout=acc_layout)
+    o = acc.to(o_blk.dtype)
+    buffer_store(o, o_blk.ptr, o_blk.offs)
 
 
 def attn_fwd(  #
@@ -2791,7 +2798,7 @@ def attn_fwd(  #
     else:
         args = [o, l, m, sm_scale, cfg]
         kwargs = {"num_warps": num_warps, "waves_per_eu": 1}
-        mxfp_attn_reduce_kernel[(grid[0], 1, grid[2])](*args, **kwargs)
+        mxfp_attn_reduce_kernel[grid](*args, **kwargs)
         out = o.cpu()[..., :group_sz, :]
 
     if is_prefill:
