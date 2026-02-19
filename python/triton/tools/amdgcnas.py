@@ -1849,7 +1849,9 @@ def optimize_buffer_load_m0(bb):
             ## pattern 2: s_mov_b32 m0 --> buffer_load --> mfma
             ## swap buffer_load and mfma
             mfma = bb.instructions[idx + 1]
-            assert mfma.is_mfma()
+            if not mfma.is_mfma():
+                i += 1
+                continue
             bb.instructions[idx], bb.instructions[idx + 1] = bb.instructions[idx + 1], bb.instructions[idx]
             ## remove s_nop
             if 'nop' in bb.instructions[idx - 1].opcode:
@@ -1894,6 +1896,8 @@ def reuse_regs(bb):
             continue
         for src_reg in inst.get_src_regs():
             if len(src_reg.ids) != len(dst_reg.ids):
+                continue
+            if src_reg.kind != dst_reg.kind:
                 continue
             used_again = False
             for r in flatten_regs(src_reg):
@@ -2399,7 +2403,7 @@ def optimize_copy(bb):
         x_def = bb.get_reaching_defs(inst, x)
         if len(x_def) != 1:
             logging.debug(f"Found {len(x_def)} reaching defs of {inst.emit()}")
-        assert len(x_def) == 1
+            continue
         x_def = next(iter(x_def))
         u0 = x_def.users
         ## z = y ==> user
