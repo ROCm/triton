@@ -124,7 +124,7 @@ def get_wmma_scale_layout(dot_operand_layout, shape, scale_factor=32):
     assert scale_factor in (16, 32), "Only support 16 or 32 scale factor"
     op_idx = dot_operand_layout.operand_index
     parent = dot_operand_layout.parent
-    assert isinstance(parent, AMDWMMALayout), "Expected parent to be an instance of AMDMFMALayout"
+    assert isinstance(parent, AMDWMMALayout), "Expected parent to be an instance of AMDWMMALayout"
     mdim = parent.instr_shape[0]
     reg_bases = parent.reg_bases
     warp_bases = parent.warp_bases
