@@ -66,7 +66,14 @@ class HIPOptions:
     # attention: enables a bunch of optimizations for attention kernels, including:
     #            - iglp 2 and sched.barrier around it
     #            - sink-insts-to-avoid-spills flag to avoid register spills
+    # iterative-ilp-scheduler: enables custom instruction scheduler in backend
+    #
+    # Option allows to set multiple variants divided by commas:
+    # schedule_hint="attention,iterative-ilp-scheduler"
     schedule_hint: str = 'none'
+
+    # This flag is to force to lower all global memory access ops to buffer ops
+    force_buffer_ops: bool = False
 
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
@@ -241,10 +248,11 @@ class HIPBackend(BaseBackend):
         if use_block_pingpong and options.num_stages > 1:
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
 
-        if knobs.amd.use_buffer_ops:
+        if knobs.amd.use_buffer_ops or options.force_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
-            amd.passes.ttgpuir.add_convert_to_buffer_ops(pm, options.arch, knobs.amd.use_buffer_atomics)
+            amd.passes.ttgpuir.add_convert_to_buffer_ops(pm, options.arch, knobs.amd.use_buffer_atomics,
+                                                         options.force_buffer_ops)
 
         amd.passes.ttgpuir.add_fold_true_cmpi(pm)
         passes.common.add_canonicalizer(pm)
@@ -417,8 +425,12 @@ class HIPBackend(BaseBackend):
         # into loops to avoid register spills in the MachineSinking pass, while it
         # can also lead to regression in some cases. But from current observation,
         # the regression is not significant. It would be better to have some heuristics.
-        if options.schedule_hint == 'attention':
-            flags.append('sink-insts-to-avoid-spills')
+
+        for hint in options.schedule_hint.split(","):
+            if hint == 'attention':
+                flags.append(('sink-insts-to-avoid-spills', True))
+            if hint == 'iterative-ilp-scheduler':
+                flags.append(('amdgpu-sched-strategy', 'iterative-ilp'))
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', flags, options.enable_fp_fusion, False)
         if knobs.amd.dump_amdgcn:
             print("// -----// AMDGCN Dump //----- //")

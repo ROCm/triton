@@ -82,13 +82,135 @@ void MemDescType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
+// Returns ["dim0", "dim1", ..., "dim<rank-1>"].
+static SmallVector<StringAttr> standardOutDimNames(MLIRContext *ctx, int rank) {
+  SmallVector<StringAttr> ret;
+  for (int i = 0; i < rank; i++) {
+    ret.push_back(StringAttr::get(ctx, "dim" + llvm::Twine(i)));
+  }
+  return ret;
+}
+
 LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
                                   ArrayRef<int64_t> shape, Type elementType,
                                   Attribute encoding, Attribute memorySpace,
                                   bool mutableMemory,
                                   ArrayRef<int64_t> allocShape) {
+  if (shape.empty()) {
+    return emitError() << "rank 0 memdesc is not allowed";
+  }
+  // Every dimension but the first (to allow for pipelining) must be a power of
+  // 2
+  if (!llvm::all_of(shape.drop_front(1), [](int64_t dim) {
+        return llvm::isPowerOf2_64(dim) && dim > 0;
+      }))
+    return emitError()
+           << "shape must have power-of-2 and non-zero dimensions; got "
+           << shape;
   if (allocShape.size() < shape.size())
-    emitError() << "alloc shape must have at least as many dimensions as shape";
+    return emitError()
+           << "alloc shape must have at least as many dimensions as shape";
+  if (llvm::any_of(
+          llvm::zip(shape, allocShape.take_back(shape.size())),
+          [](auto pair) { return std::get<0>(pair) > std::get<1>(pair); }))
+    return emitError() << "shape must be less than or equal to allocShape. "
+                       << "shape = " << shape
+                       << ", allocShape = " << allocShape;
+  auto ctx = encoding.getContext();
+  // if (auto enc = dyn_cast<nvidia_gpu::TensorMemoryEncodingAttr>(encoding)) {
+  //   if (memorySpace != nvidia_gpu::TensorMemorySpaceAttr::get(ctx)) {
+  //     return emitError() << "memorySpace must be TensorMemorySpace";
+  //   }
+  //   if (shape.size() != 2 && shape.size() != 3) {
+  //     return emitError() << "rank must be 2 or 3";
+  //   }
+  //   auto bitwidth = elementType.getIntOrFloatBitWidth();
+  //   if (!enc.getUnpacked() && bitwidth > 16) {
+  //     return emitError() << "bitwidth must be <= 16 for packed tensor memory";
+  //   }
+  //   if (enc.getUnpacked() && (16 != bitwidth && 32 != bitwidth)) {
+  //     return emitError()
+  //            << "bitwidth must be either 16 or 32 for unpacked tensor memory";
+  //   }
+  //   shape = shape.take_back(2);
+  //   allocShape = allocShape.take_back(2);
+  //   if (allocShape[0] < enc.getBlockM() * enc.getCTASplitM() ||
+  //       allocShape[1] < enc.getBlockN() * enc.getCTASplitN()) {
+  //     return emitError() << "the allocation shape must be at least "
+  //                        << enc.getBlockM() * enc.getCTASplitM() << "x"
+  //                        << enc.getBlockN() * enc.getCTASplitN() << ". Got "
+  //                        << allocShape;
+  //   }
+  //   auto ll = toLinearLayout(allocShape, enc);
+  //   auto dims = standardOutDimNames(ctx, 2);
+  //   if (ll.getOutDimSize(dims[0]) != allocShape[0] ||
+  //       ll.getOutDimSize(dims[1]) != allocShape[1]) {
+  //     return emitError() << "allocation shape must be equal to "
+  //                        << ll.getOutDimSize(dims[0]) << "x"
+  //                        << ll.getOutDimSize(dims[1]);
+  //   }
+  // } else 
+  if (auto enc = dyn_cast<SharedEncodingTrait>(encoding)) {
+    if (memorySpace != SharedMemorySpaceAttr::get(ctx)) {
+      return emitError()
+             << "memorySpace must be SharedMemorySpace for shared encoding. "
+             << "Got " << memorySpace;
+    }
+  } 
+  // else if (auto enc = dyn_cast<nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+  //                encoding)) {
+  //   if (memorySpace != nvidia_gpu::TensorMemorySpaceAttr::get(ctx)) {
+  //     return emitError() << "memorySpace must be TensorMemorySpace";
+  //   }
+  //   if (allocShape.size() != 2) {
+  //     return emitError() << "Scales don't currently support multibuffering";
+  //   }
+  //   auto bitwidth = elementType.getIntOrFloatBitWidth();
+  //   if (bitwidth != 8) {
+  //     return emitError() << "bitwidth must be 8";
+  //   }
+  // } 
+  else {
+    return emitError() << encoding << " is not a valid encoding";
+  }
+
+  // PaddedSharedEncodingAttr is also a SharedEncodingTrait but we have some
+  // additional rules to verify.
+  if (auto enc = dyn_cast<PaddedSharedEncodingAttr>(encoding)) {
+    auto rank = enc.getRank();
+
+    if (rank != shape.size() && rank != shape.size() - 1) {
+      return emitError() << "padding rank must be equal to or one less than "
+                         << "the shape size when pipelining.";
+    }
+
+    // Subslices are not yet implemented
+    auto subsliceAllocSize =
+        allocShape.drop_front(allocShape.size() - shape.size());
+    for (auto [allocDim, shapeDim] : llvm::zip(shape, subsliceAllocSize)) {
+      if (allocDim != shapeDim) {
+        return emitError() << "Subslices with padded encodings are not yet "
+                           << "implemented.";
+      }
+    }
+
+    // Ensure linear component's outDims match the alloc size ignoring
+    // pipelining dimension
+    auto outDims = standardOutDimNames(ctx, rank);
+    const auto &ll = enc.getLinearComponent();
+    auto expectedShape = shape;
+    if (shape.size() == allocShape.size() && shape.size() == rank + 1)
+      expectedShape = expectedShape.drop_front(1);
+
+    for (auto d = 0; d < rank; d++) {
+      if (ll.getOutDimSize(outDims[d]) != expectedShape[d]) {
+        return emitError() << "Mismatch in expected shape for dimension " << d
+                           << ". Expected: " << ll.getOutDimSize(outDims[d])
+                           << ", got: " << expectedShape[d];
+      }
+    }
+  }
+
   return success();
 }
 

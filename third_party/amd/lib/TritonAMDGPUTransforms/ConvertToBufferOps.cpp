@@ -80,8 +80,12 @@ bool verifyNonSmallerByAssumption(
 
 bool verifyNonNegativeExpr(
     Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
-    std::shared_ptr<DataFlowSolver> solver) {
+    std::shared_ptr<DataFlowSolver> solver, bool force_buffer_ops = false) {
   LDBG("Determing if non-negative: " << expr);
+
+  // hack to use buffer ops for some kernels
+  if (force_buffer_ops)
+    return true;
 
   auto nonNegativePred = [&solver](Value v) -> bool {
     if (const auto *r =
@@ -111,7 +115,7 @@ bool verifyNonNegativeExpr(
                 triton::ExpandDimsOp, triton::SplatOp, triton::ReshapeOp,
                 triton::gpu::ConvertLayoutOp>([&](auto unaryOp) {
             return verifyNonNegativeExpr(unaryOp.getOperand(), assumptions,
-                                         solver);
+                                         solver, force_buffer_ops);
           })
           .Case<triton::GatherOp>([&](auto gatherOp) {
             return verifyNonNegativeExpr(gatherOp.getSrc(), assumptions,
@@ -119,9 +123,10 @@ bool verifyNonNegativeExpr(
           })
           // Joining two non-negative tensors is still non-negative
           .Case<triton::JoinOp, triton::CatOp>([&](auto joinOp) {
-            return verifyNonNegativeExpr(joinOp.getLhs(), assumptions,
-                                         solver) &&
-                   verifyNonNegativeExpr(joinOp.getRhs(), assumptions, solver);
+            return verifyNonNegativeExpr(joinOp.getLhs(), assumptions, solver,
+                                         force_buffer_ops) &&
+                   verifyNonNegativeExpr(joinOp.getRhs(), assumptions, solver,
+                                         force_buffer_ops);
           })
           // Returns a tensor representing histogram: histograms only contain
           // buckets of non-negative values.
@@ -147,17 +152,20 @@ bool verifyNonNegativeExpr(
           })
           .Case<arith::MaxSIOp>([&](auto maxOp) {
             // max(a,b) >= 0 iff a>=0 || b>=0
-            return verifyNonNegativeExpr(maxOp.getLhs(), assumptions, solver) ||
-                   verifyNonNegativeExpr(maxOp.getRhs(), assumptions, solver);
+            return verifyNonNegativeExpr(maxOp.getLhs(), assumptions, solver,
+                                         force_buffer_ops) ||
+                   verifyNonNegativeExpr(maxOp.getRhs(), assumptions, solver,
+                                         force_buffer_ops);
           })
           .Case<arith::RemSIOp>([&](auto remsiOp) {
             // a % b >= 0 iff a>=0
-            return verifyNonNegativeExpr(remsiOp.getLhs(), assumptions, solver);
+            return verifyNonNegativeExpr(remsiOp.getLhs(), assumptions, solver,
+                                         force_buffer_ops);
           })
           .Case<arith::TruncIOp, arith::ExtSIOp>([&](Operation *unaryOp) {
             // a = OP b >= 0 iff b >= 0
             return verifyNonNegativeExpr(unaryOp->getOperand(0), assumptions,
-                                         solver);
+                                         solver, force_buffer_ops);
           })
           // Casting from arbitrary data does *not* guarantee the offset is in
           // range (even if pointer, or the data is non-negative when
@@ -177,9 +185,9 @@ bool verifyNonNegativeExpr(
               // OP != sub
               [&](Operation *binOp) {
                 return verifyNonNegativeExpr(binOp->getOperand(0), assumptions,
-                                             solver) &&
+                                             solver, force_buffer_ops) &&
                        verifyNonNegativeExpr(binOp->getOperand(1), assumptions,
-                                             solver);
+                                             solver, force_buffer_ops);
               })
           // TODO: more scf
           .Case<scf::IfOp>([&](auto ifOp) {
@@ -194,9 +202,10 @@ bool verifyNonNegativeExpr(
             auto thenYield = cast<scf::YieldOp>(ifOp.thenYield());
             auto elseYield = cast<scf::YieldOp>(ifOp.elseYield());
             return verifyNonNegativeExpr(thenYield->getOperand(resultIdx),
-                                         assumptions, solver) &&
+                                         assumptions, solver,
+                                         force_buffer_ops) &&
                    verifyNonNegativeExpr(elseYield->getOperand(resultIdx),
-                                         assumptions, solver);
+                                         assumptions, solver, force_buffer_ops);
           })
           .Case<arith::SubIOp>([&](auto op) {
             // If a user annotates tl.assume(a >= b) then we know a - b >= 0
@@ -204,8 +213,8 @@ bool verifyNonNegativeExpr(
                                                 op.getRhs());
           })
           .Case<triton::amdgpu::ExtractSliceOp>([&](auto op) {
-            return verifyNonNegativeExpr(op->getOperand(0), assumptions,
-                                         solver);
+            return verifyNonNegativeExpr(op->getOperand(0), assumptions, solver,
+                                         force_buffer_ops);
           })
           .Default([&](Operation *) {
             // Conservatively assume that the expression is negative
@@ -219,7 +228,8 @@ bool verifyNonNegativeExpr(
 // buffer operations
 bool canUseBufferOps(Value ptr,
                      const DenseMap<Value, SetVector<Operation *>> &assumptions,
-                     std::shared_ptr<DataFlowSolver> solver) {
+                     std::shared_ptr<DataFlowSolver> solver,
+                     bool force_buffer_ops) {
   // 1. Check if the pointer is uniform: i.e., if it comes from a uniform
   // pointer(splatted) and non-uniform offset addition
 
@@ -239,7 +249,8 @@ bool canUseBufferOps(Value ptr,
     return false;
   LDBG("32 bit offset");
 
-  return verifyNonNegativeExpr(offset, assumptions, std::move(solver));
+  return verifyNonNegativeExpr(offset, assumptions, std::move(solver),
+                               force_buffer_ops);
 }
 
 // Extract stride of the blocked offset of LD/ST ops.
@@ -282,7 +293,7 @@ struct ConvertTritonAtomicCASOpToBufferAtomicCAS
     auto sem = op.getSem();
     auto scope = op.getScope();
 
-    if (!canUseBufferOps(ptr, assumptions, solver)) {
+    if (!canUseBufferOps(ptr, assumptions, solver, false)) {
       return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
     }
 
@@ -358,10 +369,12 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
-      std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily)
+      std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily,
+      bool force_buffer_ops)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
-        solver(std::move(solver)), isaFamily(isaFamily) {}
+        solver(std::move(solver)), isaFamily(isaFamily),
+        force_buffer_ops(force_buffer_ops) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicRMWOp op,
@@ -374,7 +387,7 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
 
     // In addition to the `canUserBufferOps` check, we should ensure that
     // 1. Perform the canUserBufferOps check
-    if (!canUseBufferOps(ptr, assumptions, solver)) {
+    if (!canUseBufferOps(ptr, assumptions, solver, force_buffer_ops)) {
       return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
     }
 
@@ -492,6 +505,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   ISAFamily isaFamily;
+  bool force_buffer_ops;
 };
 
 // Workaround to allow static_assert(false) on older compilers as it was
@@ -506,16 +520,16 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
   ConvertTritonLoadToBufferLoad(
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
-      std::shared_ptr<DataFlowSolver> solver)
+      std::shared_ptr<DataFlowSolver> solver, bool force_buffer_ops)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
-        solver(std::move(solver)) {}
+        solver(std::move(solver)), force_buffer_ops(force_buffer_ops) {}
 
   mlir::LogicalResult
   matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
     Value ptr = op.getOperand(0);
 
-    if (canUseBufferOps(ptr, assumptions, solver)) {
+    if (canUseBufferOps(ptr, assumptions, solver, force_buffer_ops)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -560,6 +574,7 @@ private:
   // Assumptions collected through the function
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
+  bool force_buffer_ops;
 };
 
 struct ConvertTritonStoreToBufferStore
@@ -569,9 +584,10 @@ struct ConvertTritonStoreToBufferStore
   ConvertTritonStoreToBufferStore(
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
-      std::shared_ptr<DataFlowSolver> solver)
+      std::shared_ptr<DataFlowSolver> solver, bool force_buffer_ops)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
-        assumptions(assumptions), solver(std::move(solver)) {}
+        assumptions(assumptions), solver(std::move(solver)),
+        force_buffer_ops(force_buffer_ops) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp op,
@@ -579,7 +595,7 @@ struct ConvertTritonStoreToBufferStore
     LDBG("Try to convert: " << op);
     Value ptr = op.getPtr();
 
-    if (canUseBufferOps(ptr, assumptions, solver)) {
+    if (canUseBufferOps(ptr, assumptions, solver, force_buffer_ops)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -602,6 +618,7 @@ private:
   // Assumptions collected through the function
   DenseMap<Value, SetVector<Operation *>> assumptions;
   std::shared_ptr<DataFlowSolver> solver;
+  bool force_buffer_ops;
 };
 
 } // anonymous namespace
@@ -629,16 +646,19 @@ struct TritonAMDGPUConvertToBufferOpsPass
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
                  ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>,
-                 ConvertTritonStoreToBufferStore>(context, assumptions, solver);
+                 ConvertTritonStoreToBufferStore>(context, assumptions, solver,
+                                                  this->forceBufferOps);
 
     // Gate buffer atomics behind CDNA3 for now
     // GFX942-specific assumptions regarding cache coherence are made when
     // lowering to LLVM
     triton::AMD::ISAFamily isaFamily =
         triton::AMD::deduceISAFamily(archGenerationName);
-    if (this->allowBufferAtomics && ISAFamily::CDNA3 == isaFamily)
+    if (this->allowBufferAtomics &&
+        (ISAFamily::CDNA3 == isaFamily || ISAFamily::CDNA4 == isaFamily))
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
-          context, assumptions, axisInfoAnalysis, solver, isaFamily);
+          context, assumptions, axisInfoAnalysis, solver, isaFamily,
+          this->forceBufferOps);
     patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
         context, assumptions, axisInfoAnalysis, solver);
 
