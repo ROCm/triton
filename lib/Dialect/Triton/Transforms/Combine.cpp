@@ -268,6 +268,29 @@ public:
 using CombineDotAddIPattern = CombineDotAddPattern<arith::AddIOp>;
 using CombineDotAddFPattern = CombineDotAddPattern<arith::AddFOp>;
 
+class CombineDotScaledAddPattern : public mlir::OpRewritePattern<DotScaledOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::DotScaledOp dotOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (!dotOp->hasOneUse() || !isZero(dotOp.getC()))
+      return failure();
+    auto user = dotOp->getUsers().begin();
+    if (auto addOp = llvm::dyn_cast<arith::AddFOp>(*user)) {
+      auto acc = (addOp.getRhs() == dotOp) ? addOp.getLhs() : addOp.getRhs();
+      IRMapping mapping;
+      mapping.map(dotOp.getC(), acc);
+      auto newOp = rewriter.clone(*dotOp, mapping);
+      rewriter.replaceOp(addOp, newOp->getResults());
+      rewriter.eraseOp(dotOp);
+      return success();
+    }
+    return failure();
+  }
+};
+
 } // anonymous namespace
 
 class CombineOpsPass : public impl::TritonCombineOpsBase<CombineOpsPass> {
@@ -279,6 +302,7 @@ public:
 
     patterns.add<CombineDotAddIPattern>(context);
     patterns.add<CombineDotAddFPattern>(context);
+    patterns.add<CombineDotScaledAddPattern>(context);
     patterns.add<CombineSelectMaskedLoadPattern>(context);
     patterns.add<CombineAddPtrPattern>(context);
     patterns.add<CombineBroadcastMulReducePattern>(context);
