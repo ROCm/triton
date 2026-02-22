@@ -168,6 +168,7 @@ def process_streamk_tiles(
         p_ptr + p_offset,
         ttgl.zeros((BLOCK_M, BLOCK_N), dtype=p_ptr.type.element_ty, layout=WMMA_LAYOUT),
     )
+    ttgl.barrier()
     ttgl.store(locks_ptr + pid, 0)
 
     # Compute StreamK params inline
@@ -219,6 +220,15 @@ def process_streamk_tiles(
         HALF_M: ttgl.constexpr = BLOCK_M // 2
         HALF_N: ttgl.constexpr = BLOCK_N // 2
 
+        # Pre-define range tensors BEFORE the runtime if to prevent them from
+        # being yielded as scf.if results with unresolvable auto_encoding.
+        # (The Triton frontend yields variables defined in both if/else branches,
+        # and the encoding inference can't resolve scf.if result types that have
+        # no downstream consumers.)
+        if BLOCK_M == 256 and BLOCK_N == 256:
+            rm_q = ttgl.arange(0, HALF_M)
+            rn_q = ttgl.arange(0, HALF_N)
+
         # Contributor or Owner logic
         if current_start_iter != tile_iter:
             # Contributor: Store accumulator to P buffer
@@ -230,9 +240,6 @@ def process_streamk_tiles(
                 acc_00, acc_10 = acc_n0.split()
                 acc_01, acc_11 = acc_n1.split()
 
-                # Use WMMA layout offsets for buffer_store
-                rm_q = ttgl.arange(0, HALF_M)
-                rn_q = ttgl.arange(0, HALF_N)
                 P_base_offs = pid * BLOCK_M * BLOCK_N
 
                 # Store each quadrant with buffer_store
@@ -269,10 +276,6 @@ def process_streamk_tiles(
                 acc_n0, acc_n1 = acc_4d.split()
                 acc_00, acc_10 = acc_n0.split()
                 acc_01, acc_11 = acc_n1.split()
-
-                # Use WMMA layout offsets for buffer_load
-                rm_q = ttgl.arange(0, HALF_M)
-                rn_q = ttgl.arange(0, HALF_N)
 
                 while end < tile_iter + iters_per_tile and next_pid < num_sms:
                     while ttgl.atomic_cas(locks_ptr + next_pid, 1, 1) != 1:
@@ -386,6 +389,7 @@ def process_streamk_tiles_8warps(
         p_ptr + p_offset,
         ttgl.zeros((BLOCK_M, BLOCK_N), dtype=p_ptr.type.element_ty, layout=WMMA_LAYOUT),
     )
+    ttgl.barrier()
     ttgl.store(locks_ptr + pid, 0)
 
     # Compute StreamK params inline
