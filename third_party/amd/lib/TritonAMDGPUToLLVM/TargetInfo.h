@@ -119,6 +119,10 @@ public:
   bool supportsTDM() const;
   bool supportsClusterLoadBitWidth(int biwWidth) const;
 
+  bool supportsBufferAtomicRMW() const;
+  bool supportsBufferAtomicFadd(mlir::Type elementType) const;
+  int32_t getBufferAtomicCachePolicy(bool hasUsers) const;
+
   bool supportsWaveId() const;
   bool supportsPermlaneSwap() const;
   bool supportsCvtPkScalePk8() const;

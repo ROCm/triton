@@ -746,6 +746,39 @@ bool TargetInfo::supportsBufferLoadToLocal() const {
                             getISAFamily());
 }
 
+// Whether this target supports buffer atomic read-modify-write (RMW)
+// operations. This gates all buffer RMW conversions (BUFFER_ATOMIC_ADD,
+// _AND, _OR, _XOR, _UMIN, _UMAX, _SWAP, _ADD_F32, _PK_ADD_F16, etc.).
+// CAS (BUFFER_ATOMIC_CMPSWAP) is handled separately.
+bool TargetInfo::supportsBufferAtomicRMW() const {
+  return llvm::is_contained(
+      {ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::RDNA4}, getISAFamily());
+}
+
+// Additional per-type gate for buffer atomic FADD. Integer RMW ops (ADD, AND,
+// etc.) work on i32/i64 universally, but float FADD has ISA-specific type
+// restrictions for BUFFER_ATOMIC_ADD_{F32,F64} and
+// BUFFER_ATOMIC_PK_ADD_{F16,BF16}:
+//   - CDNA3 (gfx942): no BUFFER_ATOMIC_PK_ADD_BF16
+//   - RDNA4: no BUFFER_ATOMIC_ADD_F64
+//   - CDNA4: all float types supported
+bool TargetInfo::supportsBufferAtomicFadd(mlir::Type elementType) const {
+  auto isaFamily = getISAFamily();
+  if (isaFamily == ISAFamily::CDNA3 && elementType.isBF16())
+    return false;
+  if (isaFamily == ISAFamily::RDNA4 && elementType.isF64())
+    return false;
+  return true;
+}
+
+int32_t TargetInfo::getBufferAtomicCachePolicy(bool hasUsers) const {
+  const int sc0Bit = 0b1;
+  int32_t aux = 0;
+  if (hasUsers)
+    aux |= sc0Bit;
+  return aux;
+}
+
 bool TargetInfo::supportsWaveId() const {
   return getISAFamily() == ISAFamily::RDNA4 ||
          getISAFamily() == ISAFamily::GFX1250;
