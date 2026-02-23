@@ -751,8 +751,9 @@ bool TargetInfo::supportsBufferLoadToLocal() const {
 // _AND, _OR, _XOR, _UMIN, _UMAX, _SWAP, _ADD_F32, _PK_ADD_F16, etc.).
 // CAS (BUFFER_ATOMIC_CMPSWAP) is handled separately.
 bool TargetInfo::supportsBufferAtomicRMW() const {
-  return llvm::is_contained(
-      {ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::RDNA4}, getISAFamily());
+  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4,
+                             ISAFamily::RDNA4, ISAFamily::GFX1250},
+                            getISAFamily());
 }
 
 // Additional per-type gate for buffer atomic FADD. Integer RMW ops (ADD, AND,
@@ -761,7 +762,7 @@ bool TargetInfo::supportsBufferAtomicRMW() const {
 // BUFFER_ATOMIC_PK_ADD_{F16,BF16}:
 //   - CDNA3 (gfx942): no BUFFER_ATOMIC_PK_ADD_BF16
 //   - RDNA4: no BUFFER_ATOMIC_ADD_F64
-//   - CDNA4: all float types supported
+//   - CDNA4, GFX1250: all float types supported (GFX1250 adds PK_ADD_BF16)
 bool TargetInfo::supportsBufferAtomicFadd(mlir::Type elementType) const {
   auto isaFamily = getISAFamily();
   if (isaFamily == ISAFamily::CDNA3 && elementType.isBF16())
@@ -771,11 +772,37 @@ bool TargetInfo::supportsBufferAtomicFadd(mlir::Type elementType) const {
   return true;
 }
 
+// Returns the cpol (cache policy) immediate for buffer atomic instructions.
+//
+// The cpol operand is a 6-bit value that LLVM splits across VBUFFER
+// instruction bits when encoding (BUFInstructions.td, VBUFFER_Real class):
+//   cpol{2:0} -> TH[2:0]    (temporal hint,  VBUFFER Inst{54:52})
+//   cpol{4:3} -> SCOPE[1:0] (memory scope,   VBUFFER Inst{51:50})
+//   cpol{5}   -> NV         (non-volatile,   VBUFFER Inst{7})
+//
+// For atomics, TH has special meaning (SIDefines.h, AMDGPU::CPol):
+//   TH_ATOMIC_RETURN  = bit 0 (return pre-op value to VGPRs)
+//   TH_ATOMIC_NT      = bit 1 (non-temporal)
+//   TH_ATOMIC_CASCADE = bit 2 (cascading)
+//
+// On CDNA3/4 (MUBUF encoding), the equivalent fields are:
+//   SC0/GLC = bit 0  (return data to VGPRs)
+//   NT/SLC  = bit 1  (non-temporal)
+//   SC1/SCC = bit 4  (system coherence)
+//
+// On gfx1250 (VBUFFER encoding), SCOPE replaces SC1:
+//   SCOPE encoding (SIDefines.h, AMDGPU::CPol::SCOPE_*):
+//     0b00 = CU/WGP, 0b01 = SE, 0b10 = DEV, 0b11 = SYS
+//   We set SCOPE_DEV (device scope) since Triton's gpu-scope atomics
+//   require device-wide visibility.
 int32_t TargetInfo::getBufferAtomicCachePolicy(bool hasUsers) const {
-  const int sc0Bit = 0b1;
+  const int sc0Bit = 0b1;          // TH_ATOMIC_RETURN (cpol bit 0)
+  const int scopeDevBit = 0b10000; // SCOPE_DEV = 2 << 3 (cpol bits [4:3])
   int32_t aux = 0;
   if (hasUsers)
     aux |= sc0Bit;
+  if (getISAFamily() == ISAFamily::GFX1250)
+    aux |= scopeDevBit;
   return aux;
 }
 
