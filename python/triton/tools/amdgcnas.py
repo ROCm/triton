@@ -674,6 +674,14 @@ class Program:
 
         dbg("========== process blocks done ====", indent)
 
+    def _bb_kind(self, bb):
+        if bb.is_loop():
+            return "loop"
+        elif bb.is_epilogue():
+            return "epi"
+        else:
+            return "pro"
+
     def collect_ds_chains(self, indent):
 
         dbg("========== collecting lds chains ==========", indent)
@@ -683,51 +691,46 @@ class Program:
 
         ## A map from (mfma_inst, opIdx) to its corresponding DSReadGroup
         ds_map = defaultdict(DSReadGroup)
+        ## Track which bb_kind each group belongs to
+        group_bb_kind = {}
         for bb in self.blocks:
-            if bb.is_epilogue():
-                continue
+            bb_kind = self._bb_kind(bb)
             for inst in bb.instructions:
-                if 'ds_read_b128' in inst.opcode:
-                    used_by_mfma = True
-                    for user in inst.users:
-                        if not user.is_mfma():
-                            used_by_mfma = False
-                            break
-                    if not used_by_mfma:
-                        dbg(f"{inst.emit()} has non mfma users !!!", indent)
-                        for user in inst.users:
-                            dbg(f"{user.raw_line}", indent + 2)
-                        continue
+                if 'ds_read_b128' not in inst.opcode:
+                    continue
 
-                    data_reg = inst.get_dst_regs()
-                    firstMfma = min(inst.users, key=lambda i: i.index)
-                    assert 'mfma' in firstMfma.opcode
+                # Skip ds_read that do not feed mfma
+                if not inst.users or not all(u.is_mfma() for u in inst.users):
+                    continue
 
-                    opIdx = firstMfma.get_op_idx(data_reg)
-                    assert opIdx == 1 or opIdx == 2
+                data_reg = inst.get_dst_regs()
+                firstMfma = min(inst.users, key=lambda i: i.index)
+                assert 'mfma' in firstMfma.opcode
 
-                    key = (firstMfma, opIdx)
-                    if key in ds_map:
-                        dbg(f"{inst.emit()} added into exisitng group", indent)
-                        ## the ds_group already exist, add this ds_inst
-                        ds_group = ds_map[key]
-                        ds_group.insert_ds(inst)
-                        ds_group.users |= inst.users
-                    else:
-                        dbg(f"{inst.emit()} added into new group", indent)
-                        ## the ds_group does not exist
-                        ds_group = DSReadGroup(inst)
-                        ds_group.users = inst.users
-                        ds_map[key] = ds_group
-                        groups.append(ds_group)
+                opIdx = firstMfma.get_op_idx(data_reg)
+                assert opIdx == 1 or opIdx == 2
 
-                    ds_group.update_data()
-                    ds_group.opIdx = opIdx
-                    ds_group.loc = inst.loc[1]
-                    ds_group.addr = inst.get_src_regs()[0]
-                    if firstMfma not in bb.instructions:
-                        ds_group.isLiveAcrossBB = True
-                    inst.lds_group = ds_group
+                key = (firstMfma, opIdx)
+                if key in ds_map:
+                    ## the ds_group already exist, add this ds_inst
+                    ds_group = ds_map[key]
+                    ds_group.insert_ds(inst)
+                    ds_group.users |= inst.users
+                else:
+                    ## the ds_group does not exist
+                    ds_group = DSReadGroup(inst)
+                    ds_group.users = inst.users
+                    ds_map[key] = ds_group
+                    groups.append(ds_group)
+                    group_bb_kind[id(ds_group)] = bb_kind
+
+                ds_group.update_data()
+                ds_group.opIdx = opIdx
+                ds_group.loc = inst.loc[1]
+                ds_group.addr = inst.get_src_regs()[0]
+                if firstMfma not in bb.instructions:
+                    ds_group.isLiveAcrossBB = True
+                inst.lds_group = ds_group
 
         dbg(f"Collected {len(groups)} groups")
         ## construct ds read chains based on all the collect groups
@@ -741,6 +744,7 @@ class Program:
             regs = set()
             crossLive = None
             chain = DSReadChain(loc)
+            bb_kind = None
             for group in groups_in_map:
                 chain.ds_groups.append(group)
                 regs |= flatten_regs(group.data)
@@ -753,27 +757,35 @@ class Program:
                     crossLive = group.isLiveAcrossBB
                 chain.isLiveAcrossBB = crossLive
 
+                gk = group_bb_kind.get(id(group), "")
+                if bb_kind is None:
+                    bb_kind = gk
+                elif bb_kind != gk:
+                    bb_kind = "mixed"
+
             regs = coalesce_regs(regs)
             chain.regs = regs
+            chain.bb_kind = bb_kind or ""
             chains.append(chain)
 
         dbg(f"collected {len(chains)} lds chains", indent)
         dbg("========== collecting lds chains done =====", indent)
         self.LDSChains = chains
 
-    def collect_mfma_chains(self, bb, indent):
+    def _collect_mfma_chains_in_bb(self, bb, visited, indent):
         '''
-        Collect a chain of insrtuctions that includes
-        1. mfma instructions that are supposed to use the same regs for acc
-        2. copy instructions that push and pull regs for acc
-           copy instructions refer to inst start with COPY_DATA
+        Collect mfma chains in a single basic block.
+
+        A chain includes:
+        1. mfma instructions that share the same acc registers
+        2. copy instructions that push/pull regs for acc (COPY_DATA)
+        3. (epilogue only) cvt instructions that consume final mfma results
 
         The alg goes backward to collect mfma and copy instructions.
-        Then it goes forward to collect copy instructions after the last mfma on the chain.
+        Then it goes forward to collect copy instructions after the last mfma.
+        In the epilogue, the forward pass also records cvt instructions.
         '''
-        #bb = self.get_loop()
-        dbg("====== collect mfma chains ======", indent)
-        visited = set()
+        bb_kind = self._bb_kind(bb)
         chains = []
 
         for inst in reversed(bb.instructions):
@@ -783,6 +795,7 @@ class Program:
                 continue
 
             chain = AccumulatorChain(inst)
+            chain.bb_kind = bb_kind
 
             ## bwd pass
             worklist = [inst]
@@ -842,10 +855,12 @@ class Program:
                     continue
                 visited.add(cur)
 
-                ## Stop at cvt instructions
+                ## Record cvt instructions
                 if 'v_cvt' in cur.opcode:
-                    visited.add(cur)
+                    if bb_kind == "epi":
+                        chain.cvt_instrs.append(cur)
                     continue
+
                 assert cur.opcode.startswith(COPY_DATA)
                 chain.copy_instrs.append(cur)
                 cur.mfma_chain = chain
@@ -856,16 +871,93 @@ class Program:
 
             get_entry_exit_acc_reg(bb, chain)
 
-        dbg(f"collected {len(chains)} chains", indent)
-        entry_acc = set()
-        for chain in chains:
-            entry_acc |= flatten_regs(chain.entry_acc)
-        entry_acc = coalesce_regs(entry_acc)
-        num_a, num_v = count_regs(entry_acc)
-        dbg(f"entry acc ({num_a} x a, {num_v} x v): {entry_acc}", indent)
+        return chains
+
+    def collect_mfma_chains(self, bbs, indent):
+        '''
+        Collect mfma chains across one or more basic blocks.
+        bbs: a single BasicBlock or a list of BasicBlocks.
+        '''
+        if isinstance(bbs, BasicBlock):
+            bbs = [bbs]
+
+        dbg("====== collect mfma chains ======", indent)
+        visited = set()
+        all_chains = []
+
+        for bb in bbs:
+            bb_kind = self._bb_kind(bb)
+            chains = self._collect_mfma_chains_in_bb(bb, visited, indent)
+            dbg(f"  {bb_kind}: {len(chains)} chains", indent)
+            all_chains.extend(chains)
+
+        dbg(f"collected {len(all_chains)} chains total", indent)
+
+        # Aggregate entry_acc and exit_acc per bb_kind
+        by_kind = defaultdict(list)
+        for chain in all_chains:
+            by_kind[chain.bb_kind].append(chain)
+
+        acc_info = {}  # bb_kind -> (entry_acc_regs, exit_acc_regs)
+        for kind, chains in by_kind.items():
+            entry = set()
+            exit_ = set()
+            for chain in chains:
+                if chain.entry_acc is not None:
+                    entry |= flatten_regs(chain.entry_acc)
+                if chain.exit_acc is not None:
+                    exit_ |= flatten_regs(chain.exit_acc)
+
+            # For epilogue, exit_acc = inputs of cvt instructions
+            if kind == "epi":
+                cvt_src = set()
+                for chain in chains:
+                    for cvt in chain.cvt_instrs:
+                        cvt_src |= flatten_regs(cvt.get_src_regs())
+                exit_ = cvt_src
+
+            acc_info[kind] = (coalesce_regs(entry), coalesce_regs(exit_))
+
+        # Print table
+        hdr_bb     = "bb"
+        hdr_dir    = ""
+        hdr_na     = "#a"
+        hdr_aregs  = "a regs"
+        hdr_nv     = "#v"
+        hdr_vregs  = "v regs"
+
+        rows = []
+        for kind in ["loop", "epi"]:
+            if kind not in acc_info:
+                continue
+            entry_regs, exit_regs = acc_info[kind]
+            ea, ev, _ = _split_regs_by_kind(flatten_regs(entry_regs))
+            xa, xv, _ = _split_regs_by_kind(flatten_regs(exit_regs))
+            num_ea = sum(len(r.ids) for r in ea)
+            num_ev = sum(len(r.ids) for r in ev)
+            num_xa = sum(len(r.ids) for r in xa)
+            num_xv = sum(len(r.ids) for r in xv)
+            rows.append((kind, "entry", str(num_ea), _fmt_regs(ea), str(num_ev), _fmt_regs(ev)))
+            rows.append(("",    "exit",  str(num_xa), _fmt_regs(xa), str(num_xv), _fmt_regs(xv)))
+
+        if rows:
+            w_bb  = max(len(hdr_bb),    max(len(r[0]) for r in rows))
+            w_dir = max(len(hdr_dir),   max(len(r[1]) for r in rows))
+            w_na  = max(len(hdr_na),    max(len(r[2]) for r in rows))
+            w_ar  = max(len(hdr_aregs), max(len(r[3]) for r in rows))
+            w_nv  = max(len(hdr_nv),    max(len(r[4]) for r in rows))
+            w_vr  = max(len(hdr_vregs), max(len(r[5]) for r in rows))
+
+            fmt = f"{{:<{w_bb}}}  {{:<{w_dir}}}  {{:>{w_na}}}  {{:<{w_ar}}}  {{:>{w_nv}}}  {{:<{w_vr}}}"
+            sep = f"{{:-<{w_bb}}}  {{:-<{w_dir}}}  {{:->{w_na}}}  {{:-<{w_ar}}}  {{:->{w_nv}}}  {{:-<{w_vr}}}"
+            dbg(fmt.format(hdr_bb, hdr_dir, hdr_na, hdr_aregs, hdr_nv, hdr_vregs), indent)
+            dbg(sep.format('', '', '', '', '', ''), indent)
+            for r in rows:
+                dbg(fmt.format(*r), indent)
+
         dbg("========== collect mfma chains done =====", indent)
 
-        return chains
+        return all_chains
 
     def rewrite_mfma_acc(self, mfmaChains, min_a, indent):
         '''
@@ -967,6 +1059,8 @@ class AccumulatorChain:
         self.exit_acc: Register = None
         self.zero_init: set[Instruction] = None
         self.use_acc: set[Instruction] = set()  # Other instructions that uses acc
+        self.cvt_instrs: list[Instruction] = []
+        self.bb_kind: str = ""  # "loop" or "epi"
 
     def rewrite_mfma(self):
         '''
@@ -1085,6 +1179,7 @@ class DSReadChain:
     1. location in the source dode --> loc: int
     2. All the ds_read instructions --> ds_groups: set[DSReadGroup]
     3. If the users of the ds_read are in a different block --> isLiveAcrossBB: bool
+    4. Which basic block section this chain belongs to --> bb_kind: str ("pro", "loop", "epi")
     '''
 
     def __init__(self, loc: int):
@@ -1092,6 +1187,7 @@ class DSReadChain:
         self.ds_groups: list[DSReadGroup] = []
         self.isLiveAcrossBB: bool = False
         self.regs: list[Register] = []
+        self.bb_kind: str = ""
 
     def update_regs(self):
         regs = []
@@ -1506,29 +1602,83 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
     total_lds_regs = set()
     total_lds_regs_in_loop = set()
     entry_lds_data = set()
+
+    # Collect per-chain data
+    chain_rows = []
     for chain in chains:
         chain.update_regs()
 
-        total_lds_regs |= flatten_regs(chain.regs)
+        flat = flatten_regs(chain.regs)
+        total_lds_regs |= flat
         if chain.ds_groups[0].ds[0] in bb.instructions:
-            total_lds_regs_in_loop |= flatten_regs(chain.regs)
+            total_lds_regs_in_loop |= flat
 
         if chain.isLiveAcrossBB:
-            entry_lds_data |= flatten_regs(chain.regs)
+            entry_lds_data |= flat
 
-        cnt = len(flatten_regs(chain.regs))
-        check_mark = print_check(chain.isLiveAcrossBB)
-        dbg(
-            f"loc-{chain.loc} ({cnt} regs, isLiveAcrossBB: {check_mark}, {len(chain.ds_groups)} lds groups): {chain.regs}",
-            indent)
+        a_regs, v_regs, _ = _split_regs_by_kind(flat)
+        na = sum(r.size for r in a_regs)
+        nv = sum(r.size for r in v_regs)
+        chain_rows.append((chain, na, a_regs, nv, v_regs))
 
-    total_lds_regs_in_loop = coalesce_regs(total_lds_regs_in_loop)
-    a_num, v_num = count_regs(total_lds_regs_in_loop)
-    dbg(f"total LDS regs in loop ({a_num} x a, {v_num} x v): {total_lds_regs_in_loop}", indent)
+    # Summary rows
+    total_flat = set()
+    for r in coalesce_regs(total_lds_regs_in_loop):
+        total_flat |= flatten_regs(r)
+    tot_a, tot_v, _ = _split_regs_by_kind(total_lds_regs_in_loop)
+    tot_na = sum(r.size for r in tot_a)
+    tot_nv = sum(r.size for r in tot_v)
 
-    entry_lds_data = coalesce_regs(entry_lds_data)
-    lds_a, lds_v = count_regs(entry_lds_data)
-    dbg(f"live-in lds data ({lds_a} x a, {lds_v} x v): {entry_lds_data}", indent)
+    ent_a, ent_v, _ = _split_regs_by_kind(entry_lds_data)
+    ent_na = sum(r.size for r in ent_a)
+    ent_nv = sum(r.size for r in ent_v)
+
+    # Compute column widths
+    all_locs = [str(r[0].loc) for r in chain_rows]
+    all_grps = [str(len(r[0].ds_groups)) for r in chain_rows]
+    all_bbs = [r[0].bb_kind for r in chain_rows]
+    loc_w = max(len(s) for s in all_locs + ['loc'])
+    grp_w = max(len(s) for s in all_grps + ['grp'])
+    bb_w = max(len(s) for s in all_bbs + ['bb'])
+    live_w = 4  # "live" header, values are check marks
+
+    all_na = [r[1] for r in chain_rows] + [tot_na, ent_na]
+    all_nv = [r[3] for r in chain_rows] + [tot_nv, ent_nv]
+    na_w = max(len(str(n)) for n in all_na)
+    nv_w = max(len(str(n)) for n in all_nv)
+
+    all_a_strs = [_fmt_regs(r[2]) for r in chain_rows] + [_fmt_regs(tot_a), _fmt_regs(ent_a)]
+    all_v_strs = [_fmt_regs(r[4]) for r in chain_rows] + [_fmt_regs(tot_v), _fmt_regs(ent_v)]
+    a_col = max(len(s) for s in all_a_strs)
+    v_col = max(len(s) for s in all_v_strs)
+
+    # Summary label column width (reuses loc+bb+grp+live span)
+    sum_label_w = loc_w + 3 + bb_w + 3 + grp_w + 3 + live_w  # " | " separators
+
+    # Print table
+    hdr = (f"{'loc':>{loc_w}} | {'bb':<{bb_w}} | {'grp':>{grp_w}} | {'live':<{live_w}} | "
+           f"{'#a':>{na_w}} | {'a regs':<{a_col}} | {'#v':>{nv_w}} | {'v regs':<{v_col}}")
+    sep = '-' * len(hdr)
+    dbg(sep, indent)
+    dbg(hdr, indent)
+    dbg(sep, indent)
+
+    for (chain, na, a_regs, nv, v_regs) in chain_rows:
+        check = print_check(chain.isLiveAcrossBB)
+        line = (f"{chain.loc:>{loc_w}} | {chain.bb_kind:<{bb_w}} | {len(chain.ds_groups):>{grp_w}} | {check:<{live_w}} | "
+                f"{na:>{na_w}} | {_fmt_regs(a_regs):<{a_col}} | {nv:>{nv_w}} | {_fmt_regs(v_regs):<{v_col}}")
+        dbg(line, indent)
+
+    dbg(sep, indent)
+
+    def _summary_row(label, na, a_regs, nv, v_regs):
+        return (f"{label:>{sum_label_w}} | "
+                f"{na:>{na_w}} | {_fmt_regs(a_regs):<{a_col}} | {nv:>{nv_w}} | {_fmt_regs(v_regs):<{v_col}}")
+
+    dbg(_summary_row("total in loop", tot_na, tot_a, tot_nv, tot_v), indent)
+    dbg(_summary_row("live-in lds", ent_na, ent_a, ent_nv, ent_v), indent)
+
+    dbg(sep, indent)
 
     for inst in bb.instructions:
         if inst.is_mfma() or "ds_read" in inst.opcode or inst.mark_dead:
@@ -1540,7 +1690,31 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
 
     dbg(f"========== analyzing {chain_cnt} ds read chains done ===== ", indent)
 
-    return flatten_regs(total_lds_regs_in_loop)
+    return flatten_regs(coalesce_regs(total_lds_regs_in_loop))
+
+
+def _split_regs_by_kind(flat_regs):
+    """Split a flat reg set into coalesced lists by kind (a, v, s/m)."""
+    by_kind = defaultdict(set)
+    for kind, rid in flat_regs:
+        by_kind[kind].add((kind, rid))
+    a_regs = coalesce_regs(by_kind.get('a', set()))
+    v_regs = coalesce_regs(by_kind.get('v', set()))
+    # Merge s and m into one list
+    sm_regs = coalesce_regs(by_kind.get('s', set()) | by_kind.get('m', set()))
+    return a_regs, v_regs, sm_regs
+
+
+def _fmt_reg_no_kind(r):
+    """Format a Register without the kind prefix (e.g. '[0:39]' instead of 'a[0:39]')."""
+    if len(r.ids) == 1:
+        return str(r.ids[0])
+    return f"[{min(r.ids)}:{max(r.ids)}]"
+
+
+def _fmt_regs(regs):
+    """Format a list of Register objects without kind prefix."""
+    return ', '.join(_fmt_reg_no_kind(r) for r in regs) if regs else '-'
 
 
 def analyze_regs(bb, mfmaChainsInBB, indent):
@@ -1557,28 +1731,53 @@ def analyze_regs(bb, mfmaChainsInBB, indent):
     if not entry_acc.issubset(live_in):
         dbg("WARNING: entry_acc is not a subset of live_in", indent)
 
-    live_in_a, live_in_v = count_regs(coalesce_regs(live_in))
-    dbg(f"live in ({live_in_a} x a, {live_in_v} x v): {coalesce_regs(live_in)}", indent)
-    acc_a, acc_v = count_regs(coalesce_regs(entry_acc))
-    dbg(f"acc ({acc_a} x a, {acc_v} x v): {coalesce_regs(entry_acc)}", indent)
-
     bb_uses = bb.defs | bb.uses
-    if live_in.issubset(bb_uses):
-        dbg("bb_uses contains live_in", indent)
-    bb_a, bb_v = count_regs(coalesce_regs(bb_uses))
-    dbg(f"BB uses ({bb_a} x a, {bb_v} x v): {coalesce_regs(bb_uses)}", indent)
-
     live_through = live_in - bb_uses
-    th_a, th_v = count_regs(coalesce_regs(live_through))
-    dbg(f"live through ({th_a} x a, {th_v} x v): {coalesce_regs(live_through)}", indent)
-
     free_regs = bb.free_regs
-    free_a, free_v = count_regs(coalesce_regs(free_regs))
-    dbg(f"free regs ({free_a} x a, {free_v} x v): {coalesce_regs(free_regs)}", indent)
+
+    # Split each category by register kind
+    rows = {
+        'live in':      live_in,
+        'acc':          entry_acc,
+        'BB uses':      bb_uses,
+        'live through': live_through,
+        'free regs':    free_regs,
+    }
+
+    # Compute columns for each row
+    table_data = []
+    for label, flat in rows.items():
+        a_regs, v_regs, sm_regs = _split_regs_by_kind(flat)
+        na = sum(r.size for r in a_regs)
+        nv = sum(r.size for r in v_regs)
+        table_data.append((label, na, a_regs, nv, v_regs, sm_regs))
+
+    # Determine column widths
+    label_w = max(len(d[0]) for d in table_data)
+    na_w = max(len(str(d[1])) for d in table_data)
+    nv_w = max(len(str(d[3])) for d in table_data)
+    a_col = max(len(_fmt_regs(d[2])) for d in table_data)
+    v_col = max(len(_fmt_regs(d[4])) for d in table_data)
+    sm_col = max(len(_fmt_regs(d[5])) for d in table_data)
+
+    # Print header
+    hdr = (f"{'':>{label_w}} | {'#a':>{na_w}} | {'a regs':<{a_col}} | "
+           f"{'#v':>{nv_w}} | {'v regs':<{v_col}} | {'s/m regs':<{sm_col}}")
+    sep = '-' * len(hdr)
+    dbg(sep, indent)
+    dbg(hdr, indent)
+    dbg(sep, indent)
+
+    for label, na, a_regs, nv, v_regs, sm_regs in table_data:
+        line = (f"{label:>{label_w}} | {na:>{na_w}} | {_fmt_regs(a_regs):<{a_col}} | "
+                f"{nv:>{nv_w}} | {_fmt_regs(v_regs):<{v_col}} | {_fmt_regs(sm_regs):<{sm_col}}")
+        dbg(line, indent)
+
+    dbg(sep, indent)
 
     read_from = coalesce_regs(bb.read_from)
     write_to = coalesce_regs(bb.write_to)
-    dbg(f"{read_from=}  {write_to=}", indent)
+    dbg(f"read_from={read_from}  write_to={write_to}", indent)
 
     dbg(f"========== Analyze regs in block {bb.name} done =====", indent)
 
@@ -2592,16 +2791,16 @@ def amdgcn_as(text, verbose=False):
     program.process_blocks(indent)
 
     loop = program.get_loop()
-    #epilogue = program.get_epilogue()
+    epilogue = program.get_epilogue()
 
     program.collect_ds_chains(indent)
-    mfmaChainsInLoop = program.collect_mfma_chains(loop, indent)
-    #mfmaChainsInEpi = program.collect_mfma_chains(epilogue, indent)
+    allMfmaChains = program.collect_mfma_chains([loop, epilogue], indent)
+    mfmaChainsInLoop = [c for c in allMfmaChains if c.bb_kind == "loop"]
+    mfmaChainsInEpi = [c for c in allMfmaChains if c.bb_kind == "epi"]
 
     LDSChains = program.LDSChains
 
     entry_acc = analyze_regs(loop, mfmaChainsInLoop, indent)
-    #entry_acc_epi = analyze_regs(epilogue, mfmaChainsInEpi, indent)
     analyze_lds_chains(loop, LDSChains, indent)
     program.update_free_regs(indent)
 
