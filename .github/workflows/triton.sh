@@ -82,6 +82,10 @@ echo "=== Install triton_kernels ==="
 
 cd python/triton_kernels && pip3 install -e . && cd -
 
+echo "=== Run AMD-specific Tests ==="
+
+pytest --durations=10 third_party/amd/python/test/test_compiler_fence_gfx1250.py
+
 echo "=== Run Gluon MoE Tests ==="
 
 # MoE tests require NPI PyTorch, so we test them in Triton pipeline.
