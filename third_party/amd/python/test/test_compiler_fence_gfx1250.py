@@ -25,12 +25,36 @@ See https://github.com/llvm/llvm-project/issues/181708.
 import re
 
 import numpy as np
+import pytest
+import torch
 import triton
+import triton.knobs as knobs
 import triton.language as tl
 from triton.compiler import ASTSource, compile as triton_compile
 from triton.backends.compiler import GPUTarget
-
 from triton._internal_testing import is_hip_gfx1250
+
+SHAPE0, SHAPE1 = 4, 64
+TARGET = GPUTarget("hip", "gfx1250", 32)
+
+
+@triton.jit
+def kernel(Z, X, SHAPE0: tl.constexpr, SHAPE1: tl.constexpr):
+    off0 = tl.arange(0, SHAPE0)
+    off1 = tl.arange(0, SHAPE1)
+    x = tl.load(X + off0[:, None] * SHAPE1 + off1[None, :])
+    z = tl.sum(x, axis=1)
+    tl.atomic_add(Z + off0, z)
+
+
+def compile_kernel():
+    src = ASTSource(
+        fn=kernel,
+        signature={"Z": "*fp64", "X": "*fp64"},
+        constexprs={"SHAPE0": SHAPE0, "SHAPE1": SHAPE1},
+    )
+    compiled = triton_compile(src, target=TARGET)
+    return compiled.asm["amdgcn"]
 
 
 def get_kernel_body(amdgcn, kernel_name):
@@ -41,28 +65,27 @@ def get_kernel_body(amdgcn, kernel_name):
     return match.group(1)
 
 
+def test_buffer_atomic_used_when_enabled():
+    """Verify that buffer_atomic is used when buffer atomics are enabled (default)."""
+
+    amdgcn = compile_kernel()
+    body = get_kernel_body(amdgcn, "kernel")
+
+    assert "buffer_atomic" in body, ("expected buffer_atomic instruction when buffer atomics are enabled")
+    assert "global_atomic" not in body, ("expected no global_atomic instruction when buffer atomics are enabled")
+
+
 def test_ds_load_not_sunk_past_cbranch():
-    """Verify that ds_load from reduce is not sunk past s_cbranch from atomic."""
+    """Verify that ds_load from reduce is not sunk past s_cbranch from atomic.
 
-    shape0, shape1 = 4, 64
+    This tests the non-buffer-atomic code path (global_atomic + condBr thread
+    masking), which is the path vulnerable to the MachineSink bug.
+    """
 
-    @triton.jit
-    def kernel(Z, X, SHAPE0: tl.constexpr, SHAPE1: tl.constexpr):
-        off0 = tl.arange(0, SHAPE0)
-        off1 = tl.arange(0, SHAPE1)
-        x = tl.load(X + off0[:, None] * SHAPE1 + off1[None, :])
-        z = tl.sum(x, axis=1)
-        tl.atomic_add(Z + off0, z)
-
-    # Assembly check: compile and verify instruction ordering
-    target = GPUTarget("hip", "gfx1250", 32)
-    src = ASTSource(
-        fn=kernel,
-        signature={"Z": "*fp64", "X": "*fp64"},
-        constexprs={"SHAPE0": shape0, "SHAPE1": shape1},
-    )
-    compiled = triton_compile(src, target=target)
-    amdgcn = compiled.asm["amdgcn"]
+    # Disable buffer atomics to exercise the global_atomic + condBr path
+    with knobs.amd.scope():
+        knobs.amd.use_buffer_atomics = False
+        amdgcn = compile_kernel()
 
     body = get_kernel_body(amdgcn, "kernel")
     lines = body.splitlines()
@@ -101,16 +124,28 @@ def test_ds_load_not_sunk_past_cbranch():
         f"s_cbranch (line {first_cbranch_after_last_ds_load}) should come before "
         f"global_atomic (line {first_global_atomic})")
 
-    # Correctness check: run the kernel on GPU and verify results
-    if not is_hip_gfx1250():
-        return
 
-    import torch
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
+def test_gpu_correctness_buffer_atomic():
+    """Run the kernel on GPU and verify results with buffer atomics enabled."""
+    x = torch.randn((SHAPE0, SHAPE1), device="cuda", dtype=torch.float64)
+    z = torch.zeros((SHAPE0, ), device="cuda", dtype=torch.float64)
 
-    x = torch.randn((shape0, shape1), device="cuda", dtype=torch.float64)
-    z = torch.zeros((shape0, ), device="cuda", dtype=torch.float64)
+    kernel[(1, )](z, x, SHAPE0, SHAPE1)
 
-    kernel[(1, )](z, x, shape0, shape1)
+    z_ref = x.sum(axis=1)
+    np.testing.assert_allclose(z.cpu().numpy(), z_ref.cpu().numpy(), rtol=1e-5)
+
+
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
+def test_gpu_correctness():
+    """Run the kernel on GPU and verify results with buffer atomics disabled."""
+    x = torch.randn((SHAPE0, SHAPE1), device="cuda", dtype=torch.float64)
+    z = torch.zeros((SHAPE0, ), device="cuda", dtype=torch.float64)
+
+    with knobs.amd.scope():
+        knobs.amd.use_buffer_atomics = False
+        kernel[(1, )](z, x, SHAPE0, SHAPE1)
 
     z_ref = x.sum(axis=1)
     np.testing.assert_allclose(z.cpu().numpy(), z_ref.cpu().numpy(), rtol=1e-5)
