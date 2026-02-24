@@ -430,6 +430,9 @@ class HIPBackend(BaseBackend):
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
+        amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
+        if amdgcn_as_level in ("1", "2"):
+            fns[0].add_fn_attr("amdgpu-agpr-alloc", "256")
         cluster_dim = metadata["num_ctas"]
         fns[0].add_fn_attr("amdgpu-cluster-dims", f"{cluster_dim},1,1")
         # warp-specialization mutates num_warps

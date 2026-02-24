@@ -331,6 +331,11 @@ std::string translateLLVMIRToASM(llvm::Module &module,
                                  bool enable_fp_fusion, bool isObject) {
   using namespace mlir;
 
+  auto amdgcnAsLevel = triton::tools::getStrEnv("TRITON_ENABLE_AMDGCN_AS");
+  if (amdgcnAsLevel == "1" || amdgcnAsLevel == "2") {
+    setLLVMOption<bool>("amdgpu-mfma-vgpr-form", false);
+  }
+
   // Apply flags
   for (const std::string &flag : flags) {
     setLLVMOption<bool>(flag, true);
