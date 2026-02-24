@@ -615,6 +615,8 @@ class Program:
                 kind = 'v'
                 id = i
                 all_regs.add((kind, id))
+        for i in range(102):
+            all_regs.add(('s', i))
 
         for bb in self.blocks:
             live_in = bb.live_in
@@ -1680,13 +1682,13 @@ def analyze_lds_chains(bb, chains: list[DSReadChain], indent):
 
     dbg(sep, indent)
 
-    for inst in bb.instructions:
-        if inst.is_mfma() or "ds_read" in inst.opcode or inst.mark_dead:
-            continue
-        if inst.uses & total_lds_regs:
-            dbg(f"Found user {inst.emit()} of {coalesce_regs(inst.uses & total_lds_regs)}", indent)
-        if inst.defs & total_lds_regs:
-            dbg(f"Found defer {inst.emit()} of {coalesce_regs(inst.defs & total_lds_regs)}", indent)
+    #for inst in bb.instructions:
+    #    if inst.is_mfma() or "ds_read" in inst.opcode or inst.mark_dead:
+    #        continue
+    #    if inst.uses & total_lds_regs:
+    #        dbg(f"Found user {inst.emit()} of {coalesce_regs(inst.uses & total_lds_regs)}", indent)
+    #    if inst.defs & total_lds_regs:
+    #        dbg(f"Found defer {inst.emit()} of {coalesce_regs(inst.defs & total_lds_regs)}", indent)
 
     dbg(f"========== analyzing {chain_cnt} ds read chains done ===== ", indent)
 
@@ -2450,9 +2452,10 @@ def can_hoist(inst, bb, invariant_regs):
                 break
                 #return False
     if redef:
-        ## Try to use a different reg
+        ## Keep the hoisted inst as-is and rewrite the OTHER defs
+        ## (and their users) to use a free reg instead.
         def_reg = coalesce_regs(inst.defs)[0]
-        logging.debug(f"  reg redefined, trying to rewrite {def_reg.emit()}")
+        logging.debug(f"  reg redefined, trying to rewrite other defs of {def_reg.emit()}")
         kind, ids = def_reg.kind, def_reg.ids
         num = len(ids)
         free_reg = pick_and_remove_contiguous_regs(bb.free_regs, num, kind)
@@ -2461,9 +2464,16 @@ def can_hoist(inst, bb, invariant_regs):
             return False
         free_reg = coalesce_regs(free_reg)[0]
         logging.debug(f"  found free reg: {free_reg.emit()}")
-        inst.replace_users_with(free_reg)
-        inst.replace_reg(def_reg, free_reg)
-        logging.debug(f"  new inst: {inst.emit()}")
+        ## Rewrite all other defs of the same register and their users
+        for other in bb.instructions:
+            if other == inst:
+                continue
+            if other.get_dst_regs():
+                if flatten_regs(other.get_dst_regs()) & flatten_regs(reg):
+                    logging.debug(f"  rewriting other def: {other.emit()}")
+                    other.replace_users_with(free_reg)
+                    other.replace_reg(def_reg, free_reg)
+                    logging.debug(f"    -> {other.emit()}")
 
     return True
 
@@ -2656,24 +2666,102 @@ def licm(program):
     logging.debug("========== LICM done =====")
 
 
+def _make_inst(text, bb):
+    return parse_instruction(text, 0, bb)
+
+
 def rotate_lgkmcnt(program):
     loop = program.get_loop()
-    target = None
-    for inst in loop.instructions:
-        if 's_waitcnt' in inst.opcode and 'lgkmcnt' in inst.operands[0]:
-            target = inst
-            break
+    prologue = program.get_prologue()
+    insts = loop.instructions
 
-    if target is None:
+    ## Step 1: Identify region-start sync points.
+    ## Each region in the loop begins before a group of mfma or ds_read.
+    ## Before that, there may be:
+    ##   a) s_waitcnt lgkmcnt(0) alone (for mfma), followed later by
+    ##      s_waitcnt vmcnt(x), lgkmcnt(0) + s_barrier (for ds_read)
+    ##   b) s_waitcnt vmcnt(x), lgkmcnt(0) + s_barrier (already merged)
+    ## We want to merge case (a) into a single waitcnt+barrier pair.
+
+    ## Find all s_waitcnt with lgkmcnt and s_barrier instructions.
+    ## For each waitcnt+barrier pair, look backward for a standalone
+    ## s_waitcnt lgkmcnt(0) that precedes it in the same region.
+    ## The standalone may have mfma instructions between it and the pair,
+    ## but no other waitcnt+barrier pair.
+    sync_pairs = []  # list of (waitcnt_inst, barrier_inst)
+    i = 0
+    while i < len(insts):
+        inst = insts[i]
+        if 's_waitcnt' not in inst.opcode or not any('lgkmcnt' in op for op in inst.operands):
+            i += 1
+            continue
+
+        # Check if this waitcnt has a barrier right after
+        if i + 1 < len(insts) and 's_barrier' in insts[i + 1].opcode:
+            barrier_inst = insts[i + 1]
+
+            # Look backward for a standalone s_waitcnt lgkmcnt(0) in the same region.
+            # Stop at any s_barrier (region boundary).
+            prev_standalone = None
+            for k in range(i - 1, -1, -1):
+                if 's_barrier' in insts[k].opcode:
+                    break
+                if 's_waitcnt' in insts[k].opcode and any('lgkmcnt' in op for op in insts[k].operands):
+                    prev_standalone = insts[k]
+                    break
+
+            if prev_standalone is not None:
+                # Merge: replace the standalone with the waitcnt+barrier pair,
+                # and kill the original pair at its later position.
+                logging.debug(f"rotate_lgkmcnt: merging [{prev_standalone.emit()}] into [{inst.emit()}] + [{barrier_inst.emit()}]")
+                standalone_idx = insts.index(prev_standalone)
+                # Insert waitcnt+barrier at the standalone's position
+                new_waitcnt = _make_inst(inst.emit(), loop)
+                new_barrier = _make_inst(barrier_inst.emit(), loop)
+                insts.insert(standalone_idx, new_barrier)
+                insts.insert(standalone_idx, new_waitcnt)
+                # Kill the standalone and the original pair
+                prev_standalone.mark_dead = True
+                inst.mark_dead = True
+                barrier_inst.mark_dead = True
+                sync_pairs.append((new_waitcnt, new_barrier))
+                # Adjust i for the 2 inserted instructions + skip the pair
+                i += 4
+            else:
+                sync_pairs.append((inst, barrier_inst))
+                i += 2
+        else:
+            i += 1
+
+    if not sync_pairs:
         return
-    ## 1. remove the target from the loop
-    ## 2. add the target at the end of the prologue
-    ## 3. add the target before the s_cbranch inst in the loop
-    idx = len(loop.instructions) - 1
-    loop.instructions.insert(idx, target)
-    idx = target.index
-    loop.instructions.pop(idx)
-    program.get_prologue().add_inst(target)
+
+    ## Step 2: Rotate the first sync pair.
+    ## Remove from current position, add to end of prologue and end of loop.
+    first_waitcnt, first_barrier = sync_pairs[0]
+    waitcnt_text = first_waitcnt.emit()
+    barrier_text = first_barrier.emit()
+    logging.debug(f"rotate_lgkmcnt: rotating [{waitcnt_text}] + [{barrier_text}]")
+
+    # Mark originals as dead
+    first_waitcnt.mark_dead = True
+    first_barrier.mark_dead = True
+
+    # Add to end of prologue
+    prologue.add_inst(_make_inst(waitcnt_text, prologue))
+    prologue.add_inst(_make_inst(barrier_text, prologue))
+
+    # Add before the s_cbranch at end of loop
+    cbranch_idx = len(insts) - 1
+    while cbranch_idx >= 0 and not insts[cbranch_idx].is_control():
+        cbranch_idx -= 1
+    if cbranch_idx >= 0:
+        logging.debug(f"rotate_lgkmcnt: inserting before [{insts[cbranch_idx].emit()}] at idx {cbranch_idx}")
+        insts.insert(cbranch_idx, _make_inst(barrier_text, loop))
+        insts.insert(cbranch_idx, _make_inst(waitcnt_text, loop))
+
+    # Clean up dead instructions
+    loop.cleanup_bb()
 
 
 def separate_waitcnt_and_barrier(loop):
@@ -2794,7 +2882,7 @@ def amdgcn_as(text, verbose=False):
     epilogue = program.get_epilogue()
 
     program.collect_ds_chains(indent)
-    allMfmaChains = program.collect_mfma_chains([loop, epilogue], indent)
+    allMfmaChains = program.collect_mfma_chains([bb for bb in [loop, epilogue] if bb is not None], indent)
     mfmaChainsInLoop = [c for c in allMfmaChains if c.bb_kind == "loop"]
     mfmaChainsInEpi = [c for c in allMfmaChains if c.bb_kind == "epi"]
 
@@ -2851,7 +2939,7 @@ def amdgcn_as(text, verbose=False):
     dbg("## Step 5", indent)
     dbg("## rewrite ds_read data regs", indent)
     dbg("######################################################", indent)
-    rewrite_lds_data(loop, LDSChains, entry_acc)
+    #rewrite_lds_data(loop, LDSChains, entry_acc)
 
     program.update_free_regs(indent)
     analyze_regs(loop, mfmaChainsInLoop, indent)
@@ -2873,7 +2961,7 @@ def amdgcn_as(text, verbose=False):
     dbg("## Step 7", indent)
     dbg("## reuse regs when possible", indent)
     dbg("######################################################", indent)
-    reuse_regs(loop)
+    #reuse_regs(loop)
 
     program.update_free_regs(indent)
     analyze_regs(loop, mfmaChainsInLoop, indent)
@@ -2884,10 +2972,10 @@ def amdgcn_as(text, verbose=False):
     dbg("## Step 8", indent)
     dbg("## loophole optimizations", indent)
     dbg("######################################################", indent)
-    #rotate_lgkmcnt(program)
-    #separate_waitcnt_and_barrier(loop)
+    rotate_lgkmcnt(program)
+    separate_waitcnt_and_barrier(loop)
 
-    #loop.instructions = optimize_mfma_density(loop.instructions)
+    loop.instructions = optimize_mfma_density(loop.instructions)
 
     program.process_blocks(indent)
     program.update_free_regs(indent)
