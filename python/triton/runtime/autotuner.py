@@ -309,7 +309,8 @@ class Config:
     :type num_ctas: int
     :type maxnreg: Optional[int]
     :ivar maxnreg: maximum number of registers one thread can use.  Corresponds
-                       to ptx .maxnreg directive.  Not supported on all platforms.
+                       to ptx .maxnreg directive on CUDA and amdgpu-num-vgpr on ROCm.
+                       Not supported on all platforms.
     :ivar pre_hook: a function that will be called before the kernel is called. Parameters of this
                     function are args.
     :ivar ir_override: filename of a user-defined IR (*.{ttgir|llir|ptx|amdgcn}).
