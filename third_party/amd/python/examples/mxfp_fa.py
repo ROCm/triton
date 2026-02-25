@@ -84,6 +84,18 @@ ATOL_100 = RTOL_100 / 10
 
 
 @triton.jit
+def unshuffle_scale(x, non_k_dim, k_dim, preshuffle_factor: tl.constexpr):
+    """ Unshuffle scales inside the kernel to restore the original shape. """
+    block_non_k: tl.constexpr = non_k_dim // preshuffle_factor
+    kwidth: tl.constexpr = 4 if k_dim >= 4 else k_dim
+    block_k: tl.constexpr = k_dim // kwidth
+    x = tl.reshape(x, (block_non_k, block_k, preshuffle_factor // 4, 4, kwidth))
+    x = tl.permute(x, (0, 3, 2, 1, 4))
+    x = tl.reshape(x, (non_k_dim, k_dim))
+    return x
+
+
+@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -104,19 +116,28 @@ def _attn_fwd_inner(
     kv_type: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
     SM_SCALE: tl.constexpr,
+    BLOCK_SCALE_FACTOR: tl.constexpr,
+    KV_PACK_DIV: tl.constexpr,
+    PRESHUFFLE_K_FACTOR: tl.constexpr,
+    PRESHUFFLE_V_FACTOR: tl.constexpr,
     DISABLE_MASKING: tl.constexpr,
     USE_TDM: tl.constexpr,
 ):
     RCP_LN2: tl.constexpr = 1.4426950408889634
-    KV_PACK_DIV: tl.constexpr = 2 if kv_type == 'e2m1' else 1
 
     for i in range(block_min, block_max, BLOCK_N):
         if USE_TDM:
             k = k_desc_or_ptrs.load([i, 0]).T
         else:
             k = tl.load(k_desc_or_ptrs)
-        k_scale = tl.load(k_scale_ptrs)
+
+        if USE_TDM:
+            k_scale = k_scale_ptrs.load([i // BLOCK_N, 0])
+            k_scale = unshuffle_scale(k_scale, BLOCK_N, BLOCK_DMODEL // BLOCK_SCALE_FACTOR, PRESHUFFLE_K_FACTOR)
+        else:
+            k_scale = tl.load(k_scale_ptrs)
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot_scaled(q, q_scale, q_type, k, k_scale, kv_type)
@@ -145,7 +166,12 @@ def _attn_fwd_inner(
             v = v_desc_or_ptrs.load([i // KV_PACK_DIV, 0])
         else:
             v = tl.load(v_desc_or_ptrs)
-        v_scale = tl.load(v_scale_ptrs)
+
+        if USE_TDM:
+            v_scale = v_scale_ptrs.load([0, i // BLOCK_N * stride_v_scale_n])
+            v_scale = unshuffle_scale(v_scale, BLOCK_DMODEL, BLOCK_N // BLOCK_SCALE_FACTOR, PRESHUFFLE_V_FACTOR)
+        else:
+            v_scale = tl.load(v_scale_ptrs)
 
         # update m_i and l_i
         l_i = l_i * alpha + l_ij
@@ -155,11 +181,11 @@ def _attn_fwd_inner(
 
         if not USE_TDM:
             k_desc_or_ptrs += BLOCK_N * stride_kn
-        k_scale_ptrs += BLOCK_N * stride_k_scale_n
+            k_scale_ptrs += BLOCK_N * stride_k_scale_n
 
         if not USE_TDM:
             v_desc_or_ptrs += (BLOCK_N // KV_PACK_DIV) * stride_vk
-        v_scale_ptrs += (BLOCK_N // 32) * stride_v_scale_n
+            v_scale_ptrs += (BLOCK_N // BLOCK_SCALE_FACTOR) * stride_v_scale_n
 
     return acc, l_i, m_i
 
@@ -212,14 +238,16 @@ def _attn_fwd(
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BATCH,
+    BLOCK_SCALE_FACTOR: tl.constexpr,
+    KV_PACK_DIV: tl.constexpr,
+    PRESHUFFLE_K_FACTOR: tl.constexpr,
+    PRESHUFFLE_V_FACTOR: tl.constexpr,
     DISABLE_MASKING: tl.constexpr,
     USE_TDM: tl.constexpr,
 ):
     NUM_BLOCKS = (SEQLEN_Q + BLOCK_M - 1) // BLOCK_M
     seqlen_q = SEQLEN_Q
     seqlen_k = SEQLEN_K
-
-    KV_PACK_DIV: tl.constexpr = 2 if kv_type == 'e2m1' else 1
 
     # workgroup id ranging: 0,1,2,...., (BATCH * NUM_Q_HEADS * NUM_BLOCKS - 1)
     wid = tl.program_id(0)
@@ -232,10 +260,10 @@ def _attn_fwd(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     offs_n_packed = tl.arange(0, BLOCK_N // KV_PACK_DIV)
-    offs_n_scale = tl.arange(0, BLOCK_N // 32)
+    offs_n_scale = tl.arange(0, BLOCK_N // BLOCK_SCALE_FACTOR)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_d_packed = tl.arange(0, BLOCK_DMODEL // KV_PACK_DIV)
-    offs_d_scale = tl.arange(0, BLOCK_DMODEL // 32)
+    offs_d_scale = tl.arange(0, BLOCK_DMODEL // BLOCK_SCALE_FACTOR)
     off_k_head = off_q_head
 
     # q       [BLOCK_M, BLOCK_DMODEL]
@@ -267,9 +295,17 @@ def _attn_fwd(
                   offs_n[None, :] * stride_kn)
         k_desc_or_ptrs = k_ptr + k_offs
 
-    k_scale_offs = (off_z * stride_k_scale_z + off_k_head * stride_k_scale_h + offs_n[:, None] * stride_k_scale_n +
-                    offs_d_scale[None, :] * stride_k_scale_k)
-    k_scale_ptrs = k_scale_ptr + k_scale_offs
+    if USE_TDM:
+        kscale_shape = (BATCH * seqlen_k * NUM_K_HEADS, BLOCK_DMODEL // BLOCK_SCALE_FACTOR)
+        k_scale_ptrs = tl.make_tensor_descriptor(
+            base=k_scale_ptr + off_z * stride_k_scale_z + off_k_head * stride_k_scale_h,
+            shape=(kscale_shape[0] // PRESHUFFLE_K_FACTOR, kscale_shape[1] * PRESHUFFLE_K_FACTOR),
+            strides=(kscale_shape[1] * PRESHUFFLE_K_FACTOR, stride_k_scale_k),
+            block_shape=(BLOCK_N // PRESHUFFLE_K_FACTOR, BLOCK_DMODEL // BLOCK_SCALE_FACTOR * PRESHUFFLE_K_FACTOR))
+    else:
+        k_scale_offs = (off_z * stride_k_scale_z + off_k_head * stride_k_scale_h + offs_n[:, None] * stride_k_scale_n +
+                        offs_d_scale[None, :] * stride_k_scale_k)
+        k_scale_ptrs = k_scale_ptr + k_scale_offs
 
     # v       [BLOCK_N / KV_PACK_DIV, BLOCK_DMODEL]
     # v_scale [BLOCK_DMODEL, BLOCK_N / 32]
@@ -283,9 +319,18 @@ def _attn_fwd(
                   offs_d[None, :] * stride_vk)
         v_desc_or_ptrs = v_ptr + v_offs
 
-    v_scale_offs = (off_z * stride_v_scale_z + off_k_head * stride_v_scale_h + offs_d[:, None] * stride_v_scale_k +
-                    offs_n_scale[None, :] * stride_v_scale_n)
-    v_scale_ptrs = v_scale_ptr + v_scale_offs
+    if USE_TDM:
+        vscale_shape = (BATCH * BLOCK_DMODEL * NUM_K_HEADS, seqlen_k // BLOCK_SCALE_FACTOR)
+        v_scale_ptrs = tl.make_tensor_descriptor(
+            base=v_scale_ptr + off_z * stride_v_scale_z + off_k_head * stride_v_scale_z,
+            shape=(vscale_shape[0] // PRESHUFFLE_V_FACTOR, vscale_shape[1] * PRESHUFFLE_V_FACTOR),
+            strides=(vscale_shape[1] * PRESHUFFLE_V_FACTOR, 1),
+            block_shape=(BLOCK_DMODEL // PRESHUFFLE_V_FACTOR, BLOCK_N // BLOCK_SCALE_FACTOR * PRESHUFFLE_V_FACTOR))
+        stride_v_scale_n = BLOCK_N // BLOCK_SCALE_FACTOR * PRESHUFFLE_V_FACTOR
+    else:
+        v_scale_offs = (off_z * stride_v_scale_z + off_k_head * stride_v_scale_h + offs_d[:, None] * stride_v_scale_k +
+                        offs_n_scale[None, :] * stride_v_scale_n)
+        v_scale_ptrs = v_scale_ptr + v_scale_offs
 
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
@@ -302,7 +347,9 @@ def _attn_fwd(
     block_max = n_blocks * BLOCK_N
     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_desc_or_ptrs, v_desc_or_ptrs, stride_kn, stride_vn, q_scale,
                                     k_scale_ptrs, v_scale_ptrs, stride_k_scale_n, stride_v_scale_n, block_min,
-                                    block_max, q_type, kv_type, BLOCK_M, BLOCK_N, sm_scale, DISABLE_MASKING, USE_TDM)
+                                    block_max, q_type, kv_type, BLOCK_M, BLOCK_N, BLOCK_DMODEL, sm_scale,
+                                    BLOCK_SCALE_FACTOR, KV_PACK_DIV, PRESHUFFLE_K_FACTOR, PRESHUFFLE_V_FACTOR,
+                                    DISABLE_MASKING, USE_TDM)
 
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
@@ -339,7 +386,39 @@ def _attn_fwd(
         tl.store(out_ptr + offs_out, op, mask=out_mask)
 
 
-def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
+def preshuffle_scale(x: torch.Tensor, preshuffle_factor: int = 128):
+    """ Preshuffle scales for scaled wmma instruction.
+    In scaled wmma instruction, scales takes following shapes in global memory:
+    - a_scale: [M, K // 32]
+    - b_scale: [N, K // 32]
+
+    To have vectorized memory access, it's better to store scales in a packed block scale layout. In this
+    layout, scales are stored contiguously in the shape of:
+    - a_scale: [M // 32 // 4, K // 32 // 4, 32, 4, 4]
+    - b_scale: [N // 32 // 4, K // 32 // 4, 32, 4, 4]
+
+    The output shape will be
+    - a_scale: [M // preshuffle_factor, K * preshuffle_factor]
+    - b_scale: [N // preshuffle_factor, K * preshuffle_factor]
+
+    In this way, we can load scales from global memory in a more vectorized way. Then inside the kernel, we
+    permute and reshape scales to canonical shapes required by scaled wmma.
+    """
+    *prefix, non_k, k = x.shape
+    scale_kwidth = 4 if k >= 4 else k
+    num_chunk_m = non_k // preshuffle_factor
+    num_chunk_k = k // scale_kwidth
+
+    batch = math.prod(prefix)
+    x = x.reshape(batch, non_k, k)
+    x = x.view(batch, num_chunk_m, 4, preshuffle_factor // 4, num_chunk_k, scale_kwidth)
+    x = x.permute(0, 1, 4, 3, 2, 5).contiguous()
+    x = x.view(batch, num_chunk_m, k * preshuffle_factor)
+
+    return x.view(*prefix, non_k // preshuffle_factor, k * preshuffle_factor)
+
+
+def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args, block_scale_factor):
     softmax_scale = q.shape[-1]**(-0.5)
 
     o = torch.zeros_like(q, dtype=torch.float32)
@@ -354,6 +433,16 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
     v_scale_strides = (v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3))
     o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
 
+    block_n = config["BLOCK_N"]
+    preshuffle_k_factor = 128 if block_n >= 128 else block_n
+    preshuffle_v_factor = 128 if head_sz >= 128 else head_sz
+    # Preshuffle scales
+    if args.tdm:
+        # k_scale: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ / 32]
+        k_scale = preshuffle_scale(k_scale.permute(0, 2, 1, 3), preshuffle_k_factor)
+        # v_scale: [BATCH, NUM_K_HEADS, HEAD_SZ, SEQLEN_K / 32]
+        v_scale = preshuffle_scale(v_scale.permute(0, 2, 3, 1), preshuffle_v_factor)
+
     q = q.cuda()
     k = k.cuda()
     v = v.cuda()
@@ -364,6 +453,7 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
 
     q_type = args.q_type
     kv_type = args.kv_type
+    kv_pack_div = 2 if kv_type == 'e2m1' else 1
 
     grid = lambda META: (batch * num_q_heads * triton.cdiv(seqlen_q, META["BLOCK_M"]), )
 
@@ -371,8 +461,10 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args):
                              *q_scale_strides, *k_scale_strides, *v_scale_strides, *o_strides, softmax_scale, q_type,
                              kv_type, SEQLEN_Q=q.shape[1], SEQLEN_K=k.shape[1], NUM_Q_HEADS=num_q_heads,
                              NUM_K_HEADS=num_k_heads, BLOCK_DMODEL=head_sz, BATCH=batch, BLOCK_M=config["BLOCK_M"],
-                             BLOCK_N=config["BLOCK_N"], DISABLE_MASKING=args.disable_masking,
-                             num_warps=config["NUM_WARPS"], num_stages=config["NUM_STAGES"], USE_TDM=args.tdm)
+                             BLOCK_N=config["BLOCK_N"], BLOCK_SCALE_FACTOR=block_scale_factor, KV_PACK_DIV=kv_pack_div,
+                             PRESHUFFLE_K_FACTOR=preshuffle_k_factor, PRESHUFFLE_V_FACTOR=preshuffle_v_factor,
+                             DISABLE_MASKING=args.disable_masking, num_warps=config["NUM_WARPS"],
+                             num_stages=config["NUM_STAGES"], USE_TDM=args.tdm)
 
     if args.dump_ir != 'none':
         curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -409,6 +501,9 @@ def get_percent_close(tensor, reference, atol, rtol) -> float:
 
 
 def run_mha(config, args):
+    # MXFP block scale factor: one scale value per 32 elements
+    BLOCK_SCALE_FACTOR = 32
+
     BATCH = config['BATCH']
     SEQLEN_Q = config['SEQLEN_Q']
     SEQLEN_K = config['SEQLEN_K']
@@ -438,7 +533,7 @@ def run_mha(config, args):
 
     def create_scale(dtype: str, b: int, s: int, h: int, d: int, scale_dim: int):
         size = [b, s, h, d]
-        size[scale_dim] //= 32
+        size[scale_dim] //= BLOCK_SCALE_FACTOR
         low = 1.0 / 16
         high = 2
         if dtype == 'e2m1':
@@ -447,7 +542,7 @@ def run_mha(config, args):
             low = 1.0 / 4
             high = 16
         scale = MXScaleTensor(size=tuple(size)).random(low=low, high=high)
-        scale_ref = scale.to(torch.float32).repeat_interleave(32, dim=scale_dim)
+        scale_ref = scale.to(torch.float32).repeat_interleave(BLOCK_SCALE_FACTOR, dim=scale_dim)
         return scale.data, scale_ref
 
     torch.random.manual_seed(0)
@@ -458,7 +553,7 @@ def run_mha(config, args):
     k_scale, k_scale_ref = create_scale(args.kv_type, BATCH, SEQLEN_K, NUM_K_HEADS, HEAD_SZ, scale_dim=3)
     v_scale, v_scale_ref = create_scale(args.kv_type, BATCH, SEQLEN_K, NUM_K_HEADS, HEAD_SZ, scale_dim=1)
 
-    triton_out = attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args)
+    triton_out = attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args, BLOCK_SCALE_FACTOR)
     torch_out = attn_ref(q_ref, k_ref, v_ref, q_scale_ref, k_scale_ref, v_scale_ref)
 
     try:
@@ -484,7 +579,7 @@ def run_mha(config, args):
 
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("num_heads", [1])
-@pytest.mark.parametrize("seqlen", [256])
+@pytest.mark.parametrize("seqlen", [256, 512, 1024])
 @pytest.mark.parametrize("head_sz", [128, 64])
 @pytest.mark.parametrize("block_m", [128, 64])
 @pytest.mark.parametrize("q_type", ["e4m3"])
@@ -496,7 +591,7 @@ def test_mha(batch, num_heads, seqlen, head_sz, block_m, q_type, kv_type, num_st
         pytest.skip("MXFP FA kernels are only tested on AMD backend.")
     if kv_type == "e2m1" and USE_TDM:
         pytest.skip("Numerical failures need investigation.")
-    block_n = head_sz
+    block_n = 128
     config = {
         "BATCH": batch,  #
         "NUM_Q_HEADS": num_heads,  #
