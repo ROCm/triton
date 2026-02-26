@@ -300,7 +300,7 @@ def _attn_fwd(
         k_scale_ptrs = tl.make_tensor_descriptor(
             base=k_scale_ptr + off_z * stride_k_scale_z + off_k_head * stride_k_scale_h,
             shape=(kscale_shape[0] // PRESHUFFLE_K_FACTOR, kscale_shape[1] * PRESHUFFLE_K_FACTOR),
-            strides=(kscale_shape[1] * PRESHUFFLE_K_FACTOR, stride_k_scale_k),
+            strides=(stride_k_scale_n, stride_k_scale_k),
             block_shape=(BLOCK_N // PRESHUFFLE_K_FACTOR, BLOCK_DMODEL // BLOCK_SCALE_FACTOR * PRESHUFFLE_K_FACTOR))
     else:
         k_scale_offs = (off_z * stride_k_scale_z + off_k_head * stride_k_scale_h + offs_n[:, None] * stride_k_scale_n +
@@ -322,9 +322,9 @@ def _attn_fwd(
     if USE_TDM:
         vscale_shape = (BATCH * BLOCK_DMODEL * NUM_K_HEADS, seqlen_k // BLOCK_SCALE_FACTOR)
         v_scale_ptrs = tl.make_tensor_descriptor(
-            base=v_scale_ptr + off_z * stride_v_scale_z + off_k_head * stride_v_scale_z,
+            base=v_scale_ptr + off_z * stride_v_scale_z + off_k_head * stride_v_scale_h,
             shape=(vscale_shape[0] // PRESHUFFLE_V_FACTOR, vscale_shape[1] * PRESHUFFLE_V_FACTOR),
-            strides=(vscale_shape[1] * PRESHUFFLE_V_FACTOR, 1),
+            strides=(stride_v_scale_n, 1),
             block_shape=(BLOCK_DMODEL // PRESHUFFLE_V_FACTOR, BLOCK_N // BLOCK_SCALE_FACTOR * PRESHUFFLE_V_FACTOR))
         stride_v_scale_n = BLOCK_N // BLOCK_SCALE_FACTOR * PRESHUFFLE_V_FACTOR
     else:
@@ -440,8 +440,10 @@ def attn_fwd(q, k, v, q_scale, k_scale, v_scale, config, args, block_scale_facto
     if args.tdm:
         # k_scale: [BATCH, NUM_K_HEADS, SEQLEN_K, HEAD_SZ / 32]
         k_scale = preshuffle_scale(k_scale.permute(0, 2, 1, 3), preshuffle_k_factor)
+        k_scale_strides = (k_scale.stride(0), k_scale.stride(1), k_scale.stride(2), k_scale.stride(3))
         # v_scale: [BATCH, NUM_K_HEADS, HEAD_SZ, SEQLEN_K / 32]
         v_scale = preshuffle_scale(v_scale.permute(0, 2, 3, 1), preshuffle_v_factor)
+        v_scale_strides = (v_scale.stride(0), v_scale.stride(1), v_scale.stride(2), v_scale.stride(3))
 
     q = q.cuda()
     k = k.cuda()
@@ -578,7 +580,7 @@ def run_mha(config, args):
 
 
 @pytest.mark.parametrize("batch", [1, 2])
-@pytest.mark.parametrize("num_heads", [1])
+@pytest.mark.parametrize("num_heads", [1, 16])
 @pytest.mark.parametrize("seqlen", [256, 512, 1024])
 @pytest.mark.parametrize("head_sz", [128, 64])
 @pytest.mark.parametrize("block_m", [128, 64])
