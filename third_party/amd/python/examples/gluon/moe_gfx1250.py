@@ -29,6 +29,12 @@ from triton_kernels.target_info import is_cuda, get_cdna_version, cuda_capabilit
 
 from triton_kernels.testing import assert_close, make_slice_sizes, alloc_rand
 
+# Handle imports for both pytest (module context) and direct execution
+try:
+    from .gfx1250_utils import static_profile
+except ImportError:
+    from gfx1250_utils import static_profile
+
 T = TypeVar("T")
 
 
@@ -137,6 +143,7 @@ class MoEConfig:
     NUM_SUBTILES: gl.constexpr
     EVEN_K: gl.constexpr
     USE_GATHER: gl.constexpr
+    USE_WMMA_SCALED: gl.constexpr
 
     # layouts
     shared_layout_x: gl.constexpr
@@ -172,10 +179,18 @@ class MoEConfig:
         self.DIV_FACTOR_W = gl.constexpr(2 if DTYPE_W == "e2m1" else 1)
         self.DTYPE_X = gl.constexpr(DTYPE_X)
         self.DTYPE_W = gl.constexpr(DTYPE_W)
-        self.NUM_LOADS_IN_BATCH = gl.constexpr(4 if WITH_X_MX_SCALE else 3)
+
+        num_loads = 2  # x and w
+        if WITH_X_MX_SCALE:
+            num_loads += 1
+        if WITH_W_MX_SCALE:
+            num_loads += 1
+        self.NUM_LOADS_IN_BATCH = gl.constexpr(num_loads)
         self.NUM_SUBTILES = gl.constexpr(NUM_SUBTILES)
         self.EVEN_K = gl.constexpr(EVEN_K)
         self.USE_GATHER = gl.constexpr(USE_GATHER)
+        _SCALED_FORMATS = ("e2m1", "e4m3", "e5m2")
+        self.USE_WMMA_SCALED = gl.constexpr(DTYPE_X in _SCALED_FORMATS and DTYPE_W in _SCALED_FORMATS)
         self.NUM_WARPS = gl.constexpr(NUM_WARPS)
 
         BLOCK_K_SCALE = BLOCK_K // SCALE_BLOCK
@@ -193,10 +208,22 @@ class MoEConfig:
             reg_bases: gl.constexpr = []
             warp_bases: gl.constexpr = [[0, 1], [1, 0]]
 
+        if self.USE_WMMA_SCALED:
+            WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 128]
+            WMMA_PACKED_INSTR_SHAPE: gl.constexpr = [16, 16, 64]
+            DOT_K_WIDTH: gl.constexpr = 16
+            PAD_VEC: gl.constexpr = 16
+        else:
+            WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 32]
+            WMMA_PACKED_INSTR_SHAPE: gl.constexpr = [16, 16, 32]
+            DOT_K_WIDTH: gl.constexpr = 8
+            PAD_VEC: gl.constexpr = 8
+
         WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases, reg_bases=reg_bases,
-                                                         instr_shape=[16, 16, 128])
+                                                         instr_shape=WMMA_INSTR_SHAPE)
         WMMA_LAYOUT_PACKED: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases,
-                                                                reg_bases=reg_bases, instr_shape=[16, 16, 64])
+                                                                reg_bases=reg_bases,
+                                                                instr_shape=WMMA_PACKED_INSTR_SHAPE)
 
         NUM_SUBTILES_M = self.NUM_SUBTILES[0]
         NUM_SUBTILES_N = self.NUM_SUBTILES[1]
@@ -204,16 +231,21 @@ class MoEConfig:
 
         self.dot_layout_x = gl.constexpr(
             gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT_PACKED if DTYPE_X == "e2m1" else WMMA_LAYOUT,
-                                k_width=16))
+                                k_width=DOT_K_WIDTH))
         self.dot_layout_w = gl.constexpr(
             gl.DotOperandLayout(operand_index=1, parent=WMMA_LAYOUT_PACKED if DTYPE_W == "e2m1" else WMMA_LAYOUT,
-                                k_width=16))
-        self.layout_x_scale = gl.constexpr(
-            gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_x,
-                                                 [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE // NUM_SUBTILES_K]))
-        self.layout_w_scale = gl.constexpr(
-            gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_w,
-                                                 [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_SCALE // NUM_SUBTILES_K]))
+                                k_width=DOT_K_WIDTH))
+        if self.USE_WMMA_SCALED:
+            self.layout_x_scale = gl.constexpr(
+                gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_x,
+                                                     [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_SCALE // NUM_SUBTILES_K]))
+            self.layout_w_scale = gl.constexpr(
+                gl.amd.gfx1250.get_wmma_scale_layout(self.dot_layout_w,
+                                                     [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_SCALE // NUM_SUBTILES_K]))
+        else:
+            # Scale layouts are not needed for non-scaled WMMA
+            self.layout_x_scale = gl.constexpr(0)
+            self.layout_w_scale = gl.constexpr(0)
         self.acc_layout = gl.constexpr(WMMA_LAYOUT)
 
         BLOCK_K_PACKED_X = BLOCK_K // self.DIV_FACTOR_X // NUM_SUBTILES_K
@@ -222,25 +254,31 @@ class MoEConfig:
         PAD_INTERVAL_W = 256 if BLOCK_K_PACKED_W <= 256 else BLOCK_K_PACKED_W
 
         self.shared_layout_x = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_X, 16]],
+            gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_X, PAD_VEC]],
                                                     [BLOCK_M // NUM_SUBTILES_M, BLOCK_K_PACKED_X], [1, 0]))
         if W_TRANSPOSE:
             self.shared_layout_w = gl.constexpr(
-                gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_W, 16]],
+                gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_W, PAD_VEC]],
                                                         [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_PACKED_W], [1, 0]))
         else:
             self.shared_layout_w = gl.constexpr(
                 gl.PaddedSharedLayout.with_identity_for([[BLOCK_N // NUM_SUBTILES_N, 16]],
                                                         [BLOCK_K_PACKED_W, BLOCK_N // NUM_SUBTILES_N], [1, 0]))
 
-        self.shared_layout_x_scale = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for(
-                [[256, 16]],
-                [self.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K], [1, 0]))
-        self.shared_layout_w_scale = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for(
-                [[256, 16]],
-                [self.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K], [1, 0]))
+        if self.USE_WMMA_SCALED:
+            self.shared_layout_x_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for(
+                    [[256, 16]],
+                    [self.BLOCK_M_PRESHUFFLED // NUM_SUBTILES_M, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                    [1, 0]))
+            self.shared_layout_w_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for(
+                    [[256, 16]],
+                    [self.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, self.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                    [1, 0]))
+        else:
+            self.shared_layout_x_scale = gl.constexpr(0)
+            self.shared_layout_w_scale = gl.constexpr(0)
 
 
 @gluon.jit
@@ -305,15 +343,18 @@ def create_descriptor(cfg: MoEConfig, x_ptr, w_ptr, x_scale_ptr, w_scale_ptr, of
             block_shape=(cfg.BLOCK_K // cfg.DIV_FACTOR_W // NUM_SUBTILES_K, cfg.BLOCK_N // NUM_SUBTILES_N),
             layout=cfg.shared_layout_w)
 
-    # We need to use padded shape in TDM to make sure it loads all the preshuffled data
-    N_PADDED = (N + PRESHUFFLE_FACTOR - 1) // PRESHUFFLE_FACTOR * PRESHUFFLE_FACTOR
-    K_SCALE = (K + SCALE_BLOCK - 1) // SCALE_BLOCK
-    K_SCALE_PADDED = (K_SCALE + SCALE_KWIDTH - 1) // SCALE_KWIDTH * SCALE_KWIDTH
-    w_scale_desc = tdm.make_tensor_descriptor(
-        base=w_scale_ptr + w_scale_offs, shape=(N_PADDED // PRESHUFFLE_FACTOR, K_SCALE_PADDED * PRESHUFFLE_FACTOR),
-        strides=(stride_w_scale_n, stride_w_scale_k),
-        block_shape=(cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K),
-        layout=cfg.shared_layout_w_scale)
+    if cfg.WITH_W_MX_SCALE:
+        # We need to use padded shape in TDM to make sure it loads all the preshuffled data
+        N_PADDED = (N + PRESHUFFLE_FACTOR - 1) // PRESHUFFLE_FACTOR * PRESHUFFLE_FACTOR
+        K_SCALE = (K + SCALE_BLOCK - 1) // SCALE_BLOCK
+        K_SCALE_PADDED = (K_SCALE + SCALE_KWIDTH - 1) // SCALE_KWIDTH * SCALE_KWIDTH
+        w_scale_desc = tdm.make_tensor_descriptor(
+            base=w_scale_ptr + w_scale_offs, shape=(N_PADDED // PRESHUFFLE_FACTOR, K_SCALE_PADDED * PRESHUFFLE_FACTOR),
+            strides=(stride_w_scale_n, stride_w_scale_k),
+            block_shape=(cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K),
+            layout=cfg.shared_layout_w_scale)
+    else:
+        w_scale_desc = gl.constexpr(0)
 
     return x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m
 
@@ -324,12 +365,12 @@ class MoEPipelinedProgram:
     x_buffer: gl.shared_memory_descriptor
     w_buffer: gl.shared_memory_descriptor
     x_scale_buffer: gl.shared_memory_descriptor | gl.constexpr
-    w_scale_buffer: gl.shared_memory_descriptor
+    w_scale_buffer: gl.shared_memory_descriptor | gl.constexpr
 
     x_desc: tdm.tensor_descriptor
     w_desc: tdm.tensor_descriptor
     x_scale_desc: tdm.tensor_descriptor | gl.constexpr
-    w_scale_desc: tdm.tensor_descriptor
+    w_scale_desc: tdm.tensor_descriptor | gl.constexpr
 
     gathered_m: gl.tensor | gl.constexpr
     off_k_x: gl.tensor
@@ -340,12 +381,12 @@ class MoEPipelinedProgram:
         self.cfg = cfg
         self.x_buffer = x_buffer
         self.w_buffer = w_buffer
-        self.x_scale_buffer = gl.constexpr(x_scale_buffer)
-        self.w_scale_buffer = w_scale_buffer
+        self.x_scale_buffer = x_scale_buffer if cfg.WITH_X_MX_SCALE else gl.constexpr(0)
+        self.w_scale_buffer = w_scale_buffer if cfg.WITH_W_MX_SCALE else gl.constexpr(0)
         self.x_desc = x_desc
         self.w_desc = w_desc
-        self.x_scale_desc = gl.constexpr(x_scale_desc)
-        self.w_scale_desc = w_scale_desc
+        self.x_scale_desc = x_scale_desc if cfg.WITH_X_MX_SCALE else gl.constexpr(0)
+        self.w_scale_desc = w_scale_desc if cfg.WITH_W_MX_SCALE else gl.constexpr(0)
 
         self.gathered_m = gathered_m
         self.off_k_x = off_k_x
@@ -382,10 +423,14 @@ class MoEPipelinedProgram:
         else:
             x_scale_buffer = gl.constexpr(0)
 
-        w_scale_buffer = gl.allocate_shared_memory(
-            gl.uint8, shape=[
-                NUM_BUFFERS, cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N, cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K
-            ], layout=cfg.shared_layout_w_scale)
+        if cfg.WITH_W_MX_SCALE:
+            w_scale_buffer = gl.allocate_shared_memory(
+                gl.uint8, shape=[
+                    NUM_BUFFERS, cfg.BLOCK_N_PRESHUFFLED // NUM_SUBTILES_N,
+                    cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K
+                ], layout=cfg.shared_layout_w_scale)
+        else:
+            w_scale_buffer = gl.constexpr(0)
 
         return MoEPipelinedProgram(cfg, x_buffer, w_buffer, x_scale_buffer, w_scale_buffer, x_desc, w_desc,
                                    x_scale_desc, w_scale_desc, gathered_m, off_k_x)
@@ -422,8 +467,9 @@ class MoEPipelinedProgram:
                 tdm.async_load(self.x_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
                                self.x_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
-        tdm.async_load(self.w_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
-                       self.w_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
+        if cfg.WITH_W_MX_SCALE:
+            tdm.async_load(self.w_scale_desc, [0, load_idx * cfg.BLOCK_K_SCALE_PRESHUFFLED // NUM_SUBTILES_K],
+                           self.w_scale_buffer.index((load_idx // NUM_SUBTILES_K) % cfg.NUM_BUFFERS))
 
         return load_idx + 1
 
@@ -441,23 +487,30 @@ class MoEPipelinedProgram:
 
         if cfg.WITH_X_MX_SCALE:
             x_scale_buffer_slice = self.x_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
-        w_scale_buffer_slice = self.w_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+        if cfg.WITH_W_MX_SCALE:
+            w_scale_buffer_slice = self.w_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
 
         if cfg.SCALE_PRESHUFFLE:
             if cfg.WITH_X_MX_SCALE and not cfg.USE_GATHER:
                 x_scale_buffer_slice = x_scale_buffer_slice.reshape(
                     (cfg.BLOCK_M_PRESHUFFLED, BLOCK_K_SCALE // cfg.SCALE_KWIDTH, cfg.PRESHUFFLE_FACTOR // 4, 4,
                      cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_M, BLOCK_K_SCALE))
-            w_scale_buffer_slice = w_scale_buffer_slice.reshape(
-                (cfg.BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // cfg.SCALE_KWIDTH, cfg.PRESHUFFLE_FACTOR // 4, 4,
-                 cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_N, BLOCK_K_SCALE))
+            if cfg.WITH_W_MX_SCALE:
+                w_scale_buffer_slice = w_scale_buffer_slice.reshape(
+                    (cfg.BLOCK_N_PRESHUFFLED, BLOCK_K_SCALE // cfg.SCALE_KWIDTH, cfg.PRESHUFFLE_FACTOR // 4, 4,
+                     cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_N, BLOCK_K_SCALE))
 
         if cfg.WITH_X_MX_SCALE:
             scale_x = x_scale_buffer_slice.load(layout=cfg.layout_x_scale)
         else:
             scale_x = 0
             scale_x = scale_x.to(gl.uint8)
-        scale_w = w_scale_buffer_slice.load(layout=cfg.layout_w_scale)
+
+        if cfg.WITH_W_MX_SCALE:
+            scale_w = w_scale_buffer_slice.load(layout=cfg.layout_w_scale)
+        else:
+            scale_w = 0
+            scale_w = scale_w.to(gl.uint8)
 
         return x, w, scale_x, scale_w
 
@@ -487,7 +540,10 @@ class MoEPipelinedProgram:
             self.async_wait(cfg.NUM_BUFFERS - 1)
 
             x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
-            accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            if cfg.USE_WMMA_SCALED:
+                accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            else:
+                accumulator = gl.amd.gfx1250.wmma(x, w, accumulator)
             wmma_idx += 1
 
         # epilogue
@@ -495,7 +551,10 @@ class MoEPipelinedProgram:
             self.async_wait(cfg.NUM_BUFFERS - 1)
 
             x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
-            accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            if cfg.USE_WMMA_SCALED:
+                accumulator = gl.amd.gfx1250.wmma_scaled(x, scale_x, cfg.DTYPE_X, w, scale_w, cfg.DTYPE_W, accumulator)
+            else:
+                accumulator = gl.amd.gfx1250.wmma(x, w, accumulator)
             wmma_idx += 1
 
         return accumulator
@@ -533,7 +592,7 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
             BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
             GROUP_M: gl.constexpr, XCD_SWIZZLE: gl.constexpr, SWIZZLE_MX_SCALE: gl.constexpr, EVEN_K: gl.constexpr,
             UPCAST_INDICES: gl.constexpr = False, NUM_BUFFERS: gl.constexpr = 2, SCALE_BLOCK: gl.constexpr = 32):
-    gl.static_assert(RAGGED_DIMENSION == "M")
+    gl.static_assert(RAGGED_DIMENSION is None or RAGGED_DIMENSION == "M")
     SPLIT_K: gl.constexpr = 1
 
     DTYPE_X: gl.constexpr = get_scaled_dot_format_string(X.dtype.element_ty)
@@ -551,9 +610,10 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
 
     SCALE_PRESHUFFLE: gl.constexpr = (SWIZZLE_MX_SCALE is not None and SWIZZLE_MX_SCALE != "STRIDED")
 
+    WITH_X_MX_SCALE: gl.constexpr = XMxScale is not None
+    WITH_W_MX_SCALE: gl.constexpr = WMxScale is not None
     cfg = MoEConfig(BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_X, DTYPE_W, SCALE_BLOCK=SCALE_BLOCK, NUM_BUFFERS=NUM_BUFFERS,
-                    W_TRANSPOSE=W_TRANSPOSE, WITH_X_MX_SCALE=(XMxScale is not None), WITH_W_MX_SCALE=(WMxScale
-                                                                                                      is not None),
+                    W_TRANSPOSE=W_TRANSPOSE, WITH_X_MX_SCALE=WITH_X_MX_SCALE, WITH_W_MX_SCALE=WITH_W_MX_SCALE,
                     SCALE_PRESHUFFLE=SCALE_PRESHUFFLE, index_type=index_type, EVEN_K=EVEN_K, USE_GATHER=USE_GATHER)
 
     PACKED_BLOCK_K_W: gl.constexpr = BLOCK_K // cfg.DIV_FACTOR_W
@@ -868,7 +928,7 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
     kernels = specializations.get(activation=fused_activation.specs)
 
     W_TRANSPOSE = True
-    kernels._matmul[(grid, )](
+    k = kernels._matmul[(grid, )](
         c_storage.data, *out_matmul.stride(), a_storage.data, *a_strides, a_scale, *a_scale_strides, b_storage.data,
         *b_storage.data.stride(), W_TRANSPOSE, b_scale, *b_scale_strides, bias, bias_stride, M, N, K, K_W, gather_indx,
         scatter_indx, None if scatter_indx is None else scatter_indx.shape[0], ragged_dimension, *expt_data_x,
@@ -882,7 +942,7 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
     if not (is_input_batched or b_ragged_metadata is not None):
         out_final = out_final.squeeze(0)
 
-    return out_final
+    return out_final, k
 
 
 class DType:
@@ -895,17 +955,22 @@ class DType:
         self.is_mxfloat4 = self.has_mx_scale and "float4" in dtype_str
 
 
-def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, is_mx_rowmajor=False,
-                       scale_hbm_swizzling=None):
+def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, transpose, squeeze_batch_dim,
+                       is_mx_rowmajor=False, scale_hbm_swizzling=None):
     # allocate buffer
     buffer_shape = ((n_slices, ) if ragged_dim is None else tuple()) + shape
     buffer_dtype = torch.bfloat16 if dtype.has_mx_scale else dtype.torch_dtype
     buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)
+    if squeeze_batch_dim:
+        buffer = buffer.squeeze(0)
     # handle raggedness
     ragged_metadata = None
     if ragged_dim is not None:
         slice_sizes = make_slice_sizes(n_slices, shape[ragged_dim], device=device)
         ragged_metadata = make_ragged_tensor_metadata(slice_sizes.cuda(), shape[ragged_dim])
+    # handle transpose
+    if transpose:
+        buffer = buffer.mT.contiguous().mT
     # handle mxfp
     scales = None
     if mxfp_dim is not None:
@@ -928,8 +993,9 @@ def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, is_
     return buffer, scales, ragged_metadata
 
 
-@pytest.mark.parametrize("m, n, k", [(300, 400, 784), (128, 128, 1024)])
-@pytest.mark.parametrize("dtype_a, dtype_b", [("float8_e5m2", "mxfloat4_e2m1"), ("float8_e4m3fn", "mxfloat4_e2m1")])
+@pytest.mark.parametrize("m, n, k", [(300, 400, 784), (128, 128, 512)])
+@pytest.mark.parametrize("dtype_a, dtype_b", [("float8_e5m2", "mxfloat4_e2m1"), ("float8_e4m3fn", "mxfloat4_e2m1"),
+                                              ("bfloat16", "bfloat16")])
 @pytest.mark.parametrize("do_gather", [True, False])
 @pytest.mark.parametrize("do_scatter", [True, False])
 @pytest.mark.parametrize("do_bias", [True, False])
@@ -947,9 +1013,19 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
     if k % 16 != 0:
         pytest.skip("NYI: async_copy doesn't support unaligned cases where K doesn't have 16 divisibility")
 
+    if not dtype_a.startswith("mx") and not dtype_b.startswith("mx") and SCALE_PRESHUFFLING:
+        pytest.skip("No scales to be preshuffled for non-block-scale data types")
+
+    if dtype_a == "bfloat16" and dtype_b == "bfloat16":
+        if do_gather or do_scatter:
+            pytest.skip("Don't do gather or scatter for bf16 x bf16")
+        if SCALE_PRESHUFFLING:
+            pytest.skip("No scales to be preshuffled for bf16 x bf16")
+
     torch.manual_seed(0)
 
-    n_slices = 10
+    is_not_ragged = not do_gather and not do_scatter
+    n_slices = 1 if is_not_ragged else 10
 
     a_dtype = DType(dtype_a)
     b_dtype = DType(dtype_b)
@@ -964,7 +1040,9 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
         n_slices=n_slices,
         dtype=a_dtype,
         device=device,
-        ragged_dim=0,
+        ragged_dim=None if is_not_ragged else 0,
+        transpose=False,
+        squeeze_batch_dim=is_not_ragged,
         mxfp_dim=-1 if a_dtype.has_mx_scale else None,
         scale_hbm_swizzling=layout.make_default_matmul_mxfp8_act_scale_layout
         if a_dtype.has_mx_scale and a_scale_preshuffling else None,
@@ -976,6 +1054,8 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
         dtype=b_dtype,
         device=device,
         ragged_dim=None,
+        transpose=True,
+        squeeze_batch_dim=is_not_ragged,
         mxfp_dim=-2 if b_dtype.has_mx_scale else None,
         scale_hbm_swizzling=layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=-2, num_warps=4)
         if SCALE_PRESHUFFLING else None,
@@ -1015,8 +1095,8 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
         a_mx_scale=a_scales,
         b_mx_scale=b_scale_tri,
     )
-    tri_y = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
-                   fused_activation=fused_activation, num_buffers=num_buffers)
+    tri_y, k = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
+                      fused_activation=fused_activation, num_buffers=num_buffers)
 
     if c_dtype.has_mx_scale:
         tri_y = upcast_from_mxfp(tri_y, precision_opt.c_mx_scale, target_dtype=torch.bfloat16, axis=-1).to(ref_y.dtype)
@@ -1030,8 +1110,10 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
 
     assert_close(ref_y.cpu(), tri_y.cpu(), maxtol=maxtol, rmstol=rmstol)
 
+    static_profile(k)
 
-def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype):
+
+def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, num_buffers, action):
     assert ((x_dtype == "fp8" and w_dtype == "fp8") or w_dtype == "mx4")
     dev = 'cuda'
     batch = batch_per_expt * n_expts_tot // n_expts_act
@@ -1061,15 +1143,30 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype)
     input_x = input_x.to(x_dtype)
     xg = input_x.to(wg.dtype if n_expts_tot > 1 else input_x.dtype)
 
-    if n_expts_tot > 1:
-        logits = matmul(xg, wg, bg, precision_config=pcg)
-        x, rdata, gather_indx, scatter_indx, _ = routing(input_x, logits, n_expts_act)
-    else:
-        rdata, gather_indx, scatter_indx, _ = None, None, None, None
+    actions = ["gating", "dispatch", "combine"] if action == "e2e" else [action]
 
-    if x.nelement() > 0:
-        x = matmul(x, w1, b1, rdata, gather_indx=gather_indx, precision_config=pc1, fused_activation=act)
-        x = matmul(x, w2, b2, rdata, scatter_indx=scatter_indx, precision_config=pc2)
+    if "gating" in actions:
+        logits, _ = matmul(xg, wg, bg, precision_config=pcg)
+    else:
+        logits = torch.randn((batch, n_expts_tot), device=dev)
+
+    if len(actions) == 1 and actions[0] == "gating":
+        return
+
+    x, rdata, gather_indx, scatter_indx, _ = routing(input_x, logits, n_expts_act)
+
+    if "dispatch" in actions:
+        x, _ = matmul(x, w1, b1, rdata, gather_indx=gather_indx, precision_config=pc1, fused_activation=act)
+    else:
+        if x_dtype in (torch.float16, torch.bfloat16):
+            x = torch.randn((batch, dim2 // 2), device=dev, dtype=x_dtype)
+        else:
+            assert x_dtype == torch.float8_e4m3fn
+            x = 2**-(torch.randint(4, 8, (batch, dim2 // 2), device=dev, dtype=torch.float16))
+            x = x.view(x_dtype)
+
+    if "combine" in actions:
+        x, _ = matmul(x, w2, b2, rdata, scatter_indx=scatter_indx, precision_config=pc2)
 
 
 if __name__ == '__main__':
@@ -1081,5 +1178,8 @@ if __name__ == '__main__':
     parser.add_argument("--n_expts_act", '-ea', type=int, default=4)
     parser.add_argument("--x_dtype", type=str, default="fp8", choices=["fp8", "bf16"])
     parser.add_argument("--w_dtype", type=str, default="mx4", choices=["mx4", "fp8"])
+    parser.add_argument("--num_buffers", type=int, default=2, choices=[2, 4])
+    parser.add_argument("--action", '-a', type=str, default="e2d", choices=["gating", "dispatch", "combine", "e2e"])
     args = parser.parse_args()
     main(**vars(args))
+    print('✅ Done')
