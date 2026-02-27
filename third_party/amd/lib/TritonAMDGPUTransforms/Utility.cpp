@@ -309,27 +309,72 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
                                             std::move(linearComponent));
 }
 
-// Get a padded encoding instead of going through the classical swizzled one.
-// Please note that padding here is in terms of elements and not bytes or dwords
+// LDS padding strategy for TDM (descriptor) loads.
+//
+// Currently only invoked for gfx1250 TDM loads (via
+// getSharedEncIfAllUsersAreDotEncPadded in LowerLoops.cpp when useTDM is
+// true).
+//
+// Padding is chosen per-dtype and per-access-path to minimize bank conflicts
+// while avoiding unnecessary LDS waste.  The two load paths have different
+// access patterns and therefore different optimal padding values.
+//
+//   Transposed (ds_load_tr*):
+//     Used when K is contiguous in shared memory but the dot instruction
+//     needs the non-K dimension contiguous in registers.  The instruction
+//     cooperatively loads a fixed sub-tile across 16 lanes. Each lane reads
+//     instBitWidth/elemBits consecutive elements from its row. Padding must
+//     match this element count so that successive rows land on different banks.
+//
+//       16-bit (fp16/bf16): ds_load_tr16_b128 → 128/16 = 8 elems → pad 8
+//        8-bit (fp8/i8):    ds_load_tr8_b64   →  64/8  = 8 elems → pad 8
+//       32-bit (f32):       no transposed instruction; falls back to
+//                           non-transposed ds_load_b* where each thread
+//                           loads sequentially.
+//
+//   Non-transposed (ds_load_b*):
+//     Used when the shared memory layout already matches what the dot
+//     instruction expects.  Each thread issues a vector load of vecWidth
+//     consecutive elements, capped at 128 bits.  Padding matches this
+//     effective vector width.
+//
+//       32-bit (f32):  min(vecWidth, 128/32) = min(vecWidth, 4) → pad ≤ 4
+//       16-bit (fp16): min(vecWidth, 128/16) = min(vecWidth, 8) → pad ≤ 8
+//        8-bit (fp8):  min(vecWidth, 128/8)  = min(vecWidth,16) → pad ≤ 16
+//
+// Note on 4-bit types (i4): two i4 elements are packed into one i8 in LDS,
+// so from a bank-conflict perspective 4-bit behaves identically to 8-bit
+// in both transposed and non-transposed paths below.
+
 triton::gpu::PaddedSharedEncodingAttr
 getPaddedEncodingForDotOp(mlir::MLIRContext *context, int opIdx,
                           ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
                           triton::gpu::CGAEncodingAttr CGALayout,
-                          unsigned typeWidthInBit) {
-  // LDS padding strategy to reduce bank conflicts for dot operand loads.
-  //
-  // Both ds_load_tr (transposed) and ds_load (non-transposed) use 128-bit
-  // loads where 16 lanes cooperatively access 16 different rows. The bank
-  // conflict pattern is identical for both instructions since each lane
-  // reads contiguously within its row.
-  //
-  // Always pad by maxVecSize (128 bits / element size) to spread accesses
-  // across different banks.
+                          unsigned typeWidthInBit, unsigned vecWidth,
+                          const triton::AMD::TargetInfo &targetInfo) {
   auto blockShapePerCTA =
       triton::gpu::getShapePerCTA(CGALayout.getCTASplitNum(), shape);
   int innerDimLength = blockShapePerCTA[order[0]];
-  unsigned maxVecSize = 128 / typeWidthInBit;
-  unsigned padAmount = maxVecSize;
+
+  bool loadTransposed = (order[0] != (1 - opIdx));
+
+  // Fallback: assume padding to match widest load width
+  unsigned padAmount = 128 / typeWidthInBit;
+  if (loadTransposed) {
+    // Transposed path: pad by the number of elements per lane in the
+    // transposed instruction.  Query the target for the actual instruction
+    // bit-width; fall back to 128-bit if no transposed instruction exists
+    // (e.g. f32).
+    if (auto ldsParams = targetInfo.queryLDSTransLoadParams(typeWidthInBit)) {
+      padAmount = ldsParams->instBitWidth / typeWidthInBit;
+    }
+  } else {
+    // Non-transposed path: pad by the effective vector load width.
+    // vecWidth is the dot operand's kWidth, capped at max elements
+    // per 128-bit load.
+    padAmount = std::min(vecWidth, padAmount);
+  }
+
   unsigned padInterval = innerDimLength;
   return triton::gpu::PaddedSharedEncodingAttr::get(
       context, {{padInterval, padAmount}}, order, shape, CGALayout);
