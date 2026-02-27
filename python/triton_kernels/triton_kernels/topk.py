@@ -181,5 +181,5 @@ def topk_torch(
     bitmatrix_data.index_put_((rows, word_idx), masks, accumulate=True)
     bitmatrix_data = bitmatrix_data.view(torch.uint32)
 
-    bitmatrix = wrap_torch_tensor(bitmatrix_data.cuda(), dtype=BIT, shape=x.shape)
-    return SparseMatrix(vals=y_vals.cuda(), indx=y_indx.cuda(), mask=bitmatrix)
+    bitmatrix = wrap_torch_tensor(bitmatrix_data, dtype=BIT, shape=x.shape)
+    return SparseMatrix(vals=y_vals, indx=y_indx, mask=bitmatrix)

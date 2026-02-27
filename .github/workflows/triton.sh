@@ -78,17 +78,6 @@ pytest -n 80 \
     python/test/unit/runtime \
     python/test/unit/test_debug.py
 
-echo "=== Install triton_kernels ==="
-
-cd python/triton_kernels && pip3 install -e . && cd -
-
 echo "=== Run AMD-specific Tests ==="
 
 pytest --durations=10 third_party/amd/python/test/test_compiler_fence_gfx1250.py
-
-echo "=== Run Gluon MoE Tests ==="
-
-# MoE tests require NPI PyTorch, so we test them in Triton pipeline.
-# TODO: FFM can't fully clean up the model at this moment, so we need to use --forked to run each test in a separate subprocess.
-# Otherwise there will be segfaults when running multiple tests in the same process.
-HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --forked --durations=10 third_party/amd/python/examples/gluon/moe_gfx1250.py

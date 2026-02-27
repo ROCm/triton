@@ -23,7 +23,7 @@ jobs:
   gfx1250-gluon:
     name: Gluon
     runs-on: ['self-hosted', 'ffm']
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -79,3 +79,33 @@ jobs:
             --entrypoint bash \
             mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.3 \
             -lc "/code/.github/workflows/triton.sh"
+
+  gfx1250-moe:
+    name: MoE
+    runs-on: ['self-hosted', 'ffm', 'pytorch']
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Build and Test MoE
+        run: |
+          set -xeo pipefail
+          RENDER_GID=$(getent group render | cut -d: -f3)
+          echo "Render group ID: ${RENDER_GID}"
+          docker run --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v /data/ci/actions-runner/_work/triton/triton:/code \
+            -v /data/ci/llvm/979132a0-release:/llvm \
+            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r2.03:/ffm-base \
+            -v /data/ci/ffm/ffm-main-206-20260223:/ffm-update \
+            -v /data/ci/triton-cache/json:/root/.triton/json \
+            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
+            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
+            -v /data/ci/ccache:/root/.ccache \
+            -w /code \
+            --entrypoint bash \
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.4 \
+            -lc "/code/.github/workflows/moe.sh"

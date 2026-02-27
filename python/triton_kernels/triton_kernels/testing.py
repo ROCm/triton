@@ -256,7 +256,7 @@ def make_slice_sizes(n_slices, total_size, device="cuda"):
     counts = torch.bincount(assignments, minlength=n_slices).to(dtype)
     assert counts.sum().item() == total_size
     assert len(counts) == n_slices
-    return counts.to(device)
+    return counts
 
 
 def pad_rows_to_multiples(A, indices, multiple=128, pad_value=float('nan')):

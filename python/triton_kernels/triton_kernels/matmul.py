@@ -16,7 +16,7 @@ from triton_kernels.tensor_details.layout_details.hopper_scale import HopperMXSc
 # details
 from .matmul_details._matmul import _matmul
 from .matmul_details._p_matmul import _p_matmul, get_per_device_per_stream_alloc_fn
-from .numerics_details.mxfp import MXFP_BLOCK_SIZE
+from .numerics_details.mxfp import MXFP_BLOCK_SIZE, upcast_from_mxfp_torch
 from .tensor_details.layout_details.strided import StridedLayout
 from .tensor_details.layout_details.blackwell_scale import BlackwellActMXScaleLayout
 from .matmul_details.opt_flags import make_opt_flags, update_opt_flags_constraints
@@ -595,7 +595,7 @@ def matmul(a, b, bias,
 def apply_precision(x_tri, w_tri, precision_config):
     from .tensor import convert_layout
     from .tensor_details import layout
-    from .numerics_details.mxfp import upcast_from_mxfp_torch
+    from .numerics_details.mxfp import upcast_from_mxfp
 
     flex_ctx = precision_config.flex_ctx
 
@@ -610,7 +610,7 @@ def apply_precision(x_tri, w_tri, precision_config):
         canonical_layout = layout.StridedLayout(major_dim=mx_axis)
         x_tri = convert_layout(x_tri, canonical_layout)
         x_tri_scale = convert_layout(a_scale, canonical_layout)
-        x_ref = upcast_from_mxfp_torch(x_tri.storage.data, x_tri_scale.storage.data, torch.bfloat16, axis=mx_axis)
+        x_ref = upcast_from_mxfp(x_tri.storage.data, x_tri_scale.storage.data, torch.bfloat16, axis=mx_axis)
     else:
         x_ref = apply(x_tri, flex_ctx.lhs_data.scale)
 
@@ -620,6 +620,7 @@ def apply_precision(x_tri, w_tri, precision_config):
         canonical_layout = layout.StridedLayout(major_dim=mx_axis)
         w_tri = convert_layout(w_tri, canonical_layout)
         w_tri_scale = convert_layout(b_scale, canonical_layout)
+        # FIXME: Fix host-side TDM and use upcast_from_mxfp
         w_ref = upcast_from_mxfp_torch(w_tri.storage.data, w_tri_scale.storage.data, torch.bfloat16, axis=mx_axis)
     else:
         w_ref = apply(w_tri, flex_ctx.rhs_data.scale)
@@ -706,8 +707,8 @@ def matmul_torch(a, b, bias,
         a = a.view(1, *a.shape)
     # memory offsets
     if a_ragged_metadata is not None and not is_input_batched:
-        sizes = a_ragged_metadata.slice_sizes.cpu()
-        off = torch.zeros(sizes.shape[0] + 1, dtype=torch.int32, device=a.device)
+        sizes = a_ragged_metadata.slice_sizes
+        off = torch.zeros(sizes.shape[0] + 1, dtype=torch.int32)
         off[1:] = torch.cumsum(sizes, 0)
         offs = list(itertools.pairwise(off))
     else:
@@ -721,7 +722,7 @@ def matmul_torch(a, b, bias,
         else:
             idx = gather_indx[lo:hi]
         batch = i if is_input_batched else 0
-        out = torch.matmul(round_x(a[batch, idx, :], torch.arange(lo, hi, device=a.device)).float(),
+        out = torch.matmul(round_x(a[batch, idx, :], torch.arange(lo, hi, device="cuda")).float(),
                            b[i].float())
         if bias is not None:
             out += bias[i, :] if betas is None else bias[i, :] * betas[lo:hi, None]

@@ -11,7 +11,7 @@ import triton.experimental.gluon.language as gl
 from triton.experimental.gluon._runtime import GluonJITFunction, jit
 from triton.language.core import _aggregate as aggregate
 
-from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor, Storage
+from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor
 from triton_kernels.tensor import make_ragged_tensor_metadata, wrap_torch_tensor, convert_layout
 from triton_kernels.tensor_details.ragged_tensor import ragged_metadata_fields
 from triton_kernels.tensor_details import layout
@@ -894,29 +894,6 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
     b_storage = _canonicalize_storage(b.storage, 3, flex.rhs_data)
     c_storage = _canonicalize_storage(c.storage, 3, flex.out_data)
 
-    def tensor_to_cuda(x):
-        if x is None:
-            return None
-
-        if isinstance(x, torch.Tensor):
-            x = x.cuda()
-        elif isinstance(x, Tensor):
-            x.storage.data = x.storage.data.cuda()
-        elif isinstance(x, Storage):
-            x.data = x.data.cuda()
-        else:
-            raise ValueError(f"Unsupported type: {type(x)}")
-        return x
-
-    a_storage = tensor_to_cuda(a_storage)
-    b_storage = tensor_to_cuda(b_storage)
-    c_storage = tensor_to_cuda(c_storage)
-    a_scale = tensor_to_cuda(a_scale)
-    b_scale = tensor_to_cuda(b_scale)
-    bias = tensor_to_cuda(bias)
-    gather_indx = tensor_to_cuda(gather_indx)
-    scatter_indx = tensor_to_cuda(scatter_indx)
-
     # canonicalize strides
     a_strides = [0] * (3 - a_storage.data.ndim) + list(a_storage.data.stride())
     a_scale_strides = a_scale.stride() if a_has_mx else (None, None, None)
@@ -960,14 +937,17 @@ def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, tra
     # allocate buffer
     buffer_shape = ((n_slices, ) if ragged_dim is None else tuple()) + shape
     buffer_dtype = torch.bfloat16 if dtype.has_mx_scale else dtype.torch_dtype
-    buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)
+    # FIXME: Took a long time with shape (10, 784, 400) on simulator.
+    # buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)
+    buffer = alloc_rand(buffer_shape, device='cpu', dtype=buffer_dtype)
+    buffer = buffer.to(device)
     if squeeze_batch_dim:
         buffer = buffer.squeeze(0)
     # handle raggedness
     ragged_metadata = None
     if ragged_dim is not None:
         slice_sizes = make_slice_sizes(n_slices, shape[ragged_dim], device=device)
-        ragged_metadata = make_ragged_tensor_metadata(slice_sizes.cuda(), shape[ragged_dim])
+        ragged_metadata = make_ragged_tensor_metadata(slice_sizes, shape[ragged_dim])
     # handle transpose
     if transpose:
         buffer = buffer.mT.contiguous().mT
@@ -977,12 +957,10 @@ def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, tra
         assert dtype.has_mx_scale
         buffer_dtype = dtype.torch_dtype
         if is_mx_rowmajor:
-            scales = downcast_to_mxfp_torch(buffer, buffer_dtype, axis=mxfp_dim)[1]
-            buffer = downcast_to_mxfp_torch(buffer.mT.contiguous(), buffer_dtype, axis=mxfp_dim)[0].mT
+            scales = downcast_to_mxfp(buffer, buffer_dtype, axis=mxfp_dim)[1]
+            buffer = downcast_to_mxfp(buffer.mT.contiguous(), buffer_dtype, axis=mxfp_dim)[0].mT
         else:
-            buffer, scales = downcast_to_mxfp_torch(buffer, buffer_dtype, axis=mxfp_dim)
-        buffer = buffer.to(device)
-        scales = scales.to(device) if scales is not None else None
+            buffer, scales = downcast_to_mxfp(buffer, buffer_dtype, axis=mxfp_dim)
         buffer = wrap_torch_tensor(buffer, FP4 if dtype.is_mxfloat4 else None)
         scales = wrap_torch_tensor(scales)
         if scale_hbm_swizzling is not None:
@@ -993,7 +971,7 @@ def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, tra
     return buffer, scales, ragged_metadata
 
 
-@pytest.mark.parametrize("m, n, k", [(300, 400, 784), (128, 128, 512)])
+@pytest.mark.parametrize("m, n, k", [(300, 400, 416), (128, 128, 512)])
 @pytest.mark.parametrize("dtype_a, dtype_b", [("float8_e5m2", "mxfloat4_e2m1"), ("float8_e4m3fn", "mxfloat4_e2m1"),
                                               ("bfloat16", "bfloat16")])
 @pytest.mark.parametrize("do_gather", [True, False])
@@ -1031,8 +1009,7 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
     b_dtype = DType(dtype_b)
     c_dtype = DType(dtype_a)
 
-    # TODO: Use GPU once PyTorch support for GFX1250 finishes
-    device = 'cpu'
+    device = 'cuda'
 
     a_scale_preshuffling = SCALE_PRESHUFFLING and not do_gather
     a, a_scales, a_ragged_metadata = make_random_tensor(
@@ -1086,7 +1063,7 @@ def test_matmul(m, n, k, dtype_a, dtype_b, do_gather, do_scatter, do_bias, SCALE
 
     ref_y = matmul_torch(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt)
     if swiglu_opts is not None:
-        ref_y = swiglu(ref_y.cuda(), alpha=swiglu_opts[0], precision_config=SwiGLUPrecisionConfig(swiglu_opts[1])).cpu()
+        ref_y = swiglu(ref_y, alpha=swiglu_opts[0], precision_config=SwiGLUPrecisionConfig(swiglu_opts[1]))
 
     precision_opt = PrecisionConfig(
         flex_ctx=FlexCtx(InFlexData(), InFlexData(), OutFlexData()),
