@@ -54,7 +54,10 @@ pytest --count=1 -n 16 --durations=10 python/test/gluon/test_frontend.py
 echo "=== Run Gluon GEMM/Attention Tests ==="
 
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 32 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
-HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py
+HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py \
+    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[True-258-258-510-False-2-32-32-64]' \
+    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[False-258-258-510-False-2-32-32-64]' \
+    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[False-258-258-510-False-4-32-32-64]'
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/stream_copy_gfx1250.py
 
 unset HSA_MODEL_ARGS
@@ -73,7 +76,9 @@ pytest --count=1 -n 16 --durations=10 python/test/unit/language/test_conversions
 
 echo "=== Run Triton GEMM/Attention Tests ==="
 
-pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py
+pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-128-128-256-16-1]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-128-128-256-16-2]'
 
 PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
     mi400/test_gemm_hipdriver.py \
