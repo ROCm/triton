@@ -58,6 +58,11 @@ EXCLUDE_PATTERNS=(
     "test_block_scale_fp4"
     # Exclude patterns for runtime tests:
     "test_async_compile_mock" # hangs indefinitely in FFM (threading/async issues in simulation)
+    # Exclude patterns for test_tensor_descriptor.py
+    "test_tensor_descriptor_rank_reducing_matmul[float32]" # fails, but rank_reducing_load passes
+    "test_tensor_descriptor_reduce"
+    "test_tma_gather" # covers test_tma_gather and test_tma_gather_dot_pipeline
+    "test_tma_scatter"
 )
 
 # Build the -k expression: "not (pattern1 or pattern2 or ...)"
@@ -79,6 +84,7 @@ pytest -n 80 \
     -p no:forked \
     python/test/unit/language/test_core.py \
     python/test/unit/language/test_matmul.py \
+    python/test/unit/language/test_tensor_descriptor.py \
     python/test/unit/runtime \
     python/test/unit/test_debug.py
 
