@@ -782,7 +782,7 @@ void scheduleStreamOps(const LoadToStreamOpMap &loadToStreamOp,
 void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
                     tt::CoarseSchedule &schedule,
                     triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-                    int numStages, bool useAsyncCopy, bool waitAtTail) {
+                    bool useAsyncCopy, bool waitAtTail) {
   LDBG("SingleDotSchedule::updateSchedule");
   Stages stages;
   Clusters clusters;
@@ -793,8 +793,8 @@ void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
   }
 
   int numBuffers = 1;
-  if (failed(initSchedule(maxDist, stages, numStages, numBuffers, useAsyncCopy,
-                          waitAtTail, clusters, schedule)))
+  if (failed(initSchedule(maxDist, stages, schedule.getNumStages(), numBuffers,
+                          useAsyncCopy, waitAtTail, clusters, schedule)))
     return;
 
   // Convert the loads into shared memory allocations and loads from them.
@@ -997,7 +997,7 @@ void lowerLoop(scf::ForOp forOp,
                                        axisInfoAnalysis, useAsyncCopy);
   } else {
     SingleDotSchedule::updateSchedule(forOp, loadToInfo, schedule,
-                                      axisInfoAnalysis, numStages, useAsyncCopy,
+                                      axisInfoAnalysis, useAsyncCopy,
                                       waitAtTail);
   }
 
