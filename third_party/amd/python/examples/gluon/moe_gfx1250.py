@@ -16,6 +16,7 @@ from triton_kernels.tensor import make_ragged_tensor_metadata, wrap_torch_tensor
 from triton_kernels.tensor_details.ragged_tensor import ragged_metadata_fields
 from triton_kernels.tensor_details import layout
 from triton_kernels.topk import topk
+from triton_kernels.reduce import reduce
 from triton_kernels.specialize import ClosureArg, specialize
 from triton_kernels.matmul import FlexCtx, FusedActivation, PrecisionConfig
 from triton_kernels.matmul import init_allocation, apply_allocation, _canonicalize_storage, should_upcast_indices, matmul_torch
@@ -1127,8 +1128,8 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
     else:
         logits = torch.randn((batch, n_expts_tot), device=dev)
 
-    if len(actions) == 1 and actions[0] == "gating":
-        return
+    if action == "gating":
+        return logits.cpu()
 
     x, rdata, gather_indx, scatter_indx, _ = routing(input_x, logits, n_expts_act)
 
@@ -1136,14 +1137,24 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
         x, _ = matmul(x, w1, b1, rdata, gather_indx=gather_indx, precision_config=pc1, fused_activation=act)
     else:
         if x_dtype in (torch.float16, torch.bfloat16):
-            x = torch.randn((batch, dim2 // 2), device=dev, dtype=x_dtype)
+            x = torch.randn((batch * n_expts_act, dim2 // 2), device=dev, dtype=x_dtype)
         else:
             assert x_dtype == torch.float8_e4m3fn
-            x = 2**-(torch.randint(4, 8, (batch, dim2 // 2), device=dev, dtype=torch.float16))
-            x = x.view(x_dtype)
+            x = 2**-(torch.randint(4, 8, (batch * n_expts_act, dim2 // 2), device=dev, dtype=torch.float16))
+            x = x.to(x_dtype)
+
+    if action != "e2e":
+        return x.cpu()
 
     if "combine" in actions:
         x, _ = matmul(x, w2, b2, rdata, scatter_indx=scatter_indx, precision_config=pc2)
+
+    if action != "e2e":
+        return x.cpu()
+
+    x = x.view(-1, n_expts_act, x.shape[-1])
+    output, _ = reduce(x, dim=1)
+    return output.cpu()
 
 
 if __name__ == '__main__':
