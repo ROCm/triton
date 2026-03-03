@@ -83,6 +83,8 @@ public:
       if (auto transOp = dyn_cast_or_null<tt::TransOp>(op)) {
         LDBG("Found tranpose op: " << *transOp);
         cvtOp = transOp.getSrc().getDefiningOp<ttg::ConvertLayoutOp>();
+        if (!cvtOp)
+          continue;
         LDBG("Found parent cvt op of transpose: " << *cvtOp);
         usedValue = transOp->getResult(0);
         op =
