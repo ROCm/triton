@@ -2229,15 +2229,15 @@ struct AtomicRMWOpConversion
     // barriers have UnmodeledSideEffects but not mayStore(), so loads can
     // be sunk past them into successor blocks.
     //
-    // Why this happens here: When buffer atomics are not enabled for the
-    // target (see ConvertToBufferOps.cpp), this AtomicRMWOp lowering path
-    // is used instead. emitAtomicRMW() below creates a condBr that splits
-    // the current block to mask which threads execute the atomic. Without
-    // this fence, preceding LDS loads (from ConvertLayoutOps or reduce
-    // cross-warp communication) can be sunk past barriers in the successor
-    // blocks. On targets where buffer atomics ARE enabled (e.g., gfx950),
-    // LLVM replaces the condBr with buffer atomic OOB offset masking,
-    // eliminating the block split entirely and avoiding this issue.
+    // When buffer atomics are not enabled for the target (see
+    // ConvertToBufferOps.cpp), this AtomicRMWOp lowering path is used instead.
+    // emitAtomicRMW() below creates a condBr that splits the current block to
+    // mask which threads execute the atomic. Without this fence, preceding LDS
+    // loads (from ConvertLayoutOps or reduce cross-warp communication) can be
+    // sunk past barriers in the successor blocks. On targets where buffer
+    // atomics ARE enabled (e.g., gfx950), LLVM replaces the condBr with buffer
+    // atomic OOB offset masking, eliminating the block split entirely and
+    // avoiding this issue.
     //
     // This inline asm has mayStore()=true via the "~{memory}" constraint,
     // which sets SawStore in MachineSink's bottom-up walk, preventing any
