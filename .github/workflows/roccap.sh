@@ -25,8 +25,8 @@ LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 echo "=== Setup Environment ==="
 
 source /ffm-base/ffmlite_env.sh
-export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
-export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
+#export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
+#export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
 # Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite
 export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 
