@@ -76,9 +76,9 @@ pytest --count=1 -n 16 --durations=10 python/test/unit/language/test_conversions
 
 echo "=== Run Triton GEMM/Attention Tests ==="
 
-pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py \
-    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-128-128-256-16-1]' \
-    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-128-128-256-16-2]'
+# Disable time_slicing for mxfp_fa.py - causes numeric issues (https://github.com/ROCm/triton-internal/issues/1683)
+unset HSA_MODEL_ARGS
+pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py
 
 PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
     mi400/test_gemm_hipdriver.py \

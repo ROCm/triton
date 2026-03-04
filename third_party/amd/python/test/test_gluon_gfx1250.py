@@ -1,8 +1,9 @@
 # ruff: noqa: E402
-import hip
-
-hip.hip.hipInit(0)
-# Needed for internal dev flow for now; will remove later
+try:
+    import hip
+    hip.hip.hipInit(0)
+except ImportError:
+    pass
 
 import re
 import math
