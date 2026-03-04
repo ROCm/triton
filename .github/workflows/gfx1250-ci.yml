@@ -22,7 +22,7 @@ concurrency:
 jobs:
   gfx1250-gluon:
     name: Gluon
-    runs-on: ['self-hosted', 'ffm', 'name:smci350']
+    runs-on: ['self-hosted', 'ffm']
     timeout-minutes: 60
 
     steps:
@@ -52,7 +52,7 @@ jobs:
 
   gfx1250-triton:
     name: Triton
-    runs-on: ['self-hosted', 'ffm', 'pytorch', 'name:gbt350']
+    runs-on: ['self-hosted', 'ffm', 'pytorch']
     timeout-minutes: 50
 
     steps:
@@ -82,7 +82,7 @@ jobs:
 
   gfx1250-moe:
     name: MoE
-    runs-on: ['self-hosted', 'ffm', 'pytorch', 'name:gbt350']
+    runs-on: ['self-hosted', 'ffm', 'pytorch']
     timeout-minutes: 50
 
     steps:
