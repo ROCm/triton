@@ -4,8 +4,11 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/WalkPatternRewriteDriver.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/GenericSwizzling.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Debug.h"
 
 // InThreadTranspose pass optimizes inefficient
@@ -80,18 +83,14 @@ void refineGlobalLoadLayout(PatternRewriter &rewriter, Attribute encoding,
 
 void transposeInRegsitersBeforeStoreInLocalMemory(
     PatternRewriter &rewriter, Operation *memStoreOp,
-    ArrayRef<int64_t> loadShape, ttg::BlockedEncodingAttr newLoadEncoding) {
+    ttg::BlockedEncodingAttr newLoadEncoding,
+    ttg::LinearEncodingAttr transposedEncoding) {
   assert((mlir::isa<ttg::LocalAllocOp, ttg::LocalStoreOp>(memStoreOp)));
   // skip local_alloc with zero arguments
   if (memStoreOp->getNumOperands() == 0)
     return;
   auto data = memStoreOp->getOperand(0);
   rewriter.setInsertionPoint(memStoreOp);
-
-  auto transposedLayout =
-      ttag::InThreadTransposeOp::deduceOutputLayout(loadShape, newLoadEncoding);
-  auto transposedEncoding = ttg::LinearEncodingAttr::get(
-      memStoreOp->getContext(), std::move(transposedLayout));
 
   auto loc = memStoreOp->getLoc();
   auto newLoadType = replaceEncoding(data.getType(), newLoadEncoding);
@@ -106,37 +105,26 @@ void transposeInRegsitersBeforeStoreInLocalMemory(
   rewriter.finalizeOpModification(memStoreOp);
 }
 
-Attribute createNewSharedEncoding(RankedTensorType operandType) {
-  auto ctx = operandType.getContext();
-  auto dotOperandEnc =
-      cast<ttg::DotOperandEncodingAttr>(operandType.getEncoding());
-  auto cgaLayout = ttg::getCGALayout(dotOperandEnc);
-  auto bitWidth = operandType.getElementTypeBitWidth();
-  SmallVector<unsigned> order{1, 0};
-  if (dotOperandEnc.getOpIdx() == 1)
-    std::swap(order[0], order[1]);
+Attribute createNewSharedEncoding(tt::LinearLayout &srcLL,
+                                  tt::LinearLayout &dstLL,
+                                  RankedTensorType loadType, unsigned alignment,
+                                  int numBanks) {
+  MLIRContext *ctx = loadType.getContext();
+  int32_t bitwidth = loadType.getElementType().getIntOrFloatBitWidth();
 
-  auto tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-      ctx, dotOperandEnc, operandType.getShape(), order, cgaLayout, bitWidth,
-      /*needTrans=*/false);
+  auto optimalLL = ttg::optimalSwizzlingLdSt(srcLL, dstLL, bitwidth, numBanks);
 
-  auto sharedVec = tempAttr.getVec();
-  auto perPhase = tempAttr.getPerPhase();
-  auto maxPhase = tempAttr.getMaxPhase();
+  auto S = [&](StringRef name) { return StringAttr::get(ctx, name); };
+  auto linearLL = optimalLL.reshapeIns(
+      {{S("offset"), optimalLL.getTotalInDimSize()}, {S("block"), 1}});
 
-  auto newSharedEnc = ttg::AMDRotatingSharedEncodingAttr::get(
-      ctx, sharedVec, perPhase, maxPhase, order, cgaLayout);
-
-  return newSharedEnc;
+  return ttg::SharedLinearEncodingAttr::get(ctx, linearLL, alignment);
 }
 
 void changeSharedEncoding(PatternRewriter &rewriter, Value memVal,
                           Attribute newEncoding) {
   auto originalType = cast<ttg::MemDescType>(memVal.getType());
-  auto sharedEnc =
-      dyn_cast<ttg::SwizzledSharedEncodingAttr>(originalType.getEncoding());
-  // Already transformed this value
-  if (!sharedEnc)
+  if (originalType.getEncoding() == newEncoding)
     return;
 
   auto newType = ttg::MemDescType::get(
@@ -760,6 +748,18 @@ public:
         getTransposableBlockedEnc(dotOpEnc.getOpIdx(), loadResultType);
     auto loadShape = loadResultType.getShape();
 
+    auto srcLL =
+        ttag::InThreadTransposeOp::deduceOutputLayout(loadShape, newBlockedEnc);
+    auto dstLL = ttg::toLinearLayout(loadShape, dotOpEnc);
+
+    auto transposedEncoding =
+        ttg::LinearEncodingAttr::get(rewriter.getContext(), srcLL);
+    auto memDesc = cast<ttg::MemDescType>(localLoad.getSrc().getType());
+    unsigned alignment =
+        cast<ttg::SharedEncodingTrait>(memDesc.getEncoding()).getAlignment();
+    int numBanks = ttg::TritonGPUDialect::getNumBanks(
+        localLoad->getParentOfType<ModuleOp>());
+
     for (auto gLoad : pattern.globalLoads) {
       LDBG("operand newBlockedEnc = " << newBlockedEnc);
       refineGlobalLoadLayout(rewriter, newBlockedEnc, gLoad);
@@ -767,12 +767,12 @@ public:
 
     LDBG("Inserting transpose in registers before store in LDS");
     for (auto memOp : pattern.localAllocStores)
-      transposeInRegsitersBeforeStoreInLocalMemory(rewriter, memOp, loadShape,
-                                                   newBlockedEnc);
+      transposeInRegsitersBeforeStoreInLocalMemory(
+          rewriter, memOp, newBlockedEnc, transposedEncoding);
 
     LDBG("Adjust shared encoding");
-    auto newSharedEncoding =
-        createNewSharedEncoding(cast<RankedTensorType>(localLoad.getType()));
+    auto newSharedEncoding = createNewSharedEncoding(
+        srcLL, dstLL, loadResultType, alignment, numBanks);
     for (auto memVal : pattern.sharedMemVals)
       changeSharedEncoding(rewriter, memVal, newSharedEncoding);
     return success();
