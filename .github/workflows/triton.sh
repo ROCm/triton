@@ -38,6 +38,10 @@ python3 -c "import triton; print(triton.runtime.driver.active.get_current_target
 
 export TRITON_HIP_USE_ASYNC_COPY=1
 
+echo "=== Run FpSan Tests ==="
+pytest --count=1 -n 1 --durations=10 python/test/gluon/test_fpsan.py -v --tb=short
+
+
 echo "=== Run Triton Unit Tests ==="
 
 # Array of test patterns to exclude
