@@ -1740,9 +1740,11 @@ LinearLayout getTDMLinearLayout(ArrayRef<int64_t> blockShape,
     messageShape[i] = blockShape[i] / warpsPerCTA[i];
 
   auto order = getMatrixOrder(numDims, /*rowMajor=*/false);
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, numDims);
 
-  return identityStandardND(S("message"), messageShape, order) *
-         identityStandardND(S("warp"), warpsPerCTA, order) * cgaLayout;
+  return (identityStandardND(S("message"), messageShape, order) *
+          identityStandardND(S("warp"), warpsPerCTA, order) * cgaLayout)
+      .transposeOuts(outDimNames);
 }
 
 } // namespace mlir::triton::gpu

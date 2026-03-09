@@ -481,8 +481,46 @@ void fillTDMDescriptor(
   auto kOffset = str_attr("offset");
   auto kPartition = str_attr("partition");
 
+  // When !isRowMajor, shapePerCTA and offset have been swapped to match the
+  // TDM hardware coordinate space. The shared layout must be transformed to
+  // the same space for invertAndCompose to work. We swap the basis vector
+  // components for the trailing two tensor dimensions (dim(N-2) and dim(N-1)).
+  // Note: the output dimension ORDER in the layout may differ from
+  // [dim0, dim1, ...] (e.g. order [1,2,0] gives outputs [dim2, dim1, dim0]),
+  // so we must look up the actual indices by dimension name.
+  auto effectiveSharedLayout = sharedLayout;
+  if (!isRowMajor && numDims >= 2) {
+    auto outDimNames = llvm::to_vector(sharedLayout.getOutDimNames());
+    auto dimN_2 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 2));
+    auto dimN_1 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 1));
+    int idxA = sharedLayout.getOutDimIndex(dimN_2);
+    int idxB = sharedLayout.getOutDimIndex(dimN_1);
+    LinearLayout::BasesT newBases;
+    for (auto &[inDim, basisVectors] : sharedLayout.getBases()) {
+      auto &newBV = newBases[inDim];
+      for (auto &bv : basisVectors) {
+        SmallVector<int32_t> swapped(bv.begin(), bv.end());
+        std::swap(swapped[idxA], swapped[idxB]);
+        newBV.push_back({swapped.begin(), swapped.end()});
+      }
+    }
+    SmallVector<std::pair<StringAttr, int32_t>> newOutDims;
+    for (auto [i, name] : llvm::enumerate(outDimNames)) {
+      int32_t size;
+      if ((int)i == idxA)
+        size = sharedLayout.getOutDimSize(outDimNames[idxB]);
+      else if ((int)i == idxB)
+        size = sharedLayout.getOutDimSize(outDimNames[idxA]);
+      else
+        size = sharedLayout.getOutDimSize(name);
+      newOutDims.push_back({name, size});
+    }
+    effectiveSharedLayout =
+        LinearLayout(newBases, newOutDims, /*requireSurjective=*/false);
+  }
+
   auto cgaLayout = triton::gpu::SharedLinearEncodingAttr::get(
-                       ctx, sharedLayout, /*layoutAlignment=*/16)
+                       ctx, effectiveSharedLayout, /*layoutAlignment=*/16)
                        .getCGALayout()
                        .getLinearLayout();
 
@@ -496,7 +534,6 @@ void fillTDMDescriptor(
       loc, rewriter, tdmLayout,
       {{kMessage, b.i32_val(0)}, {kWarp, warpId}, {kBlock, ctaId}});
 
-  // Extract per-dimension offsets and update input offsets
   SmallVector<Value> globalOffset(numDims);
   for (size_t i = 0; i < numDims; ++i) {
     globalOffset[i] = warpOffset[i].second;
@@ -510,7 +547,7 @@ void fillTDMDescriptor(
   }
   srcPtr = b.gep(globalPtrTy, elementType, srcPtr, baseOffset);
 
-  auto tdmToShared = tdmLayout.invertAndCompose(sharedLayout);
+  auto tdmToShared = tdmLayout.invertAndCompose(effectiveSharedLayout);
   auto sharedOffsets = applyLinearLayout(
       loc, rewriter, tdmToShared,
       {{kMessage, b.i32_val(0)}, {kWarp, warpId}, {kBlock, ctaId}});
