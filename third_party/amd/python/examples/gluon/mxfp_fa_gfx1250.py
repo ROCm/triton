@@ -21,6 +21,7 @@ from triton.language.core import _aggregate as aggregate
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 from triton.experimental import gluon
 import triton.experimental.gluon.language as ttgl
+from triton.experimental.gluon.language import expand_dims
 
 from triton.experimental.gluon.language.amd import warp_pipeline_stage
 from triton.experimental.gluon.language.amd.gfx1250 import wmma_scaled
@@ -351,8 +352,8 @@ class MemoryBlock:
 
         offs_m = ttgl.arange(0, block_shape[0], ttgl.SliceLayout(1, layout))
         offs_n = ttgl.arange(0, block_shape[1], ttgl.SliceLayout(0, layout))
-        offs = offs_m[:, None] * shape[1] + offs_n[None, :]
-        mask = (offs_m < shape[0])[:, None] & (offs_n < shape[1])[None, :]
+        offs = expand_dims(offs_m, -1) * shape[1] + expand_dims(offs_n, -2)
+        mask = expand_dims(offs_m < shape[0], -1) & expand_dims(offs_n < shape[1], -2)
 
         return MemoryBlock(base, offs, mask, block_shape)
 
@@ -751,16 +752,16 @@ class GlobalScaledAttentionProgram:
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)
 
-            m = ttgl.max(qk, 1)
+            m = ttgl.max(qk, -1)
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             m_i = m_ij
             alpha = ttgl.exp2(m_diff)
-            l_ij = ttgl.sum(p, 1)
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p = self.downcast_p(p)
 
@@ -806,10 +807,10 @@ class GlobalScaledAttentionProgram:
 
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m = ttgl.max(qk, -1)  # ............................................... iter 0
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -831,8 +832,8 @@ class GlobalScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
-            l_ij = ttgl.sum(p, 1)  # .......................................... iter i
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)  # ......................................... iter i
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p = self.downcast_p(p)
 
@@ -841,10 +842,10 @@ class GlobalScaledAttentionProgram:
             self.issue_global_load_k(i + 3, buf=b, pred=pred)  # .............. iter i+3
 
             acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ............. iter i
-            m = ttgl.max(qk, 1)  # ............................................ iter i+1
+            m = ttgl.max(qk, -1)  # ........................................... iter i+1
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             alpha = ttgl.exp2(m_diff)
@@ -856,8 +857,8 @@ class GlobalScaledAttentionProgram:
 
         # pipeline epilogue, iter end-2
         qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-2
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -865,18 +866,18 @@ class GlobalScaledAttentionProgram:
         v = self.shared_load_v(buf=0)
 
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m = ttgl.max(qk, -1)  # ............................................... iter end-1
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
         m_i = m_ij
 
         # pipeline epilogue, iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-1
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-1
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -928,15 +929,15 @@ class GlobalScaledAttentionProgram:
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
         self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
 
         self.async_wait(4)  # ................................................. iter 1
         k0 = self.shared_load_k(sub_idx=0, buf=1)
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # ........ iter 0
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
         self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
@@ -954,15 +955,15 @@ class GlobalScaledAttentionProgram:
             m_diff = m_i * sm_scale - m_ij_scaled
             m_i = m_ij
             alpha = ttgl.exp2(m_diff)
-            acc0 = acc0 * alpha[:, None]
-            acc1 = acc1 * alpha[:, None]
+            acc0 = acc0 * expand_dims(alpha, -1)
+            acc1 = acc1 * expand_dims(alpha, -1)
             self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .............. iter i+1
 
             qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ........... iter i+1
             self.async_wait(4)  # ............................................. iter i
             v0 = self.shared_load_v(sub_idx=0, buf=a)
             p = self.concat_subtile(p0, p1)  # ................................ iter i
-            l_ij = ttgl.sum(p, 1)
+            l_ij = ttgl.sum(p, -1)
             l_i = l_i * alpha + l_ij
             p = self.downcast_p(p)
             self.issue_global_load_v(i + 1, sub_idx=1, buf=b)  # .............. iter i+1
@@ -971,7 +972,7 @@ class GlobalScaledAttentionProgram:
             self.async_wait(4)  # ............................................. iter i
             v1 = self.shared_load_v(sub_idx=1, buf=a)
             qk = self.concat_subtile(qk0, qk1)  # ............................. iter i+1
-            m = ttgl.max(qk, 1)
+            m = ttgl.max(qk, -1)
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
             self.issue_global_load_k(i + 3, sub_idx=0, buf=b, pred=pred)  # ... iter i+3
@@ -979,8 +980,8 @@ class GlobalScaledAttentionProgram:
             acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)  # .......... iter i
             self.async_wait(4)  # ............................................. iter i+2
             k0 = self.shared_load_k(sub_idx=0, buf=a)
-            qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ............ iter i+1
-            qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+            qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # .... iter i+1
+            qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
             p0 = ttgl.exp2(qk0_shifted)
             self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # ... iter i+3
 
@@ -992,11 +993,11 @@ class GlobalScaledAttentionProgram:
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1013,21 +1014,21 @@ class GlobalScaledAttentionProgram:
         qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
         p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1083,15 +1084,15 @@ class GlobalScaledAttentionProgram:
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
         self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
 
         self.async_wait(4)
         k0 = self.shared_load_k(sub_idx=0, buf=1)  # .......................... iter 1
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # ........ iter 0
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
         self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
@@ -1108,8 +1109,8 @@ class GlobalScaledAttentionProgram:
                 m_diff = m_i * sm_scale - m_ij_scaled
                 m_i = m_ij
                 alpha = ttgl.exp2(m_diff)
-                acc0 = acc0 * alpha[:, None]
-                acc1 = acc1 * alpha[:, None]
+                acc0 = acc0 * expand_dims(alpha, -1)
+                acc1 = acc1 * expand_dims(alpha, -1)
 
             self.async_wait(4)
             with warp_pipeline_stage("memory0"):
@@ -1119,7 +1120,7 @@ class GlobalScaledAttentionProgram:
             with warp_pipeline_stage("compute1"):
                 qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)  # ....... iter i+1
                 p = self.concat_subtile(p0, p1)  # ............................ iter i
-                l_ij = ttgl.sum(p, 1)
+                l_ij = ttgl.sum(p, -1)
                 l_i = l_i * alpha + l_ij
                 p = self.downcast_p(p)
 
@@ -1131,7 +1132,7 @@ class GlobalScaledAttentionProgram:
             with warp_pipeline_stage("compute2"):
                 acc0 = self.compute_pv(p, p_scale, v0, v_scale, acc0)  # ...... iter i
                 qk = self.concat_subtile(qk0, qk1)  # ......................... iter i+1
-                m = ttgl.max(qk, 1)
+                m = ttgl.max(qk, -1)
                 m_ij = ttgl.maximum(m_i, m)
                 m_ij_scaled = m_ij * sm_scale
 
@@ -1142,8 +1143,8 @@ class GlobalScaledAttentionProgram:
 
             with warp_pipeline_stage("compute3"):
                 acc1 = self.compute_pv(p, p_scale, v1, v_scale, acc1)  # ...... iter i
-                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ........ iter i+1
-                qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+                qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # iter i+1
+                qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
                 p0 = ttgl.exp2(qk0_shifted)
 
             self.async_wait(4)
@@ -1159,11 +1160,11 @@ class GlobalScaledAttentionProgram:
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1180,23 +1181,23 @@ class GlobalScaledAttentionProgram:
         qk1 = self.compute_qk(q, q_scale, k1, k_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
 
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
 
         p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1246,10 +1247,10 @@ class GlobalScaledAttentionProgram:
 
         self.issue_global_load_v(1, buf=1)  # ................................. iter 1
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m = ttgl.max(qk, -1)  # ............................................... iter 0
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -1269,8 +1270,8 @@ class GlobalScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
-            l_ij = ttgl.sum(p, 1)  # .......................................... iter i
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)  # ......................................... iter i
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p = self.downcast_p(p)
 
@@ -1279,10 +1280,10 @@ class GlobalScaledAttentionProgram:
             v = self.shared_load_v(buf=a)  # .................................. iter i
 
             acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ............. iter i
-            m = ttgl.max(qk, 1)  # ............................................ iter i+1
+            m = ttgl.max(qk, -1)  # ........................................... iter i+1
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             alpha = ttgl.exp2(m_diff)
@@ -1296,8 +1297,8 @@ class GlobalScaledAttentionProgram:
         a = (end - 1) % 3
 
         qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-2
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1305,10 +1306,10 @@ class GlobalScaledAttentionProgram:
         v = self.shared_load_v(buf=a)  # ...................................... iter end-2
 
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m = ttgl.max(qk, -1)  # ............................................... iter end-1
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -1317,8 +1318,8 @@ class GlobalScaledAttentionProgram:
         # pipeline epilogue, iter end-1
         a = (end - 1) % 3
 
-        l_ij = ttgl.sum(p, 1)
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p = self.downcast_p(p)
 
@@ -1744,16 +1745,16 @@ class BlockScaledAttentionProgram:
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)
 
-            m = ttgl.max(qk, 1)
+            m = ttgl.max(qk, -1)
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             m_i = m_ij
             alpha = ttgl.exp2(m_diff)
-            l_ij = ttgl.sum(p, 1)
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p, p_scale = self.downcast_p(p)
 
@@ -1801,10 +1802,10 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_k(2, buf=0)  # ................................. iter 2
         self.issue_global_load_k_scale(2, buf=0)  # ........................... iter 2
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m = ttgl.max(qk, -1)  # ............................................... iter 0
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -1828,8 +1829,8 @@ class BlockScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
-            l_ij = ttgl.sum(p, 1)  # .......................................... iter i
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)  # ......................................... iter i
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p, p_scale = self.downcast_p(p)
 
@@ -1840,10 +1841,10 @@ class BlockScaledAttentionProgram:
             self.issue_global_load_k_scale(i + 3, buf=b, pred=pred)  # ........ iter i+3
 
             acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ............. iter i
-            m = ttgl.max(qk, 1)  # ............................................ iter i+1
+            m = ttgl.max(qk, -1)  # ........................................... iter i+1
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             alpha = ttgl.exp2(m_diff)
@@ -1857,8 +1858,8 @@ class BlockScaledAttentionProgram:
 
         # pipeline epilogue, iter end-2
         qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-2
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -1867,18 +1868,18 @@ class BlockScaledAttentionProgram:
         v_scale = self.shared_load_v_scale(buf=0)
 
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m = ttgl.max(qk, -1)  # ............................................... iter end-1
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
         m_i = m_ij
 
         # pipeline epilogue, iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-1
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-1
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -1932,7 +1933,7 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
         self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
@@ -1943,8 +1944,8 @@ class BlockScaledAttentionProgram:
         self.async_wait(5)  # ................................................. iter 1
         k0_scale = self.shared_load_k_scale(buf=1, slice=0)
         k1_scale = self.shared_load_k_scale(buf=1, slice=1)
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # ........ iter 0
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
         self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
@@ -1962,8 +1963,8 @@ class BlockScaledAttentionProgram:
             m_diff = m_i * sm_scale - m_ij_scaled
             m_i = m_ij
             alpha = ttgl.exp2(m_diff)
-            acc0 = acc0 * alpha[:, None]
-            acc1 = acc1 * alpha[:, None]
+            acc0 = acc0 * expand_dims(alpha, -1)
+            acc1 = acc1 * expand_dims(alpha, -1)
             self.issue_global_load_v(i + 1, sub_idx=0, buf=b)  # .............. iter i+1
             self.issue_global_load_v_scale(i + 1, buf=b)  # ................... iter i+1
 
@@ -1974,7 +1975,7 @@ class BlockScaledAttentionProgram:
             v0_scale = self.shared_load_v_scale(buf=a, slice=0)
             v1_scale = self.shared_load_v_scale(buf=a, slice=1)
             p = self.concat_subtile(p0, p1)  # ................................ iter i
-            l_ij = ttgl.sum(p, 1)
+            l_ij = ttgl.sum(p, -1)
             l_i = l_i * alpha + l_ij
             p, p_scale = self.downcast_p(p)
             self.issue_global_load_v(i + 1, sub_idx=1, buf=b)  # .............. iter i+1
@@ -1983,7 +1984,7 @@ class BlockScaledAttentionProgram:
             self.async_wait(5)  # ............................................. iter i
             v1 = self.shared_load_v(sub_idx=1, buf=a)
             qk = self.concat_subtile(qk0, qk1)  # ............................. iter i+1
-            m = ttgl.max(qk, 1)
+            m = ttgl.max(qk, -1)
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
             self.issue_global_load_k(i + 3, sub_idx=0, buf=b, pred=pred)  # ... iter i+3
@@ -1995,8 +1996,8 @@ class BlockScaledAttentionProgram:
             self.async_wait(5)  # ............................................. iter i+2
             k0_scale = self.shared_load_k_scale(buf=a, slice=0)
             k1_scale = self.shared_load_k_scale(buf=a, slice=1)
-            qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ............ iter i+1
-            qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+            qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # .... iter i+1
+            qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
             p0 = ttgl.exp2(qk0_shifted)
             self.issue_global_load_k(i + 3, sub_idx=1, buf=b, pred=pred)  # ... iter i+3
 
@@ -2009,11 +2010,11 @@ class BlockScaledAttentionProgram:
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2032,23 +2033,23 @@ class BlockScaledAttentionProgram:
         qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
 
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
 
         p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2106,7 +2107,7 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_v(0, sub_idx=1, buf=0)  # ...................... iter 0
 
         qk = self.concat_subtile(qk0, qk1)  # ................................. iter 0
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
         self.issue_global_load_k(2, sub_idx=0, buf=0)  # ...................... iter 2
@@ -2116,8 +2117,8 @@ class BlockScaledAttentionProgram:
         k0 = self.shared_load_k(sub_idx=0, buf=1)  # .......................... iter 1
         k0_scale = self.shared_load_k_scale(buf=1, slice=0)
         k1_scale = self.shared_load_k_scale(buf=1, slice=1)
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ................ iter 0
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # ........ iter 0
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
         self.issue_global_load_k(2, sub_idx=1, buf=0)  # ...................... iter 2
 
@@ -2134,8 +2135,8 @@ class BlockScaledAttentionProgram:
                 m_diff = m_i * sm_scale - m_ij_scaled
                 m_i = m_ij
                 alpha = ttgl.exp2(m_diff)
-                acc0 = acc0 * alpha[:, None]
-                acc1 = acc1 * alpha[:, None]
+                acc0 = acc0 * expand_dims(alpha, -1)
+                acc1 = acc1 * expand_dims(alpha, -1)
 
             self.async_wait(7)
             with warp_pipeline_stage("memory0"):
@@ -2146,7 +2147,7 @@ class BlockScaledAttentionProgram:
             with warp_pipeline_stage("compute1"):
                 qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)  # ...... iter i+1
                 p = self.concat_subtile(p0, p1)  # ............................ iter i
-                l_ij = ttgl.sum(p, 1)
+                l_ij = ttgl.sum(p, -1)
                 l_i = l_i * alpha + l_ij
                 p, p_scale = self.downcast_p(p)
 
@@ -2160,7 +2161,7 @@ class BlockScaledAttentionProgram:
             with warp_pipeline_stage("compute2"):
                 acc0 = self.compute_pv(p, p_scale, v0, v0_scale, acc0)  # ..... iter i
                 qk = self.concat_subtile(qk0, qk1)  # ......................... iter i+1
-                m = ttgl.max(qk, 1)
+                m = ttgl.max(qk, -1)
                 m_ij = ttgl.maximum(m_i, m)
                 m_ij_scaled = m_ij * sm_scale
 
@@ -2172,8 +2173,8 @@ class BlockScaledAttentionProgram:
 
             with warp_pipeline_stage("compute3"):
                 acc1 = self.compute_pv(p, p_scale, v1, v1_scale, acc1)  # ..... iter i
-                qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]  # ........ iter i+1
-                qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+                qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)  # iter i+1
+                qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
                 p0 = ttgl.exp2(qk0_shifted)
 
             self.async_wait(7)
@@ -2192,11 +2193,11 @@ class BlockScaledAttentionProgram:
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2216,23 +2217,23 @@ class BlockScaledAttentionProgram:
         qk1 = self.compute_qk(q, q_scale, k1, k1_scale, zero)
 
         qk = self.concat_subtile(qk0, qk1)
-        m = ttgl.max(qk, 1)
+        m = ttgl.max(qk, -1)
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
 
-        qk0_shifted = qk0 * sm_scale - m_ij_scaled[:, None]
-        qk1_shifted = qk1 * sm_scale - m_ij_scaled[:, None]
+        qk0_shifted = qk0 * sm_scale - expand_dims(m_ij_scaled, -1)
+        qk1_shifted = qk1 * sm_scale - expand_dims(m_ij_scaled, -1)
         p0 = ttgl.exp2(qk0_shifted)
 
         p1 = ttgl.exp2(qk1_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         m_i = m_ij
         alpha = ttgl.exp2(m_diff)
-        acc0 = acc0 * alpha[:, None]
-        acc1 = acc1 * alpha[:, None]
+        acc0 = acc0 * expand_dims(alpha, -1)
+        acc1 = acc1 * expand_dims(alpha, -1)
 
         p = self.concat_subtile(p0, p1)
-        l_ij = ttgl.sum(p, 1)
+        l_ij = ttgl.sum(p, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2285,10 +2286,10 @@ class BlockScaledAttentionProgram:
         self.issue_global_load_v(1, buf=1)  # ................................. iter 1
         self.issue_global_load_v_scale(1, buf=1)  # ........................... iter 1
 
-        m = ttgl.max(qk, 1)  # ................................................ iter 0
+        m = ttgl.max(qk, -1)  # ............................................... iter 0
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -2310,8 +2311,8 @@ class BlockScaledAttentionProgram:
             pred = (pred >> 31) & 1
 
             qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ............. iter i+1
-            l_ij = ttgl.sum(p, 1)  # .......................................... iter i
-            acc = acc * alpha[:, None]
+            l_ij = ttgl.sum(p, -1)  # ......................................... iter i
+            acc = acc * expand_dims(alpha, -1)
             l_i = l_i * alpha + l_ij
             p, p_scale = self.downcast_p(p)
 
@@ -2322,10 +2323,10 @@ class BlockScaledAttentionProgram:
             v_scale = self.shared_load_v_scale(buf=a)
 
             acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ............. iter i
-            m = ttgl.max(qk, 1)  # ............................................ iter i+1
+            m = ttgl.max(qk, -1)  # ........................................... iter i+1
             m_ij = ttgl.maximum(m_i, m)
             m_ij_scaled = m_ij * sm_scale
-            qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+            qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
             p = ttgl.exp2(qk_shifted)
             m_diff = m_i * sm_scale - m_ij_scaled
             alpha = ttgl.exp2(m_diff)
@@ -2341,8 +2342,8 @@ class BlockScaledAttentionProgram:
         a = (end - 2) % 3
 
         qk = self.compute_qk(q, q_scale, k, k_scale, zero)  # ................. iter end-1
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-2
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-2
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2351,10 +2352,10 @@ class BlockScaledAttentionProgram:
         v_scale = self.shared_load_v_scale(buf=a)
 
         acc = self.compute_pv(p, p_scale, v, v_scale, acc)  # ................. iter end-2
-        m = ttgl.max(qk, 1)  # ................................................ iter end-1
+        m = ttgl.max(qk, -1)  # ............................................... iter end-1
         m_ij = ttgl.maximum(m_i, m)
         m_ij_scaled = m_ij * sm_scale
-        qk_shifted = qk * sm_scale - m_ij_scaled[:, None]
+        qk_shifted = qk * sm_scale - expand_dims(m_ij_scaled, -1)
         p = ttgl.exp2(qk_shifted)
         m_diff = m_i * sm_scale - m_ij_scaled
         alpha = ttgl.exp2(m_diff)
@@ -2363,8 +2364,8 @@ class BlockScaledAttentionProgram:
         # pipeline epilogue, iter end-1
         a = (end - 1) % 3
 
-        l_ij = ttgl.sum(p, 1)  # .............................................. iter end-1
-        acc = acc * alpha[:, None]
+        l_ij = ttgl.sum(p, -1)  # ............................................. iter end-1
+        acc = acc * expand_dims(alpha, -1)
         l_i = l_i * alpha + l_ij
         p, p_scale = self.downcast_p(p)
 
@@ -2416,7 +2417,7 @@ def store_output(  #
             layout=cfg.store_layout)
 
         l_recip = 1 / l_i
-        acc = acc * l_recip[:, None]
+        acc = acc * expand_dims(l_recip, -1)
         o = acc.to(o_blk.dtype)
         o = ttgl.convert_layout(o, cfg.store_layout)
         buffer_store(o, o_blk.ptr, o_blk.offs, o_blk.mask)
@@ -2438,7 +2439,7 @@ def store_output(  #
                 layout=cfg.store_layout)
 
             l_recip = 1 / l_i
-            acc = acc * l_recip[:, None]
+            acc = acc * expand_dims(l_recip, -1)
             o = acc.to(o_blk.dtype)
             o = ttgl.convert_layout(o, cfg.store_layout)
             buffer_store(o, o_blk.ptr, o_blk.offs, o_blk.mask)
@@ -2465,12 +2466,12 @@ def store_output(  #
             #   off_h * stride_h (GROUP_SZ * SPLIT_K) +
             #   off_s * stride_s (1)
             l_off = GROUP_SZ * SPLIT_K * (NUM_GROUPS * off_z + off_h) + off_s
-            l_offs = ttgl.arange(0, BLOCK_M, ttgl.SliceLayout(1, cfg.acc_layout))[:, None] * SPLIT_K
-            buffer_store(l_i[:, None], l_ptr + l_off, l_offs)
+            l_offs = expand_dims(ttgl.arange(0, BLOCK_M, ttgl.SliceLayout(1, cfg.acc_layout)), -1) * SPLIT_K
+            buffer_store(expand_dims(l_i, -1), l_ptr + l_off, l_offs)
 
             m_off = l_off
             m_offs = l_offs
-            buffer_store(m_i[:, None], m_ptr + m_off, m_offs)
+            buffer_store(expand_dims(m_i, -1), m_ptr + m_off, m_offs)
 
 
 @gluon.jit
@@ -2559,8 +2560,8 @@ def mxfp_attn_reduce_kernel(  #
     #   off_z * stride_z (NUM_GROUPS * GROUP_SZ * SPLIT_K) +
     #   off_h * stride_h (GROUP_SZ * SPLIT_K)
     l_off = GROUP_SZ * SPLIT_K * (NUM_GROUPS * off_z + off_h)
-    l_offs = ttgl.arange(0, BLOCK_M, ttgl.SliceLayout(1, acc_layout))[:, None] * SPLIT_K + \
-             ttgl.arange(0, SPLIT_K, ttgl.SliceLayout(0, acc_layout))[None, :]
+    l_offs = expand_dims(ttgl.arange(0, BLOCK_M, ttgl.SliceLayout(1, acc_layout)), -1) * SPLIT_K + \
+             expand_dims(ttgl.arange(0, SPLIT_K, ttgl.SliceLayout(0, acc_layout)), -2)
 
     m_off = l_off
     m_offs = l_offs
@@ -2588,12 +2589,12 @@ def mxfp_attn_reduce_kernel(  #
     for i in ttgl.static_range(SPLIT_K):
         tdm.async_load(o_desc, [i * BLOCK_M, off_s * (HEAD_SZ // SPLIT_K)], o_smem.index(i))
 
-    m_ij = ttgl.max(m, 1)
+    m_ij = ttgl.max(m, -1)
     m_ij_scaled = m_ij * sm_scale
-    m_diff = m * sm_scale - m_ij_scaled[:, None]
+    m_diff = m * sm_scale - expand_dims(m_ij_scaled, -1)
     alpha = ttgl.exp2(m_diff)
     alpha_s = split_n(alpha, SPLIT_K)
-    l_i = ttgl.sum(l * alpha, 1)
+    l_i = ttgl.sum(l * alpha, -1)
 
     for i in ttgl.static_range(SPLIT_K):
         tdm.async_wait(SPLIT_K - 1 - i)
@@ -2601,7 +2602,7 @@ def mxfp_attn_reduce_kernel(  #
         acc += o * alpha_s[i]
 
     l_recip = 1 / l_i
-    acc = acc * l_recip[:, None]
+    acc = acc * expand_dims(l_recip, -1)
 
     o_blk = MemoryBlock.initialize(  #
         o_ptr + off_s * (HEAD_SZ // SPLIT_K),  #
