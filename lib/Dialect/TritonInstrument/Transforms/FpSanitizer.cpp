@@ -850,9 +850,8 @@ struct DotPattern : public OpRewritePattern<tt::DotOp> {
     Value bPtr = createScratchAndStore(rewriter, loc, op.getB(), bTy);
     Value dPtr = createScratchAndStore(rewriter, loc, op.getC(), cTy);
 
-    // Each warp/wave may only store a subset of each tile's rows, so a
-    // barrier is needed to make all scratch stores visible before the loops
-    // read them.
+    // Each warp may only store a subset of each tile's rows, so a barrier is
+    // needed to make all scratch stores visible before the loops read them.
     ttg::BarrierOp::create(rewriter, loc,
                            ttg::AddrSpace::GlobalRead |
                                ttg::AddrSpace::GlobalWrite);
@@ -865,8 +864,8 @@ struct DotPattern : public OpRewritePattern<tt::DotOp> {
       return failure();
     rewriter.setInsertionPointAfter(*mLoop);
 
-    // Same reason: each warp/wave may only write a subset of D's rows in
-    // the loop, so synchronize before the final load.
+    // Same reason: each warp may only write a subset of D's rows in the loop,
+    // so synchronize before the final load.
     ttg::BarrierOp::create(rewriter, loc,
                            ttg::AddrSpace::GlobalRead |
                                ttg::AddrSpace::GlobalWrite);
