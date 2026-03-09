@@ -48,12 +48,12 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 //   → padded_shared<[32:+8]>
 //
 // Operand B (opIdx=1, order=[1,0]): loadTransposed = (1 != 0) = true → transposed
-//   queryLDSTransLoadParams(16) → instBitWidth=128, padAmount = 128/16 = 8
+//   queryLDSTransLoadParams(16) → instBitWidth=128, padAmount = 2*128/16 = 16
 //   innerDimLength = shape[order[0]] = shape[1] = 64 (N dim)
-//   → padded_shared<[64:+8]>
+//   → padded_shared<[64:+16]>
 // CHECK:     #ttg.padded_shared<[32:+8] {
 // CHECK-NOT: #ttg.padded_shared
-// CHECK:     #ttg.padded_shared<[64:+8] {
+// CHECK:     #ttg.padded_shared<[64:+16] {
 // CHECK-NOT: #ttg.padded_shared
 
 // CHECK-LABEL: tt.func @matmul_kernel_make_tensor_descriptor
@@ -72,17 +72,18 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // Test TDM padding for fp8 (f8E5M2) matmul on gfx1250.
 //
 // Operand A (opIdx=0, order=[1,0]): loadTransposed = (1 != 1) = false → non-transposed
-//   padAmount = min(kWidth=8, 128/8) = min(8, 16) = 8
+//   padAmount = 128/8 = 16 (sub-dword: no min with vecWidth, full 4-dword
+//   stride separation needed for ds_load_2addr_b64 cross-address conflicts)
 //   innerDimLength = shape[1] = 64 (K dim)
-//   → padded_shared<[64:+8]>
+//   → padded_shared<[64:+16]>
 //
 // Operand B (opIdx=1, order=[1,0]): loadTransposed = (1 != 0) = true → transposed
-//   queryLDSTransLoadParams(8) → instBitWidth=64, padAmount = 64/8 = 8
+//   queryLDSTransLoadParams(8) → instBitWidth=64, padAmount = 2*64/8 = 16
 //   innerDimLength = shape[1] = 64 (N dim)
-//   → padded_shared<[64:+8]>
-// CHECK:     #ttg.padded_shared<[64:+8] {
+//   → padded_shared<[64:+16]>
+// CHECK:     #ttg.padded_shared<[64:+16] {
 // CHECK-NOT: #ttg.padded_shared
-// CHECK:     #ttg.padded_shared<[64:+8] {
+// CHECK:     #ttg.padded_shared<[64:+16] {
 // CHECK-NOT: #ttg.padded_shared
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 16], threadsPerWarp = [8, 4], warpsPerCTA = [8, 1], order = [1, 0]}>

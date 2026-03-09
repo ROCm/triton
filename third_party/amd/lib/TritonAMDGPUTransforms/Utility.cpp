@@ -321,26 +321,36 @@ ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
 //
 //   Transposed (ds_load_tr*):
 //     Used when K is contiguous in shared memory but the dot instruction
-//     needs the non-K dimension contiguous in registers.  The instruction
-//     cooperatively loads a fixed sub-tile across 16 lanes. Each lane reads
-//     instBitWidth/elemBits consecutive elements from its row. Padding must
-//     match this element count so that successive rows land on different banks.
+//     needs the non-K dimension contiguous in registers. The instruction
+//     cooperatively loads a fixed sub-tile across shuffle groups. In each
+//     execution cycle, two shuffle groups (16 lanes total) access a combined
+//     row of 2 × (instBitWidth/elemBits) elements. To avoid bank conflicts,
+//     the padding must equal this combined row width so that each successive
+//     LDS row lands on a completely disjoint set of banks.
 //
-//       16-bit (fp16/bf16): ds_load_tr16_b128 → 128/16 = 8 elems → pad 8
-//        8-bit (fp8/i8):    ds_load_tr8_b64   →  64/8  = 8 elems → pad 8
+//       16-bit (fp16/bf16): ds_load_tr16_b128 → 2 × 128/16 = 16 elems → pad 16
+//        8-bit (fp8/i8):    ds_load_tr8_b64   → 2 ×  64/8  = 16 elems → pad 16
 //       32-bit (f32):       no transposed instruction; falls back to
 //                           non-transposed ds_load_b* where each thread
 //                           loads sequentially.
 //
 //   Non-transposed (ds_load_b*):
 //     Used when the shared memory layout already matches what the dot
-//     instruction expects.  Each thread issues a vector load of vecWidth
-//     consecutive elements, capped at 128 bits.  Padding matches this
-//     effective vector width.
+//     instruction expects. Each thread issues a vector load of consecutive
+//     elements.  Padding ensures the LDS row stride (in dwords) avoids
+//     periodic bank aliasing across the 16 nonK-positions per cycle.
 //
-//       32-bit (f32):  min(vecWidth, 128/32) = min(vecWidth, 4) → pad ≤ 4
-//       16-bit (fp16): min(vecWidth, 128/16) = min(vecWidth, 8) → pad ≤ 8
-//        8-bit (fp8):  min(vecWidth, 128/8)  = min(vecWidth,16) → pad ≤ 16
+//     For dword-or-wider elements (f32+): pad = min(vecWidth, 128/elemBits).
+//     The load width in dwords equals vecWidth, so pad = vecWidth gives
+//     gcd(stride_dwords, 64) = vecWidth — optimal bank separation.
+//       32-bit kWidth=4: min(4, 4) = 4 elems (MFMA 16x16x4)
+//       32-bit kWidth=2: min(2, 4) = 2 elems (MFMA 32x32x2)
+//
+//     For sub-dword elements (fp16/fp8): pad = 128/elemBits (= 4 dwords).
+//     Dual-address loads (e.g. ds_load_2addr_b64) need the full 4-dword
+//     stride separation to avoid cross-address bank conflicts.
+//       16-bit (fp16): 128/16 =  8 elems
+//        8-bit (fp8):  128/8  = 16 elems
 //
 // Note on 4-bit types (i4): two i4 elements are packed into one i8 in LDS,
 // so from a bank-conflict perspective 4-bit behaves identically to 8-bit
@@ -361,18 +371,34 @@ getPaddedEncodingForDotOp(mlir::MLIRContext *context, int opIdx,
   // Fallback: assume padding to match widest load width
   unsigned padAmount = 128 / typeWidthInBit;
   if (loadTransposed) {
-    // Transposed path: pad by the number of elements per lane in the
-    // transposed instruction.  Query the target for the actual instruction
-    // bit-width; fall back to 128-bit if no transposed instruction exists
-    // (e.g. f32).
+    // Transposed path: pad by twice the elements-per-lane of the transposed
+    // instruction.  Two shuffle groups execute per cycle, each reading
+    // instBitWidth/elemBits elements from the same row set.  Padding by
+    // 2× ensures the stride (in dwords) is an odd multiple of the combined
+    // row-access width, distributing all 16 lanes' bank accesses across
+    // disjoint banks and eliminating conflicts for tile widths >= 32.
     if (auto ldsParams = targetInfo.queryLDSTransLoadParams(typeWidthInBit)) {
-      padAmount = ldsParams->instBitWidth / typeWidthInBit;
+      padAmount = 2 * ldsParams->instBitWidth / typeWidthInBit;
     }
   } else {
-    // Non-transposed path: pad by the effective vector load width.
-    // vecWidth is the dot operand's kWidth, capped at max elements
-    // per 128-bit load.
-    padAmount = std::min(vecWidth, padAmount);
+    // Non-transposed path: each cycle 16 lanes at distinct nonK rows load
+    // vecWidth consecutive K elements.  Padding shifts the row stride so
+    // that gcd(stride_dwords, 64) is small enough for all lanes' bank
+    // sets to be disjoint.
+    //
+    // For dword-or-wider elements (f32+): pad = min(vecWidth, 128/elemBits).
+    // vecWidth elements = vecWidth dwords, giving gcd(stride_dwords, 64) =
+    // vecWidth for power-of-2 BLOCK_K.  This is optimal:
+    //   MFMA 16x16x4 f32 (kWidth=4): pad=4 → conflict-free
+    //   MFMA 32x32x2 f32 (kWidth=2): pad=2 → conflict-free
+    //
+    // For sub-dword elements (fp16/fp8): keep pad = 128/elemBits (4 dwords).
+    // On architectures with dual-address LDS loads (e.g. gfx1250
+    // ds_load_2addr_b64 for fp8), two addresses are served simultaneously,
+    // requiring the full 4-dword stride separation to avoid cross-address
+    // bank conflicts.
+    if (typeWidthInBit >= 32)
+      padAmount = std::min(vecWidth, padAmount);
   }
 
   unsigned padInterval = innerDimLength;
