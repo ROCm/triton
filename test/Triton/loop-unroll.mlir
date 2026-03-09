@@ -25,6 +25,35 @@ tt.func @add_kernel_unroll(%arg0: tensor<256x!tt.ptr<f32>>, %arg1: i32) {
 
 // -----
 
+// When a dominating llvm.intr.assume proves the trip count is divisible
+// by the unroll factor, the epilogue should be eliminated entirely.
+tt.func @add_kernel_unroll_assume_divisible(%arg0: tensor<256x!tt.ptr<f32>>, %arg1: i32) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %c2_i32 = arith.constant 2 : i32
+  %cst = arith.constant 0.000000e+00 : f32
+  %0 = tt.splat %c1_i32 : i32 -> tensor<256xi32>
+  %1 = tt.splat %cst : f32 -> tensor<256xf32>
+  %rem = arith.remsi %arg1, %c2_i32 : i32
+  %cmp = arith.cmpi eq, %rem, %c0_i32 : i32
+  llvm.intr.assume %cmp : i1
+  // CHECK-LABEL: add_kernel_unroll_assume_divisible
+  // CHECK: scf.for
+  // CHECK-COUNT-2: tt.load
+  // CHECK-NOT: tt.load
+  // No epilogue loop:
+  // CHECK-NOT: scf.for
+  %2:2 = scf.for %arg3 = %c0_i32 to %arg1 step %c1_i32 iter_args(%arg4 = %1, %arg5 = %arg0) -> (tensor<256xf32>, tensor<256x!tt.ptr<f32>>)  : i32 {
+      %3 = tt.load %arg5 : tensor<256x!tt.ptr<f32>>
+    %4 = arith.addf %arg4, %3 : tensor<256xf32>
+    %5 = tt.addptr %arg5, %0 : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    scf.yield %4, %5 : tensor<256xf32>, tensor<256x!tt.ptr<f32>>
+  } {tt.loop_unroll_factor = 2 : i32}
+  tt.return
+}
+
+// -----
+
 tt.func @add_kernel_nounroll(%arg0: tensor<256x!tt.ptr<f32>>, %arg1: i32) {
   %c1_i32 = arith.constant 1 : i32
   %cst = arith.constant 0.000000e+00 : f32
