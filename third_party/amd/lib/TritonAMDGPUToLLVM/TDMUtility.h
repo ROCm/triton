@@ -36,8 +36,6 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
 
 // Update the global memory address with offset, and fill the shared memory
 // address and pred in a given TDM descriptor for regular load/store (1D-5D).
-// For partitioned shared memory, dstPtrs contains multiple base pointers and
-// the correct one is selected based on sharedLayout's partition dimension.
 void fillTDMDescriptor(
     RewriterBase &rewriter, Location loc,
     const LLVMTypeConverter *typeConverter, Type elementType,
@@ -45,9 +43,9 @@ void fillTDMDescriptor(
     unsigned padAmount, SmallVector<Value> &group0, SmallVector<Value> &group1,
     std::optional<std::reference_wrapper<SmallVector<Value>>> group2,
     std::optional<std::reference_wrapper<SmallVector<Value>>> group3,
-    SmallVector<Value> offset, ArrayRef<Value> dstPtrs, Value pred,
-    Value multicastMask, Value barrierPtr,
-    const triton::LinearLayout &sharedLayout, Value ctaId, bool isStore);
+    SmallVector<Value> offset, Value dstPtr, Value pred, Value multicastMask,
+    Value barrierPtr, const triton::LinearLayout &cgaLayout, Value ctaId,
+    bool isStore);
 
 // Fill TDM descriptor for gather/scatter operations (2D only).
 // Gather reads from non-contiguous rows in global memory to LDS.
@@ -70,17 +68,16 @@ void fillTDMDescriptorForGatherScatter(
 // Emit a TDM load or store operation for regular (non-scatter) transfers.
 // Supports 1D-5D tensors with contiguous access patterns.
 // - offset: the starting position in global memory for each dimension
-// - dstPtrs: base pointers to shared memory (multiple for partitioned encoding)
-// - sharedLayout: the full shared memory LinearLayout (for partition selection)
+// - dstPtr: pointer to shared memory for load, or source pointer for store
 // - isLoad: true for global->LDS, false for LDS->global
 void emitTDMLoadStore(RewriterBase &rewriter, Location loc,
                       const LLVMTypeConverter *typeConverter,
-                      ArrayRef<Value> desc, ArrayRef<int64_t> shapePerCTA,
+                      ArrayRef<Value> desc, ArrayRef<int64_t> blockShape,
                       int numWarps, unsigned padInterval, unsigned padAmount,
-                      ArrayRef<Value> offset, ArrayRef<Value> dstPtrs,
-                      Value pred, Value multicastMask, Type elementType,
-                      Value barrierPtr, bool isLoad,
-                      const triton::LinearLayout &sharedLayout, Value ctaId);
+                      ArrayRef<Value> offset, Value dstPtr, Value pred,
+                      Value multicastMask, Type elementType, Value barrierPtr,
+                      bool isLoad, const triton::LinearLayout &cgaLayout,
+                      Value ctaId);
 
 // Calculate the number of TDM gather/scatter instructions needed.
 // - numIndices: number of row indices

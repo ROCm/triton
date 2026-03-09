@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import triton.experimental.gluon.language._core as ttgl
 from triton.experimental.gluon.language._layouts import PaddedSharedLayout, SwizzledSharedLayout
-from triton.experimental.gluon.language.amd.gfx1250 import PartitionedSharedLayout
 from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr
 
 if TYPE_CHECKING:
@@ -24,7 +23,7 @@ class tensor_descriptor_type(ttgl.base_type):
     block_type: ttgl.block_type
     shape_type: ttgl.tuple_type
     strides_type: ttgl.tuple_type
-    layout: PaddedSharedLayout | SwizzledSharedLayout | PartitionedSharedLayout
+    layout: PaddedSharedLayout | SwizzledSharedLayout
 
     def __str__(self) -> str:
         return f"tensor_descriptor<{self.block_type}, {self.layout}>"
@@ -93,8 +92,7 @@ class tensor_descriptor(ttgl.base_value):
 @builtin
 def make_tensor_descriptor(base: ttgl.tensor, shape: List[ttgl.constexpr | ttgl.tensor],
                            strides: List[ttgl.constexpr | ttgl.tensor], block_shape: List[ttgl.constexpr],
-                           layout: PaddedSharedLayout | SwizzledSharedLayout | PartitionedSharedLayout,
-                           _semantic=None) -> tensor_descriptor:
+                           layout: PaddedSharedLayout | SwizzledSharedLayout, _semantic=None) -> tensor_descriptor:
     """Make a tensor descriptor object.
 
     Args:
@@ -102,7 +100,7 @@ def make_tensor_descriptor(base: ttgl.tensor, shape: List[ttgl.constexpr | ttgl.
         shape (List[int]): shape of the tensor.
         strides (List[int]): strides of the tensor.
         block_shape (List[int]): block shape of the tensor.
-        layout (PaddedSharedLayout | SwizzledSharedLayout | PartitionedSharedLayout): the layout of the tensor in shared memory.
+        layout (PaddedSharedLayout | SwizzledSharedLayout): the layout of the tensor in shared memory.
 
     Returns:
         tensor_descriptor: the created tensor descriptor object
@@ -114,16 +112,10 @@ def make_tensor_descriptor(base: ttgl.tensor, shape: List[ttgl.constexpr | ttgl.
     assert isinstance(base.dtype, ttgl.pointer_type), "Expected base to be a pointer"
 
     layout = _unwrap_if_constexpr(layout)
-    assert isinstance(layout, (PaddedSharedLayout, SwizzledSharedLayout, PartitionedSharedLayout)), \
-        "Expected layout to be a PaddedSharedLayout, SwizzledSharedLayout, or PartitionedSharedLayout"
+    assert isinstance(layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
+        "Expected layout to be a PaddedSharedLayout or SwizzledSharedLayout"
     if isinstance(layout, SwizzledSharedLayout):
         assert layout.max_phase == 1, "Expected max_phase to be 1 for SwizzledSharedLayout"
-    elif isinstance(layout, PartitionedSharedLayout):
-        assert isinstance(layout.partition_layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
-            "PartitionedSharedLayout partition_layout must be PaddedSharedLayout or SwizzledSharedLayout"
-        if isinstance(layout.partition_layout, SwizzledSharedLayout):
-            assert layout.partition_layout.max_phase == 1, \
-                "Expected max_phase to be 1 for SwizzledSharedLayout in PartitionedSharedLayout"
 
     base_handle = base.handle
     shape_handles = _semantic._convert_to_ir_values(shape, require_i64=False)  # i32 shape

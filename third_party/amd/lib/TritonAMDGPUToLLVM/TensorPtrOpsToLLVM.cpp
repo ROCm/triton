@@ -93,14 +93,17 @@ struct MakeTensorDescOpConversion
       if (!sharedEnc)
         return rewriter.notifyMatchFailure(op, "Descriptor has no layout.");
     }
+    auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(sharedEnc);
+
     unsigned padInterval = 0;
     unsigned padAmount = 0;
-    if (auto padEnc = getPaddedEncoding(sharedEnc)) {
-      if (padEnc.getIntervals().size() != 1 || padEnc.getPaddings().size() != 1)
+    if (paddedEnc) {
+      if (paddedEnc.getIntervals().size() != 1 ||
+          paddedEnc.getPaddings().size() != 1)
         return rewriter.notifyMatchFailure(
             op, "NYI: Multiple interval-padding pairs in TDM.");
-      padInterval = padEnc.getIntervals()[0];
-      padAmount = padEnc.getPaddings()[0];
+      padInterval = paddedEnc.getIntervals()[0];
+      padAmount = paddedEnc.getPaddings()[0];
     }
 
     Type elementType =
