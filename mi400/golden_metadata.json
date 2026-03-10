@@ -1,56 +1,56 @@
 {
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_WARPS4": {
-    "sgpr_count": 82,
+    "sgpr_count": 86,
     "sgpr_spill_count": 0,
     "vgpr_count": 769,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 21808,
+    "code_len_in_byte": 21920,
     "occupancy": 1
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_WARPS4": {
-    "sgpr_count": 52,
+    "sgpr_count": 56,
     "sgpr_spill_count": 0,
     "vgpr_count": 805,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 21020,
+    "code_len_in_byte": 21032,
     "occupancy": 1
   },
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_WARPS4": {
-    "sgpr_count": 94,
+    "sgpr_count": 104,
     "sgpr_spill_count": 0,
     "vgpr_count": 953,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 39808,
+    "code_len_in_byte": 39876,
     "occupancy": 1
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM256_BN128_WARPS4": {
-    "sgpr_count": 70,
+    "sgpr_count": 66,
     "sgpr_spill_count": 0,
     "vgpr_count": 933,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 39012,
+    "code_len_in_byte": 39632,
     "occupancy": 1
   },
   "mxfp_attn_fwd_block_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_WARPS8": {
-    "sgpr_count": 78,
+    "sgpr_count": 86,
     "sgpr_spill_count": 0,
     "vgpr_count": 412,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 12672,
+    "code_len_in_byte": 12724,
     "occupancy": 2
   },
   "mxfp_attn_fwd_global_e4m3xe4m3_BATCH1_SEQLENQ1024_SEQLENK1024_QHEADS1_KVHEADS1_HEADSZ128_BM128_BN128_WARPS8": {
-    "sgpr_count": 52,
+    "sgpr_count": 54,
     "sgpr_spill_count": 0,
     "vgpr_count": 348,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 12324,
+    "code_len_in_byte": 12328,
     "occupancy": 2
   },
   "BATCH8_SEQLENQ512_SEQLENK512_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN64_f16_attn_fwd_pipelined_kernel": {
