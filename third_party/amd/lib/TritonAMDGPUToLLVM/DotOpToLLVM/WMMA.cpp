@@ -51,15 +51,13 @@ Value prepareOperands(ConversionPatternRewriter &rewriter, Value rawElems,
     if (wmmaVer < 3)
       convertedElems = tb.bitcast(rawElems, vec_ty(i16_ty, kBase));
   } else {
-    // When scaleFactor == 16, scales are stored in i64
-    Type targetTy = kBase == 8 ? i64_ty : i32_ty;
     auto elems =
-        kBase * type.getIntOrFloatBitWidth() / targetTy.getIntOrFloatBitWidth();
+        kBase * type.getIntOrFloatBitWidth() / i32_ty.getIntOrFloatBitWidth();
     assert(elems >= 1 && "unexpected number of elements");
     if (elems == 1)
-      convertedElems = tb.bitcast(rawElems, targetTy);
+      convertedElems = tb.bitcast(rawElems, i32_ty);
     else
-      convertedElems = tb.bitcast(rawElems, vec_ty(targetTy, elems));
+      convertedElems = tb.bitcast(rawElems, vec_ty(i32_ty, elems));
   }
   return convertedElems;
 }
@@ -203,22 +201,10 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   return wmmaIntrinsic.getResult(0);
 }
 
-static inline int32_t getWmmaScaleDataType(Type scaleElemType) {
-  // Data Type of block-scale
-  // 0: E8M0
-  // 1: E5M3
-  // 2: E4M3
-  return llvm::TypeSwitch<Type, int32_t>(scaleElemType)
-      .Case<IntegerType>([](Type) { return 0; })
-      .Case<Float8E4M3FNType>([](Type) { return 2; })
-      .Default([](Type) { return -1; });
-}
-
 Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
                                   Location loc, Value valA, Value valScaleA,
                                   Value valB, Value valScaleB, Value valC,
-                                  Type aElType, Type aScaleElType, Type bElType,
-                                  Type bScaleElType, Type dElType,
+                                  Type aElType, Type bElType, Type dElType,
                                   int scaleKWidth, int opSelScaleA,
                                   int opSelScaleB) {
   assert(scaleKWidth == 2 || scaleKWidth == 4 || scaleKWidth == 8);
@@ -247,15 +233,13 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
   // Set scale_opsel bit. 0: Use scales in 0..15 lanes; 1: Use scales in 16..31
   // lanes
   operands.push_back(b.i32_val(opSelScaleA));
-  int32_t scaleDTypeA = getWmmaScaleDataType(aScaleElType);
-  assert(scaleDTypeA != -1);
-  operands.push_back(b.i32_val(scaleDTypeA));
+  // Set a_scale_fmt to 0 = E8M0
+  operands.push_back(b.i32_val(0));
   operands.push_back(valScaleA);
   // Set scale_opsel bit.
   operands.push_back(b.i32_val(opSelScaleB));
-  int32_t scaleDTypeB = getWmmaScaleDataType(bScaleElType);
-  assert(scaleDTypeB != -1);
-  operands.push_back(b.i32_val(scaleDTypeB));
+  // Set b_scale fmt to 0 = E8M0
+  operands.push_back(b.i32_val(0));
   operands.push_back(valScaleB);
   // Set "Reuse matrix A" and "Reuse matrix B" to 0.
   operands.push_back(b.i1_val(0));
@@ -524,23 +508,20 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   unsigned kDim = mnkDim[2];
   unsigned kBase = 64;
 
-  auto aElemType = op.getAElemType();
-  bool isFp4A = aElemType == triton::ScaleDotElemType::E2M1;
+  bool isFp4A = op.getAElemType() == triton::ScaleDotElemType::E2M1;
   int kBaseA = isFp4A ? kBase / 2 : kBase;
   int kDimA = isFp4A ? kDim / 2 : kDim;
+  int scaleFactorA = isFp4A ? 16 : 32;
 
-  auto bElemType = op.getBElemType();
-  bool isFp4B = bElemType == triton::ScaleDotElemType::E2M1;
+  bool isFp4B = op.getBElemType() == triton::ScaleDotElemType::E2M1;
   int kBaseB = isFp4B ? kBase / 2 : kBase;
   int kDimB = isFp4B ? kDim / 2 : kDim;
+  int scaleFactorB = isFp4B ? 16 : 32;
 
-  unsigned scaleFactor = op.deduceScaleFactor();
-  int kDimScale = kDim / scaleFactor;
-
-  bool isFp6A = (aElemType == triton::ScaleDotElemType::E2M3) ||
-                (aElemType == triton::ScaleDotElemType::E3M2);
-  bool isFp6B = (bElemType == triton::ScaleDotElemType::E2M3) ||
-                (bElemType == triton::ScaleDotElemType::E3M2);
+  bool isFp6A = (op.getAElemType() == triton::ScaleDotElemType::E2M3) ||
+                (op.getAElemType() == triton::ScaleDotElemType::E3M2);
+  bool isFp6B = (op.getBElemType() == triton::ScaleDotElemType::E2M3) ||
+                (op.getBElemType() == triton::ScaleDotElemType::E3M2);
   if (isFp6A || isFp6B)
     return op.emitError("NYI: FP6 scaled dot");
 
@@ -575,7 +556,7 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   auto paddingFactor = kDimA > kDimTensorA ? (kDimA / kDimTensorA) : 1;
   auto kPaddingA = kBaseA - kBaseA / paddingFactor;
   auto kPaddingB = kBaseB - kBaseB / paddingFactor;
-  auto KBaseScale = scaleFactor == 32 ? 4 : 8;
+  auto KBaseScale = 4;
   auto aLayout = triton::gpu::toLinearLayout(aTensorTy);
   auto bLayout = triton::gpu::toLinearLayout(bTensorTy);
   auto aScaleLayout = triton::gpu::toLinearLayout(aScaleTensorTy);
@@ -629,7 +610,7 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
 
       auto sa = getOperandVals(
           rewriter, typeConverter, aScaleLayout, loadedAScale,
-          /*opIdx*/ 0, rank, b, m, k, kDimScale, KBaseScale,
+          /*opIdx*/ 0, rank, b, m, k, kDimA / scaleFactorA, KBaseScale,
           /*padding*/ 0, &scaleOpSelA, aScaleTensorTy.getElementType(), loc,
           /*isScale*/ true);
       sa = prepareOperands(rewriter, sa, aScaleTensorTy.getElementType(),
@@ -637,23 +618,22 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
 
       auto sb = getOperandVals(
           rewriter, typeConverter, bScaleLayout, loadedBScale,
-          /*opIdx*/ 0, rank, b, n, k, kDimScale, KBaseScale,
+          /*opIdx*/ 0, rank, b, n, k, kDimB / scaleFactorB, KBaseScale,
           /*padding*/ 0, &scaleOpSelB, bScaleTensorTy.getElementType(), loc,
           /*isScale*/ true);
       sb = prepareOperands(rewriter, sb, bScaleTensorTy.getElementType(),
                            wmmaVer, KBaseScale, loc);
 
-      acc = wmmaLayout.getIsTransposed()
-                ? generateScaledWMMAIntrinsic(
-                      rewriter, loc, hb, sb, ha, sa, acc, scaledBElemType,
-                      bScaleTensorTy.getElementType(), scaledAElemType,
-                      aScaleTensorTy.getElementType(), dstElemTy, KBaseScale,
-                      scaleOpSelB, scaleOpSelA)
-                : generateScaledWMMAIntrinsic(
-                      rewriter, loc, ha, sa, hb, sb, acc, scaledAElemType,
-                      aScaleTensorTy.getElementType(), scaledBElemType,
-                      bScaleTensorTy.getElementType(), dstElemTy, KBaseScale,
-                      scaleOpSelA, scaleOpSelB);
+      acc =
+          wmmaLayout.getIsTransposed()
+              ? generateScaledWMMAIntrinsic(rewriter, loc, hb, sb, ha, sa, acc,
+                                            scaledBElemType, scaledAElemType,
+                                            dstElemTy, KBaseScale, scaleOpSelB,
+                                            scaleOpSelA)
+              : generateScaledWMMAIntrinsic(rewriter, loc, ha, sa, hb, sb, acc,
+                                            scaledAElemType, scaledBElemType,
+                                            dstElemTy, KBaseScale, scaleOpSelA,
+                                            scaleOpSelB);
     }
     for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
       fc[reg + v] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
