@@ -18,7 +18,7 @@ CMP_PREFIXES = ('s_cmp', 'v_cmp')
 
 ## TODO(lixun)
 ## Only buffer_load lds should be included in ALL_USERS set
-ALL_USERS = ('s_cmp', 'v_cmp', 'v_permlane', 'buffer_store', 'buffer_load')
+ALL_USERS = ('s_cmp', 'v_cmp', 'v_permlane', 'buffer_store', 'ds_write', 'ds_store')
 ALL_DEFS_USES = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov', 'scratch_load', 'scratch_store')
 
@@ -120,6 +120,8 @@ class Instruction:
         self.is_mfma_copy: bool = False
 
     def emit(self):
+        if self.opcode.startswith("."):
+            return self.raw_line
         if not self.operands:
             return self.opcode
         return f"{self.opcode} " + ", ".join(self.operands)
@@ -327,7 +329,8 @@ class Instruction:
             self.uses |= flatten_regs(self.regs_by_operand[0])
             return
 
-        if self.opcode.startswith(ALL_USERS):
+        if self.opcode.startswith(ALL_USERS) or \
+           (self.opcode.startswith('buffer_load') and 'lds' in self.operands):
             for reg in self.regs_by_operand:
                 self.uses |= flatten_regs(reg)
             return
@@ -2442,38 +2445,48 @@ def can_hoist(inst, bb, invariant_regs):
         return False
 
     # 2. No redefinition after inst
-    redef = False
+    reg_flat = flatten_regs(reg)
     for later in bb.instructions:
         if later == inst:
             continue
-        if later.get_dst_regs():
-            if flatten_regs(later.get_dst_regs()) & flatten_regs(reg):
-                redef = True
-                break
-                #return False
+        # Use the defs set (from compute_def_use) instead of get_dst_regs(),
+        # because get_dst_regs() always returns operand[0] which is wrong for
+        # store instructions (ds_write, buffer_store) that don't define regs.
+        if later.defs & reg_flat:
+            redef = True
+            logging.debug(f"  reg redefined by {later.emit()}")
+            break
+    else:
+        redef = False
     if redef:
-        ## Keep the hoisted inst as-is and rewrite the OTHER defs
-        ## (and their users) to use a free reg instead.
+        ## Rename the hoisted inst's output to a free reg and update its users.
+        ## Leave the other defs of the same register untouched.
         def_reg = coalesce_regs(inst.defs)[0]
-        logging.debug(f"  reg redefined, trying to rewrite other defs of {def_reg.emit()}")
+        logging.debug(f"  reg redefined, trying to rename hoisted inst's output {def_reg.emit()}")
         kind, ids = def_reg.kind, def_reg.ids
         num = len(ids)
+
+        ## Dry-run: verify the hoisted inst and all its users can be rewritten.
+        if def_reg.emit() not in inst.operands:
+            logging.debug(f"  cannot rename {inst.emit()} (register mismatch), cannot hoist")
+            return False
+        for user in inst.users:
+            has_match = any(op == def_reg.emit() for op in user.operands)
+            if not has_match:
+                logging.debug(f"  cannot rewrite user {user.emit()} (register embedded in wider group), cannot hoist")
+                return False
+
         free_reg = pick_and_remove_contiguous_regs(bb.free_regs, num, kind)
         if not free_reg:
             logging.debug("Not enough free regs")
             return False
         free_reg = coalesce_regs(free_reg)[0]
         logging.debug(f"  found free reg: {free_reg.emit()}")
-        ## Rewrite all other defs of the same register and their users
-        for other in bb.instructions:
-            if other == inst:
-                continue
-            if other.get_dst_regs():
-                if flatten_regs(other.get_dst_regs()) & flatten_regs(reg):
-                    logging.debug(f"  rewriting other def: {other.emit()}")
-                    other.replace_users_with(free_reg)
-                    other.replace_reg(def_reg, free_reg)
-                    logging.debug(f"    -> {other.emit()}")
+        ## Rename the hoisted inst's output and update its users
+        before = inst.emit()
+        inst.replace_users_with(free_reg)
+        inst.replace_reg(def_reg, free_reg)
+        logging.debug(f"  renamed: {before} -> {inst.emit()}")
 
     return True
 
@@ -2484,6 +2497,8 @@ def hoist_loop_invariants(bb: BasicBlock):
     hoistable = []
     for inst in invariant_insts:
         logging.debug(f"loop invariant: {inst.emit()}")
+        if inst.users:
+            logging.debug(f"  users: {[u.emit() for u in inst.users]}")
         if can_hoist(inst, bb, invariant_regs):
             hoistable.append(inst)
             if 'scratch_load' in inst.opcode:
@@ -2929,7 +2944,7 @@ def amdgcn_as(text, verbose=False):
     dbg("## Step 4", indent)
     dbg("## optimize copy chains", indent)
     dbg("######################################################", indent)
-    optimize_copy(loop)
+    #optimize_copy(loop)
 
     program.update_free_regs(indent)
     analyze_regs(loop, mfmaChainsInLoop, indent)
