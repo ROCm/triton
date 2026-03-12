@@ -121,7 +121,8 @@ struct Utils {
               return InstClass::sWaitCnt;
             if (Name.contains("s.barrier"))
               return InstClass::sBarrier;
-            if (Name.contains("llvm.amdgcn.raw.ptr.buffer.load.lds"))
+            if (Name.contains("llvm.amdgcn.raw.ptr.buffer.load.lds") ||
+                Name.contains("llvm.amdgcn.raw.ptr.buffer.load.async.lds"))
               return InstClass::bufferLoadLDS;
             if (Name.contains("llvm.amdgcn.raw.ptr.buffer.store"))
               return InstClass::bufferStore;
@@ -239,7 +240,8 @@ struct Utils {
 
     if (auto *CI = dyn_cast<CallInst>(&I)) {
       if (Function *F = CI->getCalledFunction()) {
-        if (F->isIntrinsic() && F->getName().contains("buffer.load.lds"))
+        if (F->isIntrinsic() && (F->getName().contains("buffer.load.lds") ||
+                                   F->getName().contains("buffer.load.async.lds")))
           return SchedKind::BufferLoadLDS;
         if (F->isIntrinsic() && F->getName().contains("buffer.store"))
           return SchedKind::BufferStore;
@@ -321,15 +323,6 @@ struct Utils {
     return nullptr;
   }
 
-  static unsigned getMFMACyclesFromName(StringRef Name) {
-    // Extend this table as needed.
-    if (Name.contains("mfma.scale.f32.16x16x128.f8f6f4"))
-      return 32;
-    if (Name.contains("mfma.f32.16x16x32.f16"))
-      return 16;
-    return 0; // Unknown
-  }
-
   static unsigned getMFMACycles(const Instruction &I) {
     if (!isMFMAorWMMA(I))
       return 0;
@@ -337,7 +330,24 @@ struct Utils {
     const Function *Callee = CI->getCalledFunction();
     if (!Callee)
       return 0;
-    return getMFMACyclesFromName(Callee->getName());
+    StringRef Name = Callee->getName();
+    if (Name.contains("mfma.scale.f32.16x16x128.f8f6f4")) {
+      // cbsz = operand 3, blgp = operand 4.
+      // When cbsz > 1 or blgp > 1, the operand uses a sub-byte format
+      // (e.g. e2m1) and the instruction takes 16 cycles.
+      // Otherwise (f8 or wider), it takes 32 cycles.
+      if (auto *CbszC = dyn_cast<ConstantInt>(CI->getArgOperand(3))) {
+        if (auto *BlgpC = dyn_cast<ConstantInt>(CI->getArgOperand(4))) {
+          unsigned cbsz = CbszC->getZExtValue();
+          unsigned blgp = BlgpC->getZExtValue();
+          return (cbsz > 1 || blgp > 1) ? 16 : 32;
+        }
+      }
+      return 32; // Fallback if cbsz/blgp are not constants
+    }
+    if (Name.contains("mfma.f32.16x16x32.f16"))
+      return 16;
+    return 0; // Unknown
   }
 };
 
