@@ -18,7 +18,7 @@ CMP_PREFIXES = ('s_cmp', 'v_cmp')
 
 ## TODO(lixun)
 ## Only buffer_load lds should be included in ALL_USERS set
-ALL_USERS = ('s_cmp', 'v_cmp', 'v_permlane', 'buffer_store', 'ds_write', 'ds_store')
+ALL_USERS = ('s_cmp', 'v_permlane', 'buffer_store', 'ds_write', 'ds_store')
 ALL_DEFS_USES = ('v_permlane')
 COPY_DATA = ('v_accvgpr_read', 'v_accvgpr_write', 'v_accvgpr_mov', 'v_mov', 'scratch_load', 'scratch_store')
 
@@ -2581,6 +2581,8 @@ def rewrite_next_free_vgpr(text: str, new_value: int = 512) -> str:
         leading_ws = line[:len(line) - len(stripped)]
         if stripped.startswith(".amdhsa_next_free_vgpr"):
             out.append(f"{leading_ws}.amdhsa_next_free_vgpr 512\n")
+        elif stripped.startswith(".amdhsa_accum_offset"):
+            out.append(f"{leading_ws}.amdhsa_accum_offset 256\n")
         elif stripped.startswith(".vgpr_count:"):
             out.append(f"{leading_ws}.vgpr_count: {new_value}\n")
         else:
