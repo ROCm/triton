@@ -39,7 +39,7 @@ enum class InstClass {
 
 enum class MFMAInputSource { FullyPrefetched, SameRegionLoad, Unknown };
 
-enum class SchedKind { MFMA, BufferLoadLDS, BufferStore, LDSLoad, Other };
+enum class SchedKind { MFMA, GR, LR, LW, Other };
 
 // Structures used for region analysis/scheduling
 
@@ -240,17 +240,28 @@ struct Utils {
 
     if (auto *CI = dyn_cast<CallInst>(&I)) {
       if (Function *F = CI->getCalledFunction()) {
-        if (F->isIntrinsic() && (F->getName().contains("buffer.load.lds") ||
-                                   F->getName().contains("buffer.load.async.lds")))
-          return SchedKind::BufferLoadLDS;
-        if (F->isIntrinsic() && F->getName().contains("buffer.store"))
-          return SchedKind::BufferStore;
+        if (F->isIntrinsic()) {
+          StringRef Name = F->getName();
+          // GR: buffer.load (into regs), buffer.load.lds, buffer.load.async.lds
+          if (Name.contains("buffer.load"))
+            return SchedKind::GR;
+          // LR: transposed ds_read (ds.read.tr*)
+          if (Name.contains("ds.read"))
+            return SchedKind::LR;
+        }
       }
     }
 
+    // LR: load from LDS (addrspace 3)
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
       if (LI->getPointerAddressSpace() == 3)
-        return SchedKind::LDSLoad;
+        return SchedKind::LR;
+    }
+
+    // LW: store to LDS (addrspace 3)
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (SI->getPointerAddressSpace() == 3)
+        return SchedKind::LW;
     }
 
     return SchedKind::Other;
@@ -430,9 +441,9 @@ private:
     Instruction *RegionStart = nullptr;
 
     for (Instruction &I : BB) {
-      // Check if this is a memory operation (buffer.load.lds or ds_read)
+      // Check if this is a memory operation (GR, LR, or LW)
       auto SK = Utils::classifySchedInst(I);
-      if (SK == SchedKind::BufferLoadLDS || SK == SchedKind::LDSLoad) {
+      if (SK == SchedKind::GR || SK == SchedKind::LR || SK == SchedKind::LW) {
         SeenMemoryOps = true;
       }
 
@@ -631,8 +642,7 @@ private:
 
     for (Instruction &I : Utils::instructionsInRegion(R)) {
       SchedKind K = Utils::classifySchedInst(I);
-      if (K == SchedKind::BufferLoadLDS || K == SchedKind::LDSLoad ||
-          K == SchedKind::BufferStore) {
+      if (K == SchedKind::GR || K == SchedKind::LR || K == SchedKind::LW) {
         Res.LastAnchor = &I;
         Res.Anchors.push_back({&I, K});
         continue;
@@ -682,50 +692,260 @@ private:
     return Res;
   }
 
-  static void scheduleMFMAWithSpacing(ArrayRef<AnchorInst> Anchors,
+  static StringRef schedKindName(SchedKind K) {
+    switch (K) {
+    case SchedKind::GR:
+      return "GR";
+    case SchedKind::LR:
+      return "LR";
+    case SchedKind::LW:
+      return "LW";
+    case SchedKind::MFMA:
+      return "mfma";
+    case SchedKind::Other:
+      return "other";
+    }
+    llvm_unreachable("unknown SchedKind");
+  }
+
+  // Move LR instructions (and s.waitcnt/s.barrier between LW and LR)
+  // from their position between LW and GR to right after the 2nd-to-last GR.
+  // This places ds_write (LW) after the ds_read (LR) chunk in each region,
+  // so MFMA can hide the long ds_write latency (up to 400 cycles due to
+  // LDS port contention with buffer_load_to_lds).
+  static void moveAnchors(SmallVectorImpl<AnchorInst> &Anchors,
+                           const BBRegion &Region) {
+    // Find the range of instructions between the last LW and the first GR.
+    // This includes LR, s.waitcnt, and s.barrier instructions.
+    SmallVector<AnchorInst> GR;
+    for (auto &A : Anchors) {
+      if (A.Kind == SchedKind::GR)
+        GR.push_back(A);
+    }
+
+    if (GR.size() < 2)
+      return; // Need at least 2 GR to have a 2nd-to-last
+
+    // Find the last LW and first GR in the anchor list
+    Instruction *LastLW = nullptr;
+    Instruction *FirstGR = nullptr;
+    for (auto &A : Anchors) {
+      if (A.Kind == SchedKind::LW)
+        LastLW = A.I;
+    }
+    for (auto &A : Anchors) {
+      if (A.Kind == SchedKind::GR) {
+        FirstGR = A.I;
+        break;
+      }
+    }
+
+    if (!LastLW || !FirstGR)
+      return;
+
+    // Collect LR instructions between LastLW and FirstGR, plus their
+    // immediate users (bitcast etc.), s.waitcnt, and s.barrier.
+    // Do NOT move make.buffer.rsrc or other GR dependencies.
+    SmallVector<Instruction *, 16> ToMove;
+    SmallPtrSet<Instruction *, 16> ToMoveSet;
+    bool inRange = false;
+    for (Instruction &I : Utils::instructionsInRegion(Region)) {
+      if (&I == LastLW) {
+        inRange = true;
+        continue;
+      }
+      if (&I == FirstGR)
+        break;
+      if (!inRange)
+        continue;
+
+      SchedKind K = Utils::classifySchedInst(I);
+      InstClass C = Utils::classifyInstruction(I);
+      if (K == SchedKind::LR || C == InstClass::sWaitCnt ||
+          C == InstClass::sBarrier || Utils::isSchedBarrier(I)) {
+        ToMove.push_back(&I);
+        ToMoveSet.insert(&I);
+      }
+    }
+    // Also collect immediate users of moved LR instructions that are
+    // in the range (e.g., bitcast of ds_read_tr results)
+    SmallVector<Instruction *, 8> ExtraUsers;
+    for (Instruction *I : ToMove) {
+      if (Utils::classifySchedInst(*I) != SchedKind::LR)
+        continue;
+      for (User *U : I->users()) {
+        if (auto *UI = dyn_cast<Instruction>(U)) {
+          if (!ToMoveSet.count(UI)) {
+            ExtraUsers.push_back(UI);
+            ToMoveSet.insert(UI);
+          }
+        }
+      }
+    }
+    // Insert extra users right after their defining LR in the move list
+    for (Instruction *EU : ExtraUsers) {
+      // Find the position: right after the LR that defines it
+      for (size_t j = 0; j < ToMove.size(); ++j) {
+        if (ToMove[j] == cast<Instruction>(EU->getOperand(0))) {
+          ToMove.insert(ToMove.begin() + j + 1, EU);
+          break;
+        }
+      }
+    }
+
+    if (ToMove.empty())
+      return;
+
+    // Move them right after the 2nd-to-last GR
+    Instruction *InsertAfter = GR[GR.size() - 2].I;
+    LLVM_DEBUG(dbgs() << "  Moving " << ToMove.size()
+                      << " instructions (LR/waitcnt/barrier) after 2nd-to-last GR\n");
+
+    for (Instruction *I : ToMove) {
+      I->moveAfter(InsertAfter);
+      InsertAfter = I; // chain them in order
+    }
+
+    // Rebuild anchor list in program order
+    Anchors.clear();
+    for (Instruction &I : Utils::instructionsInRegion(Region)) {
+      SchedKind K = Utils::classifySchedInst(I);
+      if (K == SchedKind::GR || K == SchedKind::LR || K == SchedKind::LW)
+        Anchors.push_back({&I, K});
+    }
+
+    LLVM_DEBUG({
+      dbgs() << "  New anchor order:";
+      for (auto &A : Anchors)
+        dbgs() << " " << schedKindName(A.Kind);
+      dbgs() << "\n";
+    });
+  }
+
+  // Helper: move N MFMAs after InsertPt using moveAfter.
+  // moveAfter naturally produces correct order: each new MFMA goes right
+  // after InsertPt, pushing previous ones further away.
+  // Result: InsertPt, MFMA[N-K], ..., MFMA[N-2], MFMA[N-1]
+  static unsigned moveMFMAsAfter(SmallVectorImpl<Instruction *> &MFMAInsts,
+                                 unsigned &MFMAIdx, unsigned Count,
+                                 Instruction *InsertPt) {
+    unsigned moved = 0;
+    for (unsigned j = 0; j < Count && MFMAIdx > 0; ++j) {
+      MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
+      moved++;
+    }
+    return moved;
+  }
+
+  // Interleave MFMA with anchor instructions using moveAfter.
+  //
+  // Step 1: Count needed MFMAs: 4 per GR, 1 per LR, 1 per LW.
+  //         leftover = total_mfma - needed
+  // Step 2: Process anchors in reverse, inserting MFMAs after each:
+  //   - GR: 4 mfma after it
+  //   - LR: 1 mfma after it
+  //   - LW: first LW seen (reverse) → leftover mfma after it
+  //          subsequent LW           → 1 mfma after it
+  //   ~1 mfma remains at the front of the region.
+  static void scheduleMFMAWithSpacing(SmallVectorImpl<AnchorInst> &Anchors,
                                       SmallVectorImpl<Instruction *> &MFMAInsts,
-                                      unsigned X, unsigned Y) {
-    if (MFMAInsts.empty() || Anchors.empty())
+                                      const BBRegion &Region) {
+    if (Anchors.empty())
+      return;
+
+    // Move LR/waitcnt/barrier from between LW and GR to after 2nd-to-last GR
+    moveAnchors(Anchors, Region);
+
+    if (MFMAInsts.empty())
       return;
 
     unsigned MFMAIdx = MFMAInsts.size();
+    unsigned Total = MFMAIdx;
+
     // Insert s.waitcnt before the first MFMA in the region
     Utils::insertSWaitCntBefore(MFMAInsts.front(), 0);
 
-    auto spacingFor = [&](SchedKind K) {
-      return (K == SchedKind::BufferLoadLDS) ? X : Y;
-    };
-
-    // Put 2 extra mfma after the last anchor inst
+    // Determine MFMAs per regular GR based on MFMA cycle latency:
+    //   16 cycles → 4 mfma, 32 cycles → 2 mfma
+    unsigned mfmaPerGR = 4;
     {
-      Instruction *InsertPt = Anchors.back().I;
-      if (MFMAIdx >= 1)
-        MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
-      if (MFMAIdx >= 1)
-        MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
+      unsigned cycles = Utils::getMFMACycles(*MFMAInsts.front());
+      if (cycles == 32)
+        mfmaPerGR = 2;
+      else if (cycles == 16)
+        mfmaPerGR = 4;
     }
 
-    SchedKind PrevKind = Anchors.back().Kind;
+    // Step 1: Count needed MFMAs for anchors
+    // GR: mfmaPerGR each, except GR followed by LR costs 1
+    // LR: 1 each, LW: 1 each, plus 2 at the end of the region
+    unsigned numGR = 0, numLR = 0, numLW = 0, numGRBeforeLR = 0;
+    for (size_t j = 0; j < Anchors.size(); ++j) {
+      if (Anchors[j].Kind == SchedKind::GR) {
+        numGR++;
+        // Check if next anchor (forward) is LR
+        if (j + 1 < Anchors.size() && Anchors[j + 1].Kind == SchedKind::LR)
+          numGRBeforeLR++;
+      } else if (Anchors[j].Kind == SchedKind::LR) {
+        numLR++;
+      } else if (Anchors[j].Kind == SchedKind::LW) {
+        numLW++;
+      }
+    }
+    unsigned needed = mfmaPerGR * (numGR - numGRBeforeLR) + numGRBeforeLR + numLR + numLW + 2;
+    unsigned leftover = (Total > needed) ? Total - needed : 0;
 
-    for (int i = static_cast<int>(Anchors.size()) - 1; i >= 0; --i) {
+    LLVM_DEBUG(dbgs() << "  MFMA budget: total=" << Total << ", needed=" << needed
+                      << ", leftover=" << leftover << "\n");
+
+    // Tracking counters for debug output
+    unsigned MFMAAtEnd = 0;
+    DenseMap<SchedKind, unsigned> MFMAPerAnchorKind;
+
+    // Insert 2 mfma at the end of the region (after last anchor)
+    MFMAAtEnd = moveMFMAsAfter(MFMAInsts, MFMAIdx, 2, Anchors.back().I);
+
+    bool seenLW = false;
+
+    // Step 2: Process anchors in reverse
+    for (int i = static_cast<int>(Anchors.size()) - 1;
+         i >= 0 && MFMAIdx > 0; --i) {
       Instruction *InsertPt = Anchors[static_cast<size_t>(i)].I;
-      SchedKind ThisKind = Anchors[static_cast<size_t>(i)].Kind;
+      SchedKind Kind = Anchors[static_cast<size_t>(i)].Kind;
 
-      // If changing kind, put 2 extra mfma here
+      unsigned Count = 0;
 
-      if (PrevKind != ThisKind) {
-        if (MFMAIdx >= 1)
-          MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
-        if (MFMAIdx >= 1)
-          MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
+      if (Kind == SchedKind::LR) {
+        Count = 1;
+      } else if (Kind == SchedKind::GR) {
+        // GR followed by LR gets 1, otherwise mfmaPerGR (4 for 16-cycle, 2 for 32-cycle)
+        bool followedByLR =
+            (static_cast<size_t>(i + 1) < Anchors.size() &&
+             Anchors[static_cast<size_t>(i + 1)].Kind == SchedKind::LR);
+        Count = followedByLR ? 1 : mfmaPerGR;
+      } else if (Kind == SchedKind::LW) {
+        if (!seenLW) {
+          seenLW = true;
+          Count = leftover;
+        } else {
+          Count = 1;
+        }
       }
 
-      PrevKind = ThisKind;
-      unsigned Count = spacingFor(ThisKind);
-
-      for (unsigned j = 0; j < Count && MFMAIdx > 0; ++j)
-        MFMAInsts[--MFMAIdx]->moveAfter(InsertPt);
+      unsigned before = MFMAIdx;
+      moveMFMAsAfter(MFMAInsts, MFMAIdx, Count, InsertPt);
+      MFMAPerAnchorKind[Kind] += before - MFMAIdx;
     }
+
+    LLVM_DEBUG({
+      unsigned MFMAAtFront = MFMAIdx;
+      dbgs() << "  MFMA insertion summary: total=" << Total
+             << ", at_front=" << MFMAAtFront << ", at_end=" << MFMAAtEnd;
+      for (auto &KV : MFMAPerAnchorKind) {
+        dbgs() << ", after_" << schedKindName(KV.first) << "=" << KV.second;
+      }
+      dbgs() << "\n";
+    });
   }
 
   static void scheduleBB(BasicBlock &BB, const BBMFMAAnalysisMap &Analysis) {
@@ -734,10 +954,6 @@ private:
       return;
 
     const MFMARegionList &Regions = It->second;
-
-    // Tunables
-    unsigned X = 4;       // mfma between buffer.load.lds
-    const unsigned Y = 1; // mfma between lds load
 
     for (unsigned i = 0; i < Regions.size(); ++i) {
       const MFMARegionInfo &R = Regions[i];
@@ -752,16 +968,33 @@ private:
 
         MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
 
-        if (!Res.MFMAInsts.empty()) {
-          unsigned cycles = Utils::getMFMACycles(*Res.MFMAInsts.front());
-          if (cycles == 32)
-            X = 2;
-          else if (cycles == 16)
-            X = 4;
-          // Unknown cycles -> keep fallback X = 4
-        }
+        LLVM_DEBUG({
+          // Print structural layout: consecutive runs of same kind
+          dbgs() << "Cluster " << i << " structure:";
+          SchedKind RunKind = SchedKind::Other;
+          unsigned RunCount = 0;
+          // Walk region instructions in program order
+          for (Instruction &Inst : Utils::instructionsInRegion(bbR)) {
+            SchedKind K = Utils::classifySchedInst(Inst);
+            // Only show MFMA and anchor types
+            if (K != SchedKind::MFMA && K != SchedKind::GR &&
+                K != SchedKind::LR && K != SchedKind::LW)
+              continue;
+            if (K == RunKind) {
+              RunCount++;
+            } else {
+              if (RunCount > 0)
+                dbgs() << " " << RunCount << " " << schedKindName(RunKind);
+              RunKind = K;
+              RunCount = 1;
+            }
+          }
+          if (RunCount > 0)
+            dbgs() << " " << RunCount << " " << schedKindName(RunKind);
+          dbgs() << "\n";
+        });
 
-        scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, X, Y);
+        scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, bbR);
       }
     }
   }
@@ -830,8 +1063,10 @@ void runLLIRSchedulePass(llvm::Function &F) {
   FPM.run(F);
   FPM.doFinalization();
 
-  assert(!llvm::verifyFunction(F) &&
-         "expected function to verify successfully");
+  if (llvm::verifyFunction(F, &llvm::errs())) {
+    llvm::errs() << "LLIR schedule pass produced invalid IR!\n";
+    assert(false && "expected function to verify successfully");
+  }
 }
 
 } // namespace mlir::triton::AMD
