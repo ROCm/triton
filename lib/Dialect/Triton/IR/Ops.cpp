@@ -1,3 +1,5 @@
+#include <sstream>
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -322,7 +324,12 @@ LogicalResult DotScaledOp::verify() {
   auto cShape = this->getC().getType().getShape();
   int64_t mDim = cShape[cShape.size() - 2];
   int64_t nDim = cShape[cShape.size() - 1];
-  unsigned scaleFactor = this->getScaleFactor();
+  int32_t scaleFactor;
+  std::string scaleErr;
+  if (failed(deduceScaleFactor(
+          getA(), getAScale(), getAElemType(), getLhsKPack(), getB(),
+          getBScale(), getBElemType(), getRhsKPack(), scaleFactor, scaleErr)))
+    return this->emitError(scaleErr);
 
   if (getAScale()) {
     auto aScaleShape = getAScale().getType().getShape();
@@ -343,6 +350,73 @@ LogicalResult DotScaledOp::verify() {
                              "divided by the scale factor");
   }
   return success();
+}
+
+LogicalResult DotScaledOp::deduceScaleFactor(
+    Value lhs, Value lhsScale, ScaleDotElemType lhsFormat, bool lhsKPack,
+    Value rhs, Value rhsScale, ScaleDotElemType rhsFormat, bool rhsKPack,
+    int32_t &scaleFactor, std::string &errMsg) {
+  auto deduceByShape = [&errMsg](Value operand, Value scale, int opIdx,
+                                 ScaleDotElemType format,
+                                 bool kPack) -> int32_t {
+    if (!scale)
+      return 0;
+    auto scaleTy = dyn_cast<RankedTensorType>(scale.getType());
+    if (!scaleTy || scaleTy.getNumElements() == 1)
+      return 0;
+
+    auto operandShape = cast<RankedTensorType>(operand.getType()).getShape();
+    auto scaleShape = scaleTy.getShape();
+
+    int64_t unpackFactor = (format == ScaleDotElemType::E2M1 && kPack) ? 2 : 1;
+    int64_t kdim = operandShape[opIdx == 0 ? operandShape.size() - 1
+                                           : operandShape.size() - 2] *
+                   unpackFactor;
+    int32_t scaleFactor = kdim / scaleShape[scaleShape.size() - 1];
+    if (scaleFactor != 16 && scaleFactor != 32) {
+      std::ostringstream oss;
+      oss << "scale factor must be 16 or 32. Got " << scaleFactor;
+      errMsg = oss.str();
+      return 0;
+    }
+    return scaleFactor;
+  };
+
+  errMsg.clear();
+  int32_t scaleFactorA = deduceByShape(lhs, lhsScale, 0, lhsFormat, lhsKPack);
+  if (!errMsg.empty())
+    return failure();
+  int32_t scaleFactorB = deduceByShape(rhs, rhsScale, 1, rhsFormat, rhsKPack);
+  if (!errMsg.empty())
+    return failure();
+
+  if (scaleFactorA == 0 && scaleFactorB == 0) {
+    scaleFactor = 32;
+    return success();
+  }
+  if (scaleFactorA != 0 && scaleFactorB != 0) {
+    if (scaleFactorA != scaleFactorB) {
+      std::ostringstream oss;
+      oss << "Operands must have the same scale factor; (lhs: " << scaleFactorA
+          << " vs rhs: " << scaleFactorB << ")";
+      errMsg = oss.str();
+      return failure();
+    }
+    scaleFactor = scaleFactorA;
+    return success();
+  }
+  scaleFactor = scaleFactorA != 0 ? scaleFactorA : scaleFactorB;
+  return success();
+}
+
+int32_t DotScaledOp::deduceScaleFactor() {
+  int32_t scaleFactor;
+  std::string errMsg;
+  if (failed(deduceScaleFactor(
+          getA(), getAScale(), getAElemType(), getLhsKPack(), getB(),
+          getBScale(), getBElemType(), getRhsKPack(), scaleFactor, errMsg)))
+    llvm::report_fatal_error(errMsg.c_str());
+  return scaleFactor;
 }
 
 //-- MakeRangeOp --
