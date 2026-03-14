@@ -85,3 +85,7 @@ pytest -n 80 \
 echo "=== Run AMD-specific Tests ==="
 
 pytest --durations=10 third_party/amd/python/test/test_compiler_fence_gfx1250.py
+
+echo "=== Test TDM widh async_copy disabled"
+
+TRITON_HIP_USE_ASYNC_COPY=0 pytest -n 16 -s ./python/test/unit/language/test_tensor_descriptor.py::test_make_tensor_descriptor_matmul

@@ -585,8 +585,9 @@ void remapClusters(tt::CoarseSchedule &schedule, ClusterMap clusterMap,
 //   WARNING: Changing the order of schedule.clusters.newAtBack() calls
 //            can cause invalid schedules to be produced.
 LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
-                           int &numBuffers, bool useAsyncCopy, bool waitAtTail,
-                           Clusters &clusters, tt::CoarseSchedule &schedule) {
+                           int &numBuffers, bool useAsyncCopy, bool hasTDMLoad,
+                           bool waitAtTail, Clusters &clusters,
+                           tt::CoarseSchedule &schedule) {
   LDBG("Init SingleDotSchedule");
   int lastStage = numStages - 1;
   stages[SCHED_GLOBAL_LOAD] = 0;
@@ -619,9 +620,9 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   // TODO: Use the precise number of buffers needed by the particular load.
   numBuffers =
       std::max(1, stages[SCHED_LOCAL_LOAD] - stages[SCHED_LOCAL_STORE]);
-  // If we use AsyncCopy we need one more buffer since we are not using a
-  // register buffer
-  if (useAsyncCopy) {
+  // If we use AsyncCopy or TDM loads, we need one more buffer since we are not
+  // using a register buffer
+  if (useAsyncCopy || hasTDMLoad) {
     numBuffers += 1;
   }
 
@@ -782,7 +783,7 @@ void scheduleStreamOps(const LoadToStreamOpMap &loadToStreamOp,
 void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
                     tt::CoarseSchedule &schedule,
                     triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-                    bool useAsyncCopy, bool waitAtTail) {
+                    bool useAsyncCopy, bool hasTDMLoad, bool waitAtTail) {
   LDBG("SingleDotSchedule::updateSchedule");
   Stages stages;
   Clusters clusters;
@@ -794,7 +795,8 @@ void updateSchedule(scf::ForOp &forOp, const LoadToInfoMap &loadToInfo,
 
   int numBuffers = 1;
   if (failed(initSchedule(maxDist, stages, schedule.getNumStages(), numBuffers,
-                          useAsyncCopy, waitAtTail, clusters, schedule)))
+                          useAsyncCopy, hasTDMLoad, waitAtTail, clusters,
+                          schedule)))
     return;
 
   // Convert the loads into shared memory allocations and loads from them.
@@ -962,6 +964,7 @@ void lowerLoop(scf::ForOp forOp,
   auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
   triton::AMD::TargetInfo targetInfo(arch ? arch->str() : "");
 
+  bool hasTDMLoad = false;
   LoadToInfoMap loadToInfo;
   for (const auto &[load, info] : loadOpToIndLevel) {
     auto [distance, use] = info;
@@ -971,6 +974,7 @@ void lowerLoop(scf::ForOp forOp,
     } else {
       auto useTDM = isa<tt::DescriptorLoadOp>(load);
       if (useTDM) {
+        hasTDMLoad = true;
         auto paddedEncoding = getSharedEncIfAllUsersAreDotEncPadded(
                                   load->getResult(0), targetInfo)
                                   .value_or(nullptr);
@@ -998,7 +1002,7 @@ void lowerLoop(scf::ForOp forOp,
   } else {
     SingleDotSchedule::updateSchedule(forOp, loadToInfo, schedule,
                                       axisInfoAnalysis, useAsyncCopy,
-                                      waitAtTail);
+                                      hasTDMLoad, waitAtTail);
   }
 
   dumpSchedule(schedule, "[lowerLoops]updated schedule:");
