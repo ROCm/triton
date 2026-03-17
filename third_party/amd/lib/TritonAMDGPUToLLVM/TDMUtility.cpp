@@ -437,6 +437,29 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   return TDMDescriptor{group0, group1, group2, group3};
 }
 
+// Returns a copy of `layout` where the semantics of dimA and dimB are
+// exchanged: new.apply(x)[dimA] == old.apply(x)[dimB] and vice versa. The
+// output dimension order is preserved.
+static triton::LinearLayout
+swapOutDimSemantics(const triton::LinearLayout &layout, StringAttr dimA,
+                    StringAttr dimB) {
+  assert(layout.hasOutDim(dimA));
+  assert(layout.hasOutDim(dimB));
+  SmallVector<std::pair<StringAttr, int32_t>> renamedOutDims;
+  for (auto [name, size] : layout.getOutDims()) {
+    if (name == dimA)
+      renamedOutDims.push_back({dimB, size});
+    else if (name == dimB)
+      renamedOutDims.push_back({dimA, size});
+    else
+      renamedOutDims.push_back({name, size});
+  }
+  // Transpose to restore the original output dimension order.
+  return triton::LinearLayout(layout.getBases(), renamedOutDims,
+                              /*requireSurjective=*/false)
+      .transposeOuts(llvm::to_vector(layout.getOutDimNames()));
+}
+
 // Fill TDM descriptor for regular load/store operations (1D-5D tensors)
 void fillTDMDescriptor(
     RewriterBase &rewriter, Location loc,
@@ -464,6 +487,22 @@ void fillTDMDescriptor(
   Type globalPtrTy = ptr_ty(ctx, 1);
   Type sharedPtrTy = ptr_ty(ctx, 3);
 
+  // For col-major tensors the TDM descriptor was created with the trailing two
+  // dimensions swapped. Swap shapePerCTA and offset to match that hardware
+  // view, and rename the same two dims in the shared layout to align out dims.
+  std::optional<triton::LinearLayout> adjustedSharedLayout;
+  if (!isRowMajor) {
+    swapTrailingDims(shapePerCTA);
+    swapTrailingDims(offset);
+    if (numDims >= 2) {
+      auto dimN_2 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 2));
+      auto dimN_1 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 1));
+      adjustedSharedLayout = swapOutDimSemantics(sharedLayout, dimN_2, dimN_1);
+    }
+  }
+  const auto &tdmViewSharedLayout =
+      adjustedSharedLayout ? *adjustedSharedLayout : sharedLayout;
+
   // Decode the full TDM descriptor to get all values
   auto [srcPtr, tensorShape, tensorStride, decodedBlockShape] =
       decodeTDMDescriptorFull(
@@ -482,46 +521,8 @@ void fillTDMDescriptor(
   auto kOffset = str_attr("offset");
   auto kPartition = str_attr("partition");
 
-  // When !isRowMajor, shapePerCTA and offset have been swapped to match the
-  // TDM hardware coordinate space. The shared layout must be transformed to
-  // the same space for invertAndCompose to work. We swap the basis vector
-  // components for the trailing two tensor dimensions (dim(N-2) and dim(N-1)).
-  // Note: the output dimension ORDER in the layout may differ from
-  // [dim0, dim1, ...] (e.g. order [1,2,0] gives outputs [dim2, dim1, dim0]),
-  // so we must look up the actual indices by dimension name.
-  auto effectiveSharedLayout = sharedLayout;
-  if (!isRowMajor && numDims >= 2) {
-    auto outDimNames = llvm::to_vector(sharedLayout.getOutDimNames());
-    auto dimN_2 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 2));
-    auto dimN_1 = StringAttr::get(ctx, "dim" + std::to_string(numDims - 1));
-    int idxA = sharedLayout.getOutDimIndex(dimN_2);
-    int idxB = sharedLayout.getOutDimIndex(dimN_1);
-    LinearLayout::BasesT newBases;
-    for (auto &[inDim, basisVectors] : sharedLayout.getBases()) {
-      auto &newBV = newBases[inDim];
-      for (auto &bv : basisVectors) {
-        SmallVector<int32_t> swapped(bv.begin(), bv.end());
-        std::swap(swapped[idxA], swapped[idxB]);
-        newBV.push_back({swapped.begin(), swapped.end()});
-      }
-    }
-    SmallVector<std::pair<StringAttr, int32_t>> newOutDims;
-    for (auto [i, name] : llvm::enumerate(outDimNames)) {
-      int32_t size;
-      if ((int)i == idxA)
-        size = sharedLayout.getOutDimSize(outDimNames[idxB]);
-      else if ((int)i == idxB)
-        size = sharedLayout.getOutDimSize(outDimNames[idxA]);
-      else
-        size = sharedLayout.getOutDimSize(name);
-      newOutDims.push_back({name, size});
-    }
-    effectiveSharedLayout =
-        LinearLayout(newBases, newOutDims, /*requireSurjective=*/false);
-  }
-
   auto cgaLayout = triton::gpu::SharedLinearEncodingAttr::get(
-                       ctx, effectiveSharedLayout, /*layoutAlignment=*/16)
+                       ctx, tdmViewSharedLayout, /*layoutAlignment=*/16)
                        .getCGALayout()
                        .getLinearLayout();
 
@@ -548,7 +549,7 @@ void fillTDMDescriptor(
   }
   srcPtr = b.gep(globalPtrTy, elementType, srcPtr, baseOffset);
 
-  auto tdmToShared = tdmLayout.invertAndCompose(effectiveSharedLayout);
+  auto tdmToShared = tdmLayout.invertAndCompose(tdmViewSharedLayout);
   auto sharedOffsets = applyLinearLayout(
       loc, rewriter, tdmToShared,
       {{kMessage, b.i32_val(0)}, {kWarp, warpId}, {kBlock, ctaId}});
@@ -1104,9 +1105,4 @@ SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
   }
   return offsets;
 }
-
-bool needsTrailingDimSwapForTDM(ArrayRef<unsigned> sharedOrder) {
-  return sharedOrder[0] != (sharedOrder.size() - 1);
-}
-
 } // namespace mlir::LLVM::AMD

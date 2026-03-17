@@ -63,4 +63,11 @@ T getDotEncoding(Value inputValue, unsigned *opIdx, unsigned *vecSize,
   return getDotEncoding<T>(user->getResult(0), opIdx, vecSize);
 }
 
+triton::gpu::PaddedSharedEncodingAttr
+getPaddedEncodingForDotOp(mlir::MLIRContext *context, int opIdx,
+                          ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
+                          triton::gpu::CGAEncodingAttr CGALayout,
+                          unsigned typeWidthInBit, unsigned vecWidth,
+                          const triton::AMD::TargetInfo &targetInfo);
+
 #endif

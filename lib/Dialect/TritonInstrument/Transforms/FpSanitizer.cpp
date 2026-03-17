@@ -1210,16 +1210,14 @@ struct DotScaledPattern : public OpRewritePattern<tt::DotScaledOp> {
     if (aScale && !skipAScale) {
       scale.aScalePtr = createScratchAndStore(rewriter, loc, aScale, aScaleTy);
       scale.aScaleStride = aScaleTy.getShape()[0];
-      scale.aScaleFactor =
-          isa<Float8E4M3FNType>(aScaleTy.getElementType()) ? 16 : 32;
+      scale.aScaleFactor = op.deduceScaleFactor();
       scale.aScaleTileTy = RankedTensorType::get(
           {tileM, 1}, aScaleTy.getElementType(), accLayout);
     }
     if (bScale && !skipBScale) {
       scale.bScalePtr = createScratchAndStore(rewriter, loc, bScale, bScaleTy);
       scale.bScaleStride = bScaleTy.getShape()[0];
-      scale.bScaleFactor =
-          isa<Float8E4M3FNType>(bScaleTy.getElementType()) ? 16 : 32;
+      scale.bScaleFactor = op.deduceScaleFactor();
       scale.bScaleTileTy = RankedTensorType::get(
           {1, tileN}, bScaleTy.getElementType(), accLayout);
     }

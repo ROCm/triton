@@ -631,8 +631,7 @@ def _expected_trunc_ext_roundtrip_i32(x_i32: np.ndarray) -> np.ndarray:
 
 
 def _expected_ext_f16_to_f32_i32(x_i16: np.ndarray) -> np.ndarray:
-    x_u16 = x_i16.view(np.uint16).astype(np.uint32)
-    out_u32 = x_u16.astype(np.uint32)
+    out_u32 = x_i16.view(np.uint16).astype(np.uint32)
     return out_u32.view(np.int32)
 
 
@@ -862,8 +861,12 @@ def test_dot_fma(device, fresh_knobs):
     _assert_payload_equal(out, exp_bits)
 
 
+<<<<<<< HEAD
 @pytest.mark.skipif(not (is_hip_cdna3() or is_hip_cdna4() or is_hip_gfx1250()),
                     reason="Requires DotScaledOp support (CDNA3, CDNA4, or GFX1250)")
+=======
+@pytest.mark.skipif(not (is_hip_cdna4() or is_hip_gfx1250()), reason="Requires DotScaledOp support (CDNA4, or GFX1250)")
+>>>>>>> upstream/main
 @pytest.mark.parametrize("type_a", ["e2m1", "e4m3", "e5m2"])
 @pytest.mark.parametrize("type_b", ["e2m1", "e4m3", "e5m2", "bf16"])
 def test_dot_scaled(device, type_a, type_b, fresh_knobs):
@@ -1086,6 +1089,38 @@ def test_reduction(device, fresh_knobs):
     reduce_kernel[(1, )](a, c1, M=M, N=N, stride_am=a.stride(0), stride_ak=a.stride(1), ORDER=0)
     reduce_kernel[(1, )](a, c2, M=M, N=N, stride_am=a.stride(0), stride_ak=a.stride(1), ORDER=1)
     assert _payload_equal(c1, c2)
+
+
+def test_reduction_matches_loop(device, fresh_knobs):
+    _require_cuda_backend(device)
+
+    @triton.jit
+    def reduce_sum_kernel(x_ptr, out_ptr, N: tl.constexpr):
+        x = tl.load(x_ptr + tl.arange(0, N))
+        tl.store(out_ptr, tl.sum(x, axis=0))
+
+    @triton.jit
+    def loop_sum_kernel(x_ptr, out_ptr, N: tl.constexpr):
+        acc = tl.full([], 0.0, tl.float32)
+        for i in tl.static_range(0, N):
+            acc += tl.load(x_ptr + i)
+        tl.store(out_ptr, acc)
+
+    N = 256
+    pattern = torch.tensor([1e20, 1.0, -1e20, 1.0], dtype=torch.float32, device="cuda")
+    x = pattern.repeat(N // pattern.numel())
+    reduce_out = torch.empty((1, ), dtype=torch.float32, device="cuda")
+    loop_out = torch.empty((1, ), dtype=torch.float32, device="cuda")
+
+    reduce_sum_kernel[(1, )](x, reduce_out, N=N)
+    loop_sum_kernel[(1, )](x, loop_out, N=N)
+    assert not _payload_equal(reduce_out, loop_out)
+
+    fresh_knobs.compilation.instrumentation_mode = "fpsan"
+
+    reduce_sum_kernel[(1, )](x, reduce_out, N=N)
+    loop_sum_kernel[(1, )](x, loop_out, N=N)
+    _assert_payload_equal(reduce_out, loop_out)
 
 
 @pytest.mark.skipif(not (is_hip_cdna3() or is_hip_cdna4()), reason="Requires CDNA3 or CDNA4")
