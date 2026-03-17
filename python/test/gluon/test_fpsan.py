@@ -861,12 +861,7 @@ def test_dot_fma(device, fresh_knobs):
     _assert_payload_equal(out, exp_bits)
 
 
-<<<<<<< HEAD
-@pytest.mark.skipif(not (is_hip_cdna3() or is_hip_cdna4() or is_hip_gfx1250()),
-                    reason="Requires DotScaledOp support (CDNA3, CDNA4, or GFX1250)")
-=======
 @pytest.mark.skipif(not (is_hip_cdna4() or is_hip_gfx1250()), reason="Requires DotScaledOp support (CDNA4, or GFX1250)")
->>>>>>> upstream/main
 @pytest.mark.parametrize("type_a", ["e2m1", "e4m3", "e5m2"])
 @pytest.mark.parametrize("type_b", ["e2m1", "e4m3", "e5m2", "bf16"])
 def test_dot_scaled(device, type_a, type_b, fresh_knobs):
