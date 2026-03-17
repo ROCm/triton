@@ -479,11 +479,6 @@ void fillTDMDescriptor(
   auto ctx = rewriter.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  if (!isRowMajor) {
-    swapTrailingDims(shapePerCTA);
-    swapTrailingDims(offset);
-  }
-
   Type globalPtrTy = ptr_ty(ctx, 1);
   Type sharedPtrTy = ptr_ty(ctx, 3);
 
