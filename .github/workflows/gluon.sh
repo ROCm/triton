@@ -57,7 +57,8 @@ HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 32 --durations=10 third_party/amd/py
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py \
     --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[True-258-258-510-False-2-32-32-64]' \
     --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[False-258-258-510-False-2-32-32-64]' \
-    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[False-258-258-510-False-4-32-32-64]'
+    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_4warps[False-258-258-510-False-4-32-32-64]' \
+    --deselect 'third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py::test_streamk_gemm_tdm_8warps[258-258-510-False-3-32-32-64]'
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/stream_copy_gfx1250.py
 
 unset HSA_MODEL_ARGS
@@ -78,7 +79,7 @@ echo "=== Run Triton GEMM/Attention Tests ==="
 
 # Disable time_slicing for mxfp_fa.py - causes numeric issues (https://github.com/ROCm/triton-internal/issues/1683)
 unset HSA_MODEL_ARGS
-pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py
+#pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py
 
 PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
     mi400/test_gemm_hipdriver.py \

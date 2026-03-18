@@ -3,12 +3,6 @@ This file tests and ensure that generated code for BF16 BSHD Flash Attention
 kernel on GFX1250 do not have unexpected change or regression.
 """
 
-# ruff: noqa: E402
-import hip
-
-# Needed for internal dev flow for now; will remove later
-hip.hip.hipInit(0)
-
 import json
 import re
 import os

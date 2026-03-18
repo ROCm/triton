@@ -1,10 +1,3 @@
-# ruff: noqa: E402
-try:
-    import hip
-    hip.hip.hipInit(0)
-except ImportError:
-    pass
-
 import re
 import math
 import itertools

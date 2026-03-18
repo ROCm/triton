@@ -32,11 +32,6 @@ done
 
 import os
 # ruff: noqa: E402
-import hip
-
-# Needed for internal dev flow for now; will remove later
-hip.hip.hipInit(0)
-
 import pytest
 import torch
 import triton

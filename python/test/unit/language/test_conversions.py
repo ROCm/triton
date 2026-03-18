@@ -1,9 +1,4 @@
 # fmt: off
-# ruff: noqa: E402
-import hip
-
-# Needed for internal dev flow for now; will remove later
-hip.hip.hipInit(0)
 
 
 import numpy as np
@@ -40,7 +35,7 @@ def type_convert_triton(src, dst, rounding : tl.constexpr, BLOCK_SIZE : tl.const
 
 def launch_type_convert_triton(src, src_dtype, dst_dtype, device, rounding=None, BLOCK_SIZE=4096):
 
-    dst = torch.empty(src.shape, dtype=matching_int(dst_dtype)).to(device=device)
+    dst = torch.empty(src.shape, dtype=matching_int(dst_dtype), device=device)
     type_convert_triton[(src.shape[0] // BLOCK_SIZE,)](triton.reinterpret(src, src_dtype), triton.reinterpret(dst, dst_dtype), rounding, BLOCK_SIZE)
     return dst
 
@@ -83,7 +78,7 @@ def exhaustive_populate(dst, offset, BLOCK_SIZE : tl.constexpr, force_odd : tl.c
 def launch_exhaustive_populate(dst_dtype, offset, numel, force_odd, output_bits, max_repr, device, BLOCK_SIZE=4096):
 
     assert(numel % BLOCK_SIZE == 0)
-    dst = torch.empty((numel,), dtype=matching_int(dst_dtype)).to(device=device)
+    dst = torch.empty((numel,), dtype=matching_int(dst_dtype), device=device)
     exhaustive_populate[(numel // BLOCK_SIZE,)](triton.reinterpret(dst, dst_dtype), offset, BLOCK_SIZE, force_odd, output_bits, max_repr)
     # 0x80 in float8e4b8 or float8e5b16 represents inf/nan. We don't need to have that
     # as input to the conversion kernels.
@@ -161,7 +156,7 @@ def downcast_emulated(src, dst, rounding : tl.constexpr, BLOCK_SIZE : tl.constex
 
 def launch_downcast_emulated(src, src_dtype, dst_dtype, rounding, exponent_bits, mantissa_bits, exponent_bias, device, BLOCK_SIZE=4096):
 
-    dst = torch.empty(src.shape, dtype=matching_int(dst_dtype)).to(device=device)
+    dst = torch.empty(src.shape, dtype=matching_int(dst_dtype), device=device)
     downcast_emulated[(src.shape[0] // BLOCK_SIZE,)](
         triton.reinterpret(src, src_dtype), triton.reinterpret(dst, dst_dtype), rounding, BLOCK_SIZE, exponent_bits, mantissa_bits, exponent_bias)
     # 0x80 in float8e4b8 or float8e5b16 represents inf/nan. downcast_emulated kernel will
@@ -207,7 +202,7 @@ def upcast_emulated(src, dst, BLOCK_SIZE : tl.constexpr, exponent_bits : tl.cons
 
 def launch_upcast_emulated(src, exponent_bits, mantissa_bits, exponent_bias, device, BLOCK_SIZE=4096):
 
-    dst = torch.empty(src.shape, dtype=torch.int32).to(device=device)
+    dst = torch.empty(src.shape, dtype=torch.int32, device=device)
     upcast_emulated[(src.shape[0] // BLOCK_SIZE,)](src, triton.reinterpret(dst, tl.float32), BLOCK_SIZE, exponent_bits, mantissa_bits, exponent_bias)
     return dst
 
@@ -223,14 +218,11 @@ def downcast_test(src_dtype, dst_dtype, rounding, exponent_bits, mantissa_bits, 
     dst = launch_upcast_emulated(dst, exponent_bits, mantissa_bits, exponent_bias, device=device)
     dst2 = launch_upcast_emulated(dst2, exponent_bits, mantissa_bits, exponent_bias, device=device)
 
-    dst = dst.cpu()
-    dst2 = dst2.cpu()
-
     if not (torch.equal(dst, dst2)):
         print('Error!!!')
 
-        dst = dst.detach().numpy()
-        dst2 = dst2.detach().numpy()
+        dst = dst.cpu().detach().numpy()
+        dst2 = dst2.cpu().detach().numpy()
         src = src.cpu().detach().numpy()
 
         print(src[dst != dst2][0])
@@ -254,7 +246,7 @@ def upcast_test(src_dtype, dst_dtype, exponent_bits, mantissa_bits, exponent_bia
 
     src_emulated_to_float32 = launch_upcast_emulated(src, exponent_bits, mantissa_bits, exponent_bias, device=device)
 
-    assert(torch.equal(src_emulated_to_float32.cpu(), dst_to_float32.cpu()))
+    assert(torch.equal(src_emulated_to_float32, dst_to_float32))
 
 
 @pytest.mark.parametrize("src_dtype, dst_dtype", [
@@ -376,7 +368,7 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
             downcast_test(getattr(tl, src_dtype), getattr(tl, dst_dtype), rounding, *stuff, max_repr, i, device=device)
 
 @pytest.mark.parametrize("mode", [
-    'max', 'min', 'inf', '-inf', 'nan'
+    'max', 'min', 'inf', '-inf', 'nan',
 ])
 @pytest.mark.parametrize("dst_dtype", ["float8e4nv", "float8e5"])
 @pytest.mark.parametrize("src_dtype", ["float32", "float16", "bfloat16"])
@@ -424,8 +416,8 @@ def test_typeconvert_downcast_clamping(src_dtype, dst_dtype, mode, device, round
 
     BLOCK_SIZE = 1024
     shape = (BLOCK_SIZE * 2,)
-    src = torch.full(shape, test_value, dtype=torch_src_dtype).to(device=device)
-    dst = torch.empty(shape, dtype=torch_dst_dtype).to(device=device)
+    src = torch.full(shape, test_value, dtype=torch_src_dtype, device=device)
+    dst = torch.empty(shape, dtype=torch_dst_dtype, device=device)
 
     type_convert_triton[(src.shape[0] // BLOCK_SIZE,)](
         triton.reinterpret(src, torch_src_dtype),
@@ -434,7 +426,6 @@ def test_typeconvert_downcast_clamping(src_dtype, dst_dtype, mode, device, round
         BLOCK_SIZE
     )
 
-    dst = dst.to(device='cpu')
     if mode == 'nan':
         assert(torch.all(torch.isnan(dst)))
     else:

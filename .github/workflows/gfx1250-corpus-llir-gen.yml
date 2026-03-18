@@ -56,8 +56,8 @@ jobs:
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
             -v /data/ci/actions-runner/_work/triton/triton:/code \
             -v /data/ci/llvm/278dba37-release:/llvm \
-            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r3.01:/ffm-base \
-            -v /data/ci/ffm/rocdtif-7.1-am+ffmlite-mi400-r3.01:/ffm-update \
+            -v /data/ci/ffm/rocdtif-7.12-am+ffmlite-mi400.8661118.362-rel-20260317:/ffm-base \
+            -v /data/ci/ffm/rocdtif-7.12-am+ffmlite-mi400.8661118.362-rel-20260317:/ffm-update \
             -v /data/ci/triton-cache/json:/root/.triton/json \
             -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
             -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
@@ -65,7 +65,7 @@ jobs:
             -v /data/ci/llir/${DIRNAME}:/llir \
             -w /code \
             --entrypoint bash \
-            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-env:1.3 \
+            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.4 \
             -lc "/code/.github/workflows/corpus_kernel_llir_gen.sh"
 
       - name: Upload artifact

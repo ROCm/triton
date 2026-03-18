@@ -5,12 +5,6 @@ Simple Gluon stream copy kernel for GFX1250 (Babel style).
 - 128-bit read/write (8 x fp16 elements per lane)
 """
 
-# ruff: noqa: E402
-import hip
-
-# Initialize HIP
-hip.hip.hipInit(0)
-
 import torch
 from triton.experimental import gluon
 import triton.experimental.gluon.language as gl

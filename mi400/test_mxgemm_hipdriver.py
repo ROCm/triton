@@ -1,7 +1,3 @@
-import hip
-
-hip.hip.hipInit(0)
-
 import pytest
 import triton
 import triton.language as tl
