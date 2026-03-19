@@ -31,7 +31,6 @@ done
 '''
 
 import os
-# ruff: noqa: E402
 import pytest
 import torch
 import triton
