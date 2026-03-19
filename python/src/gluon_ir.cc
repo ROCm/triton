@@ -393,6 +393,17 @@ void init_gluon_ir(py::module &&m) {
              return self.getChecked<ttg::SwizzledSharedEncodingAttr>(
                  ctx, vec, perPhase, maxPhase, order, ctaLayout);
            })
+      .def("get_amd_rotating_shared_layout",
+           [](GluonOpBuilder &self, int vec, int perPhase, int maxPhase,
+              std::vector<unsigned> &order, std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
+             auto ctx = self.getContext();
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
+             return self.getChecked<ttg::AMDRotatingSharedEncodingAttr>(
+                 ctx, vec, perPhase, maxPhase, order, ctaLayout);
+           })
       .def("get_tensor_memory_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &block, bool unpacked,
               std::vector<unsigned> &ctaSplitNum) -> Attribute {
@@ -696,6 +707,29 @@ void init_gluon_ir(py::module &&m) {
               tt::CacheModifier cacheModifier) {
              self.create<ttag::BufferLoadToLocalOp>(
                  dest, ptr, offsets, mask, other, stride, cacheModifier);
+           })
+      .def("create_sched_barrier",
+           [](GluonOpBuilder &self, int32_t mask) {
+             self.create<ttag::SchedBarrierOp>(
+                 self.getBuilder().getI32IntegerAttr(mask));
+           })
+      .def("create_sched_group_barrier",
+           [](GluonOpBuilder &self, int32_t mask, int32_t size,
+              int32_t syncId) {
+             self.create<ttag::SchedGroupBarrierOp>(
+                 self.getBuilder().getI32IntegerAttr(mask),
+                 self.getBuilder().getI32IntegerAttr(size),
+                 self.getBuilder().getI32IntegerAttr(syncId));
+           })
+      .def("create_iglp_opt",
+           [](GluonOpBuilder &self, int32_t value) {
+             self.create<ttag::IglpOptOp>(
+                 self.getBuilder().getI32IntegerAttr(value));
+           })
+      .def("create_set_prio",
+           [](GluonOpBuilder &self, int32_t value) {
+             self.create<ttag::SetPrioOp>(
+                 self.getBuilder().getI32IntegerAttr(value));
            });
 
   py::class_<ttg::WarpSpecializeOp, OpState>(m, "WarpSpecializeOp",

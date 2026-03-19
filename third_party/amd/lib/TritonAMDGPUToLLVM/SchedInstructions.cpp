@@ -99,6 +99,52 @@ private:
   int32_t numStages;
 };
 
+struct SchedBarrierRewriter
+    : public OpRewritePattern<triton::amdgpu::SchedBarrierOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::amdgpu::SchedBarrierOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.create<ROCDL::SchedBarrier>(op.getLoc(), op.getMask());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct SchedGroupBarrierRewriter
+    : public OpRewritePattern<triton::amdgpu::SchedGroupBarrierOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::amdgpu::SchedGroupBarrierOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.create<ROCDL::SchedGroupBarrier>(op.getLoc(), op.getMask(),
+                                              op.getSize(), op.getSyncId());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct IglpOptRewriter
+    : public OpRewritePattern<triton::amdgpu::IglpOptOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::amdgpu::IglpOptOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.create<ROCDL::IglpOpt>(op.getLoc(),
+                                    rewriter.getI32IntegerAttr(op.getValue()));
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct SetPrioRewriter
+    : public OpRewritePattern<triton::amdgpu::SetPrioOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::amdgpu::SetPrioOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.create<ROCDL::SetPrioOp>(op.getLoc(), op.getValue());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct TritonAMDGPULowerInstructionSchedHints
     : public triton::impl::TritonAMDGPULowerInstructionSchedHintsBase<
           TritonAMDGPULowerInstructionSchedHints> {
@@ -116,14 +162,23 @@ struct TritonAMDGPULowerInstructionSchedHints
     ConversionTarget target(*ctx);
     target.addLegalDialect<LLVM::LLVMDialect>();
     target.addIllegalOp<triton::amdgpu::InstructionSchedHint>();
+    target.addIllegalOp<triton::amdgpu::SchedBarrierOp>();
+    target.addIllegalOp<triton::amdgpu::SchedGroupBarrierOp>();
+    target.addIllegalOp<triton::amdgpu::IglpOptOp>();
+    target.addIllegalOp<triton::amdgpu::SetPrioOp>();
     target.addLegalOp<ROCDL::SchedBarrier>();
     target.addLegalOp<ROCDL::IglpOpt>();
     target.addLegalOp<ROCDL::SchedGroupBarrier>();
+    target.addLegalOp<ROCDL::SetPrioOp>();
 
     RewritePatternSet patterns(ctx);
 
     patterns.add<InstructionSchedHintsRewriter>(ctx, this->arch,
                                                 this->numStages);
+    patterns.add<SchedBarrierRewriter>(ctx);
+    patterns.add<SchedGroupBarrierRewriter>(ctx);
+    patterns.add<IglpOptRewriter>(ctx);
+    patterns.add<SetPrioRewriter>(ctx);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {

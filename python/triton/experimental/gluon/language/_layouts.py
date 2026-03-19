@@ -462,6 +462,78 @@ class SwizzledSharedLayout(SharedLayout):
 
 
 @dataclass(frozen=True, eq=True)
+class AMDRotatingSharedLayout(SharedLayout):
+    """
+    Represents a rotating swizzled shared memory layout for AMD GPUs.
+
+    Similar to SwizzledSharedLayout, but uses a rotating swizzle pattern across
+    blocks to reduce bank conflicts when shared memory writes and reads have
+    different access orders. The rotation is computed as:
+        phase        = (row / per_phase) % max_phase
+        block_no     = (row / (per_phase * max_phase)) % max_phase
+        combined     = phase ^ block_no
+        out_col      = in_col ^ combined
+
+    Args:
+        vec (int): Vector width for swizzling.
+        per_phase (int): Elements per swizzle phase.
+        max_phase (int): Maximum number of swizzle phases.
+        order (List[int]): Dimension ordering for swizzling.
+        ctas_per_cga (Optional[List[int]]): CTAs per CGA grouping.
+        cta_split_num (Optional[List[int]]): Split factors for CTAs.
+        cta_order (Optional[List[int]]): CTA ordering.
+    """
+    vec: int
+    per_phase: int
+    max_phase: int
+    order: List[int]
+    ctas_per_cga: Optional[List[int]] = None
+    cta_split_num: Optional[List[int]] = None
+    cta_order: Optional[List[int]] = None
+
+    def __post_init__(self):
+        super().__setattr__("vec", _unwrap_if_constexpr(self.vec))
+        super().__setattr__("per_phase", _unwrap_if_constexpr(self.per_phase))
+        super().__setattr__("max_phase", _unwrap_if_constexpr(self.max_phase))
+        super().__setattr__("order", _unwrap_if_constexpr(self.order))
+        super().__setattr__("ctas_per_cga", _unwrap_if_constexpr(self.ctas_per_cga))
+        super().__setattr__("cta_split_num", _unwrap_if_constexpr(self.cta_split_num))
+        super().__setattr__("cta_order", _unwrap_if_constexpr(self.cta_order))
+
+        rank = len(self.order)
+        _realize_cta_layout(self, rank)
+        assert len(self.ctas_per_cga) == rank
+        assert len(self.cta_split_num) == rank
+        assert len(self.cta_order) == rank
+
+    def _to_ir(self, builder):
+        return builder.get_amd_rotating_shared_layout(
+            self.vec,
+            self.per_phase,
+            self.max_phase,
+            self.order,
+            self.ctas_per_cga,
+            self.cta_split_num,
+            self.cta_order,
+        )
+
+    def mangle(self) -> str:
+
+        def stringify(x):
+            if x is None:
+                return ""
+            return "_".join(map(str, x))
+
+        return f"ARS_{self.vec}_{self.per_phase}_{self.max_phase}_{stringify(self.order)}_{stringify(self.ctas_per_cga)}_{stringify(self.cta_split_num)}_{stringify(self.cta_order)}_ARS"
+
+    def __hash__(self):
+        return hash((self.vec, self.per_phase, self.max_phase,
+                     tuple(self.order), tuple(self.ctas_per_cga) if self.ctas_per_cga else None,
+                     tuple(self.cta_split_num) if self.cta_split_num else None,
+                     tuple(self.cta_order) if self.cta_order else None))
+
+
+@dataclass(frozen=True, eq=True)
 class PaddedSharedLayout(SharedLayout):
     """
     Represents a layout for the access to shared memory. Compared to SwizzledSharedLayout,

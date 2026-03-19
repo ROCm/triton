@@ -634,4 +634,60 @@ def LocalLoadPackedTransposedOp : TT_AMDGPU_Op<"local_load_packed_tranposed", [L
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// SchedBarrierOp
+//===----------------------------------------------------------------------===//
+
+def SchedBarrierOp : TT_AMDGPU_Op<"sched_barrier", []> {
+  let summary = "AMD instruction scheduling barrier";
+  let description = [{
+    Prevents the LLVM instruction scheduler from reordering certain
+    instruction types across this barrier.  The mask selects which
+    instruction categories are affected (0 = full barrier).
+  }];
+  let arguments = (ins I32Attr:$mask);
+  let assemblyFormat = [{ attr-dict }];
+}
+
+//===----------------------------------------------------------------------===//
+// SchedGroupBarrierOp
+//===----------------------------------------------------------------------===//
+
+def SchedGroupBarrierOp : TT_AMDGPU_Op<"sched_group_barrier", []> {
+  let summary = "AMD instruction-group scheduling barrier";
+  let description = [{
+    Groups a specified number of instructions of certain types for
+    interleaved scheduling.
+  }];
+  let arguments = (ins I32Attr:$mask, I32Attr:$size, I32Attr:$syncId);
+  let assemblyFormat = [{ attr-dict }];
+}
+
+//===----------------------------------------------------------------------===//
+// IglpOptOp
+//===----------------------------------------------------------------------===//
+
+def IglpOptOp : TT_AMDGPU_Op<"iglp_opt", []> {
+  let summary = "AMD IGLP optimization hint";
+  let description = [{
+    Instruction Group Level Parallelism optimization hint.
+    Value 0 = disabled, 1 = round-robin, 2 = attention-optimized.
+  }];
+  let arguments = (ins I32Attr:$value);
+  let assemblyFormat = [{ attr-dict }];
+}
+
+//===----------------------------------------------------------------------===//
+// SetPrioOp
+//===----------------------------------------------------------------------===//
+
+def SetPrioOp : TT_AMDGPU_Op<"set_prio", []> {
+  let summary = "Set wave scheduling priority";
+  let description = [{
+    Sets the wave scheduling priority. 0 = normal, 1 = high.
+  }];
+  let arguments = (ins I32Attr:$value);
+  let assemblyFormat = [{ attr-dict }];
+}
+
 #endif

@@ -81,6 +81,7 @@ from ._layouts import (
     NVMMADistributedLayout,
     NVMMASharedLayout,
     SwizzledSharedLayout,
+    AMDRotatingSharedLayout,
     PaddedSharedLayout,
 )
 from ._math import (

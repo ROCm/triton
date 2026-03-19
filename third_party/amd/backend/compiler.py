@@ -317,8 +317,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
 
-        if options.schedule_hint.lower() != "none":
-            amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages)
+        amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.arch, options.num_stages)
 
         # This can not be moved below the di_scope pass
         if HIPBackend.instrumentation:

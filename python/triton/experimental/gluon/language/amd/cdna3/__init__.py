@@ -9,7 +9,10 @@ from ..._core import builtin, _unwrap_if_constexpr
 if TYPE_CHECKING:
     from ..._semantic import GluonSemantic
 
-__all__ = ["buffer_load", "buffer_store", "mfma"]
+from ..scheduling import sched_barrier, sched_group_barrier, iglp_opt, set_prio
+
+__all__ = ["buffer_load", "buffer_store", "mfma",
+           "sched_barrier", "sched_group_barrier", "iglp_opt", "set_prio"]
 
 
 def _verify_buffer_ops(ptr, offsets, mask=None, other=None):

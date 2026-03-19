@@ -61,6 +61,10 @@ public:
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<triton::amdgpu::InstructionSchedHint>();
+    addLegalOp<triton::amdgpu::SchedBarrierOp>();
+    addLegalOp<triton::amdgpu::SchedGroupBarrierOp>();
+    addLegalOp<triton::amdgpu::IglpOptOp>();
+    addLegalOp<triton::amdgpu::SetPrioOp>();
   }
 };
 
