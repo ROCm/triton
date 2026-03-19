@@ -548,8 +548,8 @@ class MoEPipelinedProgram:
             wmma_idx += 1
 
         # epilogue
-        for _ in gl.static_range(cfg.NUM_BUFFERS - 1):
-            self.async_wait(cfg.NUM_BUFFERS - 1)
+        for i in gl.static_range(cfg.NUM_BUFFERS - 1):
+            self.async_wait(cfg.NUM_BUFFERS - 2 - i)
 
             x, w, scale_x, scale_w = self.issue_local_loads(wmma_idx)
             if cfg.USE_WMMA_SCALED:
