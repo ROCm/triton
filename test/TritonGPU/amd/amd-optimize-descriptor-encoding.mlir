@@ -133,8 +133,8 @@ tt.func public @descriptor_load_while(%arg0: !tt.ptr<i8> {tt.divisibility = 16 :
 #mma = #ttg.amd_wmma<{version = 3, isTranspose = true, ctaLayout = {warp = [[1, 0], [2, 0], [4, 0]]}, instrShape = [16, 16, 32]}>
 
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
-// CHECK-DAG: #[[$PADDED_A:.*]] = #ttg.padded_shared<[32:+8] {
-// CHECK-DAG: #[[$PADDED_B:.*]] = #ttg.padded_shared<[64:+16] {
+// CHECK-DAG: #[[$PADDED_A:.*]] = #ttg.padded_shared<[128:+8] {
+// CHECK-DAG: #[[$PADDED_B:.*]] = #ttg.padded_shared<[128:+16] {
 // CHECK-LABEL: @descriptor_load_dot_operand
 tt.func public @descriptor_load_dot_operand(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: i32, %arg3: i32, %arg4: i64, %arg5: i64) {
   // CHECK: tt.make_tensor_descriptor {{.*}} : <f16>, <tensor<512x32xf16, #[[$PADDED_A]]>>

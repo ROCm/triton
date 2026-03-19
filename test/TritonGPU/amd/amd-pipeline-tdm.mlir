@@ -53,8 +53,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 //   → padded_shared<[64:+16]>
 //
 // tt.desciptor_store -> padded_shared<[64:+8]>
-// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[32:+8] {order = [1, 0], shape = [512, 32]}>
-// CHECK: #[[$PADDED_B:.*]] = #ttg.padded_shared<[64:+16] {order = [1, 0], shape = [32, 64]}>
+// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[128:+8] {order = [1, 0], shape = [512, 32]}>
+// CHECK: #[[$PADDED_B:.*]] = #ttg.padded_shared<[128:+16] {order = [1, 0], shape = [32, 64]}>
 // CHECK: #[[$PADDED_C:.*]] = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [512, 64]}>
 // CHECK-NOT: #ttg.padded_shared
 
@@ -87,8 +87,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 //   → padded_shared<[64:+16]>
 //
 // tt.descriptor_store -> padded_shared<[64:+8]>
-// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[64:+16] {order = [1, 0], shape = [256, 64]}>
-// CHECK: #[[$PADDED_B:.*]] = #ttg.padded_shared<[64:+16] {order = [1, 0], shape = [64, 64]}>
+// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[256:+16] {order = [1, 0], shape = [256, 64]}>
+// CHECK: #[[$PADDED_B:.*]] = #ttg.padded_shared<[256:+16] {order = [1, 0], shape = [64, 64]}>
 // CHECK: #[[$PADDED_C:.*]] = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [256, 64]}>
 // CHECK-NOT: #ttg.padded_shared
 
@@ -159,7 +159,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 //   → padded_shared<[64:+4]>
 //
 // tt.desciptor_store -> padded_shared<[64:+4]>
-// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[16:+4] {order = [1, 0], shape = [256, 16]}>
+// CHECK: #[[$PADDED_A:.*]] = #ttg.padded_shared<[64:+4] {order = [1, 0], shape = [256, 16]}>
 // CHECK: #[[$PADDED_B:.*]] = #ttg.padded_shared<[64:+4] {order = [1, 0], shape = [16, 64]}>
 // CHECK: #[[$PADDED_C:.*]] = #ttg.padded_shared<[64:+4] {order = [1, 0], shape = [256, 64]}>
 // CHECK-NOT: #ttg.padded_shared
