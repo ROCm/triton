@@ -16,6 +16,9 @@ inline bool isFp4Padded(Attribute encoding) {
   return mmaEnc && mmaEnc.getFp4Padded();
 }
 
+gpu::CGAEncodingAttr updateCGALayoutForShape(gpu::CGAEncodingAttr cgaLayout,
+                                             ArrayRef<int64_t> shape);
+
 gpu::SharedEncodingTrait
 updateEncodingForShape(Operation *op, gpu::SharedEncodingTrait encoding,
                        RankedTensorType tensorType);
