@@ -1744,7 +1744,7 @@ LinearLayout getTDMLinearLayout(ArrayRef<int64_t> blockShape,
 
   return (identityStandardND(S("message"), messageShape, order) *
           identityStandardND(S("warp"), warpsPerCTA, order) * cgaLayout)
-      .transposeOuts(outDimNames);
+      .transposeOuts(standardOutDimNames(ctx, numDims));
 }
 
 } // namespace mlir::triton::gpu
