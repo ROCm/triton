@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-schedule-loops="num_stages=2" -tritonamdgpu-pipeline="use_async_copy=1" -canonicalize | FileCheck %s
+// RUN: triton-opt %s -split-input-file -tritonamdgpu-optimize-descriptor-encoding  -tritonamdgpu-schedule-loops="num_stages=2" -tritonamdgpu-pipeline="use_async_copy=1" -canonicalize | FileCheck %s
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [8, 1], order = [1, 0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [8, 1], order = [1, 0]}>
@@ -132,10 +132,15 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 }
 
 // CHECK-LABEL: tt.func @tdm_padding_fp8
-// CHECK: async_tdm_copy_global_to_local
-// CHECK: async_tdm_copy_global_to_local
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<256x64xf8E5M2, #[[$PADDED_A]]>> -> !ttg.memdesc<256x64xf8E5M2, #[[$PADDED_A]], #smem, mutable>
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<64x64xf8E5M2, #[[$PADDED_B]]>> -> !ttg.memdesc<64x64xf8E5M2, #[[$PADDED_B]], #smem, mutable>
 // CHECK: scf.for
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<256x64xf8E5M2, #[[$PADDED_A]]>> -> !ttg.memdesc<256x64xf8E5M2, #[[$PADDED_A]], #smem, mutable>
+// CHECK: ttg.async_commit_group tokens
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<64x64xf8E5M2, #[[$PADDED_B]]>> -> !ttg.memdesc<64x64xf8E5M2, #[[$PADDED_B]], #smem, mutable>
+// CHECK: ttg.async_commit_group tokens
 // CHECK: }
+// CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<tensor<256x64xf16, #[[$PADDED_C]]>>
 
 // -----
 
@@ -199,7 +204,12 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 }
 
 // CHECK-LABEL: tt.func @tdm_padding_f32
-// CHECK: async_tdm_copy_global_to_local
-// CHECK: async_tdm_copy_global_to_local
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<256x16xf32, #[[$PADDED_A]]>> -> !ttg.memdesc<256x16xf32, #[[$PADDED_A]], #smem, mutable>
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<16x64xf32, #[[$PADDED_B]]>> -> !ttg.memdesc<16x64xf32, #[[$PADDED_B]], #smem, mutable>
 // CHECK: scf.for
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<256x16xf32, #[[$PADDED_A]]>> -> !ttg.memdesc<256x16xf32, #[[$PADDED_A]], #smem, mutable>
+// CHECK: ttg.async_commit_group tokens
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<16x64xf32, #[[$PADDED_B]]>> -> !ttg.memdesc<16x64xf32, #[[$PADDED_B]], #smem, mutable>
+// CHECK: ttg.async_commit_group tokens
 // CHECK: }
+// CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<tensor<256x64xf32, #[[$PADDED_C]]>>
