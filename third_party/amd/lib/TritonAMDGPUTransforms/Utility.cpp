@@ -462,6 +462,39 @@ composePaddedLayoutWMMA(int opIdx, unsigned vecWidth,
       context, {{padInterval, padAmount}}, order, shape, CGALayout);
 }
 
+// updateEncodingForShape is used in OptimizeDescriptorEncoding pass and in
+// downstream lowering pass to adapt the encoding to a given tensor shape. In
+// OptimizeDescriptorEncoding, we use this function to update the encoding for
+// shape of the descriptor from its uses. The cga layout is given by a shared
+// encoding on the descriptor users or a default layout created in the fallback.
+// Given an encoding and a tensor shape, we get the cga layout and update the
+// encoding for the desired shape.
+triton::gpu::SharedEncodingTrait
+updateEncodingForShape(Operation *op, triton::gpu::SharedEncodingTrait encoding,
+                       RankedTensorType tensorType) {
+  auto ctx = encoding.getContext();
+  auto rank = tensorType.getRank();
+  SmallVector<unsigned> order(rank);
+  std::iota(order.rbegin(), order.rend(), 0);
+  auto shape = tensorType.getShape();
+  auto cgaLayout = ttg::getCGALayout(encoding);
+  cgaLayout = ttg::updateCGALayoutForShape(cgaLayout, shape);
+  // Check if we have a padded encoding
+  if (auto paddedEnc = dyn_cast<ttg::PaddedSharedEncodingAttr>(encoding)) {
+    SmallVector<std::pair<unsigned, unsigned>> intervalPads;
+    for (auto [interval, padding] :
+         llvm::zip(paddedEnc.getIntervals(), paddedEnc.getPaddings()))
+      intervalPads.push_back({interval, padding});
+    return ttg::PaddedSharedEncodingAttr::get(ctx, intervalPads, order, shape,
+                                              cgaLayout);
+  }
+  // Otherwise we have a swizzled encoding
+  auto swizzledEnc = cast<ttg::SwizzledSharedEncodingAttr>(encoding);
+  return ttg::SwizzledSharedEncodingAttr::get(
+      ctx, swizzledEnc.getVec(), swizzledEnc.getPerPhase(),
+      swizzledEnc.getMaxPhase(), order, cgaLayout);
+}
+
 ttg::SharedEncodingTrait getEncodingFromDescriptor(Operation *op,
                                                    RankedTensorType tensorType,
                                                    Value desc) {
@@ -471,7 +504,7 @@ ttg::SharedEncodingTrait getEncodingFromDescriptor(Operation *op,
     emitError(op->getLoc()) << "Missing encoding on the tensor descriptor";
     return {};
   }
-  return ttg::updateEncodingForShape(op, encoding, tensorType);
+  return updateEncodingForShape(op, encoding, tensorType);
 }
 
 ttg::PaddedSharedEncodingAttr

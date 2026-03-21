@@ -6,6 +6,7 @@
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/Transforms/DescriptorUtils.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include <numeric>
 
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
@@ -103,29 +104,76 @@ getSharedEncIfAllUsersAreDotEncPadded(
   }
   return attr;
 }
+
+Attribute findEncodingFromUsers(Operation *op) {
+  if (auto load = dyn_cast<tt::DescriptorLoadOp>(op)) {
+    auto arch = getAMDArch(op->getParentOfType<ModuleOp>());
+    auto targetInfo = tt::AMD::TargetInfo(arch.value_or("").str());
+    auto paddedEnc = getSharedEncIfAllUsersAreDotEncPadded(load, targetInfo);
+    LDBG("findEncodingFromUsers: LoadDesc Op Padded Encoding"
+         << (paddedEnc.has_value() ? "found" : "not found"));
+    return (paddedEnc.value_or(nullptr));
+  } else {
+    // Pick the first use that has a shared encoding
+    for (auto use : op->getUsers()) {
+      if (auto localAlloc = dyn_cast<ttg::LocalAllocOp>(use)) {
+        if (auto encoding = dyn_cast<ttg::PaddedSharedEncodingAttr>(
+                localAlloc.getType().getEncoding()))
+          return encoding;
+      } else if (auto store = dyn_cast<ttg::LocalStoreOp>(use)) {
+        if (auto encoding = dyn_cast<ttg::PaddedSharedEncodingAttr>(
+                store.getSrc().getType().getEncoding()))
+          return encoding;
+      }
+    }
+  }
+  return {};
+}
+
+Attribute getFallbackSharedEncoding(RankedTensorType tensorType,
+                                    ttg::CGAEncodingAttr cgaLayout,
+                                    ArrayRef<int64_t> useShape,
+                                    unsigned numCTAs) {
+  auto ctx = tensorType.getContext();
+  ArrayRef<int64_t> shape = useShape.empty() ? tensorType.getShape() : useShape;
+  unsigned rank = shape.size();
+  SmallVector<unsigned> order(rank);
+  std::iota(order.rbegin(), order.rend(), 0);
+  if (!cgaLayout) {
+    SmallVector<unsigned> ctasPerCGA(tensorType.getRank(), 1);
+    ctasPerCGA.back() = numCTAs;
+    cgaLayout = ttg::CGAEncodingAttr::fromSplitParams(ctx, ctasPerCGA,
+                                                      ctasPerCGA, order);
+  } else if (cgaLayout.getRank() != tensorType.getRank()) {
+    cgaLayout = ttg::updateCGALayoutForShape(cgaLayout, shape);
+  }
+  auto blockShapePerCTA =
+      triton::gpu::getShapePerCTA(cgaLayout.getCTASplitNum(), shape);
+
+  auto elemWidth = tensorType.getElementType().getIntOrFloatBitWidth();
+  unsigned padAmount = 128 / elemWidth;
+  // Restrict pad interval (calculated from TDM descriptor's pad interval field)
+  // Fallback to swizzled encoding if the interval exceeds this limit.
+  // TODO: Query pad interval limit from target info
+  unsigned maxPadIntervalElements = 256u * 32 / elemWidth;
+  unsigned padInterval = static_cast<unsigned>(blockShapePerCTA[order[0]]);
+  if (padInterval > maxPadIntervalElements) {
+    return ttg::SwizzledSharedEncodingAttr::get(ctx, 1, 1, 1, order, cgaLayout);
+  }
+
+  return ttg::PaddedSharedEncodingAttr::get(ctx, {{padInterval, padAmount}},
+                                            order, shape, cgaLayout);
+}
+
+bool isForcedToDefault(Operation *op) {
+  return isa<tt::CallOp, tt::ReturnOp>(op);
+}
+
 } // anonymous namespace
 
 namespace mlir {
 #define GEN_PASS_DEF_TRITONAMDGPUOPTIMIZEDESCRIPTORENCODING
 #include "TritonAMDGPUTransforms/Passes.h.inc"
-
-// Walk the uses of descriptor loads and find a favorable encoding to use.
-// Attach the desired encoding as a discardable attribute to descriptor loads.
-// assignMemoryLayouts will propagate this attribute to rest of the descriptors
-static void computeDesiredEncodingAttr(mlir::ModuleOp &m) {
-  auto arch = getAMDArch(m);
-  auto targetInfo = tt::AMD::TargetInfo(arch.value_or("").str());
-  for (auto f : m.getOps<tt::FuncOp>()) {
-    f.walk([&](tt::DescriptorLoadOp load) {
-      auto paddedEncoding =
-          getSharedEncIfAllUsersAreDotEncPadded(load, targetInfo);
-      if (paddedEncoding) {
-        load->setDiscardableAttr("tt.desired_encoding", *paddedEncoding);
-        LDBG("Desired encoding: " << *paddedEncoding);
-      }
-    });
-  }
-}
 
 // This pass assigns encoding to each descriptor in the function. Descriptors
 // are created using `tl.make_tensor_descriptor` or passed in as arguments to
@@ -152,51 +200,9 @@ public:
   void runOnOperation() override {
     mlir::MLIRContext *context = &getContext();
     mlir::ModuleOp m = getOperation();
-
-    computeDesiredEncodingAttr(m);
-
-    // callback to build a fallback encoding
-    auto buildFallbackSharedEncoding =
-        [](mlir::MLIRContext *ctx, ArrayRef<int64_t> shape,
-           ArrayRef<unsigned> order, ttg::CGAEncodingAttr cgaLayout,
-           Type elementType) -> Attribute {
-      auto blockShapePerCTA =
-          triton::gpu::getShapePerCTA(cgaLayout.getCTASplitNum(), shape);
-      auto elemWidth = elementType.getIntOrFloatBitWidth();
-      unsigned padAmount = 128 / elemWidth;
-      // Restrict pad interval (calculated from TDM descriptor's pad
-      // interval field) Fallback to swizzled encoding if the interval
-      // exceeds this limit.
-      // TODO: Query pad interval limit from target info
-      unsigned maxPadIntervalElements = 256u * 32 / elemWidth;
-      unsigned padInterval = static_cast<unsigned>(blockShapePerCTA[order[0]]);
-      if (padInterval > maxPadIntervalElements) {
-        return ttg::SwizzledSharedEncodingAttr::get(ctx, 1, 1, 1, order,
-                                                    cgaLayout);
-      }
-
-      return ttg::PaddedSharedEncodingAttr::get(ctx, {{padInterval, padAmount}},
-                                                order, shape, cgaLayout);
-    };
-
-    // callback to check if an encoding is compatible
-    auto isCompatibleSharedEncoding = [](Attribute enc) {
-      return isa<ttg::PaddedSharedEncodingAttr,
-                 ttg::SwizzledSharedEncodingAttr>(enc);
-    };
-
-    ttg::DescriptorAnalysisCallbacks callbacks;
-    callbacks.isCompatibleSharedEncoding = isCompatibleSharedEncoding;
-    callbacks.buildFallbackSharedEncoding = buildFallbackSharedEncoding;
-    ttg::AssignDescriptorMemoryLayouts assignMemoryLayouts(callbacks);
-    assignMemoryLayouts.assignMemoryLayouts(m);
-
-    // Remove temporary discardable attributes used during encoding assignment
-    for (auto f : m.getOps<tt::FuncOp>()) {
-      f.walk([](tt::DescriptorLoadOp load) {
-        load->removeDiscardableAttr("tt.desired_encoding");
-      });
-    }
+    ttg::assignMemoryLayouts(m, findEncodingFromUsers,
+                             getFallbackSharedEncoding, updateEncodingForShape,
+                             isForcedToDefault);
   }
 };
 

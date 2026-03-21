@@ -28,6 +28,12 @@ composePaddedLayout(const triton::AMD::TargetInfo &targetInfo, int opIdx,
                     triton::gpu::DotOperandEncodingAttr dotOpEnc = {},
                     bool useAsyncCopy = false);
 
+// Adapts a shared encoding to a target tensor shape (e.g. when descriptor
+// block shape differs from use shape).
+triton::gpu::SharedEncodingTrait
+updateEncodingForShape(Operation *op, triton::gpu::SharedEncodingTrait encoding,
+                       RankedTensorType tensorType);
+
 triton::gpu::SharedEncodingTrait
 getEncodingFromDescriptor(Operation *op, RankedTensorType tensorType,
                           Value desc);
