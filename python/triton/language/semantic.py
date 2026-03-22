@@ -1604,8 +1604,7 @@ class TritonSemantic(Generic[TensorTy]):
                                  None if rhs_scale_is_none else rhs_scale, scale_factor)
         return self.tensor(
             self.builder.create_dot_scaled(lhs.handle, lhs_scale_handle, lhs_format_enum, rhs.handle, rhs_scale_handle,
-                                           rhs_format_enum, fast_math, lhs_k_pack, rhs_k_pack, acc_handle,
-                                           scale_factor), ret_ty)
+                                           rhs_format_enum, fast_math, lhs_k_pack, rhs_k_pack, acc_handle), ret_ty)
 
 # ===----------------------------------------------------------------------===//
 #                               Indexing

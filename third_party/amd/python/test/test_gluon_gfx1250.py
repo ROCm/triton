@@ -12,7 +12,7 @@ from triton._internal_testing import is_hip_gfx1250, str_to_triton_dtype, numpy_
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 from triton.experimental import gluon
 import triton.experimental.gluon.language as ttgl
-from triton.experimental.gluon.language.amd.gfx1250 import get_wmma_scale_layout, _valid_dtype_combinations, PartitionedSharedLayout
+from triton.experimental.gluon.language.amd.gfx1250 import get_wmma_scale_layout, PartitionedSharedLayout, _valid_dtype_combinations
 
 
 @gluon.jit
@@ -3876,31 +3876,3 @@ def test_runtime_tdm_gather_partial_column_block(N, num_warps, index_dtype):
             ref_out[dst_row] = inp[src_row]
 
     torch.testing.assert_close(out_result, ref_out)
-
-
-# ported from test_core.py to test dpp_ctrl codegen
-@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
-def test_2d_tensor_early_return():
-
-    @gluon.jit
-    def early_return_kernel(x):
-        if x.sum(0).sum(0):
-            return x
-        x = x + x
-        return x
-
-    @gluon.jit
-    def kernel(N, out):
-        layout: ttgl.constexpr = ttgl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
-        BLOCK: ttgl.constexpr = 32
-
-        x0 = ttgl.arange(0, BLOCK, layout=ttgl.SliceLayout(1, layout))
-        x1 = ttgl.arange(0, BLOCK, layout=ttgl.SliceLayout(0, layout))
-        x = x0[:, None] * x1[None, :]
-        for i in range(N):
-            x += early_return_kernel(x)
-        ttgl.store(out, x.sum(0).sum(0))
-
-    out = torch.empty(1, dtype=torch.int32, device="cuda")
-    compiled_kernel = kernel.warmup(N=100, out=out, grid=(1, ))
-    assert compiled_kernel.asm["llir"].count("define") == 1
