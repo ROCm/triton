@@ -51,3 +51,31 @@ export HSA_ENABLE_SDMA=0
 # TODO: FFM can't fully clean up the model at this moment, so we need to use --forked to run each test in a separate subprocess.
 # Otherwise there will be segfaults when running multiple tests in the same process.
 HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --forked --durations=10 third_party/amd/python/examples/gluon/moe_gfx1250.py
+
+echo "=== Run Triton MoE Tests ==="
+
+# Apply the patch to walk around Simulator issue: https://github.com/AMD-GFX-Modeling/ffm/issues/3174
+# We don't want to modify common path shared with upstream.
+# Instead we patch the files directly.
+git apply .github/workflows/moe_triton_testing.patch
+
+# Due to time limit, we can only select a very limited set of tests to run.
+TRITON_MOE_TESTS=(
+    "test_op[None-False-False-True-True-None-128-768-512-1024-batched-float16-float16-10-1-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-16-256-256-ragged-float8_e5m2-mxfloat4_e2m1-10-1-False-True-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-300-400-832-ragged-float8_e5m2-mxfloat4_e2m1-10-1-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-False-False-False-None-16-727-577-859-ragged-float16-float16-10-1-False-False-None-False-False-False-True-None]"
+)
+
+K_EXPR=""
+for i in "${!TRITON_MOE_TESTS[@]}"; do
+    if [ $i -gt 0 ]; then
+        K_EXPR="$K_EXPR or "
+    fi
+    K_EXPR="$K_EXPR${TRITON_MOE_TESTS[$i]}"
+done
+
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 4 --durations=0 -k "$K_EXPR" python/triton_kernels/tests/test_matmul.py
+
+# Revert the patch.
+git apply -R .github/workflows/moe_triton_testing.patch

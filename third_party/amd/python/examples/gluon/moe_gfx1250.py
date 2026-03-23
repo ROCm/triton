@@ -1274,9 +1274,11 @@ specializations = SpecializationModule(
 def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
            b_ragged_metadata: RaggedTensorMetadata | None = None, gather_indx: torch.Tensor | None = None,
            scatter_indx: torch.Tensor | None = None, precision_config: PrecisionConfig | None = None,
-           fused_activation: FusedActivation | None = None, num_buffers: int = 2, scale_block: int = 32,
-           block_m: int = 128, block_n: int = 128, block_k: int = 256, schedule: str = 'baseline',
-           pingpong: bool = False):
+           fused_activation: FusedActivation | None = None,
+
+           # Optimization parameters
+           num_buffers: int = 2, scale_block: int = 32, block_m: int = 128, block_n: int = 128, block_k: int = 256,
+           schedule: str = 'baseline', pingpong: bool = False):
     if precision_config is None:
         precision_config = PrecisionConfig()
 
