@@ -222,6 +222,7 @@ class Package:
     lib_flag: str
     syspath_var_name: str
     sym_name: Optional[str] = None
+    keep: bool = False
 
 
 def get_json_package_info():
@@ -284,7 +285,7 @@ def get_llvm_package_info(helper_args: BuildHelperArgs):
     # Create a stable symlink that doesn't include revision
     sym_name = f"llvm-{system_suffix}"
     url = f"https://oaitriton.blob.core.windows.net/public/llvm-builds/{name}.tar.gz"
-    return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH", sym_name=sym_name)
+    return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH", sym_name=sym_name, keep=True)
 
 
 def _get_syspath_override(package_syspath_var_name: str, helper_args: BuildHelperArgs) -> Optional[str]:
@@ -311,8 +312,9 @@ def _get_thirdparty_package_cmake_vars(package: Package, helper_args: BuildHelpe
     if helper_args.offline_build and not input_defined:
         raise RuntimeError(f"Requested an offline build but {package.syspath_var_name} is not set")
     if not helper_args.offline_build and not input_defined and not input_compatible:
-        with contextlib.suppress(Exception):
-            shutil.rmtree(package_root_dir)
+        if not package.keep:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(package_root_dir)
         _download_and_extract(package.url, package_root_dir, package.name)
         # write version url to package_dir
         with open(os.path.join(package_dir, "version.txt"), "w") as file:
