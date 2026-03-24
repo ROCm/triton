@@ -1391,13 +1391,8 @@ FailureOr<WmmaIntrinsic> chooseWmmaInstruction(Location loc, int wmmaVersion,
   auto M = resShape[rank - 2];
   auto N = resShape[rank - 1];
 
-  unsigned mDim = 0;
-  unsigned nDim = 0;
-  int minSize = std::min(M, N);
-  if (minSize >= 16) {
-    mDim = 16;
-    nDim = 16;
-  }
+  unsigned mDim = 16;
+  unsigned nDim = 16;
 
   FailureOr<WmmaIntrinsic> maybeWmmaIntrinsic = WmmaIntrinsic::selectFor(
       wmmaVersion, mDim, nDim, inputKSize, aElemType, bElemType, cElemType);
@@ -1412,7 +1407,6 @@ FailureOr<WmmaIntrinsic> chooseWmmaInstruction(Location loc, int wmmaVersion,
 
   kDim = maybeWmmaIntrinsic->kDim;
   assert(kDim != 0);
-  assert(M % mDim == 0 && N % nDim == 0);
   return maybeWmmaIntrinsic;
 }
 
