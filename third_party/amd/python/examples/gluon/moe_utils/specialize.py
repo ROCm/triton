@@ -1,35 +1,16 @@
+# Adapted from python/triton_kernels/triton_kernels/specialize.py
 import inspect
 import re
 import textwrap
 import types
-from dataclasses import dataclass
-from typing import Optional
 
 import triton
+from triton.experimental.gluon._runtime import GluonJITFunction
+
+from triton_kernels.specialize import ClosureArg, FnSpecs
 
 
-def cacheable(f):
-    """
-    A decorator that allow you to write something of the form:
-
-    @cacheable
-    def my_kernel(): return (expression dynamically defining a kernel)
-
-    such that it interacts gracefully with triton cache and preload.
-    """
-
-    g = f()
-    g.fn.__name__ = f.__name__
-    g.fn.__module__ = f.__module__
-    g.fn.__qualname__ = f.__qualname__
-    g.__name__ = f.__name__
-    g.__module__ = f.__module__
-    g.__qualname__ = f.__qualname__
-    g._fn_name = f"{f.__module__}.{f.__qualname__}"
-    return g
-
-
-def define_kernel(src, module, attrs=None, **extra_globals):
+def define_kernel(src, module, attrs=None, is_gluon=False, **extra_globals):
     """
     Dynamically create a Triton function or kernel from a src string,
     linking any symbols in the kernel to objects specified by extra_globals.
@@ -60,22 +41,12 @@ def define_kernel(src, module, attrs=None, **extra_globals):
 
     if attrs is None:
         attrs = dict()
-    f = triton.JITFunction(f, **attrs)
+    if is_gluon:
+        f = GluonJITFunction(f, **attrs)
+    else:
+        f = triton.JITFunction(f, **attrs)
     f._unsafe_update_src(src)
     return f
-
-
-@dataclass(frozen=True)
-class FnSpecs:
-    name: str
-    fn: Optional["triton.runtime.jit.JITFunction"]
-    fn_arg_names: tuple[str, ...] = tuple()
-    fn_arg_do_not_specialize: tuple[str, ...] = tuple()
-    reduction_n: int = 1
-
-    @staticmethod
-    def default():
-        return FnSpecs("dflt", None, tuple())
 
 
 def specialize(fn, module, constants, tuples, name=None, do_not_specialize=tuple()):
@@ -118,13 +89,16 @@ def specialize(fn, module, constants, tuples, name=None, do_not_specialize=tuple
     globals = spec_fns | fn.get_capture_scope()
     # build new source code and define kernel dynamically
     new_signature = f"def {name}({', '.join(non_specialized_args)}):"
+    lang_module = "gl" if fn.is_gluon() else "tl"
     constexpr_lines = [
-        f"    {key}: tl.constexpr = {value.__name__ if callable(value) else value}" for key, value in constants.items()
+        f"    {key}: {lang_module}.constexpr = {value.__name__ if callable(value) else value}"
+        for key, value in constants.items()
     ]
     tuple_lines = [
         f"    {key} = {'(' + ','.join(value) + (',' if len(value)>=1 else '') + ')'}" for key, value in tuples.items()
     ]
-    new_src = "\n".join(["@triton.jit", new_signature] + constexpr_lines + tuple_lines + body_lines)
+    new_src = "\n".join(["@gluon.jit" if fn.is_gluon() else "@triton.jit", new_signature] + constexpr_lines +
+                        tuple_lines + body_lines)
     # Track how many logical lines precede the function body so we can adjust
     # the bookkeeping metadata to match the template definition.
     new_preamble_len = 1 + len(constexpr_lines) + len(tuple_lines)  # def + injected init lines
@@ -153,7 +127,7 @@ def specialize(fn, module, constants, tuples, name=None, do_not_specialize=tuple
 
     if do_not_specialize:
         attrs["do_not_specialize"] = do_not_specialize
-    ret = define_kernel(new_src, module, attrs, **globals)
+    ret = define_kernel(new_src, module, attrs, is_gluon=fn.is_gluon(), **globals)
 
     # Reuse the original kernel's metadata so that stack traces and other
     # source-based tooling report the correct file and line numbers.
@@ -173,12 +147,6 @@ def specialize(fn, module, constants, tuples, name=None, do_not_specialize=tuple
     return ret
 
 
-@dataclass(frozen=True)
-class ClosureArg:
-    fn_name: str
-    fn_params_name: str
-
-
 class SpecializationModule:
 
     def __init__(self, module_name: str, kernels: list[tuple[str, object]], closure_args: dict[str, ClosureArg]):
@@ -188,8 +156,8 @@ class SpecializationModule:
         self._modules = dict()
 
     def get(self, **kwargs):
-        import sys
         import types
+        import sys
         specs = [FnSpecs.default()] * len(self.closure_args)
         for key, value in kwargs.items():
             specs[list(self.closure_args.keys()).index(key)] = value

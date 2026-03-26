@@ -3,12 +3,9 @@ import torch
 import pytest
 import triton
 import argparse
-from typing import TypeVar
 from triton.experimental import gluon
-from triton.runtime.jit import JITFunction
 from triton.experimental.gluon.language.amd.gfx1250 import tdm
 import triton.experimental.gluon.language as gl
-from triton.experimental.gluon._runtime import GluonJITFunction, jit
 from triton.language.core import _aggregate as aggregate
 
 from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor
@@ -17,59 +14,30 @@ from triton_kernels.tensor_details.ragged_tensor import ragged_metadata_fields
 from triton_kernels.tensor_details import layout
 from triton_kernels.topk import topk
 from triton_kernels.reduce import reduce
-from triton_kernels.specialize import ClosureArg, specialize
+from triton_kernels.specialize import ClosureArg, FnSpecs
 from triton_kernels.matmul import FlexCtx, FusedActivation, PrecisionConfig
 from triton_kernels.matmul import init_allocation, apply_allocation, _canonicalize_storage, should_upcast_indices, matmul_torch
 from triton_kernels.matmul_details.opt_flags import make_opt_flags
 from triton_kernels.matmul_details._common import compute_pids, compute_offsets
-from triton_kernels.specialize import FnSpecs
 from triton_kernels.numerics import InFlexData, OutFlexData
 from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp, downcast_to_mxfp_torch, upcast_from_mxfp_torch
 from triton_kernels.swiglu import swiglu_fn, swiglu, PrecisionConfig as SwiGLUPrecisionConfig
-from triton_kernels.target_info import is_cuda, get_cdna_version, cuda_capability_geq
 
 from triton_kernels.testing import assert_close, make_slice_sizes, alloc_rand
 
 # Handle imports for both pytest (module context) and direct execution
 try:
     from .gfx1250_utils import static_profile, composition
+    from .moe_utils.specialize import SpecializationModule
+    from .moe_utils.misc import _import_from_triton, quantize_weight, get_scaled_dot_format_string, DType
 except ImportError:
     from gfx1250_utils import static_profile, composition
-
-T = TypeVar("T")
-
-
-def _import_from_triton(fn: JITFunction[T]) -> GluonJITFunction[T]:
-    # Wrap the function and preserve its original docstring
-    gluon_fn = jit(fn.fn)
-    gluon_fn.__doc__ = fn.__doc__
-    return gluon_fn
-
+    from moe_utils.specialize import SpecializationModule
+    from moe_utils.misc import _import_from_triton, quantize_weight, get_scaled_dot_format_string, DType
 
 compute_pids = _import_from_triton(compute_pids)
 compute_offsets = _import_from_triton(compute_offsets)
 swiglu_fn = _import_from_triton(swiglu_fn)
-
-
-# Borrowed from https://github.com/triton-lang/triton/blob/53b0eafd76debe074965a5d751dd21c593097eb2/python/triton_kernels/bench/bench_mlp.py#L35
-def quantize_weight(w, dtype, value_layout=None, scale_layout=None):
-    if dtype == "bf16":
-        wq = w.to(torch.bfloat16).transpose(-1, -2).contiguous().transpose(-1, -2)
-        return wq, InFlexData(), None
-    elif dtype == "fp8":
-        fp8e4_dtype = torch.float8_e4m3fn if get_cdna_version() != 3 else torch.float8_e4m3fnuz
-        wq = w.to(fp8e4_dtype)
-        if is_cuda() and not cuda_capability_geq(10, 0):
-            wq = wq.transpose(-1, -2).contiguous().transpose(-1, -2)
-        return wq, InFlexData(dtype=wq.dtype, scale=w.abs().max().unsqueeze(0)), None
-    else:
-        assert dtype == "mx4", f"{dtype=}"
-        w, w_scale = downcast_to_mxfp(w.to(torch.bfloat16), torch.uint8, axis=1)
-        if value_layout is not None:
-            w = convert_layout(wrap_torch_tensor(w, dtype=FP4), value_layout)
-        if scale_layout is not None:
-            w_scale = convert_layout(wrap_torch_tensor(w_scale), scale_layout)
-        return w, InFlexData(), w_scale
 
 
 @gluon.constexpr_function
@@ -100,16 +68,6 @@ def get_blocked_layout(shape, dtype, num_warps, ndim=2):
 @gluon.constexpr_function
 def get_tdm_gather_scatter_idx_layout(NUM_INDICES, NUM_WARPS):
     return gl.BlockedLayout([NUM_INDICES, 1], [1, 32], [1, NUM_WARPS], [1, 0])
-
-
-def routing(x, logits, n_expts_act, apply_softmax: bool = True):
-    logits = topk(logits, n_expts_act, apply_softmax=apply_softmax)
-    dispatch_indx = logits.mask_metadata.row_sorted_indx
-    combine_indx = logits.mask_metadata.col_sorted_indx
-    ragged_metadata = make_ragged_tensor_metadata(logits.mask_metadata.col_sum, dispatch_indx.shape[0])
-    gather_indx = combine_indx // n_expts_act
-    scatter_indx = combine_indx
-    return x, ragged_metadata, gather_indx, scatter_indx, None
 
 
 @aggregate
@@ -1008,18 +966,6 @@ class MoESliceNKProgram:
         return accumulator
 
 
-@gluon.constexpr_function
-def get_scaled_dot_format_string(dtype: gl.dtype):
-    mapping = {
-        gl.float16: "fp16",
-        gl.bfloat16: "bf16",
-        gl.uint8: "e2m1",
-        gl.float8e4nv: "e4m3",
-        gl.float8e5: "e5m2",
-    }
-    return mapping[dtype]
-
-
 @gluon.jit
 def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, stride_x_m, stride_x_k, XMxScale,
             stride_x_mx_z, stride_x_mx_m, stride_x_mx_k, W, stride_w_e, stride_w_k, stride_w_n,
@@ -1231,37 +1177,6 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
         gl.amd.gfx1250.buffer_store(out, Y_ptr, y_offs, mask=y_mask)
 
 
-class SpecializationModule:
-
-    def __init__(self, module_name: str, kernels: list[tuple[str, object]], closure_args: dict[str, ClosureArg]):
-        self.module_name = module_name
-        self.kernels = kernels
-        self.closure_args = closure_args
-        self._modules = dict()
-
-    def get(self, **kwargs):
-        import types
-        import sys
-        specs = [FnSpecs.default()] * len(self.closure_args)
-        for key, value in kwargs.items():
-            specs[list(self.closure_args.keys()).index(key)] = value
-        key = tuple(spec.name for spec in specs)
-        if key in self._modules:
-            return self._modules[key]
-        spec_constants = {arg.fn_name: spec.fn for arg, spec in zip(self.closure_args.values(), specs)}
-        spec_tuples = {arg.fn_params_name: spec.fn_arg_names for arg, spec in zip(self.closure_args.values(), specs)}
-        do_not_specialize = []
-        for spec in specs:
-            do_not_specialize.extend(spec.fn_arg_do_not_specialize)
-        module = types.ModuleType(self.module_name + '_'.join(key))
-        sys.modules[module.__name__] = module
-        for kernel_name, kernel_fn in self.kernels:
-            setattr(module, kernel_name,
-                    specialize(kernel_fn, module, spec_constants, spec_tuples, do_not_specialize=do_not_specialize))
-        self._modules[key] = module
-        return module
-
-
 specializations = SpecializationModule(
     "matmul",
     kernels=[("_matmul", _matmul)],
@@ -1395,16 +1310,6 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
         out_final = out_final.squeeze(0)
 
     return out_final, k
-
-
-class DType:
-
-    def __init__(self, dtype_str):
-        self.has_global_scale = dtype_str.startswith("float8")
-        self.has_mx_scale = dtype_str.startswith("mx")
-        to_torch_dtype = lambda name: torch.uint8 if name == "float4_e2m1" else getattr(torch, name)
-        self.torch_dtype = to_torch_dtype(dtype_str.strip("mx"))
-        self.is_mxfloat4 = self.has_mx_scale and "float4" in dtype_str
 
 
 def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, transpose, squeeze_batch_dim,
@@ -1598,8 +1503,18 @@ def test_matmul(m, n, k, block_m, block_n, block_k, dtype_a, dtype_b, do_gather,
     static_profile(k)
 
 
+def routing(x, logits, n_expts_act, apply_softmax: bool = True):
+    logits = topk(logits, n_expts_act, apply_softmax=apply_softmax)
+    dispatch_indx = logits.mask_metadata.row_sorted_indx
+    combine_indx = logits.mask_metadata.col_sorted_indx
+    ragged_metadata = make_ragged_tensor_metadata(logits.mask_metadata.col_sum, dispatch_indx.shape[0])
+    gather_indx = combine_indx // n_expts_act
+    scatter_indx = combine_indx
+    return x, ragged_metadata, gather_indx, scatter_indx, None
+
+
 def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, num_buffers, action, block_m, block_n,
-         block_k, schedule='baseline', pingpong=False):
+         block_k, schedule='baseline', num_warps=4, pingpong=False):
     assert ((x_dtype == "fp8" and w_dtype == "fp8") or w_dtype == "mx4")
     dev = 'cuda'
     batch = batch_per_expt * n_expts_tot // n_expts_act
@@ -1613,7 +1528,6 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
     value_layout = None
     scale_layout = None
     if w_dtype == "mx4":
-        num_warps = 4
         value_layout = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
         scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1, num_warps=num_warps)
     wg, wg_flex, wg_scale = quantize_weight(wg, "bf16")
@@ -1639,6 +1553,7 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
                            block_n=block_n,  #
                            block_k=block_k,  #
                            schedule=schedule,  #
+                           num_warps=num_warps,  #
                            pingpong=pingpong)
     else:
         logits = torch.randn((batch, n_expts_tot), device=dev)
@@ -1657,6 +1572,7 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
                       block_n=block_n,  #
                       block_k=block_k,  #
                       schedule=schedule,  #
+                      num_warps=num_warps,  #
                       pingpong=pingpong)
     else:
         if x_dtype in (torch.float16, torch.bfloat16):
@@ -1678,6 +1594,7 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
                       block_n=block_n,  #
                       block_k=block_k,  #
                       schedule=schedule,  #
+                      num_warps=num_warps,  #
                       pingpong=pingpong)
 
     if action != "e2e":
@@ -1703,6 +1620,7 @@ if __name__ == '__main__':
     parser.add_argument("--block_n", '-bn', type=int, default=256)
     parser.add_argument("--block_k", '-bk', type=int, default=256)
     parser.add_argument("--schedule", type=str, choices=['sliceNK', 'sliceK', 'baseline'], default='baseline')
+    parser.add_argument("--num_warps", type=int, default=4, choices=[4, 8])
     parser.add_argument("--pingpong", action='store_true')
     args = parser.parse_args()
     main(**vars(args))
