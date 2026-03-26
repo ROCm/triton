@@ -137,14 +137,14 @@ struct Utils {
       return InstClass::Load;
     if (isa<StoreInst>(I))
       return InstClass::Store;
+    if (isa<BranchInst>(I))
+      return InstClass::Branch;
 
     switch (I.getOpcode()) {
     case Instruction::FAdd:
       return InstClass::FAdd;
     case Instruction::FMul:
       return InstClass::FMul;
-    case Instruction::Br:
-      return InstClass::Branch;
     default:
       return InstClass::Other;
     }
