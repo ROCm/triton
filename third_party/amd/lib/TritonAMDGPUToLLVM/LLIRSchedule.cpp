@@ -717,31 +717,46 @@ private:
                            const BBRegion &Region) {
     // Find the range of instructions between the last LW and the first GR.
     // This includes LR, s.waitcnt, and s.barrier instructions.
-    SmallVector<AnchorInst> GR;
-    for (auto &A : Anchors) {
-      if (A.Kind == SchedKind::GR)
-        GR.push_back(A);
-    }
-
-    if (GR.size() < 2)
-      return; // Need at least 2 GR to have a 2nd-to-last
-
-    // Find the last LW and first GR in the anchor list
+    // Find the last LW first (needed to filter GR after it)
+    // Find the last LW and the first GR *after* the last LW
     Instruction *LastLW = nullptr;
-    Instruction *FirstGR = nullptr;
+    Instruction *FirstGRAfterLW = nullptr;
     for (auto &A : Anchors) {
       if (A.Kind == SchedKind::LW)
         LastLW = A.I;
     }
+    if (!LastLW)
+      return;
+    bool pastLW = false;
     for (auto &A : Anchors) {
-      if (A.Kind == SchedKind::GR) {
-        FirstGR = A.I;
+      if (A.I == LastLW) {
+        pastLW = true;
+        continue;
+      }
+      if (pastLW && A.Kind == SchedKind::GR) {
+        FirstGRAfterLW = A.I;
         break;
       }
     }
+    Instruction *FirstGR = FirstGRAfterLW;
 
-    if (!LastLW || !FirstGR)
+    if (!FirstGR)
       return;
+
+    // Collect GR anchors after the last LW (for determining 2nd-to-last target)
+    SmallVector<AnchorInst> GR;
+    bool afterLW = false;
+    for (auto &A : Anchors) {
+      if (A.I == LastLW) {
+        afterLW = true;
+        continue;
+      }
+      if (afterLW && A.Kind == SchedKind::GR)
+        GR.push_back(A);
+    }
+
+    if (GR.size() < 2)
+      return; // Need at least 2 GR after LW to have a 2nd-to-last
 
     // Collect LR instructions between LastLW and FirstGR, plus their
     // immediate users (bitcast etc.), s.waitcnt, and s.barrier.
