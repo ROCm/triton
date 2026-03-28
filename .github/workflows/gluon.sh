@@ -35,6 +35,8 @@ export TRITON_HIP_USE_ASYNC_COPY=1
 
 echo "=== Sanity Check ==="
 
+pip install pytest-timeout
+
 pip show torch
 pip show triton
 python3 -c "import triton; print(triton.runtime.driver.active.get_current_target())"
@@ -48,10 +50,12 @@ make test-nogpu
 
 echo "=== Run Gluon Unit Tests ==="
 
-pytest --count=1 -n 48 --durations=10 third_party/amd/python/test/test_gluon_gfx1250.py
+pytest --count=1 -n 48 --durations=10 -vv --maxfail=1 third_party/amd/python/test/test_gluon_gfx1250.py
 pytest --count=1 -n 16 --durations=10 python/test/gluon/test_frontend.py
 
 echo "=== Run Gluon GEMM/Attention Tests ==="
+
+uptime
 
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 32 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py
 HSA_MODEL_NUM_THREADS=2 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_gemm_streamk_gfx1250.py \
