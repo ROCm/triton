@@ -92,18 +92,17 @@ echo "Running pytest with filter: $K_EXPR"
 uptime
 
 # Use -p no:forked to disable forking to avoid RuntimeError: Cannot re-initialize CUDA in forked subprocess.
-pytest -n 80 \
-    --durations=20 \
-    -vv \
-    --maxfail=1 \
-    -k "$K_EXPR" \
-    -p no:forked \
-    python/test/unit/language/test_core.py \
-    python/test/unit/language/test_matmul.py \
-    python/test/unit/language/test_tensor_descriptor.py \
-    python/test/unit/runtime \
-    python/test/unit/test_debug.py \
+pytest -n 64 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked python/test/unit/language/test_core.py
+
+pytest -n 32 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked python/test/unit/language/test_matmul.py \
     --deselect 'python/test/unit/language/test_matmul.py::test_simple_matmul[False-False-4-1-512-64-32-2-float64-float64]' # Can take 10min!
+
+pytest -n 32 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked \
+    python/test/unit/test_debug.py \
+    python/test/unit/runtime
+
+pytest -n 64 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked -vv --timeout=300 --timeout-method=thread \
+    python/test/unit/language/test_tensor_descriptor.py
 
 echo "=== Run AMD-specific Tests ==="
 
