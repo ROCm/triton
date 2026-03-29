@@ -33,8 +33,8 @@ LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 echo "=== Setup Environment ==="
 
 source /ffm-base/ffmlite_env.sh
-#export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
-#export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
+export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
+export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
 export HSA_MODEL_NUM_THREADS=1
 export HSA_MODEL_TOML=".github/workflows/ffm_config.toml"
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
