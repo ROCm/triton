@@ -70,7 +70,8 @@ jobs:
           echo "Render group ID: ${RENDER_GID}"
           DIRNAME=${{ env.DIRNAME }}
           mkdir /data/ci/roccap/${DIRNAME}
-          docker run --rm \
+          docker run --rm --init \
+            --name ci-roccap-${{ github.run_id }} \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -106,7 +107,13 @@ jobs:
           ROCCAP_GROUP_NAME: ${{ inputs.groupName }}
           ROCCAP_NUM_XCC: ${{ inputs.numXCCs }}
           ROCCAP_CMD: ${{ inputs.cmd }}
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop ci-roccap-${{ github.run_id }} 2>/dev/null || true
+          docker rm -f ci-roccap-${{ github.run_id }} 2>/dev/null || true
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v3
         with:
           name: triton-roccap-${{ env.DIRNAME }}

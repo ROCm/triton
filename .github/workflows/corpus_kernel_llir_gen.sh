@@ -10,6 +10,14 @@
 
 set -xeo pipefail
 
+cleanup() {
+    echo "=== Cleaning up child processes ==="
+    pkill -TERM -P $$ 2>/dev/null || true
+    sleep 3
+    pkill -KILL -P $$ 2>/dev/null || true
+}
+trap cleanup EXIT
+
 echo "=== Build and Install Triton ==="
 
 export PYTHON="python3"
