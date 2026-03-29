@@ -1240,28 +1240,21 @@ LinearLayout toLinearLayout(ArrayRef<int64_t> shape, Attribute layout) {
                                                                    layout);
 }
 
-LinearLayout paddedLinearLayout(MemDescType type) {
-  auto encoding = type.getEncoding();
-  assert(isPaddedEncoding(encoding) &&
-         "expected padded encoding or partitioned wrapping padded");
-
-  if (auto padded = dyn_cast<PaddedSharedEncodingAttr>(encoding)) {
-    return padded.getLinearComponent();
-  }
-
-  auto partitioned = cast<PartitionedSharedEncodingAttr>(encoding);
-  auto shape = type.getAllocShape().take_back(type.getRank());
-  return partitionedSharedToLinearLayout(shape, partitioned);
-}
-
 LinearLayout paddedLinearLayout(ArrayRef<int64_t> shape, Attribute encoding) {
   assert(isPaddedEncoding(encoding) &&
          "expected padded encoding or partitioned wrapping padded");
+
   if (auto padded = dyn_cast<PaddedSharedEncodingAttr>(encoding)) {
     return padded.getLinearComponent();
   }
+
   auto partitioned = cast<PartitionedSharedEncodingAttr>(encoding);
   return partitionedSharedToLinearLayout(shape, partitioned);
+}
+
+LinearLayout paddedLinearLayout(MemDescType type) {
+  auto shape = type.getAllocShape().take_back(type.getRank());
+  return paddedLinearLayout(shape, type.getEncoding());
 }
 
 LinearLayout getLayoutWithinBlock(const LinearLayout &layout) {
