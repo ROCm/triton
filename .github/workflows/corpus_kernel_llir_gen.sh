@@ -27,6 +27,10 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 
+echo "=== Install triton_kernels ==="
+
+cd python/triton_kernels && pip3 install -e . && cd -
+
 echo "=== Setup Environment ==="
 
 source /ffm-base/ffmlite_env.sh
@@ -186,6 +190,22 @@ run_and_collect "f16_gemm_gfx1250" "python3 third_party/amd/python/examples/gluo
 # f16_gemm_warp_pipeline_gfx1250 (F16 GEMM Warp Pipeline kernels)
 # ============================================================================
 run_and_collect "f16_gemm_warp_pipeline_gfx1250" "python3 third_party/amd/python/examples/gluon/f16_gemm_warp_pipeline_gfx1250.py -M 2048 -N 2048 -K 2048 --num-buffers 3"
+
+# ============================================================================
+# moe_gfx1250 (MoE kernels)
+# ============================================================================
+export HSA_ENABLE_SDMA=0
+run_and_collect "moe_gfx1250_dispatch" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule baseline"
+run_and_collect "moe_gfx1250_dispatch" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceK"
+run_and_collect "moe_gfx1250_dispatch" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceNK"
+run_and_collect "moe_gfx1250_dispatch" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 8 --num_buffers 3 -bm 128 -bn 256 -bk 256 --schedule baseline"
+run_and_collect "moe_gfx1250_dispatch" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 8 --num_buffers 3 -bm 128 -bn 256 -bk 256 --schedule baseline --pingpong"
+run_and_collect "moe_gfx1250_combine" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule baseline"
+run_and_collect "moe_gfx1250_combine" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceK"
+run_and_collect "moe_gfx1250_combine" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceNK"
+run_and_collect "moe_gfx1250_combine" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 8 --num_buffers 3 -bm 128 -bn 256 -bk 256 --schedule baseline"
+run_and_collect "moe_gfx1250_combine" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 8 --num_buffers 3 -bm 128 -bn 256 -bk 256 --schedule baseline --pingpong"
+run_and_collect "moe_gfx1250_e2e" "python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a e2e -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule baseline"
 
 echo "=== Corpus Generation Complete ==="
 

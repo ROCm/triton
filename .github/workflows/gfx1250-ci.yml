@@ -91,39 +91,3 @@ jobs:
         run: |
           docker stop ci-triton-${{ github.run_id }} 2>/dev/null || true
           docker rm -f ci-triton-${{ github.run_id }} 2>/dev/null || true
-
-  gfx1250-moe:
-    name: MoE
-    runs-on: ['self-hosted', 'ffm', 'pytorch']
-    timeout-minutes: 50
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Build and Test MoE
-        run: |
-          set -xeo pipefail
-          RENDER_GID=$(getent group render | cut -d: -f3)
-          echo "Render group ID: ${RENDER_GID}"
-          docker run --rm --init \
-            --name ci-moe-${{ github.run_id }} \
-            --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
-            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-            --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864 \
-            -v /data/ci/actions-runner/_work/triton/triton:/code \
-            -v /data/ci/llvm/7f77ca0d-release:/llvm \
-            -v /data/ci/ffm/rocdtif-7.12-am+ffmlite-mi400.8661118.362-rel-20260317:/ffm-base \
-            -v /data/ci/ffm/rocdtif-7.12-am+ffmlite-mi400.8661118.362-rel-20260317:/ffm-update \
-            -v /data/ci/triton-cache/json:/root/.triton/json \
-            -v /data/ci/triton-cache/llvm:/root/.triton/llvm \
-            -v /data/ci/triton-cache/nvidia:/root/.triton/nvidia \
-            -v /data/ci/ccache:/root/.ccache \
-            -w /code \
-            --entrypoint bash \
-            mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.4 \
-            -lc "/code/.github/workflows/moe.sh"
-      - name: Cleanup
-        if: always()
-        run: |
-          docker stop ci-moe-${{ github.run_id }} 2>/dev/null || true
-          docker rm -f ci-moe-${{ github.run_id }} 2>/dev/null || true

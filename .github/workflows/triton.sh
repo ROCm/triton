@@ -112,3 +112,38 @@ pytest --durations=10 third_party/amd/python/test/test_compiler_fence_gfx1250.py
 echo "=== Test TDM widh async_copy disabled"
 
 TRITON_HIP_USE_ASYNC_COPY=0 pytest -n 16 -s ./python/test/unit/language/test_tensor_descriptor.py::test_make_tensor_descriptor_matmul
+
+echo "=== Install triton_kernels ==="
+
+cd python/triton_kernels && pip3 install -e . && cd -
+
+echo "=== Run Triton MoE Tests ==="
+
+# Apply the patch to walk around Simulator issue: https://github.com/AMD-GFX-Modeling/ffm/issues/3174
+# We don't want to modify common path shared with upstream.
+# Instead we patch the files directly.
+sed -i 's/assert_close(ref_y, tri_y, maxtol=maxtol, rmstol=rmstol)/assert_close(ref_y.cpu(), tri_y.cpu(), maxtol=maxtol, rmstol=rmstol)/g' python/triton_kernels/tests/test_matmul.py
+sed -i "s/buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)/buffer = alloc_rand(buffer_shape, device='cpu', dtype=buffer_dtype).to(device)/" python/triton_kernels/triton_kernels/testing.py
+
+# Due to time limit, we can only select a very limited set of tests to run.
+TRITON_MOE_TESTS=(
+    "test_op[None-False-False-True-True-None-128-768-512-1024-batched-float16-float16-None-10-1-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-16-256-256-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-True-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-300-400-832-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-False-False-False-None-16-727-577-859-ragged-float16-float16-None-10-1-False-False-None-False-False-False-True-None]"
+)
+
+K_EXPR=""
+for i in "${!TRITON_MOE_TESTS[@]}"; do
+    if [ $i -gt 0 ]; then
+        K_EXPR="$K_EXPR or "
+    fi
+    K_EXPR="$K_EXPR${TRITON_MOE_TESTS[$i]}"
+done
+
+export HSA_ENABLE_SDMA=0
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 4 --durations=0 -k "$K_EXPR" python/triton_kernels/tests/test_matmul.py
+
+# Revert the patch
+sed -i 's/assert_close(ref_y.cpu(), tri_y.cpu(), maxtol=maxtol, rmstol=rmstol)/assert_close(ref_y, tri_y, maxtol=maxtol, rmstol=rmstol)/g' python/triton_kernels/tests/test_matmul.py
+sed -i "s/buffer = alloc_rand(buffer_shape, device='cpu', dtype=buffer_dtype).to(device)/buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)/" python/triton_kernels/triton_kernels/testing.py

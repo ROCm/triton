@@ -81,6 +81,20 @@ HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --durations=10 third_party/amd/py
 HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/f16_fa_gfx1250.py
 HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 16 --durations=10 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py
 HSA_MODEL_NUM_THREADS=8 pytest --count=1 -n 4 --durations=10 mi400/test_kernel_metadata.py
+
+echo "=== Install triton_kernels ==="
+
+cd python/triton_kernels && pip3 install -e . && cd -
+
+echo "=== Run Gluon MoE Tests ==="
+
+# Bypass a FFM issue: https://github.com/AMD-GFX-Modeling/ffm/issues/3164
+export HSA_ENABLE_SDMA=0
+
+# MoE tests require NPI PyTorch, so we test them in Triton pipeline.
+# TODO: FFM can't fully clean up the model at this moment, so we need to use --forked to run each test in a separate subprocess.
+# Otherwise there will be segfaults when running multiple tests in the same process.
+HSA_MODEL_NUM_THREADS=4 pytest --count=1 -n 32 --forked --durations=10 third_party/amd/python/examples/gluon/moe_gfx1250.py
 export HSA_MODEL_ARGS=ffm_enable_time_slicing
 
 echo "=== Run E2E Upstream Tests ==="

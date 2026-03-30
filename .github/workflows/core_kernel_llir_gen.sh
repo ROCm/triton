@@ -26,6 +26,10 @@ export CCACHE_COMPRESS="true"
 
 LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 
+echo "=== Install triton_kernels ==="
+
+cd python/triton_kernels && pip3 install -e . && cd -
+
 echo "=== Setup Environment ==="
 
 source /ffm-base/ffmlite_env.sh
@@ -62,6 +66,10 @@ unset HSA_MODEL_ARGS
 # TODO: uncomment. Temp disabled for experimenting
 HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/mxfp_gemm_gfx1250.py -M 8192 -N 8192 -K 8192 -BM 256 -BN 256 -BK 256 --num_warps 4 --num_buffers 2 --dtype_a float8_e4m3 --dtype_b float8_e4m3 --scale_preshuffled --with_a_scale --schedule 'sliceK'
 HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/mxfp_fa_gfx1250.py --q_type e4m3 --kv_type e4m3 --batch 1 --seqlen_q 8192 --seqlen_k 8192 --num_q_heads 1 --num_k_heads 1 --head_sz 128 --block_m 256 --block_n 128 --scale_type global --pipelined --num_warps 4
+
+export HSA_ENABLE_SDMA=0
+HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a dispatch -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceNK
+HSA_MODEL_NUM_THREADS=4 python3 third_party/amd/python/examples/gluon/moe_gfx1250.py -b 256 -d1 512 -d2 3072 -a combine -et 128 -ea 4 --num_warps 4 --num_buffers 2 -bm 256 -bn 256 -bk 256 --schedule sliceNK
 
 echo "=== Saving LLIR into llir_kernels directory ==="
 cd $TRITON_HOME

@@ -9,7 +9,7 @@ import triton.experimental.gluon.language as gl
 from triton.language.core import _aggregate as aggregate
 
 from triton_kernels.tensor import FP4, RaggedTensorMetadata, Tensor
-from triton_kernels.tensor import make_ragged_tensor_metadata, wrap_torch_tensor, convert_layout
+from triton_kernels.tensor import make_ragged_tensor_metadata, wrap_torch_tensor
 from triton_kernels.tensor_details.ragged_tensor import ragged_metadata_fields
 from triton_kernels.tensor_details import layout
 from triton_kernels.topk import topk
@@ -20,20 +20,22 @@ from triton_kernels.matmul import init_allocation, apply_allocation, _canonicali
 from triton_kernels.matmul_details.opt_flags import make_opt_flags
 from triton_kernels.matmul_details._common import compute_pids, compute_offsets
 from triton_kernels.numerics import InFlexData, OutFlexData
-from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp, downcast_to_mxfp_torch, upcast_from_mxfp_torch
+from triton_kernels.numerics_details.mxfp import upcast_from_mxfp, downcast_to_mxfp_torch, upcast_from_mxfp_torch
 from triton_kernels.swiglu import swiglu_fn, swiglu, PrecisionConfig as SwiGLUPrecisionConfig
 
-from triton_kernels.testing import assert_close, make_slice_sizes, alloc_rand
+from triton_kernels.testing import assert_close
 
 # Handle imports for both pytest (module context) and direct execution
 try:
     from .gfx1250_utils import static_profile, composition
     from .moe_utils.specialize import SpecializationModule
     from .moe_utils.misc import _import_from_triton, quantize_weight, get_scaled_dot_format_string, DType
+    from .moe_utils.testing import make_random_tensor
 except ImportError:
     from gfx1250_utils import static_profile, composition
     from moe_utils.specialize import SpecializationModule
     from moe_utils.misc import _import_from_triton, quantize_weight, get_scaled_dot_format_string, DType
+    from moe_utils.testing import make_random_tensor
 
 compute_pids = _import_from_triton(compute_pids)
 compute_offsets = _import_from_triton(compute_offsets)
@@ -68,6 +70,30 @@ def get_blocked_layout(shape, dtype, num_warps, ndim=2):
 @gluon.constexpr_function
 def get_tdm_gather_scatter_idx_layout(NUM_INDICES, NUM_WARPS):
     return gl.BlockedLayout([NUM_INDICES, 1], [1, 32], [1, NUM_WARPS], [1, 0])
+
+
+@gluon.constexpr_function
+def get_wmma_layout(num_warps, packed, use_wmma_scaled, scale_preshuffle):
+    assert (num_warps in (4, 8))
+    if scale_preshuffle:
+        reg_bases = [[0, 1], [1, 0]]
+        tiles_per_warp = 2
+    else:
+        reg_bases = []
+        tiles_per_warp = 1
+
+    # [NUM_WARPS // 2, 2]
+    if num_warps == 4:
+        warp_bases = [[0, tiles_per_warp], [tiles_per_warp, 0]]
+    else:
+        warp_bases = [[0, tiles_per_warp], [0, tiles_per_warp * 2], [tiles_per_warp, 0]]
+
+    if use_wmma_scaled:
+        WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 64] if packed else [16, 16, 128]
+    else:
+        WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 32]
+
+    return gl.amd.AMDWMMALayout(3, True, warp_bases, reg_bases, WMMA_INSTR_SHAPE)
 
 
 @aggregate
@@ -160,29 +186,11 @@ class MoEConfig:
         self.BLOCK_N_PRESHUFFLED = gl.constexpr(BLOCK_N // self.PRESHUFFLE_FACTOR)
         self.BLOCK_K_SCALE_PRESHUFFLED = gl.constexpr(BLOCK_K_SCALE * self.PRESHUFFLE_FACTOR)
 
-        if SCALE_PRESHUFFLE:
-            reg_bases: gl.constexpr = [[0, 1], [1, 0]]
-            warp_bases: gl.constexpr = [[0, 2], [2, 0]]
-        else:
-            reg_bases: gl.constexpr = []
-            warp_bases: gl.constexpr = [[0, 1], [1, 0]]
+        WMMA_LAYOUT: gl.constexpr = get_wmma_layout(NUM_WARPS, False, self.USE_WMMA_SCALED, SCALE_PRESHUFFLE)
+        WMMA_LAYOUT_PACKED: gl.constexpr = get_wmma_layout(NUM_WARPS, True, self.USE_WMMA_SCALED, SCALE_PRESHUFFLE)
 
-        if self.USE_WMMA_SCALED:
-            WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 128]
-            WMMA_PACKED_INSTR_SHAPE: gl.constexpr = [16, 16, 64]
-            DOT_K_WIDTH: gl.constexpr = 16
-            PAD_VEC: gl.constexpr = 16
-        else:
-            WMMA_INSTR_SHAPE: gl.constexpr = [16, 16, 32]
-            WMMA_PACKED_INSTR_SHAPE: gl.constexpr = [16, 16, 32]
-            DOT_K_WIDTH: gl.constexpr = 8
-            PAD_VEC: gl.constexpr = 8
-
-        WMMA_LAYOUT: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases, reg_bases=reg_bases,
-                                                         instr_shape=WMMA_INSTR_SHAPE)
-        WMMA_LAYOUT_PACKED: gl.constexpr = gl.amd.AMDWMMALayout(3, transposed=True, warp_bases=warp_bases,
-                                                                reg_bases=reg_bases,
-                                                                instr_shape=WMMA_PACKED_INSTR_SHAPE)
+        DOT_K_WIDTH: gl.constexpr = 16 if self.USE_WMMA_SCALED else 8
+        PAD_VEC: gl.constexpr = 16 if self.USE_WMMA_SCALED else 8
 
         NUM_SUBTILES_M = self.NUM_SUBTILES[0]
         NUM_SUBTILES_N = self.NUM_SUBTILES[1]
@@ -986,7 +994,7 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
             BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr, BLOCK_K: gl.constexpr,  #
             GROUP_M: gl.constexpr, XCD_SWIZZLE: gl.constexpr, SWIZZLE_MX_SCALE: gl.constexpr, EVEN_K: gl.constexpr,
             UPCAST_INDICES: gl.constexpr = False, NUM_BUFFERS: gl.constexpr = 2, SCALE_BLOCK: gl.constexpr = 32,
-            SCHEDULE: gl.constexpr = 'baseline', PINGPONG: gl.constexpr = False):
+            SCHEDULE: gl.constexpr = 'baseline', PINGPONG: gl.constexpr = False, NUM_WARPS: gl.constexpr = 4):
     gl.static_assert(RAGGED_DIMENSION is None or RAGGED_DIMENSION == "M")
     SPLIT_K: gl.constexpr = 1
 
@@ -1019,7 +1027,7 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
     cfg = MoEConfig(BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_X, DTYPE_W, SCALE_BLOCK=SCALE_BLOCK, NUM_BUFFERS=NUM_BUFFERS,
                     W_TRANSPOSE=W_TRANSPOSE, WITH_X_MX_SCALE=WITH_X_MX_SCALE, WITH_W_MX_SCALE=WITH_W_MX_SCALE,
                     SCALE_PRESHUFFLE=SCALE_PRESHUFFLE, index_type=index_type, NUM_SUBTILES=NUM_SUBTILES, EVEN_K=EVEN_K,
-                    USE_GATHER=USE_GATHER)
+                    USE_GATHER=USE_GATHER, NUM_WARPS=NUM_WARPS)
 
     PACKED_BLOCK_K_W: gl.constexpr = BLOCK_K // cfg.DIV_FACTOR_W
 
@@ -1193,7 +1201,7 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
 
            # Optimization parameters
            num_buffers: int = 2, scale_block: int = 32, block_m: int = 128, block_n: int = 128, block_k: int = 256,
-           schedule: str = 'baseline', pingpong: bool = False):
+           schedule: str = 'baseline', pingpong: bool = False, num_warps: int = 4):
     if precision_config is None:
         precision_config = PrecisionConfig()
 
@@ -1302,53 +1310,15 @@ def matmul(a, b, bias, a_ragged_metadata: RaggedTensorMetadata | None = None,
         *expt_data_w, batch_size, grid_m, grid_n, *fused_activation.fn_args, fused_activation.specs.reduction_n,
         n_valid_slices, opt_flags.block_m, opt_flags.block_n, opt_flags.block_k, opt_flags.group_m,
         opt_flags.xcd_swizzle, SWIZZLE_MX_SCALE=None if b_scale is None else b_scale.storage.layout.name,
-        EVEN_K=(K % opt_flags.block_k == 0), UPCAST_INDICES=should_upcast_indices(a, b, out_matmul), num_warps=4,
-        NUM_BUFFERS=num_buffers, SCALE_BLOCK=scale_block, SCHEDULE=schedule, PINGPONG=pingpong)
+        EVEN_K=(K % opt_flags.block_k == 0), UPCAST_INDICES=should_upcast_indices(a, b,
+                                                                                  out_matmul), num_warps=num_warps,
+        NUM_BUFFERS=num_buffers, SCALE_BLOCK=scale_block, SCHEDULE=schedule, PINGPONG=pingpong, NUM_WARPS=num_warps)
 
     out_final = c_storage.data
     if not (is_input_batched or b_ragged_metadata is not None):
         out_final = out_final.squeeze(0)
 
     return out_final, k
-
-
-def make_random_tensor(shape, n_slices, ragged_dim, device, dtype, mxfp_dim, transpose, squeeze_batch_dim,
-                       is_mx_rowmajor=False, scale_hbm_swizzling=None):
-    # allocate buffer
-    buffer_shape = ((n_slices, ) if ragged_dim is None else tuple()) + shape
-    buffer_dtype = torch.bfloat16 if dtype.has_mx_scale else dtype.torch_dtype
-    # FIXME: Took a long time with shape (10, 784, 400) on simulator.
-    # buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)
-    buffer = alloc_rand(buffer_shape, device='cpu', dtype=buffer_dtype)
-    buffer = buffer.to(device)
-    if squeeze_batch_dim:
-        buffer = buffer.squeeze(0)
-    # handle raggedness
-    ragged_metadata = None
-    if ragged_dim is not None:
-        slice_sizes = make_slice_sizes(n_slices, shape[ragged_dim], device=device)
-        ragged_metadata = make_ragged_tensor_metadata(slice_sizes, shape[ragged_dim])
-    # handle transpose
-    if transpose:
-        buffer = buffer.mT.contiguous().mT
-    # handle mxfp
-    scales = None
-    if mxfp_dim is not None:
-        assert dtype.has_mx_scale
-        buffer_dtype = dtype.torch_dtype
-        if is_mx_rowmajor:
-            scales = downcast_to_mxfp(buffer, buffer_dtype, axis=mxfp_dim)[1]
-            buffer = downcast_to_mxfp(buffer.mT.contiguous(), buffer_dtype, axis=mxfp_dim)[0].mT
-        else:
-            buffer, scales = downcast_to_mxfp(buffer, buffer_dtype, axis=mxfp_dim)
-        buffer = wrap_torch_tensor(buffer, FP4 if dtype.is_mxfloat4 else None)
-        scales = wrap_torch_tensor(scales)
-        if scale_hbm_swizzling is not None:
-            # convert scales to swizzled hbm layout
-            if callable(scale_hbm_swizzling):
-                scale_hbm_swizzling = scale_hbm_swizzling(ragged_metadata)
-            scales = convert_layout(scales, scale_hbm_swizzling)
-    return buffer, scales, ragged_metadata
 
 
 @pytest.mark.parametrize("m, n, k", [(300, 400, 416), (128, 128, 512)])
@@ -1446,7 +1416,7 @@ def test_matmul(m, n, k, block_m, block_n, block_k, dtype_a, dtype_b, do_gather,
         transpose=True,
         squeeze_batch_dim=is_not_ragged,
         mxfp_dim=-2 if b_dtype.has_mx_scale else None,
-        scale_hbm_swizzling=layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=-2, num_warps=4)
+        scale_hbm_swizzling=layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=-2, num_warps=num_warps)
         if SCALE_PRESHUFFLING else None,
     )
 
@@ -1486,7 +1456,7 @@ def test_matmul(m, n, k, block_m, block_n, block_k, dtype_a, dtype_b, do_gather,
     )
     tri_y, k = matmul(a, b, bias, a_ragged_metadata, b_ragged_metadata, gather_indx, scatter_indx, precision_opt,
                       fused_activation=fused_activation, num_buffers=num_buffers, block_m=block_m, block_n=block_n,
-                      block_k=block_k, schedule=schedule, pingpong=pingpong)
+                      block_k=block_k, schedule=schedule, pingpong=pingpong, num_warps=num_warps)
 
     if c_dtype.has_mx_scale:
         tri_y = upcast_from_mxfp(tri_y, precision_opt.c_mx_scale, target_dtype=torch.bfloat16, axis=-1).to(ref_y.dtype)
@@ -1545,16 +1515,18 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
 
     actions = ["gating", "dispatch", "combine"] if action == "e2e" else [action]
 
+    is_e2e = action == "e2e"
+
     if "gating" in actions:
         logits, _ = matmul(xg, wg, bg,  #
                            precision_config=pcg,  #
-                           num_buffers=num_buffers,  #
-                           block_m=block_m,  #
-                           block_n=block_n,  #
-                           block_k=block_k,  #
-                           schedule=schedule,  #
-                           num_warps=num_warps,  #
-                           pingpong=pingpong)
+                           num_buffers=2 if is_e2e else num_buffers,  #
+                           block_m=256 if is_e2e else block_m,  #
+                           block_n=256 if is_e2e else block_n,  #
+                           block_k=128 if is_e2e else block_k,  #
+                           schedule='baseline' if is_e2e else schedule,  #
+                           num_warps=4 if is_e2e else num_warps,  #
+                           pingpong=False if is_e2e else pingpong)
     else:
         logits = torch.randn((batch, n_expts_tot), device=dev)
 

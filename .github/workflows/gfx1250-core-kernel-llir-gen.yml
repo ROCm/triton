@@ -34,7 +34,7 @@ jobs:
           RENDER_GID=$(getent group render | cut -d: -f3)
           echo "Render group ID: ${RENDER_GID}"
           DIRNAME=${{ env.DIRNAME }}
-          mkdir /data/ci/llir/${DIRNAME}
+          mkdir -p /data/ci/llir/${DIRNAME}
           docker run --rm --init \
             --name ci-core-llir-${{ github.run_id }} \
             --device=/dev/kfd --device=/dev/dri --group-add video --group-add $RENDER_GID \
