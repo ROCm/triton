@@ -622,6 +622,7 @@ void fillTDMDescriptor(
       loc, rewriter, tdmLayout,
       {{kMessage, b.i32_val(0)}, {kWarp, warpId}, {kBlock, ctaId}});
 
+  // Extract per-dimension offsets and update input offsets
   SmallVector<Value> globalOffset(numDims);
   for (size_t i = 0; i < numDims; ++i) {
     globalOffset[i] = warpOffset[i].second;

@@ -196,9 +196,6 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
   if (auto linearEnc = dyn_cast<SharedLinearEncodingAttr>(layout)) {
     return linearEnc.getOrder();
   }
-  if (auto partitionedEnc = dyn_cast<PartitionedSharedEncodingAttr>(layout)) {
-    return getOrder(partitionedEnc.getPartitionLayout(), shape);
-  }
   if (auto sharedLayout = dyn_cast<NVMMASharedEncodingAttr>(layout)) {
     if (shape.size() == 1) {
       return {0};
