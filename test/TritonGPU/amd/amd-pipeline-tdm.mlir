@@ -59,15 +59,17 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK-NOT: #ttg.padded_shared
 
 // CHECK-LABEL: tt.func @matmul_kernel_make_tensor_descriptor
-// CHECK: async_tdm_copy_global_to_local
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<512x32xf16, #[[$PADDED_A]]>> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
 // CHECK: ttg.async_commit_group tokens
-// CHECK: async_tdm_copy_global_to_local
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<32x64xf16, #[[$PADDED_B]]>> -> !ttg.memdesc<32x64xf16, #[[$PADDED_B]], #smem, mutable>
 // CHECK: ttg.async_commit_group tokens
 // CHECK: scf.for
-// CHECK: amdg.async_tdm_wait
-// CHECK: async_tdm_copy_global_to_local
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<512x32xf16, #[[$PADDED_A]]>> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
+// CHECK: ttg.async_commit_group tokens
+// CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<tensor<32x64xf16, #[[$PADDED_B]]>> -> !ttg.memdesc<32x64xf16, #[[$PADDED_B]], #smem, mutable>
 // CHECK: ttg.async_commit_group tokens
 // CHECK: }
+// CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<tensor<512x64xf16, #[[$PADDED_C]]>>
 
 // -----
 

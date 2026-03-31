@@ -39,13 +39,6 @@ composePaddedLayout(const triton::AMD::TargetInfo &targetInfo, int opIdx,
                     triton::gpu::DotOperandEncodingAttr dotOpEnc = {},
                     bool useAsyncCopy = false);
 
-triton::gpu::PaddedSharedEncodingAttr
-getPaddedEncodingForDotOp(mlir::MLIRContext *context, int opIdx,
-                          ArrayRef<int64_t> shape, ArrayRef<unsigned> order,
-                          triton::gpu::CGAEncodingAttr CGALayout,
-                          unsigned typeWidthInBit, unsigned vecWidth,
-                          const triton::AMD::TargetInfo &targetInfo);
-
 triton::gpu::SharedEncodingTrait
 getEncodingFromDescriptor(Operation *op, RankedTensorType tensorType,
                           Value desc);

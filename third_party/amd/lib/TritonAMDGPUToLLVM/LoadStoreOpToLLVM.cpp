@@ -1182,8 +1182,8 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     auto encoding = descBlockTy.getEncoding();
     Type elementType =
         getTypeConverter()->convertType(descBlockTy.getElementType());
-    // Use descBlockTy for the shared layout because the TDM lowering expects
-    // the descriptor's dimensionality. For rank-reducing loads, resultant
+    // Use descBlockTy to query shared layout because TDM lowering logic expects
+    // the descriptor's dimensionality. For rank-reducing loads, destination
     // shared memory may have fewer dimensions than the descriptor block type.
     triton::LinearLayout sharedLayout =
         isPaddedEncoding(encoding)
