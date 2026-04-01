@@ -205,7 +205,7 @@ def profile_batch_kernels(M, N, K, gpuid, gpus, jobs, verbose):
             print(f"profiling {kernel_name} on GPU {gpuid}")
         here = Path(__file__).parent
         run_bash_command_wrapper(
-            f"PYTHONPATH={here} rocprofv3 --kernel-trace -o {get_output_dir()}/{jobId} --log-level fatal -- python {get_filename_profile_driver(M, N, K, jobId)}",
+            f"PYTHONPATH={here} rocprofv3 --kernel-trace -o {get_output_dir()}/{jobId} --output-format csv --log-level fatal -- python {get_filename_profile_driver(M, N, K, jobId)}",
             capture=(verbose < 2))
         jobId += ngpus
 
