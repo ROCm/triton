@@ -19,8 +19,7 @@ def supports_tensor_descriptor():
 
 
 HAS_TENSOR_DESC = supports_tensor_descriptor()
-# Todo: Enable this kernel when host tensor descriptor lowering is fully implemented
-HAS_HOST_TENSOR_DESC = supports_tensor_descriptor() and False
+HAS_HOST_TENSOR_DESC = supports_tensor_descriptor()
 
 
 @triton.jit
@@ -88,15 +87,15 @@ def gemm_tdm_kernel(a_desc, b_desc, c_desc, M, N, K, BLOCK_M: tl.constexpr, BLOC
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
     pid_n = pid // num_pid_m
+    offs_cm = pid_m * BLOCK_M
+    offs_cn = pid_n * BLOCK_N
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_K):
-        a = a_desc.load([0, k])
-        b = b_desc.load([k, 0])
+        a = a_desc.load([offs_cm, k])
+        b = b_desc.load([k, offs_cn])
         accumulator = tl.dot(a, b, acc=accumulator)
 
-    offs_cm = pid_m * BLOCK_M
-    offs_cn = pid_n * BLOCK_N
     c_desc.store([offs_cm, offs_cn], accumulator)
 
 
@@ -126,8 +125,12 @@ def test_gemm_fp16(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, device_tensor_desc, host_
     if device_tensor_desc and not HAS_TENSOR_DESC:
         pytest.skip("Skip unsupported test with device tensor descriptor")
 
-    if host_tensor_desc and not HAS_HOST_TENSOR_DESC:
-        pytest.skip("Skip unsupported test with host tensor descriptor")
+    if host_tensor_desc:
+        if not HAS_HOST_TENSOR_DESC:
+            pytest.skip("Skip unsupported test with host tensor descriptor")
+        # TensorDescriptor requires that the strides must be 16 bytes aligned
+        if (N * 2) % 16 != 0 or (K * 2) % 16 != 0:
+            pytest.skip("Skip test with strides that are not a multiple of 16")
 
     z = _run_kernel(x, y, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, device_tensor_desc, host_tensor_desc)
 

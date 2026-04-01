@@ -280,10 +280,10 @@ def _attn_fwd(
     # k_scale [BLOCK_N, BLOCK_DMODEL / 32]
     if USE_TDM:
         # TDM requires last_stride=1, so we need to load K in a different way then transpose it.
-        k_desc_or_ptrs = tl.make_tensor_descriptor(base=k_ptr + off_z * stride_kz + off_k_head * stride_kh,
-                                                   shape=(BATCH * seqlen_k * NUM_K_HEADS // KV_PACK_DIV, BLOCK_DMODEL),
-                                                   strides=(stride_kn, stride_kk),
-                                                   block_shape=(BLOCK_N, BLOCK_DMODEL // KV_PACK_DIV))
+        k_desc_or_ptrs = tl.make_tensor_descriptor(
+            base=k_ptr + off_z * stride_kz + off_k_head * stride_kh,
+            shape=(BATCH * (seqlen_k // KV_PACK_DIV) * NUM_K_HEADS, BLOCK_DMODEL), strides=(stride_kn, stride_kk),
+            block_shape=(BLOCK_N, BLOCK_DMODEL // KV_PACK_DIV))
     else:
         k_offs = (off_z * stride_kz + off_k_head * stride_kh + offs_d_packed[:, None] * stride_kk +
                   offs_n[None, :] * stride_kn)

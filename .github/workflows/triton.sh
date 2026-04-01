@@ -59,17 +59,12 @@ echo "=== Run Triton Unit Tests ==="
 # Array of test patterns to exclude
 EXCLUDE_PATTERNS=(
     # Exclude pattern for test_core.py
-    "test_dot" # Failing 8 test cases
-    "test_load_scope_sem_coop_grid_cta_one" # coop group not supported in FFM
     "test_load_store_same_ptr" # takes >60 mins
-    "test_cat_nd" # Failure after merge in upstream with #500
-    # Excluse pattern for test_matmul.py
+    # Excluse pattern for test_matmul.py, each takes > 1 hr
     "test_preshuffle_scale_mxfp_cdna4"
     "test_batched_mxfp"
     "test_mxfp8_mxfp4_matmul"
     "test_block_scale_fp4"
-    # Exclude patterns for runtime tests:
-    "test_async_compile_mock" # hangs indefinitely in FFM (threading/async issues in simulation)
     # Exclude patterns for test_tensor_descriptor.py
     "test_tensor_descriptor_rank_reducing_matmul[float32]" # fails, but rank_reducing_load passes
     "test_tensor_descriptor_reduce"
