@@ -550,8 +550,8 @@ void init_triton_amd(py::module &&m) {
     mlir::triton::AMD::runScalarizePackedFOpsPass(*fn);
   });
 
-  m.def("add_llir_schedule_pass", [](llvm::Function *fn) {
-    mlir::triton::AMD::runLLIRSchedulePass(*fn);
+  m.def("add_llir_schedule_pass", [](llvm::Function *fn, const std::string &arch) {
+    mlir::triton::AMD::runLLIRSchedulePass(*fn, arch);
   });
 
   auto hipBlas = m.def_submodule("hipblas");

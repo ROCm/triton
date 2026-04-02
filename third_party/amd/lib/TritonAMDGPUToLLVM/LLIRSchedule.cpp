@@ -1,6 +1,8 @@
 #include "TritonAMDGPUToLLVM/Passes.h"
+#include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
@@ -242,11 +244,12 @@ struct Utils {
       if (Function *F = CI->getCalledFunction()) {
         if (F->isIntrinsic()) {
           StringRef Name = F->getName();
-          // GR: buffer.load (into regs), buffer.load.lds, buffer.load.async.lds
-          if (Name.contains("buffer.load"))
+          // GR: buffer.load (into regs), buffer.load.lds, buffer.load.async.lds,
+          //     tensor.load.to.lds (gfx1250 TDM)
+          if (Name.contains("buffer.load") || Name.contains("tensor.load.to.lds"))
             return SchedKind::GR;
-          // LR: transposed ds_read (ds.read.tr*)
-          if (Name.contains("ds.read"))
+          // LR: ds_read (ds.read.*) or ds_load (ds.load.*)
+          if (Name.contains("ds.read") || Name.contains("ds.load"))
             return SchedKind::LR;
         }
       }
@@ -293,16 +296,26 @@ struct Utils {
     CI->setTailCallKind(CallInst::TCK_Tail);
   }
 
-  static void insertSWaitCntBefore(Instruction *IP, int /*cnt*/) {
-    // NOTE: LLVM AMDGPU s_waitcnt encoding operand packs several fields.
-    // 49279 is taken from the original code. Keep as-is for behavior parity.
+  static bool isGFX12Plus(StringRef Arch) {
+    auto family = mlir::triton::AMD::deduceISAFamily(Arch);
+    return family == mlir::triton::AMD::ISAFamily::RDNA4 ||
+           family == mlir::triton::AMD::ISAFamily::GFX1250;
+  }
+
+  static void insertSWaitCntBefore(Instruction *IP, int /*cnt*/,
+                                   StringRef Arch) {
     Function *F = IP->getFunction();
     Module *M = F->getParent();
-    Function *WaitFn =
-        Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_s_waitcnt);
     IRBuilder<> Builder(F->getContext());
     Builder.SetInsertPoint(IP);
-    Value *Cnt = Builder.getInt32(49279);
+
+    bool gfx12 = isGFX12Plus(Arch);
+    Intrinsic::ID WaitID = gfx12 ? Intrinsic::amdgcn_s_wait_dscnt
+                                  : Intrinsic::amdgcn_s_waitcnt;
+    // gfx12+: s_wait_dscnt takes i16 0
+    // gfx9: s_waitcnt takes i32 49279 (packed vmcnt=15, expcnt=7, lgkmcnt=31)
+    Value *Cnt = gfx12 ? Builder.getInt16(0) : Builder.getInt32(49279);
+    Function *WaitFn = Intrinsic::getOrInsertDeclaration(M, WaitID);
     CallInst *CI = Builder.CreateCall(WaitFn, {Cnt});
     CI->setTailCallKind(CallInst::TCK_Tail);
   }
@@ -368,7 +381,7 @@ class PreRAScheduler {
 public:
   explicit PreRAScheduler() = default;
 
-  void runOnLoop(Function &F, Loop &MainLoop, LoopInfo &LI) {
+  void runOnLoop(Function &F, Loop &MainLoop, LoopInfo &LI, StringRef Arch) {
     LLVM_DEBUG(dbgs() << "Pre-RA scheduler analyzing function: " << F.getName()
                       << "\n");
     Utils::dumpInstructionHistogram(&MainLoop);
@@ -378,7 +391,7 @@ public:
     for (BasicBlock *BB : MainLoop.blocks()) {
       LLVM_DEBUG(dbgs() << "BB: " << BB->getName() << "\n");
       analyzeBBMFMA(*BB, BBMFMAMap);
-      scheduleBB(*BB, BBMFMAMap);
+      scheduleBB(*BB, BBMFMAMap, Arch);
     }
 
     LLVM_DEBUG(dbgs() << "============================================\n");
@@ -640,6 +653,15 @@ private:
   collectMFMAAndTransparentInstsInRegion(const BBRegion &R) {
     MFMARegionCollectResult Res;
 
+    // Collect LR instructions in this region so we can check if a shuffle
+    // operand is a same-region LDS load.
+    SmallPtrSet<Instruction *, 16> RegionLRInsts;
+    for (Instruction &I : Utils::instructionsInRegion(R)) {
+      SchedKind K = Utils::classifySchedInst(I);
+      if (K == SchedKind::LR)
+        RegionLRInsts.insert(&I);
+    }
+
     for (Instruction &I : Utils::instructionsInRegion(R)) {
       SchedKind K = Utils::classifySchedInst(I);
       if (K == SchedKind::GR || K == SchedKind::LR || K == SchedKind::LW) {
@@ -654,7 +676,21 @@ private:
       }
 
       if (Utils::isHoistTransparentInst(I)) {
-        if (feedsMFMA(&I))
+        // Don't hoist shuffles whose operands are LR instructions in this
+        // region — hoisting would move the shuffle before its LDS load
+        // operand, breaking dominance.
+        bool consumesSameRegionLR = false;
+        if (isa<ShuffleVectorInst>(I)) {
+          for (Value *Op : I.operands()) {
+            if (auto *OpI = dyn_cast<Instruction>(Op)) {
+              if (RegionLRInsts.count(OpI)) {
+                consumesSameRegionLR = true;
+                break;
+              }
+            }
+          }
+        }
+        if (!consumesSameRegionLR && feedsMFMA(&I))
           Res.Hoist.push_back(&I);
         continue;
       }
@@ -864,7 +900,8 @@ private:
   //   ~1 mfma remains at the front of the region.
   static void scheduleMFMAWithSpacing(SmallVectorImpl<AnchorInst> &Anchors,
                                       SmallVectorImpl<Instruction *> &MFMAInsts,
-                                      const BBRegion &Region) {
+                                      const BBRegion &Region,
+                                      StringRef Arch) {
     if (Anchors.empty())
       return;
 
@@ -878,7 +915,7 @@ private:
     unsigned Total = MFMAIdx;
 
     // Insert s.waitcnt before the first MFMA in the region
-    Utils::insertSWaitCntBefore(MFMAInsts.front(), 0);
+    Utils::insertSWaitCntBefore(MFMAInsts.front(), 0, Arch);
 
     // Determine MFMAs per regular GR based on MFMA cycle latency:
     //   16 cycles → 4 mfma, 32 cycles → 2 mfma
@@ -907,7 +944,12 @@ private:
         numLW++;
       }
     }
-    unsigned needed = mfmaPerGR * (numGR - numGRBeforeLR) + numGRBeforeLR + numLR + numLW + 2;
+    bool isGFX12 = Utils::isGFX12Plus(Arch);
+    // gfx1250: 1 WMMA per 2 LR; gfx9: 1 MFMA per 1 LR
+    unsigned lrBudget = isGFX12 ? numLR / 2 : numLR;
+    // gfx1250: 10 (8 before + 2 after) per standalone GR; gfx9: mfmaPerGR per standalone GR
+    unsigned grBudget = isGFX12 ? 10 * (numGR - numGRBeforeLR) : mfmaPerGR * (numGR - numGRBeforeLR);
+    unsigned needed = grBudget + numGRBeforeLR + lrBudget + numLW + 2;
     unsigned leftover = (Total > needed) ? Total - needed : 0;
 
     LLVM_DEBUG(dbgs() << "  MFMA budget: total=" << Total << ", needed=" << needed
@@ -921,6 +963,7 @@ private:
     MFMAAtEnd = moveMFMAsAfter(MFMAInsts, MFMAIdx, 2, Anchors.back().I);
 
     bool seenLW = false;
+    unsigned lrCount = 0;
 
     // Step 2: Process anchors in reverse
     for (int i = static_cast<int>(Anchors.size()) - 1;
@@ -931,13 +974,29 @@ private:
       unsigned Count = 0;
 
       if (Kind == SchedKind::LR) {
-        Count = 1;
+        if (isGFX12) {
+          // gfx1250: insert 1 WMMA every 2 LR anchors
+          lrCount++;
+          Count = (lrCount % 2 == 0) ? 1 : 0;
+        } else {
+          // gfx9: 1 MFMA per LR
+          Count = 1;
+        }
       } else if (Kind == SchedKind::GR) {
-        // GR followed by LR gets 1, otherwise mfmaPerGR (4 for 16-cycle, 2 for 32-cycle)
         bool followedByLR =
             (static_cast<size_t>(i + 1) < Anchors.size() &&
              Anchors[static_cast<size_t>(i + 1)].Kind == SchedKind::LR);
-        Count = followedByLR ? 1 : mfmaPerGR;
+        if (isGFX12 && !followedByLR) {
+          // gfx1250: 2 WMMA after GR, 8 WMMA before GR
+          Count = 2;
+          // Insert 8 WMMAs before the GR instruction
+          Instruction *BeforeGR = InsertPt->getPrevNode();
+          if (BeforeGR)
+            moveMFMAsAfter(MFMAInsts, MFMAIdx, 8, BeforeGR);
+        } else {
+          // GR followed by LR gets 1, otherwise mfmaPerGR
+          Count = followedByLR ? 1 : mfmaPerGR;
+        }
       } else if (Kind == SchedKind::LW) {
         if (!seenLW) {
           seenLW = true;
@@ -963,7 +1022,8 @@ private:
     });
   }
 
-  static void scheduleBB(BasicBlock &BB, const BBMFMAAnalysisMap &Analysis) {
+  static void scheduleBB(BasicBlock &BB, const BBMFMAAnalysisMap &Analysis,
+                         StringRef Arch) {
     auto It = Analysis.find(&BB);
     if (It == Analysis.end())
       return;
@@ -1009,7 +1069,7 @@ private:
           dbgs() << "\n";
         });
 
-        scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, bbR);
+        scheduleMFMAWithSpacing(Res.Anchors, Res.MFMAInsts, bbR, Arch);
       }
     }
   }
@@ -1039,8 +1099,9 @@ private:
 struct LLIRSchedulePass : FunctionPass {
   static char ID;
   PreRAScheduler Scheduler;
+  std::string Arch;
 
-  LLIRSchedulePass() : FunctionPass(ID) {}
+  LLIRSchedulePass(StringRef Arch = "") : FunctionPass(ID), Arch(Arch.str()) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<LoopInfoWrapperPass>();
@@ -1059,7 +1120,7 @@ struct LLIRSchedulePass : FunctionPass {
     if (!mainLoop)
       return false;
 
-    Scheduler.runOnLoop(F, *mainLoop, LI);
+    Scheduler.runOnLoop(F, *mainLoop, LI, Arch);
     // Analysis-only pass
     return false;
   }
@@ -1071,9 +1132,9 @@ char LLIRSchedulePass::ID = 0;
 
 namespace mlir::triton::AMD {
 
-void runLLIRSchedulePass(llvm::Function &F) {
+void runLLIRSchedulePass(llvm::Function &F, llvm::StringRef arch) {
   llvm::legacy::FunctionPassManager FPM(F.getParent());
-  FPM.add(new LLIRSchedulePass());
+  FPM.add(new LLIRSchedulePass(arch));
   FPM.doInitialization();
   FPM.run(F);
   FPM.doFinalization();
