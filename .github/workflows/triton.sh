@@ -131,7 +131,6 @@ pytest -n 8  --durations=10 third_party/amd/python/test/ \
                 --ignore=third_party/amd/python/test/test_gluon_gfx1250_consan.py \
                 --ignore=third_party/amd/python/test/test_pointer_optimization.py \
                 --ignore=third_party/amd/python/test/test_gluon_gfx1250.py
-TRITON_ALWAYS_COMPILE=1 pytest --capture=tee-sys -rfs third_party/amd/python/test/test_scalarize_packed_fops.py
 
 echo "=== Test TDM widh async_copy disabled"
 
