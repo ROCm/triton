@@ -4,6 +4,7 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
+#include "triton/Tools/LayoutUtils.h"
 #include <numeric>
 #include <optional>
 
@@ -868,6 +869,15 @@ void fillTDMDescriptorForGatherScatter(
   group1[4] = b.and_(group1[4], b.i32_val(0xFFFF0000));
   group1[4] = b.or_(group1[4], b.i32_val(numIndices & 0xFFFF));
 
+  // Fix tile_dim0 for gather/scatter: createTDMDescriptor divides the column
+  // dimension across warps for regular load/store, but gather and scatter use
+  // row indices and need the full undivided column width.
+  if (blockShape.size() >= 2) {
+    int64_t fullColWidth = blockShape[blockShape.size() - 1];
+    group1[3] = b.and_(group1[3], b.i32_val(0xFFFF));
+    group1[3] = b.or_(group1[3], b.i32_val(fullColWidth << 16));
+  }
+
   // Fill group2 and group3 with row indices
   if (use32BitIndices) {
     // 32-bit indices: 4 in group2, 4 in group3
@@ -1116,26 +1126,93 @@ size_t getTDMGatherScatterInstrinsicCount(size_t numIndices,
   return llvm::divideCeil(numIndices, maxIndicesPerInstr);
 }
 
-void emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
-                          const LLVMTypeConverter *typeConverter,
-                          ArrayRef<Value> desc, ArrayRef<int64_t> blockShape,
-                          unsigned padInterval, unsigned padAmount,
-                          Value ldsPtr, Value pred, Type elementType,
-                          Value barrierPtr,
-                          const triton::LinearLayout &cgaLayout, Value ctaId,
-                          ArrayRef<Value> rowIndices, Value colOffset,
-                          bool use32BitIndices, bool isGather) {
+LogicalResult
+emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
+                     const LLVMTypeConverter *typeConverter,
+                     ArrayRef<Value> desc, ArrayRef<int64_t> blockShape,
+                     unsigned padInterval, unsigned padAmount, Value ldsPtr,
+                     Value pred, Type elementType, Value barrierPtr,
+                     const triton::LinearLayout &cgaLayout, Value ctaId,
+                     ArrayRef<Value> rowIndices, Value colOffset, bool isGather,
+                     int numWarps, RankedTensorType indicesType) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   assert(!rowIndices.empty() && "Gather/scatter requires row indices");
   assert(colOffset && "Gather/scatter requires column offset");
 
-  size_t numIndices = rowIndices.size();
+  bool use32BitIndices =
+      indicesType.getElementType().getIntOrFloatBitWidth() == 32;
   size_t maxIndicesPerInstr = use32BitIndices ? 8 : 16;
 
-  // Calculate the number of TDM instructions we'll emit
-  size_t numInstructions =
-      getTDMGatherScatterInstrinsicCount(numIndices, use32BitIndices);
+  // For gather, use LinearLayout to determine:
+  // 1. Which registers are broadcasted — remove duplicates
+  // 2. Which warps are redundant — zero the pred to make instruction a no-op
+  // 3. Per-batch LDS row offset — via applyLinearLayout per batch
+  SmallVector<Value> effectiveRowIndices(rowIndices.begin(), rowIndices.end());
+  SmallVector<Value> gatherBatchLdsOffsets;
+
+  if (isGather) {
+    auto indexLL = triton::gpu::toLinearLayout(indicesType);
+    assert(indexLL.getNumOutDims() == 1 &&
+           "Gather index layout must have exactly one output dimension");
+    auto freeVarMasks = indexLL.getFreeVariableMasks();
+
+    auto kRegister = rewriter.getStringAttr("register");
+    auto kLane = rewriter.getStringAttr("lane");
+    auto kWarp = rewriter.getStringAttr("warp");
+
+    // Remove broadcasted (duplicated) register entries. After this, indexLL
+    // has a compact register dimension and effectiveRowIndices contains only
+    // unique index values.
+    auto removeBcast = actionRemoveBroadcastedRegs(indexLL);
+    if (!removeBcast.isIdentity()) {
+      indexLL = removeBcast.apply(indexLL);
+      effectiveRowIndices = removeBcast.apply(
+          SmallVector<Value>(rowIndices.begin(), rowIndices.end()));
+    }
+
+    Value warpId = getLaneAndWarpId(rewriter, loc).second;
+
+    // If any warp bits are free, those warps hold redundant copies.
+    // Zero the pred so the instruction becomes a no-op.
+    int32_t warpFreeMask = freeVarMasks.lookup(kWarp);
+    if (warpFreeMask != 0) {
+      Value isActive =
+          b.icmp_eq(b.and_(warpId, b.i32_val(warpFreeMask)), b.i32_val(0));
+      pred = b.select(isActive, pred, b.i32_val(0));
+    }
+
+    // The index encoding may cover fewer warps than the CTA actually has.
+    // applyLinearLayout wraps extra warp IDs via modular arithmetic,
+    // causing silent duplication. Predicate off explicitly.
+    int numLayoutWarps = indexLL.getInDimSize(kWarp);
+    if (numLayoutWarps < numWarps) {
+      Value inRange = b.icmp_ult(warpId, b.i32_val(numLayoutWarps));
+      pred = b.select(inRange, pred, b.i32_val(0));
+    }
+
+    size_t contigIndiceCount = indexLL.getNumConsecutiveInOut();
+    maxIndicesPerInstr = std::min(maxIndicesPerInstr, contigIndiceCount);
+
+    // Precompute LDS row offset for each instruction batch via
+    // applyLinearLayout with the actual register index and warp ID.
+    auto kBlock = rewriter.getStringAttr("block");
+    for (size_t startIdx = 0; startIdx < effectiveRowIndices.size();
+         startIdx += maxIndicesPerInstr) {
+      auto offsets = applyLinearLayout(loc, rewriter, indexLL,
+                                       {{kRegister, b.i32_val(startIdx)},
+                                        {kLane, b.i32_val(0)},
+                                        {kWarp, warpId},
+                                        {kBlock, b.i32_val(0)}});
+      gatherBatchLdsOffsets.push_back(offsets[0].second);
+    }
+  }
+
+  size_t numIndicesPerWarp = effectiveRowIndices.size();
+  size_t numInstructions = gatherBatchLdsOffsets.empty()
+                               ? getTDMGatherScatterInstrinsicCount(
+                                     numIndicesPerWarp, use32BitIndices)
+                               : gatherBatchLdsOffsets.size();
 
   // Get the descriptor groups (gather/scatter uses 2D format: 12 dwords)
   auto group0Vec = SmallVector<Value>(desc.begin(), desc.begin() + 4);
@@ -1148,11 +1225,11 @@ void emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
   // Issue multiple TDM instructions if needed
   for (size_t instrIdx = 0; instrIdx < numInstructions; ++instrIdx) {
     size_t startIdx = instrIdx * maxIndicesPerInstr;
-    size_t endIdx = std::min(startIdx + maxIndicesPerInstr, numIndices);
+    size_t endIdx = std::min(startIdx + maxIndicesPerInstr, numIndicesPerWarp);
 
     // Get the subset of indices for this batch
-    SmallVector<Value> batchIndices(rowIndices.begin() + startIdx,
-                                    rowIndices.begin() + endIdx);
+    SmallVector<Value> batchIndices(effectiveRowIndices.begin() + startIdx,
+                                    effectiveRowIndices.begin() + endIdx);
 
     // Make copies of the descriptor groups for this iteration
     auto g0 = group0Vec;
@@ -1160,14 +1237,18 @@ void emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
     auto g2 = group2Vec;
     auto g3 = group3Vec;
 
-    // Fill the descriptor for gather/scatter:
-    // - ldsRowOffset: row offset within shared memory for this batch
-    // - colOffset: starting column in global memory
+    // For gather, use the precomputed layout-derived LDS offset.
+    // For scatter, use sequential batch position.
+    Value ldsRowOffset;
+    if (!gatherBatchLdsOffsets.empty())
+      ldsRowOffset = gatherBatchLdsOffsets[instrIdx];
+    else
+      ldsRowOffset = b.i32_val(startIdx);
+
     fillTDMDescriptorForGatherScatter(
         rewriter, loc, typeConverter, elementType, to_vector(blockShape),
-        padInterval, padAmount, g0, g1, g2, g3, b.i32_val(startIdx), colOffset,
-        ldsPtr, pred, barrierPtr, cgaLayout, ctaId, batchIndices,
-        use32BitIndices);
+        padInterval, padAmount, g0, g1, g2, g3, ldsRowOffset, colOffset, ldsPtr,
+        pred, barrierPtr, cgaLayout, ctaId, batchIndices, use32BitIndices);
 
     // Pack and emit the instruction
     auto group0 = packLLVector(loc, g0, rewriter);
@@ -1184,6 +1265,7 @@ void emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
         rewriter, loc, intrinsicName, {},
         {group0, group1, group2, group3, group4Zero, b.i32_val(0)});
   }
+  return success();
 }
 
 SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
