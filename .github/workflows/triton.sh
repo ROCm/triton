@@ -100,6 +100,26 @@ pytest -n 64 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked -vv --timeout=
     python/test/unit/language/test_tensor_descriptor.py \
     --deselect 'python/test/unit/language/test_tensor_descriptor.py::test_host_tensor_descriptor_in_tuple[int16]' # Fails after #657 due to s_trap change from upstream #9692
 
+pytest -n 16 --durations=10 python/test/unit/language/test_conversions.py
+
+echo "=== Run Triton GEMM/Attention Tests ==="
+
+# Enable time_slicing for mxfp_fa.py - causes numeric issues (https://github.com/ROCm/triton-internal/issues/1683)
+unset HSA_MODEL_ARGS
+# TODO: After #668 the following are failing due to NaNs. Investigate and fix.
+pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-64-128-256-16-1]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[True-3-e4m3-e4m3-64-128-256-1-1]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-1-2]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-16-1]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-1-1]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-16-2]'
+
+PYTHONPATH=$PWD/mi400 pytest --count=1 -n 16 --durations=10 \
+    mi400/test_gemm_hipdriver.py \
+    mi400/test_mxgemm_hipdriver.py \
+    mi400/test_softmax_hipdriver.py
+
 echo "=== Run AMD-specific Tests ==="
 
 pytest --durations=10 third_party/amd/python/test/test_compiler_fence_gfx1250.py
