@@ -917,25 +917,11 @@ private:
     // Insert s.waitcnt before the first MFMA in the region
     Utils::insertSWaitCntBefore(MFMAInsts.front(), 0, Arch);
 
-    // Determine MFMAs per regular GR based on MFMA cycle latency:
-    //   16 cycles → 4 mfma, 32 cycles → 2 mfma
-    unsigned mfmaPerGR = 4;
-    {
-      unsigned cycles = Utils::getMFMACycles(*MFMAInsts.front());
-      if (cycles == 32)
-        mfmaPerGR = 2;
-      else if (cycles == 16)
-        mfmaPerGR = 4;
-    }
-
-    // Step 1: Count needed MFMAs for anchors
-    // GR: mfmaPerGR each, except GR followed by LR costs 1
-    // LR: 1 each, LW: 1 each, plus 2 at the end of the region
+    // Count anchors by kind
     unsigned numGR = 0, numLR = 0, numLW = 0, numGRBeforeLR = 0;
     for (size_t j = 0; j < Anchors.size(); ++j) {
       if (Anchors[j].Kind == SchedKind::GR) {
         numGR++;
-        // Check if next anchor (forward) is LR
         if (j + 1 < Anchors.size() && Anchors[j + 1].Kind == SchedKind::LR)
           numGRBeforeLR++;
       } else if (Anchors[j].Kind == SchedKind::LR) {
@@ -944,82 +930,145 @@ private:
         numLW++;
       }
     }
+
     bool isGFX12 = Utils::isGFX12Plus(Arch);
-    // gfx1250: 1 WMMA per 2 LR; gfx9: 1 MFMA per 1 LR
-    unsigned lrBudget = isGFX12 ? numLR / 2 : numLR;
-    // gfx1250: 10 (8 before + 2 after) per standalone GR; gfx9: mfmaPerGR per standalone GR
-    unsigned grBudget = isGFX12 ? 10 * (numGR - numGRBeforeLR) : mfmaPerGR * (numGR - numGRBeforeLR);
-    unsigned needed = grBudget + numGRBeforeLR + lrBudget + numLW + 2;
-    unsigned leftover = (Total > needed) ? Total - needed : 0;
 
-    LLVM_DEBUG(dbgs() << "  MFMA budget: total=" << Total << ", needed=" << needed
-                      << ", leftover=" << leftover << "\n");
+    if (isGFX12) {
+      // gfx1250 sub-region scheduling:
+      //   4 sub-regions, each with numLR/4 LRs.
+      //
+      // Label LRs in reverse as 1, 2, ..., numLR.
+      // Insert 1 WMMA after odd-numbered LR >= 3, producing clean (LR, LR,
+      // WMMA) groups in program order with a dangling Lx2 at the end.
+      //
+      // Sub-region boundaries at lrCount = lrPerSub+1, 2*lrPerSub+1,
+      // 3*lrPerSub+1. At each boundary, insert extra WMMAs (pure WMMA block).
+      //
+      // TDMs in last sub-region (first processed in reverse): 2 WMMAs each.
+      // First sub in reverse has (lrPerSub-2)/2 interleaved WMMAs (lrCount=1
+      // is odd but < 3, so skipped). Other subs have lrPerSub/2.
+      unsigned numStandaloneGR = numGR - numGRBeforeLR;
+      unsigned lrPerSub = numLR / 4;
+      unsigned wmmaPerSub = Total / 4;
+      unsigned interleavedFirst = (lrPerSub >= 2) ? (lrPerSub - 2) / 2 : 0;
+      unsigned interleavedOther = lrPerSub / 2;
+      unsigned extraFirst =
+          wmmaPerSub > interleavedFirst + 2 * numStandaloneGR
+              ? wmmaPerSub - interleavedFirst - 2 * numStandaloneGR
+              : 0;
+      unsigned extraOther = wmmaPerSub > interleavedOther
+                                ? wmmaPerSub - interleavedOther
+                                : 0;
 
-    // Tracking counters for debug output
-    unsigned MFMAAtEnd = 0;
-    DenseMap<SchedKind, unsigned> MFMAPerAnchorKind;
+      LLVM_DEBUG(dbgs() << "  GFX12 sub-region: total=" << Total
+                        << " numLR=" << numLR << " numGR=" << numStandaloneGR
+                        << " lrPerSub=" << lrPerSub
+                        << " wmmaPerSub=" << wmmaPerSub
+                        << " extraFirst=" << extraFirst
+                        << " extraOther=" << extraOther << "\n");
 
-    // Insert 2 mfma at the end of the region (after last anchor)
-    MFMAAtEnd = moveMFMAsAfter(MFMAInsts, MFMAIdx, 2, Anchors.back().I);
+      unsigned lrCount = 0;
+      unsigned subRegionsDone = 0;
 
-    bool seenLW = false;
-    unsigned lrCount = 0;
+      for (int i = static_cast<int>(Anchors.size()) - 1;
+           i >= 0 && MFMAIdx > 0; --i) {
+        size_t idx = static_cast<size_t>(i);
+        Instruction *InsertPt = Anchors[idx].I;
+        SchedKind Kind = Anchors[idx].Kind;
 
-    // Step 2: Process anchors in reverse
-    for (int i = static_cast<int>(Anchors.size()) - 1;
-         i >= 0 && MFMAIdx > 0; --i) {
-      Instruction *InsertPt = Anchors[static_cast<size_t>(i)].I;
-      SchedKind Kind = Anchors[static_cast<size_t>(i)].Kind;
-
-      unsigned Count = 0;
-
-      if (Kind == SchedKind::LR) {
-        if (isGFX12) {
-          // gfx1250: insert 1 WMMA every 2 LR anchors
+        if (Kind == SchedKind::LR) {
           lrCount++;
-          Count = (lrCount % 2 == 0) ? 1 : 0;
-        } else {
-          // gfx9: 1 MFMA per LR
-          Count = 1;
+          if (lrCount >= 3 && lrCount % 2 == 1)
+            moveMFMAsAfter(MFMAInsts, MFMAIdx, 1, InsertPt);
+
+          // Sub-region boundary at lrCount = lrPerSub*k + 1 (k=1,2,3)
+          if (lrPerSub > 0 && lrCount > 1 &&
+              (lrCount - 1) % lrPerSub == 0) {
+            unsigned extra = (subRegionsDone == 0) ? extraFirst : extraOther;
+            if (extra > 0)
+              moveMFMAsAfter(MFMAInsts, MFMAIdx, extra, InsertPt);
+            subRegionsDone++;
+
+            LLVM_DEBUG(dbgs() << "    Sub-region boundary: lrCount=" << lrCount
+                              << " extra=" << extra << "\n");
+          }
+        } else if (Kind == SchedKind::GR) {
+          bool followedByLR =
+              (idx + 1 < Anchors.size() &&
+               Anchors[idx + 1].Kind == SchedKind::LR);
+          if (!followedByLR) {
+            Instruction *BeforeGR = InsertPt->getPrevNode();
+            if (BeforeGR)
+              moveMFMAsAfter(MFMAInsts, MFMAIdx, 2, BeforeGR);
+          } else {
+            moveMFMAsAfter(MFMAInsts, MFMAIdx, 1, InsertPt);
+          }
         }
-      } else if (Kind == SchedKind::GR) {
-        bool followedByLR =
-            (static_cast<size_t>(i + 1) < Anchors.size() &&
-             Anchors[static_cast<size_t>(i + 1)].Kind == SchedKind::LR);
-        if (isGFX12 && !followedByLR) {
-          // gfx1250: 2 WMMA after GR, 8 WMMA before GR
-          Count = 2;
-          // Insert 8 WMMAs before the GR instruction
-          Instruction *BeforeGR = InsertPt->getPrevNode();
-          if (BeforeGR)
-            moveMFMAsAfter(MFMAInsts, MFMAIdx, 8, BeforeGR);
-        } else {
-          // GR followed by LR gets 1, otherwise mfmaPerGR
+      }
+
+      LLVM_DEBUG(dbgs() << "  GFX12 done: " << MFMAIdx
+                        << " WMMAs remaining at front\n");
+
+    } else {
+      // gfx9 path: mfmaPerGR MFMAs per GR, 1 per LR, leftover on first LW
+      unsigned mfmaPerGR = 4;
+      {
+        unsigned cycles = Utils::getMFMACycles(*MFMAInsts.front());
+        if (cycles == 32)
+          mfmaPerGR = 2;
+      }
+
+      unsigned lrBudget = numLR;
+      unsigned grBudget = mfmaPerGR * (numGR - numGRBeforeLR);
+      unsigned needed = grBudget + numGRBeforeLR + lrBudget + numLW + 2;
+      unsigned leftover = (Total > needed) ? Total - needed : 0;
+
+      LLVM_DEBUG(dbgs() << "  MFMA budget: total=" << Total
+                        << ", needed=" << needed
+                        << ", leftover=" << leftover << "\n");
+
+      unsigned MFMAAtEnd =
+          moveMFMAsAfter(MFMAInsts, MFMAIdx, 2, Anchors.back().I);
+      bool seenLW = false;
+      DenseMap<SchedKind, unsigned> MFMAPerAnchorKind;
+
+      for (int i = static_cast<int>(Anchors.size()) - 1;
+           i >= 0 && MFMAIdx > 0; --i) {
+        size_t idx = static_cast<size_t>(i);
+        Instruction *InsertPt = Anchors[idx].I;
+        SchedKind Kind = Anchors[idx].Kind;
+
+        unsigned Count = 0;
+        if (Kind == SchedKind::LR) {
+          Count = 1;
+        } else if (Kind == SchedKind::GR) {
+          bool followedByLR =
+              (idx + 1 < Anchors.size() &&
+               Anchors[idx + 1].Kind == SchedKind::LR);
           Count = followedByLR ? 1 : mfmaPerGR;
+        } else if (Kind == SchedKind::LW) {
+          if (!seenLW) {
+            seenLW = true;
+            Count = leftover;
+          } else {
+            Count = 1;
+          }
         }
-      } else if (Kind == SchedKind::LW) {
-        if (!seenLW) {
-          seenLW = true;
-          Count = leftover;
-        } else {
-          Count = 1;
-        }
+
+        unsigned before = MFMAIdx;
+        moveMFMAsAfter(MFMAInsts, MFMAIdx, Count, InsertPt);
+        MFMAPerAnchorKind[Kind] += before - MFMAIdx;
       }
 
-      unsigned before = MFMAIdx;
-      moveMFMAsAfter(MFMAInsts, MFMAIdx, Count, InsertPt);
-      MFMAPerAnchorKind[Kind] += before - MFMAIdx;
+      LLVM_DEBUG({
+        dbgs() << "  MFMA insertion summary: total=" << Total
+               << ", at_front=" << MFMAIdx << ", at_end=" << MFMAAtEnd;
+        for (auto &KV : MFMAPerAnchorKind) {
+          dbgs() << ", after_" << schedKindName(KV.first) << "=" << KV.second;
+        }
+        dbgs() << "\n";
+      });
     }
-
-    LLVM_DEBUG({
-      unsigned MFMAAtFront = MFMAIdx;
-      dbgs() << "  MFMA insertion summary: total=" << Total
-             << ", at_front=" << MFMAAtFront << ", at_end=" << MFMAAtEnd;
-      for (auto &KV : MFMAPerAnchorKind) {
-        dbgs() << ", after_" << schedKindName(KV.first) << "=" << KV.second;
-      }
-      dbgs() << "\n";
-    });
   }
 
   static void scheduleBB(BasicBlock &BB, const BBMFMAAnalysisMap &Analysis,
