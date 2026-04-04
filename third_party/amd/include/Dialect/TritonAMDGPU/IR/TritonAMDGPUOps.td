@@ -750,19 +750,25 @@ def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
     Variadic<I32>:$indices,
     Arg<TTG_MemDescType, "", [MemWrite<SharedMemory>]>:$result,
     I32:$pred,
-    Arg<Optional<TTG_MemDescType>, "", [MemWrite<SharedMemory>]>:$barrier
+    Arg<Optional<TTG_MemDescType>, "", [MemWrite<SharedMemory>]>:$barrier,
+    OptionalAttr<UnitAttr>:$prepositioned
   );
 
   let results = (outs TTG_AsyncToken:$token);
 
   let builders = [
     OpBuilder<(ins "Value":$desc, "ValueRange":$indices, "Value":$result, "Value":$pred), [{
-      return build($_builder, $_state, desc, indices, result, pred, /*barrier=*/static_cast<mlir::Value>(nullptr));
+      return build($_builder, $_state, desc, indices, result, pred, /*barrier=*/static_cast<mlir::Value>(nullptr), /*prepositioned=*/nullptr);
+    }]>,
+    OpBuilder<(ins "Value":$desc, "ValueRange":$indices, "Value":$result, "Value":$pred, "Value":$barrier, "bool":$prepositioned), [{
+      auto preposAttr = prepositioned ? $_builder.getUnitAttr() : UnitAttr();
+      return build($_builder, $_state, desc, indices, result, pred, barrier, preposAttr);
     }]>
   ];
 
   let assemblyFormat = [{
     $desc `[` $indices `]` `into` $result `,` `pred` `=` $pred (`,` `barrier` `=` $barrier^)?
+    (`prepositioned` $prepositioned^)?
     attr-dict `:` qualified(type($desc)) (`,` qualified(type($barrier))^)? `->` qualified(type($result))
   }];
 
@@ -964,7 +970,47 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// AdvanceTDMDescOp
+//===----------------------------------------------------------------------===//
 
+def AdvanceTDMDescOp : TT_AMDGPU_Op<"tdm_advance_descriptor", [Pure]> {
+  let summary = "Advance a TDM descriptor position by given offsets";
+
+  let description = [{
+    Incrementally updates global_addr and tensor_dim in a TDM descriptor that
+    has per-warp offsets already applied (from make_tensor_descriptor lowering).
+    The offsets are deltas (not absolute positions). This emits minimal SALU
+    instructions (~3) compared to full descriptor reconstruction (~15).
+  }];
+
+  let arguments = (ins
+    TT_TensorDescType:$desc,
+    Variadic<I32>:$offsets,
+    DefaultValuedAttr<BoolAttr, "true">:$isRowMajor,
+    DefaultValuedAttr<BoolAttr, "true">:$updateBounds
+  );
+
+  let results = (outs TT_TensorDescType:$result);
+
+  let builders = [
+    OpBuilder<(ins "Value":$desc, "ValueRange":$offsets, "bool":$isRowMajor, "bool":$updateBounds), [{
+      return build($_builder, $_state, desc.getType(), desc, offsets,
+                   $_builder.getBoolAttr(isRowMajor),
+                   $_builder.getBoolAttr(updateBounds));
+    }]>,
+    OpBuilder<(ins "Value":$desc, "ValueRange":$offsets, "bool":$isRowMajor), [{
+      return build($_builder, $_state, desc.getType(), desc, offsets,
+                   $_builder.getBoolAttr(isRowMajor),
+                   $_builder.getBoolAttr(true));
+    }]>,
+    OpBuilder<(ins "Value":$desc, "ValueRange":$offsets), [{
+      return build($_builder, $_state, desc.getType(), desc, offsets,
+                   $_builder.getBoolAttr(true),
+                   $_builder.getBoolAttr(true));
+    }]>
+  ];
+}
 
 //===----------------------------------------------------------------------===//
 // AsyncWait

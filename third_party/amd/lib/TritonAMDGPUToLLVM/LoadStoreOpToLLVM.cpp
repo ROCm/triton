@@ -1224,10 +1224,10 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     SmallVector<int64_t> blockShape =
         llvm::to_vector(tensorDescTy.getBlockType().getShape());
 
-    // 2D tensors: 12 dwords (group0: 4, group1: 8)
-    // 3D-5D tensors: 20 dwords (group0: 4, group1: 8, group2: 4, group3: 4)
-    assert((blockShape.size() <= 2 && desc.size() == 12) ||
-           (blockShape.size() > 2 && desc.size() == 20));
+    // 2D tensors: 2 vectors (group0: <4 x i32>, group1: <8 x i32>)
+    // 3D-5D tensors: 4 vectors (+group2, group3: <4 x i32>)
+    assert((blockShape.size() <= 2 && desc.size() == 2) ||
+           (blockShape.size() > 2 && desc.size() == 4));
 
     auto dstMemObj = LLVM::getSharedMemoryObjectFromStruct(
         loc, adaptor.getResult(), elementType, rewriter);
@@ -1254,11 +1254,20 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         shapePerCTA);
     bool isRowMajor = sharedOrder[0] == (sharedOrder.size() - 1);
 
-    mlir::LLVM::AMD::emitTDMLoadStore(
-        rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
-        padInterval, padAmount, offset, dstPtrs, op.getPred(), multicastMask,
-        elementType, barrierPtr, /*isLoad=*/true, sharedLayout, ctaId,
-        isRowMajor);
+    if (op.getPrepositioned()) {
+      // Lightweight path: descriptor is already pre-positioned (global_addr
+      // and tensor_dim set by advance). Only set LDS addr, pred, barrier.
+      mlir::LLVM::AMD::emitTDMLoadFromAdvanced(
+          rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
+          padInterval, padAmount, dstPtrs, op.getPred(), multicastMask,
+          elementType, barrierPtr, sharedLayout, ctaId, isRowMajor);
+    } else {
+      mlir::LLVM::AMD::emitTDMLoadStore(
+          rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
+          padInterval, padAmount, offset, dstPtrs, op.getPred(), multicastMask,
+          elementType, barrierPtr, /*isLoad=*/true, sharedLayout, ctaId,
+          isRowMajor);
+    }
 
     rewriter.eraseOp(op);
     return success();
@@ -1293,10 +1302,10 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
     SmallVector<int64_t> blockShape =
         llvm::to_vector(tensorDescTy.getBlockType().getShape());
 
-    // 2D tensors: 12 dwords (group0: 4, group1: 8)
-    // 3D-5D tensors: 20 dwords (group0: 4, group1: 8, group2: 4, group3: 4)
-    assert((blockShape.size() <= 2 && desc.size() == 12) ||
-           (blockShape.size() > 2 && desc.size() == 20));
+    // 2D tensors: 2 vectors (group0: <4 x i32>, group1: <8 x i32>)
+    // 3D-5D tensors: 4 vectors (+group2, group3: <4 x i32>)
+    assert((blockShape.size() <= 2 && desc.size() == 2) ||
+           (blockShape.size() > 2 && desc.size() == 4));
 
     auto dstMemObj = LLVM::getSharedMemoryObjectFromStruct(
         loc, adaptor.getSrc(), elementType, rewriter);
@@ -2540,6 +2549,45 @@ struct TDMPrefetchConversion
 private:
   const AMD::TargetInfo &targetInfo;
 };
+
+struct AdvanceTDMDescOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::AdvanceTDMDescOp>,
+      public LoadStoreConversionBase {
+  AdvanceTDMDescOpConversion(LLVMTypeConverter &converter,
+                             const AMD::TargetInfo &targetInfo,
+                             ModuleAxisInfoAnalysis &axisAnalysisPass,
+                             PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit),
+        LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
+
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::AdvanceTDMDescOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto tensorDescTy = op.getDesc().getType();
+    auto blockTy = tensorDescTy.getBlockType();
+    size_t numDims = blockTy.getRank();
+    Type elementType =
+        getTypeConverter()->convertType(blockTy.getElementType());
+
+    auto desc = unpackLLElements(loc, adaptor.getDesc(), rewriter);
+    // desc[0] = group0 (<4 x i32>), desc[1] = group1 (<8 x i32>)
+    SmallVector<Value> offsets(adaptor.getOffsets().begin(),
+                               adaptor.getOffsets().end());
+
+    bool isRowMajor = op.getIsRowMajor();
+    bool updateBounds = op.getUpdateBounds();
+    LLVM::AMD::advanceTDMDescriptor(rewriter, loc, getTypeConverter(),
+                                    desc[0], desc[1], offsets, numDims,
+                                    elementType, isRowMajor, updateBounds);
+
+    auto result = packLLElements(loc, getTypeConverter(), desc, rewriter,
+                                 tensorDescTy);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 } // namespace
 
 namespace mlir::triton::AMD {
@@ -2560,6 +2608,8 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<TDMPrefetchConversion>(typeConverter, targetInfo, benefit);
   patterns.add<AsyncTDMIntrinsicWaitConversion>(typeConverter, benefit);
+  patterns.add<AdvanceTDMDescOpConversion>(typeConverter, targetInfo,
+                                           axisInfoAnalysis, benefit);
   patterns.add<AsyncCommitGroupOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<AsyncCopyMbarrierArriveOpConversion>(typeConverter, benefit);
 }

@@ -54,6 +54,7 @@ void populateMaskedOpsToLLVMPatterns(RewritePatternSet &patterns,
                                      const TargetInfo &targetInfo);
 
 void populateTensorPtrOpsToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                        const TargetInfo &targetInfo,
                                         RewritePatternSet &patterns,
                                         PatternBenefit benefit);
 

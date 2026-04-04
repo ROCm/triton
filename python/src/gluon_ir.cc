@@ -1023,12 +1023,32 @@ void init_gluon_ir(py::module &&m) {
              return self.create<tt::MakeTensorDescOp>(resultTy, base, shape,
                                                       strides, paddingOption);
            })
+      .def("create_advance_tdm_desc",
+           [](GluonOpBuilder &self, Value desc,
+              std::vector<Value> &offsets, bool isRowMajor,
+              bool updateBounds) -> Value {
+             auto loc = self.getLastLoc();
+             auto &builder = self.getBuilder();
+             SmallVector<Value> offs(offsets.begin(), offsets.end());
+             auto op = ttag::AdvanceTDMDescOp::create(builder, loc,
+                                                       desc.getType(), desc, offs,
+                                                       isRowMajor, updateBounds);
+             return op.getResult();
+           },
+           py::arg("desc"), py::arg("offsets"), py::arg("isRowMajor") = true,
+           py::arg("updateBounds") = true)
       .def("create_async_tdm_copy_global_to_local",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
-              Value result, Value pred, Value barrier) {
-             self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(
-                 descPtr, indices, result, pred, barrier);
-           })
+              Value result, Value pred, Value barrier, bool prepositioned) {
+             auto op = self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(
+                 descPtr, indices, result, pred, barrier,
+                 prepositioned
+                     ? mlir::UnitAttr::get(self.getBuilder().getContext())
+                     : mlir::UnitAttr());
+           },
+           py::arg("descPtr"), py::arg("indices"), py::arg("result"),
+           py::arg("pred"), py::arg("barrier"),
+           py::arg("prepositioned") = false)
       .def("create_async_tdm_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
               Value src, Value barrier) {

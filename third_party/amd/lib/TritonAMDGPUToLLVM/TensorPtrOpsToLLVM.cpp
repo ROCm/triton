@@ -4,8 +4,14 @@
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
+
+// Include shared C-compatible TDM utilities for warp distribution
+#include "../../backend/include/TDMCommon.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -125,8 +131,12 @@ Attribute findEncodingFromUsers(Operation *op) {
 
 struct MakeTensorDescOpConversion
     : public ConvertOpToLLVMPattern<triton::MakeTensorDescOp> {
-  using ConvertOpToLLVMPattern<
-      triton::MakeTensorDescOp>::ConvertOpToLLVMPattern;
+  const TargetInfo &targetInfo;
+
+  MakeTensorDescOpConversion(LLVMTypeConverter &converter,
+                             const TargetInfo &targetInfo,
+                             PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
 
   LogicalResult
   matchAndRewrite(triton::MakeTensorDescOp op, OpAdaptor adaptor,
@@ -175,6 +185,137 @@ struct MakeTensorDescOpConversion
         rewriter, loc, getTypeConverter(), elementType, shapePerCTA, numWarps,
         padInterval, padAmount, tensorShape, tensorStride, basePtr, isRowMajor);
 
+    // Apply per-warp offsets to global_addr and tensor_dim at descriptor
+    // creation time.
+    {
+      auto ctx = rewriter.getContext();
+      auto b = TritonLLVMOpBuilder(loc, rewriter);
+      size_t numDims = blockShape.size();
+
+      auto hwShapePerCTA = shapePerCTA;
+      if (!isRowMajor)
+        LLVM::AMD::swapTrailingDims(hwShapePerCTA);
+
+      int warpsArr[5];
+      tdmGetWarpDistribution(hwShapePerCTA.data(), numDims, numWarps,
+                             warpsArr);
+      SmallVector<unsigned> warpsPerCTA(warpsArr, warpsArr + numDims);
+
+      auto smemSpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+      auto memDescTy = triton::gpu::MemDescType::get(
+          blockShape, blockTy.getElementType(), sharedEnc,
+          /*memorySpace=*/smemSpace, /*mutableMemory=*/true);
+      triton::LinearLayout sharedLayout =
+          triton::gpu::isPaddedEncoding(sharedEnc)
+              ? triton::gpu::paddedLinearLayout(memDescTy)
+              : triton::gpu::toLinearLayout(memDescTy);
+
+      triton::LinearLayout tdmViewSharedLayout = sharedLayout;
+      if (!isRowMajor && numDims >= 2) {
+        auto dimN_2 =
+            StringAttr::get(ctx, "dim" + std::to_string(numDims - 2));
+        auto dimN_1 =
+            StringAttr::get(ctx, "dim" + std::to_string(numDims - 1));
+        tdmViewSharedLayout =
+            LLVM::AMD::swapOutDimSemantics(sharedLayout, dimN_2, dimN_1);
+      }
+
+      auto cgaLayout =
+          triton::gpu::SharedLinearEncodingAttr::get(
+              ctx, tdmViewSharedLayout, /*layoutAlignment=*/16)
+              .getCGALayout()
+              .getLinearLayout();
+
+      auto tdmLayout = triton::gpu::getTDMLinearLayout(hwShapePerCTA,
+                                                        warpsPerCTA, cgaLayout);
+
+      auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+      auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
+
+      auto kMessage = StringAttr::get(ctx, "message");
+      auto kWarp = StringAttr::get(ctx, "warp");
+      auto kBlock = StringAttr::get(ctx, "block");
+
+      auto warpOffset = applyLinearLayout(
+          loc, rewriter, tdmLayout,
+          {{kMessage, b.i32_val(0)}, {kWarp, warpId}, {kBlock, ctaId}});
+
+      // Compute global address offset from warp distribution
+      SmallVector<Value> hwStride(numDims);
+      for (size_t i = 0; i < numDims; ++i)
+        hwStride[i] = b.trunc(i32_ty, tensorStride[i]);
+      if (!isRowMajor)
+        LLVM::AMD::swapTrailingDims(hwStride);
+
+      Value baseOffset = b.i32_val(0);
+      for (size_t i = 0; i < numDims; ++i) {
+        Value dimOffset = b.mul(warpOffset[i].second, hwStride[i]);
+        baseOffset = b.add(baseOffset, dimOffset);
+      }
+
+      // Advance global_addr in group0[2:3]
+      Value curAddrLo = LLVM::AMD::vecGet(b, tdmDesc.group0, 2);
+      Value curAddrHi =
+          b.and_(LLVM::AMD::vecGet(b, tdmDesc.group0, 3),
+                 b.i32_val(0x7FFFFFFF));
+      Value curAddr =
+          b.or_(b.zext(i64_ty, curAddrLo),
+                b.shl(b.zext(i64_ty, curAddrHi), b.i64_val(32)));
+      auto elementBitWidth = elementType.getIntOrFloatBitWidth();
+      Value byteOffset =
+          b.mul(b.sext(i64_ty, baseOffset), b.i64_val(elementBitWidth / 8));
+      Value newAddr = b.add(curAddr, byteOffset);
+      tdmDesc.group0 = LLVM::AMD::vecSet(
+          b, tdmDesc.group0, 2, b.trunc(i32_ty, newAddr));
+      tdmDesc.group0 = LLVM::AMD::vecSet(
+          b, tdmDesc.group0, 3,
+          b.or_(b.trunc(i32_ty, b.lshr(newAddr, b.i64_val(32))),
+                b.i32_val(1 << 31)));
+
+      // Adjust tensor_dim by warp offset
+      Value v16 = b.i32_val(16);
+      {
+        Value warpOff = warpOffset[numDims - 1].second;
+        Value dimLo = b.lshr(LLVM::AMD::vecGet(b, tdmDesc.group1, 1), v16);
+        Value dimHi = b.shl(
+            b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 2),
+                   b.i32_val(0xFFFF)),
+            v16);
+        Value dim = b.or_(dimLo, dimHi);
+        Value newDim = b.smax(b.i32_val(0), b.sub(dim, warpOff));
+        tdmDesc.group1 = LLVM::AMD::vecSet(
+            b, tdmDesc.group1, 1,
+            b.or_(b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 1),
+                         b.i32_val(0xFFFF)),
+                  b.shl(newDim, v16)));
+        tdmDesc.group1 = LLVM::AMD::vecSet(
+            b, tdmDesc.group1, 2,
+            b.or_(b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 2),
+                         b.i32_val(0xFFFF0000)),
+                  b.and_(b.lshr(newDim, v16), b.i32_val(0xFFFF))));
+      }
+      if (numDims >= 2) {
+        Value warpOff = warpOffset[numDims - 2].second;
+        Value dimLo = b.lshr(LLVM::AMD::vecGet(b, tdmDesc.group1, 2), v16);
+        Value dimHi = b.shl(
+            b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 3),
+                   b.i32_val(0xFFFF)),
+            v16);
+        Value dim = b.or_(dimLo, dimHi);
+        Value newDim = b.smax(b.i32_val(0), b.sub(dim, warpOff));
+        tdmDesc.group1 = LLVM::AMD::vecSet(
+            b, tdmDesc.group1, 2,
+            b.or_(b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 2),
+                         b.i32_val(0xFFFF)),
+                  b.shl(newDim, v16)));
+        tdmDesc.group1 = LLVM::AMD::vecSet(
+            b, tdmDesc.group1, 3,
+            b.or_(b.and_(LLVM::AMD::vecGet(b, tdmDesc.group1, 3),
+                         b.i32_val(0xFFFF0000)),
+                  b.and_(b.lshr(newDim, v16), b.i32_val(0xFFFF))));
+      }
+    }
+
     SmallVector<Value> groups = tdmDesc.getAllGroups();
 
     auto desc =
@@ -187,8 +328,10 @@ struct MakeTensorDescOpConversion
 } // namespace
 
 void mlir::triton::AMD::populateTensorPtrOpsToLLVMPatterns(
-    LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    PatternBenefit benefit) {
-  patterns.add<MakeTensorDescOpConversion>(typeConverter, benefit);
+    LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
+    RewritePatternSet &patterns, PatternBenefit benefit) {
+  patterns.add<MakeTensorDescOpConversion>(typeConverter, targetInfo, benefit);
+  // NOTE: AdvanceTDMDescOpConversion is registered in
+  // populateLoadStoreOpToLLVMPatterns alongside the other TDM ops.
   return;
 }

@@ -27,10 +27,19 @@ public:
 
   Type convertTensorDescType(triton::TensorDescType type) {
     auto ctx = type.getContext();
-    int numDwords = amdgpu::getTensorDescNumDwords(type);
+    auto i32Ty = IntegerType::get(ctx, 32);
+    auto v4i32Ty = VectorType::get(4, i32Ty);
+    auto v8i32Ty = VectorType::get(8, i32Ty);
 
-    auto types = SmallVector<Type>(numDwords, IntegerType::get(ctx, 32));
-    return LLVM::LLVMStructType::getLiteral(ctx, types);
+    int rank = type.getBlockType().getRank();
+    SmallVector<Type> fields;
+    fields.push_back(v4i32Ty);  // group0: <4 x i32>
+    fields.push_back(v8i32Ty);  // group1: <8 x i32>
+    if (rank > 2) {
+      fields.push_back(v4i32Ty);  // group2: <4 x i32>
+      fields.push_back(v4i32Ty);  // group3: <4 x i32>
+    }
+    return LLVM::LLVMStructType::getLiteral(ctx, fields);
   }
 };
 

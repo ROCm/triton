@@ -12,8 +12,8 @@ if TYPE_CHECKING:
     from triton.experimental.gluon.language._core import shared_memory_descriptor
 
 __all__ = [
-    "async_load", "async_wait", "make_tensor_descriptor", "tensor_descriptor", "tensor_descriptor_type", "prefetch",
-    "async_scatter"
+    "advance", "async_load", "async_wait", "make_tensor_descriptor", "tensor_descriptor", "tensor_descriptor_type",
+    "prefetch", "async_scatter"
 ]
 
 
@@ -143,6 +143,49 @@ def make_tensor_descriptor(base: ttgl.tensor, shape: List[ttgl.constexpr | ttgl.
 
 
 @builtin
+def advance(desc: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor],
+            update_bounds: bool = True, _semantic=None) -> tensor_descriptor:
+    """Advance a TDM descriptor position by delta offsets (incremental, not absolute).
+
+    Args:
+        desc (tensor_descriptor): the tensor descriptor to advance.
+        offsets (List[int]): the delta offsets per dimension (not absolute positions).
+        update_bounds (bool): if True, update tensor_dim for OOB checking (~15 SALU).
+            Set to False for interior tiles where OOB is impossible (~3 SALU).
+
+    Returns:
+        tensor_descriptor: a new descriptor at the advanced position.
+    """
+    # Determine if the layout is row-major or col-major.
+    # For PaddedSharedLayout, we detect this from offset_bases: the first basis
+    # tells us which dimension is the fastest-changing (order[0]).
+    layout = _unwrap_if_constexpr(desc.layout)
+    ndim = len(offsets)
+    is_row_major = True  # default
+    if hasattr(layout, 'order'):
+        is_row_major = layout.order[0] == ndim - 1
+    elif hasattr(layout, 'offset_bases') and ndim >= 2:
+        # PaddedSharedLayout: first basis vector indicates order[0]
+        # If first basis has 1 in the last dim position, it's row-major
+        first_basis = layout.offset_bases[0]
+        is_row_major = first_basis[-1] != 0
+
+    update_bounds = _unwrap_if_constexpr(update_bounds)
+    offset_handles = _semantic._convert_to_ir_values(offsets, require_i64=False)
+    new_handle = _semantic.builder.create_advance_tdm_desc(
+        desc.handle, offset_handles, is_row_major, update_bounds)
+    # Return a new tensor_descriptor with the advanced handle.
+    # Shape and strides are conceptually unchanged but we must create new
+    # tuple objects to avoid sharing IR value references with the original
+    # descriptor, which confuses the frontend's SSA value tracking.
+    new_shape = ttgl.tuple(list(desc.shape))
+    new_strides = ttgl.tuple(list(desc.strides))
+    result = tensor_descriptor(new_handle, new_shape, new_strides, desc.type)
+    result._prepositioned = True
+    return result
+
+
+@builtin
 def async_load(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor], dest: shared_memory_descriptor,
                pred=1, mbarrier: shared_memory_descriptor = None, _semantic=None) -> None:
     """Load a block of tensor specified in tensor descriptor from global memory to shared memory asynchronously.
@@ -159,8 +202,11 @@ def async_load(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tenso
     pred_handle = pred.handle
     mbarrier = _unwrap_if_constexpr(mbarrier)
     mbarrier_handle = mbarrier.handle if mbarrier is not None else ttgl.ir.value()
+    # Detect pre-positioned descriptor (from advance) with zero offsets
+    # and use the lightweight load path that skips full descriptor reconstruction.
+    prepositioned = getattr(src, '_prepositioned', False)
     _semantic.builder.create_async_tdm_copy_global_to_local(src.handle, offset_handles, dest.handle, pred_handle,
-                                                            mbarrier_handle)
+                                                            mbarrier_handle, prepositioned)
 
 
 @builtin

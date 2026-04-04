@@ -62,6 +62,7 @@ public:
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<triton::amdgpu::InstructionSchedHint>();
+    addIllegalOp<triton::amdgpu::AdvanceTDMDescOp>();
     // Warp specialization is lowered later.
     addLegalOp<triton::gpu::WarpSpecializeOp>();
     addLegalOp<triton::gpu::WarpYieldOp>();
@@ -186,7 +187,7 @@ struct ConvertTritonAMDGPUToLLVM
                                            axisInfoAnalysis, AMDBenefit);
     AMD::populateMaskedOpsToLLVMPatterns(patterns, targetInfo);
     AMD::populateBarrierOpToLLVMPatterns(typeConverter, patterns, AMDBenefit);
-    AMD::populateTensorPtrOpsToLLVMPatterns(typeConverter, patterns,
+    AMD::populateTensorPtrOpsToLLVMPatterns(typeConverter, targetInfo, patterns,
                                             AMDBenefit);
 
     populatePatterns7(mlir::triton::populateReduceOpToLLVMPatterns,

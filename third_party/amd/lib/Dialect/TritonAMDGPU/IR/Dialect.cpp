@@ -801,6 +801,10 @@ LogicalResult AsyncTDMGatherOp::verify() {
   return success();
 }
 
+// -- AdvanceTDMDescOp --
+// TODO: re-enable verifier after debugging hang issue
+// LogicalResult AdvanceTDMDescOp::verify() { ... }
+
 // -- InitBarrierOp --
 LogicalResult InitBarrierOp::verify() {
   if (failed(verifyBarrierType(*this, getAlloc().getType())))
