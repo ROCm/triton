@@ -84,6 +84,10 @@ struct TMAGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
 
   LogicalResult matchAndRewrite(DescriptorGatherOp op,
                                 PatternRewriter &rewriter) const override {
+    auto indicesType = cast<RankedTensorType>(op.getXOffsets().getType());
+    if (!indicesType.getElementType().isInteger(32))
+      return op.emitOpError("NVIDIA TMA gather only supports i32 indices");
+
     auto createLoad = [&](Value desc, Value barrierAlloc, Value alloc,
                           Value pred) {
       triton::nvidia_gpu::AsyncTMAGatherOp::create(

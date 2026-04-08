@@ -68,7 +68,7 @@ EXCLUDE_PATTERNS=(
     # Exclude patterns for test_tensor_descriptor.py
     "test_tensor_descriptor_rank_reducing_matmul[float32]" # fails, but rank_reducing_load passes
     "test_tensor_descriptor_reduce"
-    "test_tma_gather" # covers test_tma_gather and test_tma_gather_dot_pipeline
+    "test_tma_gather_dot_pipeline"
     "test_tma_scatter"
 )
 

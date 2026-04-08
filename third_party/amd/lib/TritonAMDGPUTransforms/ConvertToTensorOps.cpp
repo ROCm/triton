@@ -66,6 +66,81 @@ public:
   }
 };
 
+// Build the index encoding for TDM gather/scatter.
+//
+// Layout: BlockedLayout([1, M], [threadsPerWarp, 1], [1, numWarps], [0, 1])
+// sliced along dim 0 to produce a 1D encoding. M is the max number of row
+// indices per TDM instruction (256 bits / index element bitwidth). The
+// freeVarMasks mechanism in the LLVM lowering adapts the number of active
+// warps and gathers per warp to the actual problem size.
+static SliceEncodingAttr getTDMGatherIndexEncoding(Operation *op) {
+  MLIRContext *ctx = op->getContext();
+  auto indicesType = cast<RankedTensorType>(
+      cast<DescriptorGatherOp>(op).getXOffsets().getType());
+  unsigned idxBitWidth = indicesType.getElementType().getIntOrFloatBitWidth();
+  assert((idxBitWidth == 16 || idxBitWidth == 32) &&
+         "TDM gather/scatter indices must be i16 or i32");
+  unsigned maxIndicesPerInstr = 256 / idxBitWidth;
+
+  unsigned numWarps = triton::gpu::lookupNumWarps(op);
+  unsigned threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(
+      op->getParentOfType<ModuleOp>());
+  auto cgaLayout = CGAEncodingAttr::get1CTALayout(ctx, /*rank=*/2);
+
+  std::array<unsigned, 2> sizePerThread = {1, maxIndicesPerInstr};
+  std::array<unsigned, 2> tPerWarp = {threadsPerWarp, 1};
+  std::array<unsigned, 2> warpsPerCTA = {1, numWarps};
+  std::array<unsigned, 2> order = {0, 1};
+  auto parentEnc = BlockedEncodingAttr::get(ctx, sizePerThread, tPerWarp,
+                                            warpsPerCTA, order, cgaLayout);
+  return SliceEncodingAttr::get(ctx, /*dim=*/0, parentEnc);
+}
+
+struct TensorGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(DescriptorGatherOp op,
+                                PatternRewriter &rewriter) const override {
+    MLIRContext *ctx = op.getContext();
+    Attribute sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+    auto loc = op.getLoc();
+    auto tensorType = op.getResult().getType();
+
+    auto encoding = getEncodingFromDescriptor(op, tensorType, op.getDesc());
+    if (!encoding) {
+      op.emitError() << "Could not create encoding for descriptor gather";
+      return failure();
+    }
+
+    auto idxEnc = getTDMGatherIndexEncoding(op);
+    auto indices = op.getXOffsets();
+    auto indicesType = cast<RankedTensorType>(indices.getType());
+
+    // NOTE: The shared TritonToTritonGPU conversion (GatherScatterOpPattern)
+    // unconditionally applies an NVIDIA-oriented index layout. Because of
+    // this, the indices arriving here already carry that layout, making default
+    // index encoding never matches most desirable AMD index encoding, and
+    // therefore an additional ConvertLayoutOp emitted.
+    if (indicesType.getEncoding() != idxEnc) {
+      auto newIdxType = RankedTensorType::get(
+          indicesType.getShape(), indicesType.getElementType(), idxEnc);
+      indices = ConvertLayoutOp::create(rewriter, loc, newIdxType, indices);
+    }
+
+    MemDescType memDescType =
+        MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                         encoding, sharedMemorySpace, /*mutableMemory=*/true);
+    Value alloc = LocalAllocOp::create(rewriter, loc, memDescType);
+    Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
+
+    amdgpu::AsyncTDMGatherOp::create(rewriter, loc, op.getDesc(), indices,
+                                     op.getYOffset(), alloc, pred);
+    amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
+    rewriter.replaceOpWithNewOp<LocalLoadOp>(op, op.getType(), alloc);
+    return success();
+  }
+};
+
 class TensorStoreLowering : public OpRewritePattern<DescriptorStoreOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -105,7 +180,8 @@ struct TritonAMDGPUConvertToTensorOps
     ModuleOp m = getOperation();
 
     mlir::RewritePatternSet patterns(context);
-    patterns.add<TensorLoadLowering, TensorStoreLowering>(context);
+    patterns.add<TensorLoadLowering, TensorGatherLowering, TensorStoreLowering>(
+        context);
     if (applyPatternsGreedily(m, std::move(patterns)).failed())
       signalPassFailure();
   }
