@@ -1514,19 +1514,14 @@ public:
         convertAndCastTensor(rewriter, oldAcc, wmmaEnc, operandTypes[2]);
 
     // deduce `kWidth` - the number of consecutive elements along K dimension
-    // for a lane derive it from `kBase` the number of elements along K
-    // dimension in a wmma instruction for a lane Note, kBase can consist of a
-    // several separated groups of consecutive elements. This depends on
-    // instruction encoding
-    auto kWidth = 0;
-    if (kDimTensor < kDim) {
-      // TODO: implement zero padding for small K
-      // For now, adjust kWidth=kDimTensor/2 when kDimTensor < kDim
-      kWidth = kDimTensor / 2;
-    } else if ((wmmaVersion == 1) || (wmmaVersion == 2)) {
-      // kWidth is always equals to kBase for WMMA v1/2
-      kWidth = kBase;
-    } else if (wmmaVersion == 3) {
+    // for a lane. This is derived it from `kBase` - i.e., the number of
+    // elements along K dimension in a wmma instruction for a lane. Note, kBase
+    // can consist of a several separated groups of consecutive elements. This
+    // depends on instruction encoding
+
+    // kWidth is always equals to kBase for WMMA v1/2
+    auto kWidth = kBase;
+    if (wmmaVersion == 3) {
       const bool isF32 = oldAType.getElementType().isF32();
       // kBase always consits of several groups of 8 elments except F32 case
       kWidth = isF32 ? 2 : 8;
