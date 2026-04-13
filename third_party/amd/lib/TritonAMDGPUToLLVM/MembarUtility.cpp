@@ -13,7 +13,8 @@ bool filterAsyncLocalLoadsDependencies(Operation *op1, Operation *op2,
   auto isAsyncLoad = [](Operation *op) {
     return llvm::isa<triton::gpu::AsyncCopyGlobalToLocalOp,
                      triton::amdgpu::BufferLoadToLocalOp,
-                     triton::amdgpu::AsyncTDMCopyLocalToGlobalOp>(op);
+                     triton::amdgpu::AsyncTDMCopyLocalToGlobalOp,
+                     triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op);
   };
   auto isLocalLoadWithAsyncWaitToken = [](Operation *op) {
     auto localLoad = llvm::dyn_cast<triton::gpu::LocalLoadOp>(op);
@@ -24,6 +25,8 @@ bool filterAsyncLocalLoadsDependencies(Operation *op1, Operation *op2,
         .Case<triton::amdgpu::BufferLoadToLocalOp>(
             [](auto op) { return op.getDest(); })
         .Case<triton::gpu::AsyncCopyGlobalToLocalOp>(
+            [](auto op) { return op.getResult(); })
+        .Case<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(
             [](auto op) { return op.getResult(); })
         .Case<triton::gpu::LocalLoadOp>([](auto op) { return op.getSrc(); })
         .Default([](Operation *) { return Value(); });
@@ -62,6 +65,7 @@ bool filterLDSMemoryBarriersDependencies(Operation *op1, Operation *op2) {
 
   return (isLDSMemoryBarrierOp(op1) && isLDSMemoryBarrierOp(op2));
 }
+
 } // namespace
 
 bool membarFilter(Operation *op1, Operation *op2, bool /*op1IsRead*/,

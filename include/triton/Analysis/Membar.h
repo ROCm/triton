@@ -275,7 +275,8 @@ private:
                       FuncBlockInfoMapT *funcBlockInfoMap,
                       OpBuilder *builder) override;
 
-  void insertBarrier(Operation *operation, OpBuilder *builder);
+  void insertBarrier(Operation *operation, OpBuilder *builder,
+                     bool skipDsWait = false);
 };
 
 /// Postorder traversal on the callgraph to insert membar instructions

@@ -236,10 +236,12 @@ void MembarOrFenceAnalysis::visitTerminator(
   llvm_unreachable("Unknown terminator encountered in membar analysis");
 }
 
-void MembarAnalysis::insertBarrier(Operation *op, OpBuilder *builder) {
+void MembarAnalysis::insertBarrier(Operation *op, OpBuilder *builder,
+                                   bool skipDsWait) {
   OpBuilder::InsertionGuard g(*builder);
-  triton::gpu::BarrierOp::create(*builder, op->getLoc(),
-                                 triton::gpu::AddrSpace::Local);
+  auto addrSpace = skipDsWait ? triton::gpu::AddrSpace::None
+                              : triton::gpu::AddrSpace::Local;
+  triton::gpu::BarrierOp::create(*builder, op->getLoc(), addrSpace);
 }
 
 void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
@@ -254,8 +256,8 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
       return true;
     if (isa<triton::gpu::WarpSpecializePartitionsOp>(op))
       return true;
-    if (auto barrier = dyn_cast<triton::gpu::BarrierOp>(op))
-      return barrier.hasLocal();
+    if (isa<triton::gpu::BarrierOp>(op))
+      return true;
     return false;
   };
 
@@ -268,9 +270,19 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
   if (op->hasTrait<mlir::OpTrait::MemWaitOpTrait>() &&
       !containsLocalBarrier(op->getNextNode())) {
     // If the current op is an async wait and the next op is not a barrier we
-    // insert a barrier op and sync
+    // insert a barrier op and sync.
     builder->setInsertionPointAfter(op);
-    insertBarrier(op, builder);
+    StringRef opName = op->getName().getStringRef();
+    if (opName.contains("async_tdm_wait") ||
+        opName.contains("async_tdm_intrinsic_wait")) {
+      // TDM wait (s_wait_tensorcnt) already ensures LDS writes are complete.
+      // Only need s_barrier for cross-wave sync, not s_wait_dscnt.
+      OpBuilder::InsertionGuard g(*builder);
+      triton::gpu::BarrierOp::create(*builder, op->getLoc(),
+                                     triton::gpu::AddrSpace::None);
+    } else {
+      insertBarrier(op, builder);
+    }
     blockInfo->sync();
     return;
   }
@@ -364,7 +376,22 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     curBlockInfo.syncReadSlices[scratchSlice].insert(op);
   } else if (blockInfo->isIntersected(curBlockInfo, filter, allocation)) {
     builder->setInsertionPoint(op);
-    insertBarrier(op, builder);
+    // If ALL pending writes are TDM loads, skip the ds wait.
+    // TDM synchronization is handled by async_wait (s_wait_tensorcnt).
+    // Only s_barrier is needed for cross-wave visibility.
+    bool allWritesAreTDM = true;
+    for (auto &[slice, ops] : blockInfo->syncWriteSlices) {
+      for (auto *writeOp : ops) {
+        if (writeOp->getName().getStringRef().find(
+                "async_tdm_copy_global_to_local") == StringRef::npos) {
+          allWritesAreTDM = false;
+          break;
+        }
+      }
+      if (!allWritesAreTDM)
+        break;
+    }
+    insertBarrier(op, builder, /*skipDsWait=*/allWritesAreTDM);
     blockInfo->sync();
   }
   // Update the region info, even if barrier is inserted, we have to maintain
