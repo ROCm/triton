@@ -492,6 +492,9 @@ class HIPBackend(BaseBackend):
             fns[0].remove_fn_attr("amdgpu-no-workgroup-id-y")
             fns[0].remove_fn_attr("amdgpu-no-workgroup-id-z")
 
+        if options.arch == "gfx1250":
+            fns[0].add_fn_attr("amdgpu-expert-scheduling-mode", "true")
+
         if knobs.amd.scalarize_packed_fops:
             amd.add_scalarize_packed_fops_llvm_pass(fns[0])
 
