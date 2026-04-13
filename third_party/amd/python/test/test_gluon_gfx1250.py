@@ -4010,13 +4010,15 @@ def _tdm_gather_layout_kernel(inp_ptr, out_ptr, src_row_indices_ptr, M_inp, N_in
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
 
-def _tdm_gather_index_layouts():
-    """Yield (num_indices, num_warps, idx_layout) for TDM gather layout testing.
+def _tdm_gather_scatter_index_layouts():
+    """Yield (num_indices, num_warps, idx_layout) for TDM gather and scatter layout testing.
 
-    Covers three layout categories:
-      - Replicated:  warpsPerCTA=[1, W]   — all warps hold all indices, only warp 0 fires.
-      - Partitioned: warpsPerCTA=[W, 1]   — each warp owns a disjoint subset, all fire.
-      - Mixed:       warpsPerCTA=[A, R]   — A warps partition, R redundant copies predicated off.
+    Covers five layout categories:
+      - Replicated:       warpsPerCTA=[1, W]   — all warps hold all indices, only warp 0 fires.
+      - Partitioned:      warpsPerCTA=[W, 1]   — each warp owns a disjoint subset, all fire.
+      - Mixed:            warpsPerCTA=[A, R]   — A warps partition, R redundant copies predicated off.
+      - Redundant regs:   sizePerThread=[ni, 2] — each thread holds duplicate values (regMask != 0).
+      - Wrapping:         sizePerThread < numIndices/numWarps — register dim tiles, non-contiguous positions.
     """
     cases = []
     for ni in [4, 8, 16]:
@@ -4058,7 +4060,7 @@ def _tdm_gather_index_layouts():
 
 
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
-@pytest.mark.parametrize("num_indices, num_warps, idx_layout", _tdm_gather_index_layouts())
+@pytest.mark.parametrize("num_indices, num_warps, idx_layout", _tdm_gather_scatter_index_layouts())
 @pytest.mark.parametrize("BLOCK_N", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("index_dtype", [torch.int16, torch.int32])
@@ -4066,7 +4068,7 @@ def test_runtime_tdm_gather_layouts(num_indices, num_warps, idx_layout, BLOCK_N,
     """Test TDM gather correctness across different index layouts.
 
     A single test function exercises replicated, partitioned, and mixed warp
-    layouts by injecting the index layout from _tdm_gather_index_layouts().
+    layouts by injecting the index layout from _tdm_gather_scatter_index_layouts().
     Mirrors the pattern used by NVIDIA's test_gather_layouts in test_lowerings.py.
     """
     torch.manual_seed(42)
@@ -4096,6 +4098,76 @@ def test_runtime_tdm_gather_layouts(num_indices, num_warps, idx_layout, BLOCK_N,
     inp_bytes = inp.view(torch.uint8).reshape(M_inp, -1)
     ref_bytes = inp_bytes[src_row_indices.long(), :BLOCK_N * elem_size]
     torch.testing.assert_close(gathered_out.view(torch.uint8), ref_bytes)
+
+
+@gluon.jit
+def _tdm_scatter_layout_kernel(inp_ptr, out_ptr, dst_row_indices_ptr, M_out, N_out, stride_m, stride_n,
+                               BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, NUM_INDICES: ttgl.constexpr,
+                               DST_COL_OFFSET: ttgl.constexpr, SHARED_LAYOUT: ttgl.constexpr,
+                               IDX_LAYOUT: ttgl.constexpr):
+    """Generic TDM scatter kernel parameterized by index layout.
+
+    Mirrors _tdm_gather_layout_kernel but for the scatter direction:
+    data flows from LDS to non-contiguous global memory rows.
+    """
+    smem = ttgl.allocate_shared_memory(inp_ptr.type.element_ty, (BLOCK_M, BLOCK_N), SHARED_LAYOUT)
+
+    inp_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=inp_ptr, shape=(BLOCK_M, BLOCK_N), strides=(BLOCK_N, 1),
+                                                           block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT)
+    ttgl.amd.gfx1250.tdm.async_load(inp_desc, [0, 0], smem)
+    ttgl.amd.gfx1250.tdm.async_wait(0)
+
+    out_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=out_ptr, shape=(M_out, N_out), strides=(stride_m, 1),
+                                                           block_shape=(BLOCK_M, BLOCK_N), layout=SHARED_LAYOUT)
+
+    idx_offs = ttgl.arange(0, NUM_INDICES, layout=IDX_LAYOUT)
+    dst_row_indices = ttgl.load(dst_row_indices_ptr + idx_offs)
+
+    ttgl.amd.gfx1250.tdm.async_scatter(out_desc, dst_row_indices, DST_COL_OFFSET, smem)
+    ttgl.amd.gfx1250.tdm.async_wait(0)
+
+
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
+@pytest.mark.parametrize("num_indices, num_warps, idx_layout", _tdm_gather_scatter_index_layouts())
+@pytest.mark.parametrize("BLOCK_N", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("index_dtype", [torch.int16, torch.int32])
+def test_runtime_tdm_scatter_layouts(num_indices, num_warps, idx_layout, BLOCK_N, dtype, index_dtype):
+    """Test TDM scatter correctness across different index layouts.
+
+    Use _tdm_gather_scatter_index_layouts() to exercise replicated, partitioned,
+    and mixed warp layouts for the scatter direction. Verifies that the
+    LinearLayout-based warp predication and LDS offset computation produce
+    correct results for all layout configurations.
+    """
+    torch.manual_seed(42)
+
+    BLOCK_M = num_indices
+    SHARED_LAYOUT: ttgl.constexpr = ttgl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
+
+    M_out = 2048
+    N_out = BLOCK_N
+
+    inp = _create_scatter_test_data((BLOCK_M, BLOCK_N), dtype)
+    out = torch.zeros((M_out, N_out), dtype=dtype)
+    dst_row_indices = torch.arange(num_indices, dtype=index_dtype)
+
+    inp_d = inp.cuda()
+    out_d = out.cuda()
+    indices_d = dst_row_indices.cuda()
+
+    _tdm_scatter_layout_kernel[(1, )](inp_d, out_d, indices_d, M_out=M_out, N_out=N_out, stride_m=out_d.stride(0),
+                                      stride_n=out_d.stride(1), BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                                      NUM_INDICES=num_indices, DST_COL_OFFSET=0, SHARED_LAYOUT=SHARED_LAYOUT,
+                                      IDX_LAYOUT=idx_layout, num_warps=num_warps)
+
+    out_result = out_d.cpu()
+    ref_out = torch.zeros_like(out)
+    elem_size = ref_out.element_size()
+    ref_out_bytes = ref_out.view(torch.uint8).reshape(M_out, -1)
+    inp_bytes = inp.view(torch.uint8).reshape(BLOCK_M, -1)
+    ref_out_bytes[dst_row_indices.long(), :BLOCK_N * elem_size] = inp_bytes[:num_indices]
+    torch.testing.assert_close(out_result, ref_out)
 
 
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")

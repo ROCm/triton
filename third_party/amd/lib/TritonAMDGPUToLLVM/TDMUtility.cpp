@@ -1144,75 +1144,72 @@ emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
       indicesType.getElementType().getIntOrFloatBitWidth() == 32;
   size_t maxIndicesPerInstr = use32BitIndices ? 8 : 16;
 
-  // For gather, use LinearLayout to determine:
+  // Use LinearLayout to determine:
   // 1. Which registers are broadcasted — remove duplicates
   // 2. Which warps are redundant — zero the pred to make instruction a no-op
   // 3. Per-batch LDS row offset — via applyLinearLayout per batch
+  // This analysis is direction-agnostic: the index layout determines which warp
+  // owns which rows in LDS, regardless of whether data flows to LDS (gather) or
+  // from LDS (scatter).
+  auto indexLL = triton::gpu::toLinearLayout(indicesType);
+  assert(indexLL.getNumOutDims() == 1 &&
+         "Gather/scatter index layout must have exactly one output dimension");
+  auto freeVarMasks = indexLL.getFreeVariableMasks();
+
+  auto kRegister = rewriter.getStringAttr("register");
+  auto kLane = rewriter.getStringAttr("lane");
+  auto kWarp = rewriter.getStringAttr("warp");
+
+  // Remove broadcasted (duplicated) register entries. After this, indexLL
+  // has a compact register dimension and effectiveRowIndices contains only
+  // unique index values.
   SmallVector<Value> effectiveRowIndices(rowIndices.begin(), rowIndices.end());
-  SmallVector<Value> gatherBatchLdsOffsets;
+  auto removeBcast = actionRemoveBroadcastedRegs(indexLL);
+  if (!removeBcast.isIdentity()) {
+    indexLL = removeBcast.apply(indexLL);
+    effectiveRowIndices = removeBcast.apply(
+        SmallVector<Value>(rowIndices.begin(), rowIndices.end()));
+  }
 
-  if (isGather) {
-    auto indexLL = triton::gpu::toLinearLayout(indicesType);
-    assert(indexLL.getNumOutDims() == 1 &&
-           "Gather index layout must have exactly one output dimension");
-    auto freeVarMasks = indexLL.getFreeVariableMasks();
+  Value warpId = getLaneAndWarpId(rewriter, loc).second;
 
-    auto kRegister = rewriter.getStringAttr("register");
-    auto kLane = rewriter.getStringAttr("lane");
-    auto kWarp = rewriter.getStringAttr("warp");
+  // If any warp bits are free, those warps hold redundant copies.
+  // Zero the pred so the instruction becomes a no-op.
+  int32_t warpFreeMask = freeVarMasks.lookup(kWarp);
+  if (warpFreeMask != 0) {
+    Value isActive =
+        b.icmp_eq(b.and_(warpId, b.i32_val(warpFreeMask)), b.i32_val(0));
+    pred = b.select(isActive, pred, b.i32_val(0));
+  }
 
-    // Remove broadcasted (duplicated) register entries. After this, indexLL
-    // has a compact register dimension and effectiveRowIndices contains only
-    // unique index values.
-    auto removeBcast = actionRemoveBroadcastedRegs(indexLL);
-    if (!removeBcast.isIdentity()) {
-      indexLL = removeBcast.apply(indexLL);
-      effectiveRowIndices = removeBcast.apply(
-          SmallVector<Value>(rowIndices.begin(), rowIndices.end()));
-    }
+  // The index encoding may cover fewer warps than the CTA actually has.
+  // applyLinearLayout wraps extra warp IDs via modular arithmetic,
+  // causing silent duplication. Predicate off explicitly.
+  int numLayoutWarps = indexLL.getInDimSize(kWarp);
+  if (numLayoutWarps < numWarps) {
+    Value inRange = b.icmp_ult(warpId, b.i32_val(numLayoutWarps));
+    pred = b.select(inRange, pred, b.i32_val(0));
+  }
 
-    Value warpId = getLaneAndWarpId(rewriter, loc).second;
+  size_t contigIndiceCount = indexLL.getNumConsecutiveInOut();
+  maxIndicesPerInstr = std::min(maxIndicesPerInstr, contigIndiceCount);
 
-    // If any warp bits are free, those warps hold redundant copies.
-    // Zero the pred so the instruction becomes a no-op.
-    int32_t warpFreeMask = freeVarMasks.lookup(kWarp);
-    if (warpFreeMask != 0) {
-      Value isActive =
-          b.icmp_eq(b.and_(warpId, b.i32_val(warpFreeMask)), b.i32_val(0));
-      pred = b.select(isActive, pred, b.i32_val(0));
-    }
-
-    // The index encoding may cover fewer warps than the CTA actually has.
-    // applyLinearLayout wraps extra warp IDs via modular arithmetic,
-    // causing silent duplication. Predicate off explicitly.
-    int numLayoutWarps = indexLL.getInDimSize(kWarp);
-    if (numLayoutWarps < numWarps) {
-      Value inRange = b.icmp_ult(warpId, b.i32_val(numLayoutWarps));
-      pred = b.select(inRange, pred, b.i32_val(0));
-    }
-
-    size_t contigIndiceCount = indexLL.getNumConsecutiveInOut();
-    maxIndicesPerInstr = std::min(maxIndicesPerInstr, contigIndiceCount);
-
-    // Precompute LDS row offset for each instruction batch via
-    // applyLinearLayout with the actual register index and warp ID.
-    auto kBlock = rewriter.getStringAttr("block");
-    for (size_t startIdx = 0; startIdx < effectiveRowIndices.size();
-         startIdx += maxIndicesPerInstr) {
-      auto offsets = applyLinearLayout(loc, rewriter, indexLL,
-                                       {{kRegister, b.i32_val(startIdx)},
-                                        {kLane, b.i32_val(0)},
-                                        {kWarp, warpId},
-                                        {kBlock, b.i32_val(0)}});
-      gatherBatchLdsOffsets.push_back(offsets[0].second);
-    }
+  // Precompute LDS row offset for each instruction batch via
+  // applyLinearLayout with the actual register index and warp ID.
+  SmallVector<Value> batchLdsOffsets;
+  auto kBlock = rewriter.getStringAttr("block");
+  for (size_t startIdx = 0; startIdx < effectiveRowIndices.size();
+       startIdx += maxIndicesPerInstr) {
+    auto offsets = applyLinearLayout(loc, rewriter, indexLL,
+                                     {{kRegister, b.i32_val(startIdx)},
+                                      {kLane, b.i32_val(0)},
+                                      {kWarp, warpId},
+                                      {kBlock, b.i32_val(0)}});
+    batchLdsOffsets.push_back(offsets[0].second);
   }
 
   size_t numIndicesPerWarp = effectiveRowIndices.size();
-  size_t numInstructions = gatherBatchLdsOffsets.empty()
-                               ? getTDMGatherScatterInstrinsicCount(
-                                     numIndicesPerWarp, use32BitIndices)
-                               : gatherBatchLdsOffsets.size();
+  size_t numInstructions = batchLdsOffsets.size();
 
   // Get the descriptor groups (gather/scatter uses 2D format: 12 dwords)
   auto group0Vec = SmallVector<Value>(desc.begin(), desc.begin() + 4);
@@ -1237,13 +1234,7 @@ emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
     auto g2 = group2Vec;
     auto g3 = group3Vec;
 
-    // For gather, use the precomputed layout-derived LDS offset.
-    // For scatter, use sequential batch position.
-    Value ldsRowOffset;
-    if (!gatherBatchLdsOffsets.empty())
-      ldsRowOffset = gatherBatchLdsOffsets[instrIdx];
-    else
-      ldsRowOffset = b.i32_val(startIdx);
+    Value ldsRowOffset = batchLdsOffsets[instrIdx];
 
     fillTDMDescriptorForGatherScatter(
         rewriter, loc, typeConverter, elementType, to_vector(blockShape),
