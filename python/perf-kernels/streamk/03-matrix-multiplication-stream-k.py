@@ -9,7 +9,25 @@ from streamk_kernel import streamk_gemm
 torch.manual_seed(123)
 random.seed(123)
 
-total_sm = 304
+
+def is_hip_cdna3():
+    target = triton.runtime.driver.active.get_current_target()
+    return target.backend == 'hip' and target.arch == 'gfx942'
+
+
+def is_hip_cdna4():
+    target = triton.runtime.driver.active.get_current_target()
+    return target.backend == 'hip' and target.arch == 'gfx950'
+
+
+if is_hip_cdna3():
+    total_sm = 304
+elif is_hip_cdna4():
+    total_sm = 256
+else:
+    print("Unknown target")
+    exit(0)
+
 print(f"total SMs: {total_sm}")
 
 
@@ -138,7 +156,8 @@ perf = lambda ms: 2 * m * n * k * 1e-12 / (ms * 1e-3)
 
 ## test for tiles that is not multipe of 304 tiles
 #m, n, k = 4096, 4096, 8192  # some problem size to test
-m, n, k = 8192, 8192, 8192  # some problem size to test
+m, n, k = 8192, 8192, 512  # some problem size to test
+#m, n, k = 8704, 8704, 8192  # some problem size to test
 #m, n, k = 512, 512, 512  # some problem size to test
 
 ## memory bound sizes
@@ -171,7 +190,14 @@ num_stages = 2
 num_warps = 8
 waves_per_eu = 0
 mfmaInstrSize = 16
-kpack = 2
+
+if is_hip_cdna3():
+    kpack = 2
+elif is_hip_cdna4():
+    kpack = 1
+else:
+    print("Unknown target")
+    exit(0)
 
 ##for total_sm in range(1, 305):
 ##    print(f"{total_sm=}")
@@ -195,7 +221,7 @@ locks = torch.zeros((total_sm, ), device="cuda", dtype=torch.int32)
 P = torch.zeros((total_sm, BLK_M * BLK_N), device="cuda", dtype=torch.float32)
 C = matmul.apply(A, B, C, bias, P, locks, total_sm, BLK_M, BLK_N, BLK_K, gsize_m, two_tiles, num_stages, num_warps,
                  waves_per_eu, mfmaInstrSize, kpack)
-#exit(0)
+exit(0)
 matmul.set_debug(False)
 expected = A @ B
 
