@@ -4,6 +4,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -1071,6 +1072,17 @@ private:
     }
   }
 
+  // Insert an inline asm comment before the given instruction.
+  static void insertAsmComment(Instruction *IP, const std::string &Comment) {
+    LLVMContext &Ctx = IP->getContext();
+    IRBuilder<> Builder(Ctx);
+    Builder.SetInsertPoint(IP);
+    FunctionType *FTy = FunctionType::get(Type::getVoidTy(Ctx), false);
+    InlineAsm *IA =
+        InlineAsm::get(FTy, ";; " + Comment, "", /*hasSideEffects=*/true);
+    Builder.CreateCall(IA);
+  }
+
   static void scheduleBB(BasicBlock &BB, const BBMFMAAnalysisMap &Analysis,
                          StringRef Arch) {
     auto It = Analysis.find(&BB);
@@ -1079,7 +1091,9 @@ private:
 
     const MFMARegionList &Regions = It->second;
 
-    for (unsigned i = 0; i < Regions.size(); ++i) {
+    unsigned NumRegions = Regions.size();
+
+    for (unsigned i = 0; i < NumRegions; ++i) {
       const MFMARegionInfo &R = Regions[i];
       if (!R.Barrier)
         continue;
@@ -1088,19 +1102,31 @@ private:
         BBRegion bbR;
         bbR.BB = &BB;
         bbR.Begin = Regions[i].Barrier;
-        bbR.End = (i + 1 < Regions.size()) ? Regions[i + 1].Barrier : nullptr;
+        bbR.End = (i + 1 < NumRegions) ? Regions[i + 1].Barrier : nullptr;
 
         MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
 
+        // --- Build region comment ---
+        std::string Comment;
+        raw_string_ostream OS(Comment);
+
+        // Count anchors by kind
+        unsigned numGR = 0, numLR = 0;
+        for (auto &A : Res.Anchors) {
+          if (A.Kind == SchedKind::GR) numGR++;
+          else if (A.Kind == SchedKind::LR) numLR++;
+        }
+        OS << "Region " << i << ": " << Res.MFMAInsts.size() << " wmma, "
+           << numGR << " GR, " << numLR << " LR";
+
+        insertAsmComment(bbR.Begin, Comment);
+
         LLVM_DEBUG({
-          // Print structural layout: consecutive runs of same kind
           dbgs() << "Cluster " << i << " structure:";
           SchedKind RunKind = SchedKind::Other;
           unsigned RunCount = 0;
-          // Walk region instructions in program order
           for (Instruction &Inst : Utils::instructionsInRegion(bbR)) {
             SchedKind K = Utils::classifySchedInst(Inst);
-            // Only show MFMA and anchor types
             if (K != SchedKind::MFMA && K != SchedKind::GR &&
                 K != SchedKind::LR && K != SchedKind::LW)
               continue;
