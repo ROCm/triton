@@ -939,10 +939,11 @@ private:
 
     if (isGFX12) {
       // GFX1250 scheduling:
-      //   1. Insert remaining WMMAs at end of region (after last anchor)
-      //   2. Process anchors in reverse:
+      //   1. Reserve 2 WMMAs at the beginning of the region
+      //   2. Insert remaining WMMAs at end of region (after last anchor)
+      //   3. Process anchors in reverse:
       //      - LR: 1 WMMA before every 2nd LR
-      //      - GR (TDM): 4 WMMAs before it
+      //      - GR (TDM): 1 WMMA before it
       //      - Anchor transition (kind changes): 2 extra WMMAs before it
       //
       // Count anchor transitions: when consecutive anchors have different kinds
@@ -952,15 +953,17 @@ private:
           numTransitions++;
       }
 
+      unsigned frontBudget = 2;
       unsigned lrBudget = numLR / 2;
-      unsigned grBudget = 4 * numGR;
+      unsigned grBudget = 1 * numGR;
       unsigned transitionBudget = 2 * numTransitions;
-      unsigned needed = lrBudget + grBudget + transitionBudget;
+      unsigned needed = frontBudget + lrBudget + grBudget + transitionBudget;
       unsigned remaining = (Total > needed) ? Total - needed : 0;
 
       LLVM_DEBUG(dbgs() << "  GFX12 budget: total=" << Total
                         << " numLR=" << numLR << " numGR=" << numGR
                         << " numTransitions=" << numTransitions
+                        << " front=" << frontBudget
                         << " lrBudget=" << lrBudget << " grBudget=" << grBudget
                         << " transitionBudget=" << transitionBudget
                         << " remaining=" << remaining << "\n");
@@ -997,10 +1000,10 @@ private:
               moveMFMAsAfter(MFMAInsts, MFMAIdx, count, BeforeLR);
           }
         } else if (Kind == SchedKind::GR) {
-          // 4 WMMAs before TDM in program order
+          // 1 WMMA before TDM in program order
           Instruction *BeforeGR = InsertPt->getPrevNode();
           if (BeforeGR)
-            moveMFMAsAfter(MFMAInsts, MFMAIdx, 4, BeforeGR);
+            moveMFMAsAfter(MFMAInsts, MFMAIdx, 1, BeforeGR);
         }
       }
 
@@ -1092,6 +1095,7 @@ private:
     const MFMARegionList &Regions = It->second;
 
     unsigned NumRegions = Regions.size();
+    unsigned ScheduledRegionIdx = 0;
 
     for (unsigned i = 0; i < NumRegions; ++i) {
       const MFMARegionInfo &R = Regions[i];
@@ -1116,8 +1120,10 @@ private:
           if (A.Kind == SchedKind::GR) numGR++;
           else if (A.Kind == SchedKind::LR) numLR++;
         }
-        OS << "Region " << i << ": " << Res.MFMAInsts.size() << " wmma, "
+        OS << "Region " << ScheduledRegionIdx << ": "
+           << Res.MFMAInsts.size() << " wmma, "
            << numGR << " GR, " << numLR << " LR";
+        ScheduledRegionIdx++;
 
         insertAsmComment(bbR.Begin, Comment);
 
