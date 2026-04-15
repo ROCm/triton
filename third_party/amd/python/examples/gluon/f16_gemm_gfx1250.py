@@ -396,9 +396,8 @@ def _run_runtime_gemm_tdm_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRAN
     if num_ctas > 1 and PERSISTENT:
         pytest.skip("Skip tests with multiple CTAs and persistent or prefetch")
 
-    # We scale the problem size and block dims by ctas_per_cga so each CTA works on BLOCK_M/BLOCK_N sized tile
-    M *= ctas_per_cga[0]
-    N *= ctas_per_cga[1]
+    # To make workload for each wavefront remain unchanged with or without --ctas-per-cga,
+    # scale the block dims by ctas_per_cga, but keep the M and N unchanged.
     BLOCK_M *= ctas_per_cga[0]
     BLOCK_N *= ctas_per_cga[1]
 
