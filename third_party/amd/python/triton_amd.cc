@@ -9,7 +9,9 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "passes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
@@ -28,11 +30,11 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <array>
-#include <optional>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/stl_bind.h>
@@ -150,6 +152,54 @@ void addControlConstant(llvm::Module *module, const char *name,
   constant->setAlignment(llvm::MaybeAlign(bitwidth / 8));
   constant->setUnnamedAddr(GlobalVariable::UnnamedAddr::Local);
   constant->setVisibility(GlobalVariable::VisibilityTypes::ProtectedVisibility);
+}
+
+// gfx1250: only mark InReg for the first 16 bytes of the user-kernarg region,
+// skipping host tensor-descriptor parameters (still advance layout offset).
+//
+// Kernel LLVM functions include two trailing parameters after the source
+// kernel's formal parameters: global scratch pointer and profile scratch
+// pointer (see amendFuncOp in lib/Conversion/TritonGPUToLLVM/Utility.cpp).
+// Those are not part of the user's kernarg blob and must not be counted here;
+// hence numArgs - 2.
+void setFnArgInRegGfx1250(llvm::Function *kernelFn,
+                          llvm::ArrayRef<unsigned> hostTdArgIdxs) {
+  if (!kernelFn)
+    return;
+
+  llvm::DenseSet<unsigned> hostTdIndices;
+  for (unsigned idx : hostTdArgIdxs)
+    hostTdIndices.insert(idx);
+
+  const unsigned numArgs = static_cast<unsigned>(kernelFn->arg_size());
+  // amendFuncOp (TritonGPUToLLVM/Utility.cpp) appends two pointers after the
+  // kernel's parameters: global scratch and profile scratch. Skip those here.
+  constexpr unsigned kTrailingScratchArgCount = 2;
+  const unsigned numUserArgs = numArgs >= kTrailingScratchArgCount
+                                   ? numArgs - kTrailingScratchArgCount
+                                   : numArgs;
+
+  const llvm::DataLayout &dataLayout = kernelFn->getParent()->getDataLayout();
+  uint64_t offset = 0;
+
+  for (unsigned argIndex = 0; argIndex < numUserArgs; ++argIndex) {
+    llvm::Argument *arg = kernelFn->getArg(argIndex);
+    llvm::Type *argTy = arg->getType();
+
+    llvm::Align abiAlign = dataLayout.getABITypeAlign(argTy);
+    uint64_t allocSize = dataLayout.getTypeAllocSize(argTy);
+    uint64_t rangeBegin = llvm::alignTo(offset, abiAlign);
+    uint64_t rangeEnd = rangeBegin + allocSize;
+
+    // Cap explicit kernarg preload (InReg) to the first 16 bytes of user
+    // arguments.
+    // TODO: Fix LLVM issues blocking us preload a larger amount.
+    if (!hostTdIndices.count(argIndex) && !arg->hasByRefAttr() &&
+        !arg->hasNestAttr() && !argTy->isAggregateType() && rangeEnd <= 16)
+      arg->addAttr(llvm::Attribute::InReg);
+
+    offset = rangeEnd;
+  }
 }
 
 } // namespace
@@ -536,12 +586,17 @@ void init_triton_amd(py::module &&m) {
 
   m.def("set_all_fn_arg_inreg", [](llvm::Function *fn) {
     for (llvm::Argument &arg : fn->args()) {
-      // Check for incompatible attributes.
       if (arg.hasByRefAttr() || arg.hasNestAttr())
         continue;
       arg.addAttr(llvm::Attribute::InReg);
     }
   });
+
+  m.def(
+      "set_fn_arg_inreg_gfx1250",
+      [](llvm::Function *kernelFn, const std::vector<unsigned> &hostTdArgIdxs) {
+        setFnArgInRegGfx1250(kernelFn, hostTdArgIdxs);
+      });
 
   m.def("link_hsaco",
         [](const std::string &inPath, const std::string &outPath) {

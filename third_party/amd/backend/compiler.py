@@ -459,10 +459,20 @@ class HIPBackend(BaseBackend):
         # Hint the compiler that we'd like the firmware to set the kernel arguments
         # to user SGPRs so that the kernel does not need to s_load its arguments
         # from memory.
+        #
+        #
         # TODO(tyb0807): Disabled when using MIR swap/dump because the value is
         # not serializable to/from MIR YAML
-        if options.arch != "gfx1250" and not (knobs.amd.swap_mir or knobs.amd.dump_mir):
-            amd.set_all_fn_arg_inreg(kernel_fn)
+        if not (knobs.amd.swap_mir or knobs.amd.dump_mir):
+            if options.arch == "gfx1250":
+                tensordesc_meta = metadata.get("tensordesc_meta") or []
+                host_td_idx = []
+                for e in tensordesc_meta:
+                    if isinstance(e, dict) and "kernel_arg_index" in e:
+                        host_td_idx.append(int(e["kernel_arg_index"]))
+                amd.set_fn_arg_inreg_gfx1250(kernel_fn, host_td_idx)
+            else:
+                amd.set_all_fn_arg_inreg(kernel_fn)
 
         if knobs.compilation.enable_asan:
             default_libdir = Path(__file__).parent / 'lib'
