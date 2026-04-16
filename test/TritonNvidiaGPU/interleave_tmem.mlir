@@ -77,14 +77,14 @@ tt.func @interleave_load_store_ws() {
 
       // CHECK-NEXT: [[L0:%.+]] = ttng.tmem_load [[S0]]
       // CHECK-NEXT: [[M0:%.+]] = arith.mulf [[L0]]
-      // CHECK-NEXT: [[L1:%.+]] = ttng.tmem_load [[S1]]
-      // CHECK-NEXT: [[M1:%.+]] = arith.mulf [[L1]]
       // CHECK-NEXT: ttng.tmem_store [[M0]], [[S0]]
-      // CHECK-NEXT: ttng.tmem_store [[M1]], [[S1]]
       %slice0 = ttng.tmem_subslice %cur_acc {N = 0 : i32} : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory, mutable, 128x128>
       %val0 = ttng.tmem_load %slice0 : !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory, mutable, 128x128> -> tensor<128x64xf32, #linear64>
       %mul0 = arith.mulf %val0, %alpha : tensor<128x64xf32, #linear64>
 
+      // CHECK-NEXT: [[L1:%.+]] = ttng.tmem_load [[S1]]
+      // CHECK-NEXT: [[M1:%.+]] = arith.mulf [[L1]]
+      // CHECK-NEXT: ttng.tmem_store [[M1]], [[S1]]
       %slice1 = ttng.tmem_subslice %cur_acc {N = 64 : i32} : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory, mutable, 128x128>
       %val1 = ttng.tmem_load %slice1 : !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory, mutable, 128x128> -> tensor<128x64xf32, #linear64>
       %mul1 = arith.mulf %val1, %alpha : tensor<128x64xf32, #linear64>
@@ -106,8 +106,8 @@ tt.func @arrive_barrier(%arg0: !ttg.memdesc<1xi64, #barrier_shared, #smem, mutab
   // CHECK-COUNT-2: ttng.tmem_alloc
   %alloc = ttng.tmem_alloc : () -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
   %noalias_alloc = ttng.tmem_alloc : () -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: ttng.tmem_load
-  // CHECK-NEXT: ttng.tmem_store
+  // CHECK-NEXT: tmem_store
+  // CHECK-NEXT: tmem_load
   %0 = ttng.tmem_load %alloc : !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> tensor<128x128xf32, #linear128>
   ttng.tmem_store %cst, %noalias_alloc, %true : tensor<128x128xf32, #linear128> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
   // CHECK-NEXT: arrive_barrier
@@ -121,17 +121,17 @@ tt.func @sink_alloc_op(%arg0: tensor<128x128xf32, #linear128>) {
   %c0 = arith.constant 0 : i32
   %true = arith.constant true
 
-  // CHECK: [[ALLOC0:%.+]] = ttng.tmem_alloc
   %alloc0 = ttng.tmem_alloc : () -> !ttg.memdesc<1x128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: [[SUBVIEW0:%.+]] = ttg.memdesc_index [[ALLOC0]]
   %subview0 = ttg.memdesc_index %alloc0[%c0] : !ttg.memdesc<1x128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: [[ALLOC1:%.+]] = ttng.tmem_alloc
+  // CHECK: [[ALLOC1:%.+]] = ttng.tmem_alloc
   %alloc1 = ttng.tmem_alloc : () -> !ttg.memdesc<1x128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: [[SUBVIEW1:%.+]] = ttg.memdesc_index [[ALLOC1]]
+  // CHECK: [[SUBVIEW1:%.+]] = ttg.memdesc_index [[ALLOC1]]
   %subview1 = ttg.memdesc_index %alloc1[%c0] : !ttg.memdesc<1x128x128xf32, #tmem, #ttng.tensor_memory, mutable> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: ttng.tmem_store %arg0, [[SUBVIEW1]]
+  // CHECK-NEXT: tmem_store %arg0, [[SUBVIEW1]]
   ttng.tmem_store %arg0, %subview1, %true : tensor<128x128xf32, #linear128> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
-  // CHECK-NEXT: ttng.tmem_store %arg0, [[SUBVIEW0]]
+  // CHECK-NEXT: [[ALLOC0:%.+]] = ttng.tmem_alloc
+  // CHECK: [[SUBVIEW0:%.+]] = ttg.memdesc_index [[ALLOC0]]
+  // CHECK-NEXT: tmem_store %arg0, [[SUBVIEW0]]
   ttng.tmem_store %arg0, %subview0, %true : tensor<128x128xf32, #linear128> -> !ttg.memdesc<128x128xf32, #tmem, #ttng.tensor_memory, mutable>
   tt.return
 }
