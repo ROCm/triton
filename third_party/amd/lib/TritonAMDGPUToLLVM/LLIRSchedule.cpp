@@ -42,7 +42,7 @@ enum class InstClass {
 
 enum class MFMAInputSource { FullyPrefetched, SameRegionLoad, Unknown };
 
-enum class SchedKind { MFMA, GR, LR, LW, Other };
+enum class SchedKind { MFMA, GR, LR, LW, CVT, Other };
 
 // Structures used for region analysis/scheduling
 
@@ -127,7 +127,8 @@ struct Utils {
             if (Name.contains("llvm.amdgcn.raw.ptr.buffer.load.lds") ||
                 Name.contains("llvm.amdgcn.raw.ptr.buffer.load.async.lds"))
               return InstClass::bufferLoadLDS;
-            if (Name.contains("llvm.amdgcn.raw.ptr.buffer.store"))
+            if (Name.contains("llvm.amdgcn.raw.ptr.buffer.store") ||
+                Name.contains("tensor.store.from.lds"))
               return InstClass::bufferStore;
             return InstClass::OtherIntrinsic;
           }
@@ -247,7 +248,7 @@ struct Utils {
           StringRef Name = F->getName();
           // GR: buffer.load (into regs), buffer.load.lds, buffer.load.async.lds,
           //     tensor.load.to.lds (gfx1250 TDM)
-          if (Name.contains("buffer.load") || Name.contains("tensor.load.to.lds"))
+          if (Name.contains("buffer.load") || Name.contains("tensor.load.to.lds") || Name.contains("tensor.store.from.lds"))
             return SchedKind::GR;
           // LR: ds_read (ds.read.*) or ds_load (ds.load.*)
           if (Name.contains("ds.read") || Name.contains("ds.load"))
@@ -267,6 +268,10 @@ struct Utils {
       if (SI->getPointerAddressSpace() == 3)
         return SchedKind::LW;
     }
+
+    // CVT: fptrunc (f32 -> f16 downcast)
+    if (isa<FPTruncInst>(I))
+      return SchedKind::CVT;
 
     return SchedKind::Other;
   }
@@ -327,7 +332,7 @@ struct Utils {
 
     for (const Instruction &I : *BB) {
       auto C = classifyInstruction(I);
-      HasMFMA |= (C == InstClass::MFMA);
+      HasMFMA |= (C == InstClass::MFMA || C == InstClass::WMMA);
       HasStore |= (C == InstClass::bufferStore);
       if (HasMFMA && HasStore)
         return true;
@@ -665,7 +670,8 @@ private:
 
     for (Instruction &I : Utils::instructionsInRegion(R)) {
       SchedKind K = Utils::classifySchedInst(I);
-      if (K == SchedKind::GR || K == SchedKind::LR || K == SchedKind::LW) {
+      if (K == SchedKind::GR || K == SchedKind::LR || K == SchedKind::LW ||
+          K == SchedKind::CVT) {
         Res.LastAnchor = &I;
         Res.Anchors.push_back({&I, K});
         continue;
@@ -737,6 +743,8 @@ private:
       return "LR";
     case SchedKind::LW:
       return "LW";
+    case SchedKind::CVT:
+      return "CVT";
     case SchedKind::MFMA:
       return "mfma";
     case SchedKind::Other:
@@ -1155,6 +1163,180 @@ private:
     }
   }
 
+  // Schedule WMMAs in an epilogue region.
+  // Strategy:
+  //   1. 1 WMMA before every 4 CVT
+  //   2. 1 WMMA before every 2 LR or 2 LW
+  //   3. 1 WMMA before every GR
+  //   4. Remaining WMMAs go to the beginning of the region
+  // If budget is insufficient, prioritize: CVT > LR/LW > GR
+  static void scheduleEpilogueRegion(
+      SmallVectorImpl<AnchorInst> &Anchors,
+      SmallVectorImpl<Instruction *> &MFMAInsts,
+      BBRegion &R) {
+    if (MFMAInsts.empty() || Anchors.empty())
+      return;
+
+    unsigned MFMAIdx = MFMAInsts.size();
+    unsigned Total = MFMAIdx;
+
+    // Count anchors by kind
+    unsigned numCVT = 0, numLR = 0, numLW = 0, numGR = 0;
+    for (auto &A : Anchors) {
+      if (A.Kind == SchedKind::CVT) numCVT++;
+      else if (A.Kind == SchedKind::LR) numLR++;
+      else if (A.Kind == SchedKind::LW) numLW++;
+      else if (A.Kind == SchedKind::GR) numGR++;
+    }
+
+    // Budget calculation with priority: CVT > LR/LW > GR
+    unsigned cvtBudget = numCVT / 4;
+    unsigned lrBudget = numLR / 2;
+    unsigned lwBudget = numLW / 2;
+    unsigned grBudget = numGR;
+
+    // Clamp budgets if total is insufficient (prioritize CVT first)
+    unsigned needed = cvtBudget + lrBudget + lwBudget + grBudget;
+    if (needed > Total) {
+      unsigned avail = Total;
+      // CVT first
+      cvtBudget = std::min(cvtBudget, avail);
+      avail -= cvtBudget;
+      // LR/LW next
+      unsigned lrlwBudget = lrBudget + lwBudget;
+      if (lrlwBudget > avail) {
+        // Scale down proportionally
+        lrBudget = avail * lrBudget / (lrBudget + lwBudget + 1);
+        lwBudget = avail - lrBudget;
+      }
+      avail -= (lrBudget + lwBudget);
+      // GR last
+      grBudget = std::min(grBudget, avail);
+    }
+    unsigned remaining = Total - std::min(Total, cvtBudget + lrBudget + lwBudget + grBudget);
+
+    LLVM_DEBUG(dbgs() << "  Epilogue schedule: total=" << Total
+                      << " cvtBudget=" << cvtBudget
+                      << " lrBudget=" << lrBudget
+                      << " lwBudget=" << lwBudget
+                      << " grBudget=" << grBudget
+                      << " remaining=" << remaining << "\n");
+
+    // Place remaining WMMAs at end of region (after last anchor)
+    moveMFMAsAfter(MFMAInsts, MFMAIdx, remaining, Anchors.back().I);
+
+    // Process anchors in reverse
+    unsigned cvtCount = 0, lrCount = 0, lwCount = 0;
+    for (int i = static_cast<int>(Anchors.size()) - 1;
+         i >= 0 && MFMAIdx > 0; --i) {
+      size_t idx = static_cast<size_t>(i);
+      Instruction *InsertPt = Anchors[idx].I;
+      SchedKind Kind = Anchors[idx].Kind;
+
+      unsigned count = 0;
+      if (Kind == SchedKind::CVT) {
+        cvtCount++;
+        if (cvtCount % 4 == 0)
+          count = 1;
+      } else if (Kind == SchedKind::LR) {
+        lrCount++;
+        if (lrCount % 2 == 0)
+          count = 1;
+      } else if (Kind == SchedKind::LW) {
+        lwCount++;
+        if (lwCount % 2 == 0)
+          count = 1;
+      } else if (Kind == SchedKind::GR) {
+        count = 1;
+      }
+
+      if (count > 0) {
+        Instruction *Before = InsertPt->getPrevNode();
+        if (Before)
+          moveMFMAsAfter(MFMAInsts, MFMAIdx, count, Before);
+      }
+    }
+
+    LLVM_DEBUG(dbgs() << "  Epilogue done: " << MFMAIdx
+                      << " WMMAs at front\n");
+  }
+
+  // Check if a CVT instruction's input traces back to any WMMA in the given set,
+  // walking through shufflevector/extractelement/insertelement intermediaries.
+  static bool cvtDependsOnMFMASet(Instruction *CvtInst,
+                                  const SmallPtrSetImpl<Instruction *> &MFMAs) {
+    SmallVector<Instruction *, 8> Worklist;
+    for (Value *Op : CvtInst->operands()) {
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        Worklist.push_back(OpI);
+    }
+    while (!Worklist.empty()) {
+      Instruction *Cur = Worklist.pop_back_val();
+      if (Utils::isMFMAorWMMA(*Cur)) {
+        if (MFMAs.count(Cur))
+          return true;
+      } else if (isa<ShuffleVectorInst>(Cur) ||
+                 isa<ExtractElementInst>(Cur) ||
+                 isa<InsertElementInst>(Cur)) {
+        for (Value *Op : Cur->operands()) {
+          if (auto *OpI = dyn_cast<Instruction>(Op))
+            Worklist.push_back(OpI);
+        }
+      }
+    }
+    return false;
+  }
+
+  // Emit an epilogue region comment, debug info, and schedule a sub-region.
+  static void emitEpilogueRegionInfo(
+      BBRegion &bbR, MFMARegionCollectResult &Res, unsigned &EpiRegionIdx) {
+    std::string Comment;
+    raw_string_ostream OS(Comment);
+
+    unsigned numGR = 0, numLR = 0, numLW = 0, numCVT = 0;
+    for (auto &A : Res.Anchors) {
+      if (A.Kind == SchedKind::GR) numGR++;
+      else if (A.Kind == SchedKind::LR) numLR++;
+      else if (A.Kind == SchedKind::LW) numLW++;
+      else if (A.Kind == SchedKind::CVT) numCVT++;
+    }
+    OS << "Epilogue Region " << EpiRegionIdx << ": "
+       << Res.MFMAInsts.size() << " wmma, "
+       << numGR << " GR, " << numLR << " LR, " << numLW << " LW, "
+       << numCVT << " CVT";
+    EpiRegionIdx++;
+
+    insertAsmComment(bbR.Begin, Comment);
+
+    LLVM_DEBUG({
+      dbgs() << "  " << OS.str() << "\n";
+      dbgs() << "  Structure:";
+      SchedKind RunKind = SchedKind::Other;
+      unsigned RunCount = 0;
+      for (Instruction &Inst : Utils::instructionsInRegion(bbR)) {
+        SchedKind K = Utils::classifySchedInst(Inst);
+        if (K != SchedKind::MFMA && K != SchedKind::GR &&
+            K != SchedKind::LR && K != SchedKind::LW &&
+            K != SchedKind::CVT)
+          continue;
+        if (K == RunKind) {
+          RunCount++;
+        } else {
+          if (RunCount > 0)
+            dbgs() << " " << RunCount << " " << schedKindName(RunKind);
+          RunKind = K;
+          RunCount = 1;
+        }
+      }
+      if (RunCount > 0)
+        dbgs() << " " << RunCount << " " << schedKindName(RunKind);
+      dbgs() << "\n";
+    });
+
+    // Schedule WMMAs in this epilogue region
+    scheduleEpilogueRegion(Res.Anchors, Res.MFMAInsts, bbR);
+  }
+
   static void scheduleEpilogue(BasicBlock &BB,
                                const BBMFMAAnalysisMap &Analysis) {
     auto It = Analysis.find(&BB);
@@ -1163,14 +1345,56 @@ private:
 
     const MFMARegionList &Regions = It->second;
 
-    for (unsigned i = 0; i < Regions.size(); ++i) {
+    unsigned NumRegions = Regions.size();
+    unsigned EpiRegionIdx = 0;
+
+    for (unsigned i = 0; i < NumRegions; ++i) {
       const MFMARegionInfo &R = Regions[i];
       if (!R.Barrier)
         continue;
 
-      LLVM_DEBUG(
-          dbgs() << "Epilogue region " << i << ": total MFMA: " << R.TotalMFMA
-                 << ", fully prefetch: " << R.FullyPrefetchedMFMA << "\n");
+      Instruction *RegionBegin = Regions[i].Barrier;
+      Instruction *RegionEnd = (i + 1 < NumRegions) ? Regions[i + 1].Barrier : nullptr;
+
+      // Scan through the barrier-delimited region, splitting at CVT
+      // instructions whose inputs come from WMMAs in the current sub-region.
+      Instruction *SubRegionBegin = RegionBegin;
+      SmallPtrSet<Instruction *, 32> CurrentMFMAs;
+
+      auto ItBegin = SubRegionBegin->getIterator();
+      auto ItEnd = RegionEnd ? RegionEnd->getIterator() : BB.end();
+
+      for (auto It = ItBegin; It != ItEnd; ++It) {
+        Instruction &Inst = *It;
+        SchedKind K = Utils::classifySchedInst(Inst);
+
+        if (K == SchedKind::CVT && cvtDependsOnMFMASet(&Inst, CurrentMFMAs)) {
+          // End the current sub-region before this CVT
+          BBRegion bbR;
+          bbR.BB = &BB;
+          bbR.Begin = SubRegionBegin;
+          bbR.End = &Inst;
+
+          MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
+          emitEpilogueRegionInfo(bbR, Res, EpiRegionIdx);
+
+          // Start new sub-region from this CVT
+          SubRegionBegin = &Inst;
+          CurrentMFMAs.clear();
+        }
+
+        if (K == SchedKind::MFMA)
+          CurrentMFMAs.insert(&Inst);
+      }
+
+      // Emit the last sub-region
+      BBRegion bbR;
+      bbR.BB = &BB;
+      bbR.Begin = SubRegionBegin;
+      bbR.End = RegionEnd;
+
+      MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
+      emitEpilogueRegionInfo(bbR, Res, EpiRegionIdx);
     }
   }
 };
