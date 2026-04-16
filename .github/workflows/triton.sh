@@ -149,11 +149,12 @@ sed -i 's/assert_close(ref_y, tri_y, maxtol=maxtol, rmstol=rmstol)/assert_close(
 sed -i "s/buffer = alloc_rand(buffer_shape, device=device, dtype=buffer_dtype)/buffer = alloc_rand(buffer_shape, device='cpu', dtype=buffer_dtype).to(device)/" python/triton_kernels/triton_kernels/testing.py
 
 # Due to time limit, we can only select a very limited set of tests to run.
+# Node IDs must match python/triton_kernels/tests/test_matmul.py::test_op parametrization
 TRITON_MOE_TESTS=(
-    "test_op[None-False-False-True-True-None-128-768-512-1024-batched-float16-float16-None-10-1-False-False-None-False-False-False-True-None]"
-    "test_op[None-False-True-False-True-None-128-16-256-256-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-True-None-False-False-False-True-None]"
-    "test_op[None-False-True-False-True-None-128-300-400-832-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-False-None-False-False-False-True-None]"
-    "test_op[None-False-False-False-False-None-16-727-577-859-ragged-float16-float16-None-10-1-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-False-True-True-None-128-768-512-1024-batched-float16-float16-None-10-1-False-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-16-256-256-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-True-False-None-False-False-False-True-None]"
+    "test_op[None-False-True-False-True-None-128-300-400-832-ragged-float8_e5m2-mxfloat4_e2m1-None-10-1-False-False-False-None-False-False-False-True-None]"
+    "test_op[None-False-False-False-False-None-16-727-577-859-ragged-float16-float16-None-10-1-False-False-False-None-False-False-False-True-None]"
 )
 
 K_EXPR=""
