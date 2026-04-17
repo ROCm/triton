@@ -460,7 +460,6 @@ class HIPBackend(BaseBackend):
         # to user SGPRs so that the kernel does not need to s_load its arguments
         # from memory.
         #
-        #
         # TODO(tyb0807): Disabled when using MIR swap/dump because the value is
         # not serializable to/from MIR YAML
         if not (knobs.amd.swap_mir or knobs.amd.dump_mir):

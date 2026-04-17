@@ -154,8 +154,10 @@ void addControlConstant(llvm::Module *module, const char *name,
   constant->setVisibility(GlobalVariable::VisibilityTypes::ProtectedVisibility);
 }
 
-// gfx1250: only mark InReg for the first 16 bytes of the user-kernarg region,
-// skipping host tensor-descriptor parameters (still advance layout offset).
+// gfx1250: only mark InReg for the first kMaxPreloadBytes of the user-kernarg
+// region, skipping host tensor-descriptor parameters (still advance layout
+// offset). 96B ~= 24 x i32 slots, a practical bound vs. LLVM's
+// ~NumFreeUserSGPRs*4 without calling GCNUserSGPRUsageInfo from here.
 //
 // Kernel LLVM functions include two trailing parameters after the source
 // kernel's formal parameters: global scratch pointer and profile scratch
@@ -180,6 +182,7 @@ void setFnArgInRegGfx1250(llvm::Function *kernelFn,
                                    : numArgs;
 
   const llvm::DataLayout &dataLayout = kernelFn->getParent()->getDataLayout();
+  constexpr unsigned kMaxPreloadBytes = 96;
   uint64_t offset = 0;
 
   for (unsigned argIndex = 0; argIndex < numUserArgs; ++argIndex) {
@@ -191,11 +194,9 @@ void setFnArgInRegGfx1250(llvm::Function *kernelFn,
     uint64_t rangeBegin = llvm::alignTo(offset, abiAlign);
     uint64_t rangeEnd = rangeBegin + allocSize;
 
-    // Cap explicit kernarg preload (InReg) to the first 16 bytes of user
-    // arguments.
-    // TODO: Fix LLVM issues blocking us preload a larger amount.
     if (!hostTdIndices.count(argIndex) && !arg->hasByRefAttr() &&
-        !arg->hasNestAttr() && !argTy->isAggregateType() && rangeEnd <= 16)
+        !arg->hasNestAttr() && !argTy->isAggregateType() &&
+        rangeEnd <= kMaxPreloadBytes)
       arg->addAttr(llvm::Attribute::InReg);
 
     offset = rangeEnd;
