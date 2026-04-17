@@ -332,7 +332,11 @@ std::string translateLLVMIRToASM(llvm::Module &module,
   using namespace mlir;
 
   auto amdgcnAsLevel = triton::tools::getStrEnv("TRITON_ENABLE_AMDGCN_AS");
-  if (amdgcnAsLevel == "1" || amdgcnAsLevel == "2") {
+  // TRITON_ENABLE_AMDGPU_RA_HINTS=1 sets the RA hint flags without running the
+  // amdgcnas post-assembly pass. Lets us isolate the LLVM flag vs.
+  // post-assembly contributions. Back-compat: AMDGCN_AS=1|2 still implies it.
+  auto raHintsOnly = triton::tools::getStrEnv("TRITON_ENABLE_AMDGPU_RA_HINTS");
+  if (amdgcnAsLevel == "1" || amdgcnAsLevel == "2" || raHintsOnly == "1") {
     setLLVMOption<bool>("amdgpu-mfma-vgpr-form", false);
   }
 

@@ -431,7 +431,12 @@ class HIPBackend(BaseBackend):
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
         amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
-        if amdgcn_as_level in ("1", "2"):
+        # TRITON_ENABLE_AMDGPU_RA_HINTS=1 sets the RA hint attrs without running
+        # the amdgcnas post-assembly pass. Lets us isolate the LLVM flag vs.
+        # post-assembly contributions. Back-compat: AMDGCN_AS=1|2 still implies
+        # the RA hint.
+        ra_hints_only = os.environ.get("TRITON_ENABLE_AMDGPU_RA_HINTS", "0") == "1"
+        if amdgcn_as_level in ("1", "2") or ra_hints_only:
             fns[0].add_fn_attr("amdgpu-agpr-alloc", "256")
         cluster_dim = metadata["num_ctas"]
         fns[0].add_fn_attr("amdgpu-cluster-dims", f"{cluster_dim},1,1")
