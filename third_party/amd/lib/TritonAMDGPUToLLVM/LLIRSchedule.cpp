@@ -1349,8 +1349,121 @@ private:
     scheduleEpilogueRegion(Res.Anchors, Res.MFMAInsts, bbR);
   }
 
+  // Hoist address-compute (voffset + rsrc) chains that feed
+  // `@llvm.amdgcn.raw.ptr.buffer.store` to the start of the epilogue block.
+  // Hoisting voffset eliminates VGPR RAW-on-source hazards between row stores.
+  // Hoisting rsrc (and its base-ptr chain + make.buffer.rsrc call) forces the
+  // register allocator to assign distinct SGPR ranges to each tile's
+  // descriptor, eliminating the SGPR WAR hazard at tile boundaries that
+  // otherwise requires `s_wait_xcnt` between tiles.
+  static void hoistVoffsetCompute(BasicBlock &BB) {
+    // 1. Collect rsrc (arg 1) AND voffset (arg 2) operands from every
+    //    buffer_store call in this BB.
+    SmallVector<Value *, 32> Seeds;
+    for (Instruction &I : BB) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI)
+        continue;
+      const Function *F = CI->getCalledFunction();
+      if (!F)
+        continue;
+      if (F->getName().contains("llvm.amdgcn.raw.ptr.buffer.store")) {
+        Seeds.push_back(CI->getArgOperand(1)); // rsrc (ptr addrspace(8))
+        Seeds.push_back(CI->getArgOperand(2)); // voffset (i32)
+      }
+    }
+    if (Seeds.empty())
+      return;
+
+    // 2. DFS up the def-use chain. Accept simple int arith/casts, pointer
+    //    arithmetic (GEP, ptrtoint, inttoptr, addrspacecast), and the
+    //    `make.buffer.rsrc` intrinsic itself. Stop at instructions outside
+    //    this BB or non-hoistable ops.
+    SmallPtrSet<Instruction *, 32> HoistSet;
+    SmallPtrSet<Instruction *, 32> Visited;
+    SmallVector<Instruction *, 32> Worklist;
+    for (Value *V : Seeds)
+      if (auto *I = dyn_cast<Instruction>(V))
+        if (I->getParent() == &BB)
+          Worklist.push_back(I);
+
+    while (!Worklist.empty()) {
+      Instruction *I = Worklist.pop_back_val();
+      if (!Visited.insert(I).second)
+        continue;
+      if (I->getParent() != &BB)
+        continue;
+      unsigned Op = I->getOpcode();
+      bool Simple =
+          Op == Instruction::Add || Op == Instruction::Sub ||
+          Op == Instruction::Mul || Op == Instruction::Shl ||
+          Op == Instruction::LShr || Op == Instruction::AShr ||
+          Op == Instruction::Or || Op == Instruction::And ||
+          Op == Instruction::Xor || Op == Instruction::ZExt ||
+          Op == Instruction::SExt || Op == Instruction::Trunc ||
+          Op == Instruction::BitCast || Op == Instruction::Select ||
+          Op == Instruction::GetElementPtr ||
+          Op == Instruction::PtrToInt ||
+          Op == Instruction::IntToPtr ||
+          Op == Instruction::AddrSpaceCast;
+      bool IsMakeBufferRsrc = false;
+      if (auto *CI = dyn_cast<CallInst>(I)) {
+        if (const Function *F = CI->getCalledFunction())
+          if (F->getName().contains("llvm.amdgcn.make.buffer.rsrc"))
+            IsMakeBufferRsrc = true;
+      }
+      if (!Simple && !IsMakeBufferRsrc)
+        continue;
+      HoistSet.insert(I);
+      for (Use &U : I->operands())
+        if (auto *OpI = dyn_cast<Instruction>(U.get()))
+          Worklist.push_back(OpI);
+    }
+    if (HoistSet.empty())
+      return;
+
+    // 3. Pick insertion point: first MFMA/WMMA or first buffer_store in BB
+    //    that isn't itself in the hoist set.
+    Instruction *InsertPt = nullptr;
+    for (Instruction &I : BB) {
+      if (HoistSet.count(&I))
+        continue;
+      if (Utils::isMFMAorWMMA(I) ||
+          Utils::classifyInstruction(I) == InstClass::bufferStore) {
+        InsertPt = &I;
+        break;
+      }
+    }
+    if (!InsertPt)
+      return;
+
+    // 4. Move HoistSet instructions that currently come AT OR AFTER InsertPt
+    //    to before InsertPt, preserving their relative order (SSA topological
+    //    order). Since we iterate the block top-to-bottom, moving in order
+    //    keeps dependencies valid.
+    SmallVector<Instruction *, 32> ToMove;
+    bool PastInsert = false;
+    for (Instruction &I : BB) {
+      if (&I == InsertPt)
+        PastInsert = true;
+      if (PastInsert && HoistSet.count(&I))
+        ToMove.push_back(&I);
+    }
+    for (Instruction *I : ToMove)
+      I->moveBefore(InsertPt->getIterator());
+
+    LLVM_DEBUG(dbgs() << "  Hoisted " << ToMove.size()
+                      << " voffset-compute insts to epilogue entry\n");
+  }
+
+
   static void scheduleEpilogue(BasicBlock &BB,
                                const BBMFMAAnalysisMap &Analysis) {
+    // Hoist voffset-compute to epilogue entry first — this keeps the
+    // canonical voffset VGPRs live across all row-group stores and
+    // eliminates RAW-on-source hazards between them.
+    hoistVoffsetCompute(BB);
+
     auto It = Analysis.find(&BB);
     if (It == Analysis.end())
       return;
@@ -1408,6 +1521,7 @@ private:
       MFMARegionCollectResult Res = preprocessMFMAInstsInRegion(bbR);
       emitEpilogueRegionInfo(bbR, Res, EpiRegionIdx);
     }
+
   }
 };
 
