@@ -286,28 +286,49 @@ class TestRoundTrip:
         assert "__asm_block__" in opcodes
         assert "s_endpgm" in opcodes
 
-    def test_v9_fixture_round_trips(self, v9_asm):
-        if v9_asm is None:
-            pytest.skip("v9_sliceM.amdgcn fixture not available")
-        prog = parse_asm(v9_asm)
+    def test_kernel_fixture_round_trips(self, kernel_asm):
+        name, text = kernel_asm
+        prog = parse_asm(text)
         out = emit_program(prog)
-        assert out == v9_asm
+        assert out == text, f"round-trip mismatch for {name}"
 
 
-@pytest.fixture
-def v9_asm():
-    """Load the cached v9_sliceM.amdgcn if a user has run the benchmark.
+# Fixture file names for each kernel we exercise end-to-end.  Must be in
+# sync with the ``VERSION_MAP`` in ``gfx12-gluon-tutorials/kernels/gemm/
+# a16w16/bench.py``.
+_KERNEL_FIXTURES = [
+    "v9_sliceM.amdgcn",
+    "v10_double_local_prefetch.amdgcn",
+]
 
-    Useful during development for a realistic round-trip test, but not
-    required for CI.
-    """
+
+def _load_kernel_asm(kernel_file):
     import glob
     import os
     cache_dir = os.path.expanduser("~/.triton/cache")
     if not os.path.isdir(cache_dir):
         return None
-    matches = glob.glob(os.path.join(cache_dir, "*", "v9_sliceM.amdgcn"))
+    matches = glob.glob(os.path.join(cache_dir, "*", kernel_file))
     if not matches:
         return None
     with open(matches[0]) as f:
         return f.read()
+
+
+@pytest.fixture(params=_KERNEL_FIXTURES, ids=lambda p: p.split('.')[0])
+def kernel_asm(request):
+    """Load a cached kernel assembly produced by the matching benchmark.
+
+    Users generate the cache by running e.g.::
+
+        TRITON_ENABLE_LLIR_SCHED=1 python bench.py --version 9 --K 1024 \\
+            --dtype fp16
+
+    Useful during development for realistic round-trip tests; individual
+    tests skip when the fixture file is absent so this doesn't block CI
+    on hosts that don't run the gluon kernels.
+    """
+    text = _load_kernel_asm(request.param)
+    if text is None:
+        pytest.skip(f"{request.param} fixture not available")
+    return request.param, text

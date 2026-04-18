@@ -546,8 +546,8 @@ class HIPBackend(BaseBackend):
         if amdgcn_as_level in ("1", "2"):
             is_gfx12 = options.arch.startswith("gfx12")
             if is_gfx12:
-                from triton.tools.amdgcnas_gfx12 import parse_asm, emit_program
-                amdgcn = emit_program(parse_asm(amdgcn))
+                from triton.tools.amdgcnas_gfx12 import amdgcnas_gfx12
+                amdgcn = amdgcnas_gfx12(amdgcn, verbose=(amdgcn_as_level == "2"))
             elif amdgcn_as_level == "1":
                 amdgcn = amdgcn_as(amdgcn, False)
             else:
