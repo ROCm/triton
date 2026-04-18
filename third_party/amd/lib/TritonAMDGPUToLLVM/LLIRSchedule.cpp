@@ -182,6 +182,8 @@ struct Utils {
       return "FAdd";
     case InstClass::FMul:
       return "FMul";
+    case InstClass::FMA:
+      return "FMA";
     case InstClass::Branch:
       return "Branch";
     case InstClass::Other:
@@ -247,8 +249,11 @@ struct Utils {
         if (F->isIntrinsic()) {
           StringRef Name = F->getName();
           // GR: buffer.load (into regs), buffer.load.lds, buffer.load.async.lds,
-          //     tensor.load.to.lds (gfx1250 TDM)
-          if (Name.contains("buffer.load") || Name.contains("tensor.load.to.lds") || Name.contains("tensor.store.from.lds"))
+          //     tensor.load.to.lds (gfx1250 TDM), tensor.store.from.lds,
+          //     raw.ptr.buffer.store (gmem store from regs)
+          if (Name.contains("buffer.load") || Name.contains("tensor.load.to.lds") ||
+              Name.contains("tensor.store.from.lds") ||
+              Name.contains("raw.ptr.buffer.store"))
             return SchedKind::GR;
           // LR: ds_read (ds.read.*) or ds_load (ds.load.*)
           if (Name.contains("ds.read") || Name.contains("ds.load"))
@@ -460,9 +465,13 @@ private:
     Instruction *RegionStart = nullptr;
 
     for (Instruction &I : BB) {
-      // Check if this is a memory operation (GR, LR, or LW)
+      // Check if this is a memory operation (GR, LR, or LW) or a CVT.
+      // Treating CVT as a region-boundary anchor matches the v9-style
+      // sliced-WMMA epilogue: each sliced WMMA gets its own region, where
+      // the region contains: wmma -> cvt(prev-output) -> store(prev-output).
       auto SK = Utils::classifySchedInst(I);
-      if (SK == SchedKind::GR || SK == SchedKind::LR || SK == SchedKind::LW) {
+      if (SK == SchedKind::GR || SK == SchedKind::LR ||
+          SK == SchedKind::LW || SK == SchedKind::CVT) {
         SeenMemoryOps = true;
       }
 
@@ -1226,7 +1235,7 @@ private:
     moveMFMAsAfter(MFMAInsts, MFMAIdx, remaining, Anchors.back().I);
 
     // Process anchors in reverse
-    unsigned cvtCount = 0, lrCount = 0, lwCount = 0;
+    unsigned cvtCount = 0, lrCount = 0, lwCount = 0, grCount = 0;
     for (int i = static_cast<int>(Anchors.size()) - 1;
          i >= 0 && MFMAIdx > 0; --i) {
       size_t idx = static_cast<size_t>(i);
@@ -1247,7 +1256,10 @@ private:
         if (lwCount % 2 == 0)
           count = 1;
       } else if (Kind == SchedKind::GR) {
-        count = 1;
+        // Emit 4 WMMAs before every 4th GR (clump the 1:1 GR:WMMA ratio).
+        grCount++;
+        if (grCount % 4 == 0)
+          count = 4;
       }
 
       if (count > 0) {
