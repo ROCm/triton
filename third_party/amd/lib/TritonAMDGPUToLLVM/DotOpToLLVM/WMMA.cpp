@@ -418,8 +418,24 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   StringAttr kWarp = S("warp");
   StringAttr kBlock = S("block");
 
+  // Emit WMMAs in K-last order (outer loop over K, inner over (M, N)) so
+  // that consecutive WMMAs write to different accumulators and can issue
+  // back-to-back without an s_delay_alu between them.  In K-first order
+  // all WMMAs for a given (M, N) are adjacent in source order and LLVM's
+  // late scheduler inserts ``s_delay_alu`` hints before each dependent
+  // WMMA to satisfy the TRANS32 latency.
+  struct MNTile {
+    int b;
+    int m;
+    int n;
+    int reg;
+    int tiedGroup;               // 1 (standalone) or 2 (tied pair)
+    std::optional<int> nextM;    // populated iff tiedGroup == 2
+    int nextMReg;                // meaningful iff tiedGroup == 2
+    std::string intrinsicName;
+  };
+  SmallVector<MNTile, 32> tiles;
   llvm::DenseSet<uint64_t> mnProcessed;
-  int tiedGroup = 1;
 
   for (int reg = 0; reg < repLayout->getInDimSize(kRegister);
        reg += dElemsToStorePerThread) {
@@ -431,6 +447,7 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
 
     int nextMReg = reg + dElemsToStorePerThread;
     std::optional<int> nextM;
+    int tiedGroup = 1;
     if (paddedOutputElemSize == 2) {
       if (mnProcessed.count(packMN((uint32_t)m, (uint32_t)n))) {
         continue;
@@ -444,62 +461,79 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
       }
     }
 
-    Value acc = tb.undef(vecTy);
-    auto selectRegValue = [&](int subTied) {
-      return (subTied == 0) ? reg : nextMReg;
-    };
+    tiles.push_back({b, m, n, reg, tiedGroup, nextM, nextMReg, intrinsicName});
+  }
 
+  auto selectRegValue = [&](const MNTile &t, int subTied) {
+    return (subTied == 0) ? t.reg : t.nextMReg;
+  };
+
+  SmallVector<Value, 32> accs;
+  accs.reserve(tiles.size());
+  for (const auto &tile : tiles) {
+    Value acc = tb.undef(vecTy);
     for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
-        acc = tb.insert_element(vecTy, acc, fc[selectRegValue(subTied) + v],
-                                tb.i32_val(v * paddedOutputElemSize + subTied));
+      for (int subTied = 0; subTied < tile.tiedGroup; ++subTied) {
+        acc = tb.insert_element(
+            vecTy, acc, fc[selectRegValue(tile, subTied) + v],
+            tb.i32_val(v * paddedOutputElemSize + subTied));
       }
     }
-    for (size_t k = 0; k < numRepK; ++k) {
-      auto ha =
-          getOperandVals(rewriter, typeConverter, aLayout, loadedA,
-                         /*opIdx*/ 0, rank, b, m, k, kDim, kBase, kPadding,
-                         /*opScale*/ nullptr, aTensorTy.getElementType(), loc);
+    accs.push_back(acc);
+  }
+
+  for (size_t k = 0; k < numRepK; ++k) {
+    for (size_t i = 0; i < tiles.size(); ++i) {
+      const auto &tile = tiles[i];
+      auto ha = getOperandVals(
+          rewriter, typeConverter, aLayout, loadedA,
+          /*opIdx*/ 0, rank, tile.b, tile.m, k, kDim, kBase, kPadding,
+          /*opScale*/ nullptr, aTensorTy.getElementType(), loc);
       ha = prepareOperands(rewriter, ha, aTensorTy.getElementType(), wmmaVer,
                            kBase, loc);
 
-      auto hb =
-          getOperandVals(rewriter, typeConverter, bLayout, loadedB,
-                         /*opIdx*/ 1, rank, b, n, k, kDim, kBase, kPadding,
-                         /*opScale*/ nullptr, bTensorTy.getElementType(), loc);
+      auto hb = getOperandVals(
+          rewriter, typeConverter, bLayout, loadedB,
+          /*opIdx*/ 1, rank, tile.b, tile.n, k, kDim, kBase, kPadding,
+          /*opScale*/ nullptr, bTensorTy.getElementType(), loc);
       hb = prepareOperands(rewriter, hb, bTensorTy.getElementType(), wmmaVer,
                            kBase, loc);
 
       Value haNext;
-      if (tiedGroup == 2) {
-        haNext =
-            getOperandVals(rewriter, typeConverter, aLayout, loadedA,
-                           /*opIdx*/ 0, rank, b, nextM.value(), k, kDim, kBase,
-                           kPadding, nullptr, aTensorTy.getElementType(), loc);
-
+      if (tile.tiedGroup == 2) {
+        haNext = getOperandVals(
+            rewriter, typeConverter, aLayout, loadedA,
+            /*opIdx*/ 0, rank, tile.b, tile.nextM.value(), k, kDim, kBase,
+            kPadding, nullptr, aTensorTy.getElementType(), loc);
         haNext = prepareOperands(rewriter, haNext, aTensorTy.getElementType(),
                                  wmmaVer, kBase, loc);
       }
 
-      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
-        auto optTied =
-            tiedGroup == 2 ? std::optional<bool>(subTied != 0) : std::nullopt;
+      for (int subTied = 0; subTied < tile.tiedGroup; ++subTied) {
+        auto optTied = tile.tiedGroup == 2 ? std::optional<bool>(subTied != 0)
+                                           : std::nullopt;
         auto aValue = subTied == 0 ? ha : haNext;
-        acc = wmmaLayout.getIsTransposed()
-                  ? generateWMMAOp(rewriter, loc, wmmaVer, hb, aValue, acc,
-                                   bTensorTy.getElementType(),
-                                   aTensorTy.getElementType(), dstElemTy,
-                                   intrinsicName, optTied)
-                  : generateWMMAOp(rewriter, loc, wmmaVer, aValue, hb, acc,
-                                   aTensorTy.getElementType(),
-                                   bTensorTy.getElementType(), dstElemTy,
-                                   intrinsicName, optTied);
+        accs[i] =
+            wmmaLayout.getIsTransposed()
+                ? generateWMMAOp(rewriter, loc, wmmaVer, hb, aValue, accs[i],
+                                 bTensorTy.getElementType(),
+                                 aTensorTy.getElementType(), dstElemTy,
+                                 tile.intrinsicName, optTied)
+                : generateWMMAOp(rewriter, loc, wmmaVer, aValue, hb, accs[i],
+                                 aTensorTy.getElementType(),
+                                 bTensorTy.getElementType(), dstElemTy,
+                                 tile.intrinsicName, optTied);
       }
     }
+  }
+
+  for (size_t i = 0; i < tiles.size(); ++i) {
+    const auto &tile = tiles[i];
     for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
-        fc[selectRegValue(subTied) + v] = tb.extract_element(
-            dstElemTy, acc, tb.i32_val(v * paddedOutputElemSize + subTied));
+      for (int subTied = 0; subTied < tile.tiedGroup; ++subTied) {
+        fc[selectRegValue(tile, subTied) + v] = tb.extract_element(
+            dstElemTy, accs[i],
+            tb.i32_val(v * paddedOutputElemSize + subTied));
       }
     }
   }
