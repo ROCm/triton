@@ -1868,6 +1868,28 @@ struct BufferAtomicCASOpConversion
   }
 };
 
+// Query the offset tensor's layout to get the (M, N) tile position
+// contributed by a given register index (with lane/warp/block = 0).
+// Returns nullopt if the query is out of range or the tensor isn't at
+// least 2D.
+static std::optional<std::pair<int64_t, int64_t>>
+getLayoutRegPos(triton::LinearLayout &ll, int64_t regIdx,
+                MLIRContext *ctx) {
+  auto kRegister = StringAttr::get(ctx, "register");
+  auto kLane = StringAttr::get(ctx, "lane");
+  auto kWarp = StringAttr::get(ctx, "warp");
+  auto kBlock = StringAttr::get(ctx, "block");
+  if (regIdx >= ll.getInDimSize(kRegister))
+    return std::nullopt;
+  auto pos =
+      ll.apply({{kRegister, regIdx}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+  if (pos.size() < 2)
+    return std::nullopt;
+  int mIdx = pos.size() - 2;
+  int nIdx = pos.size() - 1;
+  return std::pair{pos[mIdx].second, pos[nIdx].second};
+}
+
 struct BufferStoreOpConversion
     : public ConvertOpToLLVMPattern<triton::amdgpu::BufferStoreOp>,
       public LoadStoreConversionBase {
@@ -1924,6 +1946,32 @@ struct BufferStoreOpConversion
     Value threadPred = emitRedundantThreadPredicateNonNull(
         freeVarMasks, rewriter, loc, targetInfo);
     uint32_t regMask = freeVarMasks[str_attr("reg")];
+
+    // Per-row canonical: for every unique M value in the offset tensor's
+    // register dimension, pick the FIRST free slot with that M as the row's
+    // canonical voffset. Subsequent slots in the same row (same M) fold
+    // against their row canonical using the pure dN constant as inst_offset.
+    int elemByteWidth =
+        std::max(8u, valueElemTy.getIntOrFloatBitWidth()) / 8;
+    auto offsetTensorTy = dyn_cast<RankedTensorType>(offset.getType());
+    DenseMap<int64_t, int64_t> rowCanonicalReg; // M value -> canonical reg
+    DenseMap<int64_t, int64_t> rowCanonicalN;   // M value -> N of canonical
+    std::optional<triton::LinearLayout> ll;
+    if (offsetTensorTy) {
+      ll.emplace(toLinearLayout(offsetTensorTy));
+      for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
+        if (!isCanonicalIndex(vecStart, regMask))
+          continue;
+        auto mn = getLayoutRegPos(*ll, (int64_t)vecStart, ctx);
+        if (!mn)
+          continue;
+        if (!rowCanonicalReg.contains(mn->first)) {
+          rowCanonicalReg[mn->first] = vecStart;
+          rowCanonicalN[mn->first] = mn->second;
+        }
+      }
+    }
+
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
       if (!isCanonicalIndex(vecStart, regMask)) {
         // Don't emit store ops for redundant elements within a thread
@@ -1938,8 +1986,22 @@ struct BufferStoreOpConversion
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
-      bufferEmitter.emitStore(rsrcDesc, offsetElems[vecStart], storeVal, pred,
-                              cacheMod);
+
+      Value offsetToUse = offsetElems[vecStart];
+      int64_t instOffsetBytes = 0;
+      if (ll) {
+        if (auto mn = getLayoutRegPos(*ll, (int64_t)vecStart, ctx)) {
+          auto canonicalIt = rowCanonicalReg.find(mn->first);
+          if (canonicalIt != rowCanonicalReg.end() &&
+              canonicalIt->second != (int64_t)vecStart) {
+            int64_t dN = mn->second - rowCanonicalN[mn->first];
+            offsetToUse = offsetElems[canonicalIt->second];
+            instOffsetBytes = dN * elemByteWidth;
+          }
+        }
+      }
+      bufferEmitter.emitStore(rsrcDesc, offsetToUse, storeVal, pred, cacheMod,
+                              instOffsetBytes);
     } // end vec
 
     rewriter.eraseOp(op);

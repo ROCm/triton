@@ -216,7 +216,8 @@ Value BufferEmitter::emitAtomicRMW(RMWOp rmwType, Type type, Value rsrcDesc,
 }
 
 void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,
-                              Value pred, triton::CacheModifier cm) {
+                              Value pred, triton::CacheModifier cm,
+                              int64_t instOffsetBytes) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   VectorType vecTy = cast<VectorType>(data.getType());
   Type bufferType = getBufferOpType(vecTy, false);
@@ -224,7 +225,7 @@ void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,
     data = b.bitcast(data, bufferType);
   SmallVector<Value, 6> args{data};
   fillCommonArgs(vecTy, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/false,
-                 args);
+                 args, instOffsetBytes);
   ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, TypeRange{}, args,
                                      ArrayRef<NamedAttribute>());
 }
@@ -278,7 +279,8 @@ Type BufferEmitter::getBufferOpType(Type type, bool atomicsOp) {
 void BufferEmitter::fillCommonArgs(Type type, Value rsrcDesc,
                                    Value vOffsetElems, Value pred,
                                    triton::CacheModifier cm, bool isBufferLoad,
-                                   SmallVector<Value> &args) {
+                                   SmallVector<Value> &args,
+                                   int64_t instOffsetBytes) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   // 1. Create the (masked) offset
   Type elementType = getElementTypeOrSelf(type);
@@ -290,6 +292,15 @@ void BufferEmitter::fillCommonArgs(Type type, Value rsrcDesc,
   Value vOffsetOutOfBunds = b.int_val(
       32, static_cast<int>(std::numeric_limits<int>::max() + int64_t(1)));
   Value vOffsetBytes = b.mul(b.int_val(32, elementByteWidth), vOffsetElems);
+  // Add compile-time byte constant after the multiply so LLVM's
+  // splitBufferOffsets sees `add(vgpr, const)` and folds into inst_offset.
+  // GFX1250+ requires the add to carry `nuw` before LLVM will split it
+  // (see SITargetLowering::splitBufferOffsets CheckNUW branch).
+  if (instOffsetBytes != 0) {
+    Value cst = b.int_val(32, static_cast<int>(instOffsetBytes));
+    vOffsetBytes = LLVM::AddOp::create(rewriter, loc, i32_ty, vOffsetBytes,
+                                        cst, LLVM::IntegerOverflowFlags::nuw);
+  }
   Value maskedOffsetBytes = b.select(pred, vOffsetBytes, vOffsetOutOfBunds);
 
   // 2. Set the sgprOffset to 0

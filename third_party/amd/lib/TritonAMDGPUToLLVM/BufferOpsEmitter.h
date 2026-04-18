@@ -84,14 +84,16 @@ struct BufferEmitter {
                       Value casStoreVal, Value pred, bool hasUsers);
 
   // Emit a predicated rocdl.raw.ptr.buffer.store
+  // instOffsetBytes: compile-time byte constant added on top of vOffset —
+  // expressed as `add(vOffset_bytes, const)` so LLVM folds into inst_offset.
   void emitStore(Value rsrcDesc, Value offset, Value data, Value pred,
-                 CacheModifier cm);
+                 CacheModifier cm, int64_t instOffsetBytes = 0);
 
 private:
   // Fill common buffer operation arguments.
   void fillCommonArgs(Type type, Value rsrcDesc, Value vOffsetElems, Value pred,
                       CacheModifier cm, bool isBufferLoad,
-                      SmallVector<Value> &args);
+                      SmallVector<Value> &args, int64_t instOffsetBytes = 0);
 
   // Fill buffer atomics arguments
   void fillCommonArgsAtomics(Type type, Value rsrcDesc, Value vOffsetElems,
