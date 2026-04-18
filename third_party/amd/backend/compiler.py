@@ -543,10 +543,15 @@ class HIPBackend(BaseBackend):
                                            options.enable_fp_fusion, False)
 
         amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
-        if amdgcn_as_level == "1":
-            amdgcn = amdgcn_as(amdgcn, False)
-        elif amdgcn_as_level == "2":
-            amdgcn = amdgcn_as(amdgcn, True)
+        if amdgcn_as_level in ("1", "2"):
+            is_gfx12 = options.arch.startswith("gfx12")
+            if is_gfx12:
+                from triton.tools.amdgcnas_gfx12 import parse_asm, emit_program
+                amdgcn = emit_program(parse_asm(amdgcn))
+            elif amdgcn_as_level == "1":
+                amdgcn = amdgcn_as(amdgcn, False)
+            else:
+                amdgcn = amdgcn_as(amdgcn, True)
 
         if "AMD_INSERT_AMDGCN" in os.environ.keys():
             insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
