@@ -162,6 +162,13 @@ class Instruction:
     # four 2-bit fields {dst, src0, src1, src2}.  None for other opcodes.
     msb_bits: Optional[tuple[int, int, int, int]] = None
 
+    # Stage 2 analysis tags.  Populated by ``annotate_regions`` and chain
+    # collectors; None until those passes run.
+    region_idx: Optional[int] = None      # enclosing Region marker index
+    sub_region_idx: Optional[int] = None  # enclosing SubRegion marker index
+    wmma_chain: Optional["WMMAChain"] = None
+    ds_chain: Optional["DSChain"] = None
+
     def emit(self) -> str:
         # Preserve original line verbatim when the instruction has no
         # structured form (labels, directives, inline asm blocks).
@@ -840,6 +847,291 @@ def overlap_wmma_with_barrier(program: Program) -> int:
 
 
 # -------------------------------------------------------------------------
+# Stage 2: region annotation, def-use, chain collection
+# -------------------------------------------------------------------------
+
+def annotate_regions(program: Program) -> None:
+    """Tag each instruction in the program with the index of the enclosing
+    ``;; Region`` and (if present) ``;; SubRegion`` markers.
+
+    Instructions preceding the first marker in a block receive ``None``
+    tags, matching their default state.
+    """
+    for bb in program.blocks:
+        cur_region: Optional[int] = None
+        cur_sub: Optional[int] = None
+        for inst in bb.instructions:
+            if inst.region_marker is not None:
+                cur_region = inst.region_marker.region
+                cur_sub = None
+            if inst.subregion_marker is not None:
+                cur_sub = inst.subregion_marker.sub_region
+            inst.region_idx = cur_region
+            inst.sub_region_idx = cur_sub
+
+
+def _iter_regs(reg_iter) -> Iterator[tuple[str, int]]:
+    """Flatten a list of Register into (kind, logical_id) pairs."""
+    for reg in reg_iter:
+        for rid in reg.ids:
+            yield (reg.kind, rid)
+
+
+@dataclass
+class DefUseIndex:
+    """Linear per-block def-use map keyed on ``(kind, logical_id)``.
+
+    ``defs`` lists every instruction that writes that register in source
+    order; ``uses`` lists every instruction that reads it.  Unmodified
+    passes use this to trace ds_load dst → WMMA src links.
+    """
+    defs: dict[tuple[str, int], list[Instruction]] = field(default_factory=dict)
+    uses: dict[tuple[str, int], list[Instruction]] = field(default_factory=dict)
+
+    def add_def(self, reg_id: tuple[str, int], inst: Instruction) -> None:
+        self.defs.setdefault(reg_id, []).append(inst)
+
+    def add_use(self, reg_id: tuple[str, int], inst: Instruction) -> None:
+        self.uses.setdefault(reg_id, []).append(inst)
+
+    def last_def_before(self, reg_id: tuple[str, int],
+                        inst: Instruction) -> Optional[Instruction]:
+        """Return the most recent definer of ``reg_id`` strictly before
+        ``inst`` within the same basic block, or None."""
+        defs = self.defs.get(reg_id, [])
+        best: Optional[Instruction] = None
+        for d in defs:
+            if d.parent_bb is not inst.parent_bb:
+                continue
+            if d.index < inst.index:
+                best = d
+            else:
+                break
+        return best
+
+
+def _add_insts_to_index(insts: Iterator[Instruction],
+                        idx: DefUseIndex) -> None:
+    for inst in insts:
+        if not inst.opcode or inst.opcode == '__asm_block__':
+            continue
+        if not inst.operands:
+            continue
+        dst_op = inst.operands[0]
+        if dst_op.regs:
+            # Treat the first operand as the def for every instruction
+            # that has register operands.  Overbroad for compares (which
+            # define scalars), harmless for the VGPR flows we trace.
+            for rid in _iter_regs(dst_op.regs):
+                idx.add_def(rid, inst)
+        for op in inst.operands[1:]:
+            for rid in _iter_regs(op.regs):
+                idx.add_use(rid, inst)
+
+
+def build_def_use_index(bb: BasicBlock) -> DefUseIndex:
+    """Scan a basic block linearly and index logical VGPR defs and uses."""
+    idx = DefUseIndex()
+    _add_insts_to_index(iter(bb.instructions), idx)
+    return idx
+
+
+def build_program_def_use_index(program: Program) -> DefUseIndex:
+    """Scan the whole program in block order and index logical VGPR defs
+    and uses.  Used for tracing cross-BB flows (prologue ds_load → loop
+    WMMA, epilogue ds_load → epilogue WMMA)."""
+    idx = DefUseIndex()
+    _add_insts_to_index(program.iter_instructions(), idx)
+    return idx
+
+
+def _program_order(inst: Instruction, block_order: dict[str, int]) -> tuple[int, int]:
+    """A sortable key reflecting program order across blocks."""
+    bb_name = inst.parent_bb.name if inst.parent_bb else ""
+    return (block_order.get(bb_name, 0), inst.index)
+
+
+# -------------------------------------------------------------------------
+# WMMA chains
+# -------------------------------------------------------------------------
+
+@dataclass
+class WMMAChain:
+    """A group of WMMA instructions that share the same accumulator
+    register range.  All WMMAs in the chain have ``dst == src2``, so the
+    chain forms a straight-line accumulation sequence (possibly
+    interleaved with other WMMAs in the scheduled assembly)."""
+    canonical: Register
+    wmmas: list[Instruction] = field(default_factory=list)
+
+    @property
+    def size(self) -> int:
+        return len(self.wmmas)
+
+    def summary(self) -> str:
+        return (f"WMMAChain(dst={self.canonical}, size={self.size}, "
+                f"bb={self.wmmas[0].parent_bb.name if self.wmmas else '?'})")
+
+
+def collect_wmma_chains(program: Program) -> list[WMMAChain]:
+    """Group WMMA instructions by their accumulator register.
+
+    Returns a list of :class:`WMMAChain` objects, one per distinct dst
+    register used by any WMMA in the program.  Instructions are linked
+    back via ``Instruction.wmma_chain``.
+    """
+    chains: dict[Register, WMMAChain] = {}
+    for inst in program.iter_instructions():
+        if not inst.opcode.startswith('v_wmma'):
+            continue
+        dst = inst.dst_reg()
+        if dst is None:
+            continue
+        chain = chains.get(dst)
+        if chain is None:
+            chain = WMMAChain(canonical=dst)
+            chains[dst] = chain
+        chain.wmmas.append(inst)
+        inst.wmma_chain = chain
+    return list(chains.values())
+
+
+# -------------------------------------------------------------------------
+# DS-load chains
+# -------------------------------------------------------------------------
+
+def _is_ds_load(inst: Instruction) -> bool:
+    return inst.opcode.startswith('ds_load') or inst.opcode.startswith('ds_read')
+
+
+@dataclass
+class DSChain:
+    """A group of ds_load instructions that together populate a single
+    logical tile tensor.
+
+    Two ds_loads belong to the same tile when their destinations feed
+    the same operand slot (``src0``, ``src1``, or ``src2``) of the same
+    WMMAChain.  ``operand_idx`` records that slot.
+    """
+    wmma_chain: WMMAChain
+    operand_idx: int          # 1 == src0, 2 == src1, 3 == src2 in MLIR order
+    ds_loads: list[Instruction] = field(default_factory=list)
+    consumers: list[Instruction] = field(default_factory=list)  # WMMA users
+
+    def data_regs(self) -> list[Register]:
+        return [d.dst_reg() for d in self.ds_loads if d.dst_reg()]
+
+    def summary(self) -> str:
+        regs = self.data_regs()
+        span = f"{regs[0]}..{regs[-1]}" if regs else "?"
+        return (f"DSChain(#loads={len(self.ds_loads)}, regs={span}, "
+                f"→ chain dst={self.wmma_chain.canonical}, "
+                f"operand=src{self.operand_idx - 1})")
+
+
+def collect_ds_chains(program: Program) -> list[DSChain]:
+    """For each ds_load in the program, identify the WMMAChain and
+    operand slot it feeds, and group loads feeding the same
+    (chain, operand) pair into one :class:`DSChain`.
+
+    The consumer search is program-wide so that ds_loads in the
+    prologue feeding first-iteration loop WMMAs are correctly paired
+    with their loop consumers (and similarly for epilogue chains that
+    span blocks).
+
+    ds_loads whose output is never consumed by a WMMA (address setup,
+    unused scratch, ...) are omitted from the result.
+    """
+    if not any(i.wmma_chain for i in program.iter_instructions()
+               if i.opcode.startswith('v_wmma')):
+        collect_wmma_chains(program)
+
+    # Program-wide index + a block-order map so we can compare positions
+    # across basic blocks.
+    pindex = build_program_def_use_index(program)
+    block_order = {bb.name: i for i, bb in enumerate(program.blocks)}
+
+    chains: dict[tuple[int, int], DSChain] = {}
+    for inst in program.iter_instructions():
+        if not _is_ds_load(inst):
+            continue
+        dst = inst.dst_reg()
+        if dst is None or inst.parent_bb is None:
+            continue
+        load_key = _program_order(inst, block_order)
+        # Locate the first WMMA consumer of any VGPR in dst's range,
+        # scanning program-wide so prologue ds_loads are paired with
+        # their first-iteration loop WMMA consumer.
+        best_user: Optional[Instruction] = None
+        best_slot: Optional[int] = None
+        best_key: Optional[tuple[int, int]] = None
+        for rid in _iter_regs([dst]):
+            for user in pindex.uses.get(rid, []):
+                if not user.opcode.startswith('v_wmma'):
+                    continue
+                user_key = _program_order(user, block_order)
+                if user_key <= load_key:
+                    continue
+                # Identify which operand slot the ds_load feeds.
+                slot = None
+                for slot_idx, op in enumerate(user.operands[1:], start=1):
+                    if any(uid == rid for uid in _iter_regs(op.regs)):
+                        slot = slot_idx
+                        break
+                if slot is None:
+                    continue
+                if best_user is None or user_key < best_key:
+                    best_user = user
+                    best_slot = slot
+                    best_key = user_key
+        if best_user is None or best_user.wmma_chain is None:
+            continue
+        key = (id(best_user.wmma_chain), best_slot)
+        chain = chains.get(key)
+        if chain is None:
+            chain = DSChain(wmma_chain=best_user.wmma_chain,
+                            operand_idx=best_slot)
+            chains[key] = chain
+        chain.ds_loads.append(inst)
+        if best_user not in chain.consumers:
+            chain.consumers.append(best_user)
+        inst.ds_chain = chain
+    return list(chains.values())
+
+
+# -------------------------------------------------------------------------
+# Human-readable diagnostic report
+# -------------------------------------------------------------------------
+
+def report_chains(program: Program) -> str:
+    """Build a human-readable summary of the chains in the program.
+
+    Intended for ``TRITON_ENABLE_AMDGCN_AS=2`` runs and for debugging the
+    upcoming bank-assignment stage.  Format is informational only.
+    """
+    lines: list[str] = []
+    wmma_chains = collect_wmma_chains(program)
+    ds_chains = collect_ds_chains(program)
+
+    lines.append(f"WMMA chains: {len(wmma_chains)}")
+    for chain in sorted(wmma_chains, key=lambda c: c.canonical.start):
+        bbs = {w.parent_bb.name for w in chain.wmmas if w.parent_bb}
+        regions = sorted({w.region_idx for w in chain.wmmas
+                          if w.region_idx is not None})
+        lines.append(f"  {chain.summary()} regions={regions} bbs={sorted(bbs)}")
+
+    lines.append(f"DS chains: {len(ds_chains)}")
+    for chain in sorted(ds_chains,
+                        key=lambda c: (c.wmma_chain.canonical.start,
+                                       c.operand_idx)):
+        regions = sorted({d.region_idx for d in chain.ds_loads
+                          if d.region_idx is not None})
+        lines.append(f"  {chain.summary()} regions={regions}")
+
+    return "\n".join(lines)
+
+
+# -------------------------------------------------------------------------
 # Round-trip emit
 # -------------------------------------------------------------------------
 
@@ -863,6 +1155,8 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
     n_waits = merge_dscnt_waits(program)
     n_barriers = overlap_wmma_with_barrier(program)
     if verbose:
+        annotate_regions(program)
         print(f"[amdgcnas_gfx12] merged {n_waits} s_wait_dscnt, "
               f"hoisted {n_barriers} wmma into barrier pairs")
+        print(report_chains(program))
     return emit_program(program)
