@@ -5,8 +5,10 @@ import pytest
 
 from triton.tools.amdgcnas_gfx12 import (
     RegionMarker,
+    _encode_msb_byte,
     emit_program,
     find_region_spans,
+    hoist_loop_invariant_addrs,
     merge_dscnt_waits,
     overlap_wmma_with_barrier,
     parse_asm,
@@ -312,6 +314,201 @@ class TestOverlapWmmaWithBarrier:
         moved = overlap_wmma_with_barrier(prog)
         assert moved == 0
         assert emit_program(prog) == before
+
+
+# -------------------------------------------------------------------------
+# hoist_loop_invariant_addrs
+# -------------------------------------------------------------------------
+
+class TestEncodeMsbByte:
+
+    def test_all_zero(self):
+        assert _encode_msb_byte(dst=0, src0=0, src1=0, src2=0) == 0x00
+
+    def test_dst_only(self):
+        # 0x80 → dst=2, others=0
+        assert _encode_msb_byte(dst=2, src0=0, src1=0, src2=0) == 0x80
+
+    def test_all_fields(self):
+        # bits 1-0=src0, 3-2=src1, 5-4=src2, 7-6=dst
+        # dst=1, src0=2, src1=2, src2=1 → 0x5a
+        assert _encode_msb_byte(dst=1, src0=2, src1=2, src2=1) == 0x5a
+
+
+def _wrap_loop(body: str, prologue: str = "", epilogue: str = "") -> str:
+    """Wrap an assembly body in a minimal program with an explicit
+    preheader (``.Lpre``) and a self-branching loop (``.Lloop``)."""
+    return (
+        ".text\n"
+        ".globl test_kernel\n"
+        "test_kernel:\n"
+        "; %bb.0:\n"
+        ".Lpre:\n"
+        f"{prologue}"
+        ".Lloop:\n"
+        f"{body}"
+        "\ts_cbranch_scc1 .Lloop\n"
+        f"{epilogue}"
+        "\ts_endpgm\n"
+    )
+
+
+class TestHoistLoopInvariantAddrs:
+
+    def test_basic_single_candidate(self):
+        # Prologue defines v131.  Loop has one v_add that reads it.
+        # (Plus a dummy ds_load that uses the computed address, to make
+        # it resemble the v9 pattern.)
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\tv_add_nc_u32_e32 v132, 0x100, v131\n"
+            "\tds_load_b128 v[10:13], v132\n"
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        assert n == 1
+        out = emit_program(prog)
+        # The v_add moved to the preheader.
+        pre_idx = out.index(".Lpre:")
+        loop_idx = out.index(".Lloop:")
+        vadd_idx = out.index("v_add_nc_u32_e32 v132")
+        assert pre_idx < vadd_idx < loop_idx
+
+    def test_forward_through_trivial_copy(self):
+        # Loop has a trivial copy (v_add ..., 0, ...) that feeds an
+        # otherwise-hoistable v_add.  Both should be hoisted (after the
+        # copy is forwarded) and the copy removed from the loop.
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\tv_add_nc_u32_e32 v38, 0, v131\n"     # trivial copy
+            "\tv_add_nc_u32_e32 v132, 0x100, v38\n"  # consumes copy
+            "\tds_load_b128 v[10:13], v132\n"
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        # One address v_add + one trivial copy removed.
+        assert n == 2
+        out = emit_program(prog)
+        # Address v_add now reads the prologue root (v131), not v38.
+        pre_idx = out.index(".Lpre:")
+        loop_idx = out.index(".Lloop:")
+        hoisted_line = [
+            ln for ln in out.splitlines()
+            if "v_add_nc_u32_e32 v132" in ln
+        ][0]
+        assert "v131" in hoisted_line
+        assert "v38" not in hoisted_line
+        # Trivial copy is gone entirely.
+        assert "v_add_nc_u32_e32 v38" not in out
+
+    def test_skip_when_source_not_invariant(self):
+        # Source of the v_add is defined inside the loop (not a trivial
+        # copy, so we can't forward).
+        body = (
+            "\tv_add_u32 v38, v100, v101\n"           # non-trivial loop def
+            "\tv_add_nc_u32_e32 v132, 0x100, v38\n"   # source isn't invariant
+            "\tds_load_b128 v[10:13], v132\n"
+        )
+        prog = parse_asm(_wrap_loop(body))
+        n = hoist_loop_invariant_addrs(prog)
+        assert n == 0
+
+    def test_hoist_with_rename_when_dst_aliased(self):
+        # dst v132 is also written as a ds_load data range (simulates the
+        # v9 v646/v512 dual-role case).  Instead of bailing, the pass
+        # should allocate a fresh VGPR, rewrite the downstream address
+        # consumer to that new register, and hoist the v_add.  The data
+        # ds_load that writes v[132:135] must be left untouched.
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\tds_load_b128 v[132:135], v200\n"       # data write to v132
+            "\tv_add_nc_u32_e32 v132, 0x100, v131\n"  # addr def (candidate)
+            "\tds_load_b128 v[10:13], v132\n"          # addr use (rename)
+            "\tv_wmma_f32_16x16x32_f16 v[200:207], v[10:17], v[132:139], v[200:207]\n"
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        assert n == 1
+        out = emit_program(prog)
+        # v_add is now in the preheader and writes a different VGPR.
+        pre = out[out.index(".Lpre:"):out.index(".Lloop:")]
+        loop = out[out.index(".Lloop:"):]
+        assert "v_add_nc_u32_e32" in pre
+        # No v_add remains in the loop body.
+        assert "v_add_nc_u32_e32" not in loop
+        # The data ds_load that writes v[132:135] is unchanged.
+        assert "ds_load_b128 v[132:135], v200" in loop
+        # The downstream addr-use ds_load no longer references v132: it
+        # was renamed to the fresh register the pass allocated.
+        addr_line = [ln for ln in loop.splitlines()
+                     if "ds_load_b128 v[10:13]" in ln][0]
+        assert ", v132" not in addr_line
+        # The wmma's src2 v[132:139] remains as a data consumer
+        # (range reads are never renamed).
+        assert "v[132:139]" in loop
+
+    def test_rename_stops_at_kill_def(self):
+        # If a later instruction redefines the addr VGPR (data write),
+        # reads beyond that kill point must NOT be renamed -- they
+        # consume the new (data) value, not the hoisted address.
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\tds_load_b128 v[132:135], v200\n"              # initial data def
+            "\tv_add_nc_u32_e32 v132, 0x100, v131\n"         # addr def
+            "\tds_load_b128 v[10:13], v132\n"                 # addr use (rename)
+            "\tds_load_b128 v[132:135], v201 offset:32\n"     # kill (redef)
+            "\tv_add_u32 v50, v132, 0\n"                      # data use (keep)
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        assert n == 1
+        out = emit_program(prog)
+        loop = out[out.index(".Lloop:"):]
+        # Data use after the kill still reads v132.
+        post_kill_line = [ln for ln in loop.splitlines()
+                          if "v_add_u32 v50" in ln][0]
+        assert "v132" in post_kill_line
+
+    def test_strips_adjacent_wait_and_delay(self):
+        # The s_wait_alu after a hoisted v_add was emitted to drain the
+        # v_add's VA_VDST counter; after hoist it would just stall the
+        # wave waiting for whatever VALU happens to be pending.  Same
+        # for the s_delay_alu before the v_add (a hint about its
+        # latency).  Both should be removed alongside the v_add.
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\ts_delay_alu instid0(VALU_DEP_1)\n"
+            "\tv_add_nc_u32_e32 v132, 0x100, v131\n"
+            "\ts_wait_alu depctr_va_vdst(0)\n"
+            "\tds_load_b128 v[10:13], v132\n"
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        # 1 v_add + 1 s_delay_alu + 1 s_wait_alu.
+        assert n == 3
+        out = emit_program(prog)
+        loop = out[out.index(".Lloop:"):]
+        assert "v_add_nc_u32_e32" not in loop
+        assert "s_delay_alu" not in loop
+        assert "s_wait_alu" not in loop
+
+    def test_multiple_candidates_single_msb_setup(self):
+        # Two hoistable v_adds with the same MSB requirement should be
+        # grouped under a single s_set_vgpr_msb.
+        prologue = "\tv_add3_u32 v131, 1, 2, 0\n"
+        body = (
+            "\tv_add_nc_u32_e32 v132, 0x100, v131\n"
+            "\tv_add_nc_u32_e32 v133, 0x200, v131\n"
+            "\tds_load_b128 v[10:13], v132\n"
+            "\tds_load_b128 v[14:17], v133\n"
+        )
+        prog = parse_asm(_wrap_loop(body, prologue=prologue))
+        n = hoist_loop_invariant_addrs(prog)
+        assert n == 2
+        out = emit_program(prog)
+        # Exactly one s_set_vgpr_msb was emitted by the pass.
+        pre_section = out[out.index(".Lpre:"):out.index(".Lloop:")]
+        assert pre_section.count("s_set_vgpr_msb") == 1
 
 
 # -------------------------------------------------------------------------

@@ -103,19 +103,29 @@ class Register:
 class Operand:
     """A single instruction operand.
 
-    ``text`` is the original operand text as it appeared in the source
-    (excluding the logical-id comment).  ``regs`` is the list of registers
-    mentioned in the operand (usually 0 or 1).  ``logical_text`` is the
-    ``/*v[...]*/`` annotation text if present, else ``None``.
+    ``text`` is just the register part as it appeared in the source
+    (e.g., ``v134`` or ``v[230:233]``).  ``regs`` is the list of
+    registers mentioned in the operand (usually 0 or 1).
+    ``logical_text`` is the ``/*v[...]*/`` annotation if present, else
+    ``None``.  ``suffix`` is any post-comment modifier such as
+    ``offset:32``.
+
+    Emit re-assembles them in the canonical AMDGCN order:
+    ``<reg> <logical_text> <suffix>`` so that subsequent re-parses (and
+    the assembler) see the same shape as the LLVM-emitted source.
     """
     text: str
     regs: list[Register]
     logical_text: Optional[str] = None
+    suffix: Optional[str] = None
 
     def emit(self) -> str:
+        parts: list[str] = [self.text]
         if self.logical_text is not None:
-            return f"{self.text} {self.logical_text}"
-        return self.text
+            parts.append(self.logical_text)
+        if self.suffix:
+            parts.append(self.suffix)
+        return " ".join(parts)
 
 
 # -------------------------------------------------------------------------
@@ -341,25 +351,23 @@ def _parse_operand(text: str) -> Operand:
             ids=list(range(log_lo, log_hi + 1)),
             raw_ids=list(range(raw_lo, raw_hi + 1)),
         ))
-        op_text = text[:m.start()].rstrip() + text[m.start():m.end(2) + 1]
+        # Just the bracketed register part, e.g. "v[192:199]".
+        op_text = text[m.start():m.end(2) + 1]
         logical_text = f"/*v[{log_lo}:{log_hi}]*/"
-        # Preserve any suffix modifiers (offset:, etc.) after the comment
-        suffix = text[m.end():].lstrip()
-        if suffix:
-            op_text = f"{op_text} {suffix}"
-        return Operand(text=op_text, regs=regs, logical_text=logical_text)
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs,
+                       logical_text=logical_text, suffix=suffix)
 
     m = _VGPR_SINGLE_COMMENT.search(text)
     if m:
         raw = int(m.group(1))
         log = int(m.group(2))
         regs.append(Register(kind='v', ids=[log], raw_ids=[raw]))
-        op_text = text[:m.start()].rstrip() + f"v{raw}"
+        op_text = f"v{raw}"
         logical_text = f"/*v{log}*/"
-        suffix = text[m.end():].lstrip()
-        if suffix:
-            op_text = f"{op_text} {suffix}"
-        return Operand(text=op_text, regs=regs, logical_text=logical_text)
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs,
+                       logical_text=logical_text, suffix=suffix)
 
     # No comment forms.
     m = _VGPR_RANGE.search(text)
@@ -1132,6 +1140,579 @@ def report_chains(program: Program) -> str:
 
 
 # -------------------------------------------------------------------------
+# LICM: hoist loop-invariant address computations out of the loop
+# -------------------------------------------------------------------------
+
+def _encode_msb_byte(dst: int, src0: int, src1: int, src2: int) -> int:
+    """Encode per-operand MSB values into the low byte of an
+    ``s_set_vgpr_msb`` immediate (new-state byte)."""
+    return ((src0 & 3) |
+            ((src1 & 3) << 2) |
+            ((src2 & 3) << 4) |
+            ((dst & 3) << 6))
+
+
+def _find_self_loop(program: Program) -> Optional[BasicBlock]:
+    """Return the BasicBlock that ends with an ``s_cbranch`` back to
+    itself (the loop body), or None."""
+    for bb in program.blocks:
+        for inst in bb.instructions:
+            if not inst.opcode.startswith('s_cbranch'):
+                continue
+            # The branch target is in the last operand's text.
+            tgt = inst.operands[-1].text if inst.operands else ""
+            if tgt.strip() == bb.name:
+                return bb
+    return None
+
+
+def _find_preheader(program: Program,
+                    loop_bb: BasicBlock) -> Optional[BasicBlock]:
+    """The preheader is the BB immediately preceding ``loop_bb`` in
+    program order (fall-through entry to the loop)."""
+    try:
+        idx = program.blocks.index(loop_bb)
+    except ValueError:
+        return None
+    if idx == 0:
+        return None
+    return program.blocks[idx - 1]
+
+
+def _is_integer_literal(text: str) -> bool:
+    try:
+        int(text.strip(), 0)
+        return True
+    except ValueError:
+        return False
+
+
+def _collect_trivial_copies(
+    loop_bb: BasicBlock,
+) -> dict[tuple[str, int], tuple[Instruction, Register]]:
+    """Find ``v_add_nc_u32_e32 dst, 0, src_vgpr`` instructions in the
+    loop -- these add zero and behave as moves.  Returns a map from the
+    destination's ``(kind, logical_id)`` to ``(copy_inst, src_reg)``."""
+    copies: dict[tuple[str, int], tuple[Instruction, Register]] = {}
+    for inst in loop_bb.instructions:
+        if inst.opcode != 'v_add_nc_u32_e32':
+            continue
+        if len(inst.operands) < 3:
+            continue
+        if inst.operands[1].text.strip() != '0':
+            continue
+        if not inst.operands[0].regs or not inst.operands[2].regs:
+            continue
+        dst = inst.operands[0].regs[0]
+        src = inst.operands[2].regs[0]
+        copies[(dst.kind, dst.ids[0])] = (inst, src)
+    return copies
+
+
+def _collect_used_logical_vgprs(program: Program) -> set[int]:
+    """All logical VGPR ids mentioned by any operand in the program."""
+    used: set[int] = set()
+    for inst in program.iter_instructions():
+        for op in inst.operands:
+            for r in op.regs:
+                if r.kind == 'v':
+                    used.update(r.ids)
+    return used
+
+
+_VGPR_BUDGET_RE = re.compile(r'(\.amdhsa_next_free_vgpr\s+)(\d+)')
+_VGPR_COUNT_RE = re.compile(r'(\.vgpr_count:\s*)(\d+)')
+
+
+def _vgpr_budget(program: Program) -> int:
+    """The kernel-declared logical VGPR budget (one past the highest
+    addressable VGPR).  Read from ``.amdhsa_next_free_vgpr`` in the
+    kernel descriptor (which usually lives in ``tail_lines`` after the
+    function body).  Defaults to 1024 if the directive isn't present."""
+    for line_list in (program.header_lines, program.tail_lines):
+        for line in line_list:
+            m = _VGPR_BUDGET_RE.search(line)
+            if m:
+                return int(m.group(2))
+    for bb in program.blocks:
+        for inst in bb.instructions:
+            m = _VGPR_BUDGET_RE.search(inst.raw_line)
+            if m:
+                return int(m.group(2))
+    return 1024
+
+
+def _set_vgpr_budget(program: Program, new_budget: int) -> None:
+    """Update both ``.amdhsa_next_free_vgpr`` and ``.vgpr_count`` lines
+    to ``new_budget`` so the kernel descriptor matches the actual
+    logical VGPR usage after hoisting."""
+
+    def _patch(line: str) -> str:
+        line = _VGPR_BUDGET_RE.sub(rf'\g<1>{new_budget}', line)
+        line = _VGPR_COUNT_RE.sub(rf'\g<1>{new_budget}', line)
+        return line
+
+    program.header_lines = [_patch(ln) for ln in program.header_lines]
+    program.tail_lines = [_patch(ln) for ln in program.tail_lines]
+    for bb in program.blocks:
+        for inst in bb.instructions:
+            patched = _patch(inst.raw_line)
+            if patched != inst.raw_line:
+                inst.raw_line = patched
+
+
+def _allocate_unused_vgpr(used: set[int],
+                          budget: Optional[int] = None) -> Optional[int]:
+    """Find an unused logical VGPR id, mark it used, and return it.
+
+    Search order:
+      1. Slots within ``budget`` (top-down, so tile-data ranges near
+         the bottom aren't disturbed).
+      2. Slots beyond ``budget`` (bottom-up, so any descriptor bump
+         stays as small as possible).
+
+    Returns None if every slot in [0, 1024) is already taken.
+
+    Bank choice doesn't matter at this stage: bank assignment is
+    handled in a later stage and the current LLVM-emitted layout is
+    already sub-optimal.  We just need ANY free VGPR so the v_add can
+    be hoisted out of the loop and break the dual-role assignment."""
+    upper = budget if budget is not None else 1024
+    for v in range(upper - 1, -1, -1):
+        if v not in used:
+            used.add(v)
+            return v
+    if budget is not None and budget < 1024:
+        for v in range(budget, 1024):
+            if v not in used:
+                used.add(v)
+                return v
+    return None
+
+
+def _rename_single_vgpr(op: Operand, old_logical: int, old_raw: int,
+                        new_raw: int, new_logical: int) -> bool:
+    """If ``op`` references a single-reg VGPR with PHYSICAL id
+    ``old_logical`` (encoded as raw ``old_raw`` plus the implied MSB),
+    rewrite it to ``new_raw`` / ``new_logical``.  Updates ``op.text``,
+    ``op.logical_text`` and ``op.regs``.  Returns True if a rename
+    occurred.
+
+    Matching on logical (physical) id rather than raw is essential:
+    different MSB contexts make the same raw id refer to different
+    physical registers, and we must only rewrite the consumers that
+    actually read the renamed register's physical bank."""
+    pattern = re.compile(rf'\bv{old_raw}\b')
+    modified = False
+    for i, r in enumerate(op.regs):
+        if (r.kind == 'v' and len(r.ids) == 1 and
+                len(r.raw_ids) == 1 and r.ids[0] == old_logical):
+            op.regs[i] = Register(kind='v', ids=[new_logical],
+                                  raw_ids=[new_raw])
+            modified = True
+    if not modified:
+        return False
+    op.text = pattern.sub(f'v{new_raw}', op.text)
+    if op.logical_text is not None:
+        op.logical_text = f'/*v{new_logical}*/'
+    return True
+
+
+def _rebuild_raw_line(inst: Instruction) -> None:
+    """Regenerate ``inst.raw_line`` from current opcode/operands.  Used
+    after an operand has been rewritten in place so the emitter picks
+    up the change."""
+    parts = [inst.opcode]
+    if inst.operands:
+        parts.append(", ".join(op.emit() for op in inst.operands))
+    line = "\t" + " ".join(parts)
+    if inst.trailing_comment is not None:
+        line = f"{line:<40} ;{inst.trailing_comment}"
+    inst.raw_line = line
+
+
+def _adjust_msbs_for_renames(loop_bb: BasicBlock) -> bool:
+    """Walk each ``s_set_vgpr_msb`` in the loop and update its src0 (and
+    dst) bank fields to match the actual register usage of the
+    consumers in its scope.  This catches MSB drift caused by VGPR
+    renames where the consumer now reads from a different bank than
+    the LLVM-emitted ``s_set_vgpr_msb`` was originally set to.
+
+    For each MSB scope ``[m, next_m)``:
+      - Collect required dst/src0 banks from ds_load consumers in that
+        scope (operand[0]=dst, operand[1]=addr/src0).
+      - If consumers disagree on a field, the LLVM-emitted MSB couldn't
+        cover them collectively after rename; we leave the field alone
+        on the assumption the next-stage bank assignment will rebuild
+        MSBs from scratch.
+
+    Returns True (always — left as boolean for future conflict signaling).
+    """
+    msb_positions = [(i, inst) for i, inst in enumerate(loop_bb.instructions)
+                     if inst.opcode == 's_set_vgpr_msb' and inst.msb_bits]
+    for k, (mi, msb_inst) in enumerate(msb_positions):
+        scope_end = (msb_positions[k + 1][0]
+                     if k + 1 < len(msb_positions)
+                     else len(loop_bb.instructions))
+
+        required_dst: set[int] = set()
+        required_src0: set[int] = set()
+        for j in range(mi + 1, scope_end):
+            inst = loop_bb.instructions[j]
+            if not _is_ds_load(inst):
+                continue
+            if inst.operands and inst.operands[0].regs:
+                r = inst.operands[0].regs[0]
+                if r.kind == 'v':
+                    required_dst.add(r.msb())
+            if len(inst.operands) >= 2 and inst.operands[1].regs:
+                r = inst.operands[1].regs[0]
+                if r.kind == 'v' and len(r.ids) == 1:
+                    required_src0.add(r.msb())
+
+        d, s0, s1, s2 = msb_inst.msb_bits
+        new_d = required_dst.pop() if len(required_dst) == 1 else d
+        new_s0 = required_src0.pop() if len(required_src0) == 1 else s0
+        if (new_d, new_s0) == (d, s0):
+            continue
+
+        new_state = (new_d, new_s0, s1, s2)
+        new_low = _encode_msb_byte(*new_state)
+        try:
+            original_imm = int(msb_inst.operands[0].text, 0)
+        except ValueError:
+            original_imm = 0
+        high_byte = (original_imm >> 8) & 0xff
+        new_imm = (high_byte << 8) | new_low
+        msb_inst.operands[0].text = f"{new_imm:#x}"
+        msb_inst.msb_bits = new_state
+        if msb_inst.trailing_comment is not None:
+            msb_inst.trailing_comment = (f"  msbs: dst={new_d} src0={new_s0} "
+                                         f"src1={s1} src2={s2}")
+        _rebuild_raw_line(msb_inst)
+    return True
+
+
+def _rename_live_range(inst: Instruction, loop_bb: BasicBlock,
+                       program: Program, old_logical: int,
+                       old_raw: int, new_raw: int, new_logical: int) -> None:
+    """Rename single-reg READs of physical ``old_logical`` (encoded as
+    raw ``old_raw`` + implicit MSB) to ``new_raw`` / ``new_logical``,
+    starting just after ``inst`` (the candidate v_add) and continuing
+    through the rest of the loop body AND any subsequent basic blocks
+    (epilogue).
+
+    Stops as soon as another instruction DEFINES physical
+    ``old_logical`` (its operand[0] range includes that physical id) --
+    that def ends the v_add's live range and later reads target the
+    new def's value.
+
+    Both the rename match and the kill check use the parsed Register's
+    *logical* (= physical) ids, not raw ids.  Without that, a wmma
+    writing raw v[128:135] with dst MSB=0 (physical v[128:135]) would
+    look like a kill of physical v646 just because raw v134 falls in
+    the range -- but they're entirely different physical registers.
+
+    The epilogue extension is essential: the hoisted v_add's value
+    persists past the loop's back-edge, and the LLVM-emitted epilogue
+    typically reads the value the in-loop v_add left in its dst on the
+    final iteration."""
+    try:
+        loop_idx_in_prog = program.blocks.index(loop_bb)
+    except ValueError:
+        loop_idx_in_prog = -1
+    try:
+        start_pos = loop_bb.instructions.index(inst)
+    except ValueError:
+        return
+
+    bbs = [loop_bb]
+    if loop_idx_in_prog >= 0:
+        bbs.extend(program.blocks[loop_idx_in_prog + 1:])
+
+    for bi, bb in enumerate(bbs):
+        first = start_pos + 1 if bi == 0 else 0
+        for i in range(first, len(bb.instructions)):
+            other = bb.instructions[i]
+            if not other.opcode or other.opcode == '__asm_block__':
+                continue
+            modified = False
+            for op in other.operands[1:]:
+                if _rename_single_vgpr(op, old_logical, old_raw,
+                                       new_raw, new_logical):
+                    modified = True
+            if modified:
+                _rebuild_raw_line(other)
+            if other.operands:
+                for r in other.operands[0].regs:
+                    if (r.kind == 'v' and r.ids and
+                            r.ids[0] <= old_logical <= r.ids[-1]):
+                        return
+
+
+def _resolve_to_loop_invariant(
+    reg: Register,
+    loop_bb: BasicBlock,
+    pindex: DefUseIndex,
+    copies: dict[tuple[str, int], tuple[Instruction, Register]],
+) -> Optional[Register]:
+    """Follow trivial copies inside ``loop_bb`` to trace ``reg`` back to
+    a definition that lives outside the loop.  Returns the
+    outside-loop-defined ``Register`` if reachable, else None."""
+    visited: set[tuple[str, int]] = set()
+    current = reg
+    for _ in range(8):  # guard against pathological chains
+        key = (current.kind, current.ids[0])
+        if key in visited:
+            return None
+        visited.add(key)
+        defs_all = pindex.defs.get(key, [])
+        defs_in = [d for d in defs_all if d.parent_bb is loop_bb]
+        if not defs_in:
+            return current
+        if len(defs_in) != 1:
+            return None
+        if key not in copies:
+            return None
+        _, src = copies[key]
+        current = src
+    return None
+
+
+def hoist_loop_invariant_addrs(program: Program) -> int:
+    """Hoist loop-invariant v_add_nc_u32_e32 address computations out of
+    the loop into the preheader.
+
+    Targets the pattern emitted by the AMDGPU backend when
+    ``MachineLICM`` declines to hoist due to register pressure::
+
+        LOOP:
+            v_add_nc_u32_e32  <copy_dst>, 0, <prologue_vgpr>
+            ...
+            v_add_nc_u32_e32  <addr_dst>, <const_imm>, <copy_dst>
+            ...
+            ds_load_b128 ..., <addr_dst>
+
+    After hoisting the 4 address v_adds (and their shared trivial copy)
+    into the preheader, the loop body contains only the ds_loads.  The
+    hoisted v_adds each write a distinct destination and all read the
+    prologue-defined root register, so no intra-group VALU hazards
+    remain and no ``s_wait_alu`` / ``s_delay_alu`` is required between
+    them.
+
+    Returns the number of instructions hoisted (ds_load addr computations
+    plus the trivial copies they needed).
+    """
+    loop_bb = _find_self_loop(program)
+    if loop_bb is None:
+        return 0
+    preheader_bb = _find_preheader(program, loop_bb)
+    if preheader_bb is None:
+        return 0
+
+    pindex = build_program_def_use_index(program)
+    loop_idx = build_def_use_index(loop_bb)
+    copies = _collect_trivial_copies(loop_bb)
+
+    # Gather (inst, resolved_src_reg, needs_rename) for every
+    # v_add_nc_u32_e32 with (literal, vreg) source operands where the
+    # vreg resolves to a loop-invariant root.
+    #
+    # ``needs_rename=True`` means the dst is ALSO written by another
+    # instruction in the loop (e.g., a ds_load writing a data range
+    # that aliases the addr register).  We break that dual role by
+    # allocating a fresh VGPR in the same bank for the hoisted v_add
+    # and renaming its downstream address-use consumers.
+    candidates: list[tuple[Instruction, Register, bool]] = []
+    for inst in loop_bb.instructions:
+        if inst.opcode != 'v_add_nc_u32_e32':
+            continue
+        if len(inst.operands) < 3:
+            continue
+        # Skip trivial copies themselves -- they're handled via the
+        # copies map.
+        if inst.operands[1].text.strip() == '0':
+            continue
+        if not _is_integer_literal(inst.operands[1].text):
+            continue
+        if not inst.operands[0].regs or not inst.operands[2].regs:
+            continue
+        dst = inst.operands[0].regs[0]
+        src = inst.operands[2].regs[0]
+        dst_defs = loop_idx.defs.get((dst.kind, dst.ids[0]), [])
+        needs_rename = bool([d for d in dst_defs if d is not inst])
+        root = _resolve_to_loop_invariant(src, loop_bb, pindex, copies)
+        if root is None:
+            continue
+        candidates.append((inst, root, needs_rename))
+
+    if not candidates:
+        return 0
+
+    # Determine, BEFORE renaming, which trivial copies will be dead
+    # after hoist (consumers were all candidate v_adds, all going
+    # away).  We need this up front so the allocator can reuse those
+    # dst slots and the post-rename consumer check doesn't get fooled
+    # by the just-renamed reads.
+    candidate_inst_ids = {id(inst) for inst, _, _ in candidates}
+    removable_copies: set[int] = set()
+    for copy_key, (copy_inst, _) in copies.items():
+        has_other_consumer = False
+        for other in loop_bb.instructions:
+            if other is copy_inst or id(other) in candidate_inst_ids:
+                continue
+            for op in other.operands[1:]:
+                for r in op.regs:
+                    if (r.kind, r.ids[0]) == copy_key:
+                        has_other_consumer = True
+                        break
+                if has_other_consumer:
+                    break
+            if has_other_consumer:
+                break
+        if not has_other_consumer:
+            removable_copies.add(id(copy_inst))
+
+    # Allocate fresh VGPRs for each renamed candidate from any bank
+    # (bank assignment is a separate, later stage; here we just need
+    # any free VGPR so the v_add can be hoisted and the dual-role
+    # assignment broken).  Discard slots about to be vacated by
+    # removable trivial copies so the allocator can recycle them.
+    used_vgprs = _collect_used_logical_vgprs(program)
+    for copy_key, (copy_inst, _) in copies.items():
+        if id(copy_inst) in removable_copies:
+            used_vgprs.discard(copy_key[1])
+    original_budget = _vgpr_budget(program)
+    kept: list[tuple[Instruction, Register, bool]] = []
+    new_dsts: list[tuple[int, int]] = []  # (raw, logical) per kept candidate
+    for inst, root, needs_rename in candidates:
+        old = inst.operands[0].regs[0]
+        if not needs_rename:
+            kept.append((inst, root, False))
+            new_dsts.append((old.raw_ids[0], old.ids[0]))
+            continue
+        new_log = _allocate_unused_vgpr(used_vgprs, budget=original_budget)
+        if new_log is None:
+            continue
+        new_raw = new_log - (new_log // 256) * 256
+        kept.append((inst, root, True))
+        new_dsts.append((new_raw, new_log))
+        _rename_live_range(inst, loop_bb, program,
+                           old_logical=old.ids[0],
+                           old_raw=old.raw_ids[0],
+                           new_raw=new_raw, new_logical=new_log)
+
+    if not kept:
+        return 0
+    candidates = kept
+
+    # If we allocated VGPRs above the kernel's declared budget, bump
+    # both ``.amdhsa_next_free_vgpr`` and ``.vgpr_count`` so the
+    # runtime allocates enough physical VGPRs to back our new logicals.
+    max_logical = max(log for _, log in new_dsts) if new_dsts else 0
+    if max_logical >= original_budget:
+        _set_vgpr_budget(program, max_logical + 1)
+
+    # Sort candidates so same-(dst_msb, src_msb) groups are adjacent --
+    # lets us emit one ``s_set_vgpr_msb`` per group instead of one per
+    # v_add.
+    order = sorted(range(len(candidates)),
+                   key=lambda i: (new_dsts[i][1] // 256,
+                                  candidates[i][1].msb()))
+    candidates = [candidates[i] for i in order]
+    new_dsts = [new_dsts[i] for i in order]
+
+    # Build the raw_line for each hoisted instruction.  The source
+    # register is the loop-invariant ``root`` (forwarded through any
+    # trivial copy).  Emit a fresh ``s_set_vgpr_msb`` whenever the
+    # required (dst, src1) bank pair changes between candidates.
+    hoisted_lines: list[str] = []
+    last_state: Optional[tuple[int, int, int, int]] = None
+    for (inst, root, _), (new_raw, new_log) in zip(candidates, new_dsts):
+        dst_msb = new_log // 256
+        src_msb = root.msb()
+        state = (dst_msb, 0, src_msb, 0)
+        if state != last_state:
+            new_imm = _encode_msb_byte(*state)
+            hoisted_lines.append(f"\ts_set_vgpr_msb {new_imm:#x}")
+            last_state = state
+        imm_text = inst.operands[1].text.strip()
+        hoisted_lines.append(
+            f"\tv_add_nc_u32_e32 v{new_raw} /*v{new_log}*/, "
+            f"{imm_text}, v{root.raw_ids[0]} /*v{root.ids[0]}*/"
+        )
+
+    # Insert the new instructions into the preheader, just before the
+    # last ``s_set_vgpr_msb`` (which resets state to all zeros before the
+    # loop entry).  If no such instruction exists, append to the end.
+    insert_idx = len(preheader_bb.instructions)
+    for i in range(len(preheader_bb.instructions) - 1, -1, -1):
+        if preheader_bb.instructions[i].opcode == 's_set_vgpr_msb':
+            insert_idx = i
+            break
+    new_insts = [_parse_instruction_line(ln) for ln in hoisted_lines]
+    for inst in new_insts:
+        inst.parent_bb = preheader_bb
+    preheader_bb.instructions[insert_idx:insert_idx] = new_insts
+
+    # Remove the original v_adds from the loop, plus the trivial
+    # copies we already determined are dead after hoist.  Use object
+    # identity (not hash/equality) since Instruction is a dataclass
+    # that isn't frozen; lookups go through ``id()``.
+    to_remove_ids: set[int] = {id(inst) for inst, _, _ in candidates}
+    to_remove_ids |= removable_copies
+
+    # Also remove the s_delay_alu / s_wait_alu sandwiching each removed
+    # v_add.  LLVM emitted them to model the v_add's VALU latency
+    # (delay) and to drain its VA_VDST counter (wait); with the v_add
+    # gone they have no specific dependency to guard and would just
+    # stall the wave waiting for whatever wmma is currently pending.
+    insts = loop_bb.instructions
+    n = len(insts)
+
+    def _is_skip(i: int) -> bool:
+        op = insts[i].opcode
+        return not op or op == '.loc' or op == '__asm_block__'
+
+    extra_remove: set[int] = set()
+    for idx in range(n):
+        if id(insts[idx]) not in to_remove_ids:
+            continue
+        # s_wait_alu after the removed instruction (skip .loc/empty).
+        j = idx + 1
+        while j < n and _is_skip(j):
+            j += 1
+        if j < n and insts[j].opcode == 's_wait_alu':
+            extra_remove.add(id(insts[j]))
+        # s_delay_alu before the removed instruction.
+        j = idx - 1
+        while j >= 0 and _is_skip(j):
+            j -= 1
+        if j >= 0 and insts[j].opcode == 's_delay_alu':
+            extra_remove.add(id(insts[j]))
+    to_remove_ids |= extra_remove
+
+    loop_bb.instructions = [i for i in loop_bb.instructions
+                            if id(i) not in to_remove_ids]
+
+    # Update the LLVM-emitted s_set_vgpr_msb instructions in the loop
+    # body AND the epilogue blocks so each one's src0/dst banks match
+    # the (possibly renamed) consumers in its scope.  No-op when
+    # nothing was renamed.
+    loop_idx_in_prog = program.blocks.index(loop_bb)
+    for bb in program.blocks[loop_idx_in_prog:]:
+        _adjust_msbs_for_renames(bb)
+
+    # Re-index both blocks.
+    for i, inst in enumerate(preheader_bb.instructions):
+        inst.index = i
+    for i, inst in enumerate(loop_bb.instructions):
+        inst.index = i
+
+    return len(to_remove_ids)
+
+
+# -------------------------------------------------------------------------
 # Round-trip emit
 # -------------------------------------------------------------------------
 
@@ -1147,16 +1728,22 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
     """Apply gfx1250-specific assembly post-processing passes and return
     the updated assembly text.
 
-    Currently runs the peephole cleanups ``merge_dscnt_waits`` and
-    ``overlap_wmma_with_barrier``.  Future stages will add bank-aware
-    VGPR renaming.
+    Runs, in order:
+      - ``hoist_loop_invariant_addrs``  hoists loop-invariant v_add
+        address computations that MachineLICM declined to hoist.
+      - ``merge_dscnt_waits``           consolidates per-region
+        ``s_wait_dscnt`` instructions.
+      - ``overlap_wmma_with_barrier``   reorders wmma across barrier
+        signal/wait pairs to hide sync latency.
     """
     program = parse_asm(text)
+    n_hoisted = hoist_loop_invariant_addrs(program)
     n_waits = merge_dscnt_waits(program)
     n_barriers = overlap_wmma_with_barrier(program)
     if verbose:
         annotate_regions(program)
-        print(f"[amdgcnas_gfx12] merged {n_waits} s_wait_dscnt, "
+        print(f"[amdgcnas_gfx12] hoisted {n_hoisted} invariant addr insts, "
+              f"merged {n_waits} s_wait_dscnt, "
               f"hoisted {n_barriers} wmma into barrier pairs")
         print(report_chains(program))
     return emit_program(program)

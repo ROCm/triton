@@ -142,7 +142,7 @@ class TestParseInstruction:
         line = "\tds_load_b128 v[124:127] /*v[636:639]*/, v194 /*v706*/ offset:32"
         inst = _parse_instruction_line(line)
         assert len(inst.operands) == 2
-        assert inst.operands[1].text.endswith("offset:32")
+        assert inst.operands[1].suffix == "offset:32"
 
     def test_tensor_load_to_lds(self):
         line = "\ttensor_load_to_lds s[16:19], s[0:7]"
