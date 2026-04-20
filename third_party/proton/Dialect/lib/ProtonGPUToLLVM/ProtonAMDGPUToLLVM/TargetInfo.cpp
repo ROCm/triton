@@ -90,39 +90,62 @@ Value TargetInfo::globalTime(ConversionPatternRewriter &rewriter,
 }
 
 // https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/include/hip/amd_detail/amd_device_functions.h#L898
+// LLVM's AMDGPU AsmParser recognizes the symbolic `HW_REG_XCC_ID` /
+// `HW_REG_HW_ID` names on gfx940/gfx942/gfx950 but *not* on gfx1250, where
+// inline asm containing those symbols aborts during make_amdgcn. For older
+// CDNA targets we keep emitting the symbolic form (preserves existing LIT
+// expectations); for gfx1250 we fall back to the equivalent numeric ids
+// (HW_REG_XCC_ID == 20, HW_REG_HW_ID == 4).
+//
+// Note on gfx1250 (MI400): hwreg id 20 on MI400 is SCRATCH_BASE_LO and id 4
+// is STATE_PRIV (see MI400 Shader Programming Guide §3.4 Wave State
+// Registers). The per-wave CU/SE/XCC ids live in HW_ID1 (id 23) / HW_ID2
+// (id 24) with different bit layouts. Wiring those up properly is tracked
+// as a TODO; today gfx1250 produces a processorId that is essentially a
+// meaningless-but-non-faulting integer. Correctness tests don't rely on
+// it; sampling-bucket assignments on gfx1250 will be incorrect until the
+// HW_ID1/2 fields are threaded through here.
+static StringRef xccHwregName(llvm::AMDGPU::GPUKind GPUKind) {
+  return GPUKind == llvm::AMDGPU::GK_GFX1250 ? "20" : "HW_REG_XCC_ID";
+}
+static StringRef hwIdHwregName(llvm::AMDGPU::GPUKind GPUKind) {
+  return GPUKind == llvm::AMDGPU::GK_GFX1250 ? "4" : "HW_REG_HW_ID";
+}
+
 // XCC_ID Register bit structure for gfx940-942, gfx950, gfx1250.
 // XCC_ID      3:0     XCC the wave is assigned to.
-// Use numeric hwreg id (HW_REG_XCC_ID == 20) rather than the symbolic name,
-// because LLVM's AMDGPU AsmParser does not recognize the `HW_REG_XCC_ID`
-// symbol on every target (notably gfx1250) and will abort when parsing.
-static Value getXCCID(ConversionPatternRewriter &rewriter, Location loc) {
+static Value getXCCID(ConversionPatternRewriter &rewriter, Location loc,
+                      llvm::AMDGPU::GPUKind GPUKind) {
   GCNBuilder builder;
   auto &gethwid = *builder.create("s_getreg_b32");
   auto xcc_id = builder.newOperand("=s");
-  auto xcc_reg = builder.newConstantOperand("hwreg(20, 0, 4)");
+  auto xcc_reg = builder.newConstantOperand(
+      ("hwreg(" + xccHwregName(GPUKind) + ", 0, 4)").str());
   gethwid(xcc_id, xcc_reg);
   return builder.launch(rewriter, loc, i32_ty, false);
 }
 
 // HW_ID Register bit structure for GCN and CDNA (reg 4).
 // CU_ID       11:8    Compute Unit the wave is assigned to.
-// Same numeric-id rationale as getXCCID above; gfx1250 LLVM does not accept
-// the symbolic `HW_REG_HW_ID` form in inline asm and aborts during make_amdgcn.
-static Value getCUID(ConversionPatternRewriter &rewriter, Location loc) {
+static Value getCUID(ConversionPatternRewriter &rewriter, Location loc,
+                     llvm::AMDGPU::GPUKind GPUKind) {
   GCNBuilder builder;
   auto &gethwid = *builder.create("s_getreg_b32");
   auto cu_id = builder.newOperand("=s");
-  auto hwreg = builder.newConstantOperand("hwreg(4, 8, 4)");
+  auto hwreg = builder.newConstantOperand(
+      ("hwreg(" + hwIdHwregName(GPUKind) + ", 8, 4)").str());
   gethwid(cu_id, hwreg);
   return builder.launch(rewriter, loc, i32_ty, false);
 }
 // SE_ID       15:13   Shader Engine the wave is assigned to for gfx940-942,
 // gfx950, gfx1250.
-static Value getSEID(ConversionPatternRewriter &rewriter, Location loc) {
+static Value getSEID(ConversionPatternRewriter &rewriter, Location loc,
+                     llvm::AMDGPU::GPUKind GPUKind) {
   GCNBuilder builder;
   auto &gethwid = *builder.create("s_getreg_b32");
   auto se_id = builder.newOperand("=s");
-  auto hwreg = builder.newConstantOperand("hwreg(4, 13, 3)");
+  auto hwreg = builder.newConstantOperand(
+      ("hwreg(" + hwIdHwregName(GPUKind) + ", 13, 3)").str());
   gethwid(se_id, hwreg);
   return builder.launch(rewriter, loc, i32_ty, false);
 }
@@ -171,14 +194,14 @@ Value TargetInfo::processorId(ConversionPatternRewriter &rewriter,
   case llvm::AMDGPU::GK_GFX942:
   case llvm::AMDGPU::GK_GFX950:
   case llvm::AMDGPU::GK_GFX1250:
-    xcc_id = getXCCID(rewriter, loc);
+    xcc_id = getXCCID(rewriter, loc, GPUKind);
     break;
   default:
     llvm::report_fatal_error("unsupported arch");
   }
 
-  Value cu_id = getCUID(rewriter, loc); // local CU ID
-  Value se_id = getSEID(rewriter, loc);
+  Value cu_id = getCUID(rewriter, loc, GPUKind); // local CU ID
+  Value se_id = getSEID(rewriter, loc, GPUKind);
   builder.create<>("s_waitcnt lgkmcnt(0)")->operator()();
 
   // For XCC based architectures to get a unique CU id for a wave:
