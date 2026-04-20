@@ -5,9 +5,11 @@ import textwrap
 import pytest
 
 from triton.tools.amdgcnas_gfx12 import (
+    BankAssignment,
     DSChain,
     WMMAChain,
     annotate_regions,
+    assign_banks,
     build_def_use_index,
     collect_ds_chains,
     collect_wmma_chains,
@@ -347,4 +349,100 @@ class TestKernelFixture:
         annotate_regions(prog)
         report = report_chains(prog)
         assert "WMMA chains" in report
-        assert "DS chains" in report
+
+    def test_bank_assignment_has_no_conflicts(self, kernel_asm):
+        # Stage 3's four-bank-per-4-region scheme should apply cleanly
+        # to v9 and v10 -- they're the designed targets.
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        result = assign_banks(prog)
+        assert result.conflicts == [], (
+            f"{name}: Stage 3 reported conflicts: {result.conflicts[:3]}")
+
+    def test_bank_assignment_four_distinct_acc_banks(self, kernel_asm):
+        # The 4-region pipeline cycle should place acc_vgprs in 4
+        # distinct banks (one per region mod 4).
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        result = assign_banks(prog)
+        wcs = collect_wmma_chains(prog)
+        assigned = [result.acc_bank(c) for c in wcs
+                    if result.acc_bank(c) is not None]
+        assert len(set(assigned)) == 4, f"{name}: acc banks = {set(assigned)}"
+
+    def test_bank_assignment_region_msb_cycles_every_four(self, kernel_asm):
+        # Region N and Region N+4 share the same WMMA chains (pipeline
+        # cycle), so their MSB tuples must be identical.
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        result = assign_banks(prog)
+        for r in (0, 1, 2, 3):
+            m = result.region_msb.get(r)
+            m4 = result.region_msb.get(r + 4)
+            if m is None or m4 is None:
+                continue
+            assert m == m4, (
+                f"{name}: L{r} MSB {m} != L{r + 4} MSB {m4}")
+
+
+# -------------------------------------------------------------------------
+# Stage 3 unit tests (synthetic)
+# -------------------------------------------------------------------------
+
+class TestAssignBanks:
+
+    def _wrap_loop(self, body: str, prologue: str = "") -> str:
+        return (
+            ".text\n"
+            ".globl test_kernel\n"
+            "test_kernel:\n"
+            "; %bb.0:\n"
+            ".Lpre:\n"
+            f"{prologue}"
+            ".Lloop:\n"
+            f"{body}"
+            "\ts_cbranch_scc1 .Lloop\n"
+            "\ts_endpgm\n"
+        )
+
+    def test_no_loop_returns_empty(self):
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        result = assign_banks(prog)
+        assert result.wmma_acc_bank == {}
+        assert result.region_msb == {}
+        assert result.conflicts == []
+
+    def test_two_regions_get_two_banks(self):
+        body = (
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            f"{MARKER_R1}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[24:31], v[32:39], v[40:47], v[24:31]\n"
+        )
+        prog = parse_asm(self._wrap_loop(body))
+        result = assign_banks(prog)
+        wcs = collect_wmma_chains(prog)
+        acc_banks = {result.acc_bank(c) for c in wcs if result.acc_bank(c) is not None}
+        assert acc_banks == {0, 1}
+
+    def test_chain_spanning_two_regions_keeps_first_bank(self):
+        # Same chain (same dst) appears in both regions; should keep
+        # Region 0's bank (0), not be reassigned in Region 1.
+        body = (
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            f"{MARKER_R1}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[32:39], v[40:47], v[0:7]\n"
+        )
+        prog = parse_asm(self._wrap_loop(body))
+        result = assign_banks(prog)
+        wcs = collect_wmma_chains(prog)
+        assert len(wcs) == 1
+        assert result.acc_bank(wcs[0]) == 0

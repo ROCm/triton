@@ -1000,7 +1000,22 @@ def collect_wmma_chains(program: Program) -> list[WMMAChain]:
     Returns a list of :class:`WMMAChain` objects, one per distinct dst
     register used by any WMMA in the program.  Instructions are linked
     back via ``Instruction.wmma_chain``.
+
+    Idempotent: if ``Instruction.wmma_chain`` is already populated
+    (from a prior call), the existing chains are returned unchanged so
+    callers that compare by object identity (dict keys, id(...)) stay
+    consistent across calls.
     """
+    cached: list[WMMAChain] = []
+    seen: set[int] = set()
+    for inst in program.iter_instructions():
+        c = inst.wmma_chain
+        if c is not None and id(c) not in seen:
+            cached.append(c)
+            seen.add(id(c))
+    if cached:
+        return cached
+
     chains: dict[Register, WMMAChain] = {}
     for inst in program.iter_instructions():
         if not inst.opcode.startswith('v_wmma'):
@@ -1062,7 +1077,20 @@ def collect_ds_chains(program: Program) -> list[DSChain]:
 
     ds_loads whose output is never consumed by a WMMA (address setup,
     unused scratch, ...) are omitted from the result.
+
+    Idempotent: if ``Instruction.ds_chain`` is already populated, the
+    existing chains are returned unchanged.
     """
+    cached: list[DSChain] = []
+    seen: set[int] = set()
+    for inst in program.iter_instructions():
+        c = inst.ds_chain
+        if c is not None and id(c) not in seen:
+            cached.append(c)
+            seen.add(id(c))
+    if cached:
+        return cached
+
     if not any(i.wmma_chain for i in program.iter_instructions()
                if i.opcode.startswith('v_wmma')):
         collect_wmma_chains(program)
@@ -1155,6 +1183,289 @@ def report_chains(program: Program) -> str:
         lines.append(f"  {chain.summary()} regions={regions}")
 
     return "\n".join(lines)
+
+
+# -------------------------------------------------------------------------
+# Stage 3: bank assignment
+# -------------------------------------------------------------------------
+#
+# Assigns a VGPR bank (0..3) to every accumulator chain and every
+# ds_load chain based on the pipelined-region structure the LLIR
+# scheduler emits.  The invariant the assignment enforces, for every
+# loop region, is:
+#
+#     all wmmas in the region share one MSB state
+#     all ds_loads in the region share that same MSB state
+#
+# which means Stage 4 (renaming) + Stage 5 (MSB regeneration) should
+# be able to emit exactly one ``s_set_vgpr_msb`` per region boundary.
+#
+# Algorithm (no VGPR renaming yet; this pass just decides the target
+# banks):
+#
+#   Phase 2.  wmmaChain.acc_bank = (first_loop_region % 4) when the
+#             chain is first visited; later regions that contain the
+#             same chain (regions N and N+4 in the 4-region pipeline
+#             cycle) preserve that bank.
+#
+#   Phase 3.  DSChain.data_bank = acc_bank of the region hosting its
+#             ds_loads -- so the ds_load's dst sits in the same bank
+#             as the region's wmma accumulators.
+#
+#   Phase 4.  wmmaChain.src0_bank / src1_bank = data_bank of the
+#             DSChain feeding that slot (Stage 2 gave us the
+#             wmma_chain<->DSChain edge).
+#
+#   Phase 5.  DSChain.addr_bank = the src0_bank of the wmmaChain that
+#             lives in the same region as the ds_load.  Makes the
+#             ds_load's addr operand agree with the region's single
+#             MSB state.
+#
+# Prologue / epilogue ds_loads and wmmas are handled implicitly: the
+# DSChain is program-wide, so a prologue ds_load that feeds a loop
+# wmma is part of the same DSChain and inherits its data_bank;
+# similarly, an epilogue wmma that reads a loop accumulator is on the
+# same WMMAChain and inherits its acc_bank.
+
+
+@dataclass
+class BankAssignment:
+    """Result of :func:`assign_banks`.
+
+    All the per-chain dicts are keyed by ``id(chain)`` so plain object
+    identity works without having to make the chain dataclasses
+    hashable.  Use the helper accessors for readability.
+    """
+    wmma_acc_bank: dict[int, int] = field(default_factory=dict)
+    wmma_src0_bank: dict[int, int] = field(default_factory=dict)
+    wmma_src1_bank: dict[int, int] = field(default_factory=dict)
+    ds_data_bank: dict[int, int] = field(default_factory=dict)
+    ds_addr_bank: dict[int, int] = field(default_factory=dict)
+    # Per-loop-region expected (dst, src0, src1, src2) MSB tuple.
+    region_msb: dict[int, tuple[int, int, int, int]] = field(default_factory=dict)
+    # Human-readable messages for inconsistencies the algorithm hit.
+    conflicts: list[str] = field(default_factory=list)
+
+    def acc_bank(self, chain: "WMMAChain") -> Optional[int]:
+        return self.wmma_acc_bank.get(id(chain))
+
+    def src_bank(self, chain: "WMMAChain", slot: int) -> Optional[int]:
+        if slot == 1:
+            return self.wmma_src0_bank.get(id(chain))
+        if slot == 2:
+            return self.wmma_src1_bank.get(id(chain))
+        if slot == 3:
+            return self.wmma_acc_bank.get(id(chain))
+        return None
+
+    def data_bank(self, chain: "DSChain") -> Optional[int]:
+        return self.ds_data_bank.get(id(chain))
+
+    def addr_bank(self, chain: "DSChain") -> Optional[int]:
+        return self.ds_addr_bank.get(id(chain))
+
+
+def _loop_region_of(inst: Instruction, loop_bb: BasicBlock,
+                    cbranch_idx: int) -> Optional[int]:
+    """Return the loop-body region index of ``inst`` (before the
+    closing ``s_cbranch``), or None if the instruction is in the
+    epilogue, in a different basic block, or not under a region
+    marker."""
+    if inst.parent_bb is not loop_bb:
+        return None
+    if inst.region_idx is None or inst.region_is_epilogue:
+        return None
+    if inst.index > cbranch_idx:
+        return None
+    return inst.region_idx
+
+
+def assign_banks(program: Program) -> BankAssignment:
+    """Compute per-chain bank assignments as described above.  Returns
+    an empty :class:`BankAssignment` if the program has no
+    self-branching loop."""
+    annotate_regions(program)
+    wchains = collect_wmma_chains(program)
+    dchains = collect_ds_chains(program)
+
+    result = BankAssignment()
+
+    loop_range = _loop_body_range(program)
+    if loop_range is None:
+        return result
+    loop_bb, cbranch_idx = loop_range
+
+    # Group WMMAChains by the loop regions they appear in.  Visiting
+    # regions in order lets the user's "first region wins" rule play
+    # out deterministically.
+    from collections import defaultdict
+    loop_wmmas_per_region: dict[int, list[WMMAChain]] = defaultdict(list)
+    for c in wchains:
+        seen_regions = set()
+        for w in c.wmmas:
+            r = _loop_region_of(w, loop_bb, cbranch_idx)
+            if r is not None and r not in seen_regions:
+                loop_wmmas_per_region[r].append(c)
+                seen_regions.add(r)
+
+    # Phase 2: acc_bank per WMMAChain.
+    for region_idx in sorted(loop_wmmas_per_region):
+        bank = region_idx % 4
+        for chain in loop_wmmas_per_region[region_idx]:
+            if id(chain) not in result.wmma_acc_bank:
+                result.wmma_acc_bank[id(chain)] = bank
+
+    # Verify every loop region's chains agree on acc_bank (i.e., the
+    # user's pipelined-chain assumption holds).  Non-fatal: we record
+    # the conflict and keep going.
+    for region_idx, chains in loop_wmmas_per_region.items():
+        banks = {result.wmma_acc_bank[id(c)] for c in chains}
+        if len(banks) > 1:
+            result.conflicts.append(
+                f'L{region_idx}: wmmaChains span acc banks {sorted(banks)}')
+
+    # Phase 3: ds_load data_bank = acc_bank of the hosting loop region.
+    for dc in dchains:
+        banks: set[int] = set()
+        for ld in dc.ds_loads:
+            r = _loop_region_of(ld, loop_bb, cbranch_idx)
+            if r is None:
+                continue  # prologue/epilogue ds_loads resolve later
+            # Pick any wmmaChain in region r to read its acc_bank --
+            # by Phase 2 they all agree (or we reported a conflict).
+            chains = loop_wmmas_per_region.get(r, [])
+            if not chains:
+                continue
+            banks.add(result.wmma_acc_bank[id(chains[0])])
+        if len(banks) == 1:
+            result.ds_data_bank[id(dc)] = banks.pop()
+        elif len(banks) > 1:
+            result.conflicts.append(
+                f'DSChain {dc.wmma_chain.canonical}.src{dc.operand_idx - 1}: '
+                f'data_bank ambiguous across regions {sorted(banks)}')
+
+    # Phase 4: per-region src0_bank / src1_bank.  A wmmaChain can span
+    # multiple loop regions (e.g., a pipelined accumulator in regions
+    # N and N+4), and each of its wmmas reads different tiles loaded
+    # by different ds_loads at different scheduled positions.  So
+    # src_bank is not a chain-level property -- it's a *region-level*
+    # property shared by all wmmas in the region.  We find the
+    # reaching (most-recent) ds_load def for each wmma's src0 and
+    # src1, and aggregate its bank per region.  A well-scheduled
+    # pipelined loop has one reaching-def region per src slot per
+    # loop region.
+    pindex = build_program_def_use_index(program)
+    block_order = {bb.name: i for i, bb in enumerate(program.blocks)}
+
+    def _reaching_load_bank(wmma: Instruction, slot: int) -> Optional[int]:
+        if slot >= len(wmma.operands) or not wmma.operands[slot].regs:
+            return None
+        reg = wmma.operands[slot].regs[0]
+        rid = next(iter(_iter_regs([reg])), None)
+        if rid is None:
+            return None
+        wmma_key = _program_order(wmma, block_order)
+        best = None
+        best_key = None
+        for d in pindex.defs.get(rid, []):
+            if not _is_ds_load(d):
+                continue
+            dkey = _program_order(d, block_order)
+            if dkey >= wmma_key:
+                continue
+            if best is None or dkey > best_key:
+                best = d
+                best_key = dkey
+        if best is None:
+            return None
+        r = _loop_region_of(best, loop_bb, cbranch_idx)
+        if r is None:
+            return None
+        hosts = loop_wmmas_per_region.get(r, [])
+        if not hosts:
+            return None
+        return result.wmma_acc_bank.get(id(hosts[0]))
+
+    # Per-region src0/src1 banks -- used both for the region_msb table
+    # and, aggregated, to back-fill WMMAChain-level src banks for
+    # chains whose wmmas all agree.
+    region_src_banks: dict[int, tuple[set[int], set[int]]] = {
+        r: (set(), set()) for r in loop_wmmas_per_region
+    }
+    # Track per-chain-per-slot banks across regions so we can summarize
+    # to BankAssignment.wmma_src0_bank / src1_bank.
+    chain_slot_banks: dict[tuple[int, int], set[int]] = defaultdict(set)
+    for r, chains in loop_wmmas_per_region.items():
+        s0, s1 = region_src_banks[r]
+        for c in chains:
+            for w in c.wmmas:
+                if _loop_region_of(w, loop_bb, cbranch_idx) != r:
+                    continue
+                b0 = _reaching_load_bank(w, 1)
+                b1 = _reaching_load_bank(w, 2)
+                if b0 is not None:
+                    s0.add(b0)
+                    chain_slot_banks[(id(c), 1)].add(b0)
+                if b1 is not None:
+                    s1.add(b1)
+                    chain_slot_banks[(id(c), 2)].add(b1)
+
+    for r, (s0, s1) in region_src_banks.items():
+        if len(s0) > 1:
+            result.conflicts.append(
+                f'L{r}: src0 spans banks {sorted(s0)} (can\'t unify MSB)')
+        if len(s1) > 1:
+            result.conflicts.append(
+                f'L{r}: src1 spans banks {sorted(s1)} (can\'t unify MSB)')
+
+    for (cid, slot), banks in chain_slot_banks.items():
+        if len(banks) == 1:
+            target = result.wmma_src0_bank if slot == 1 else result.wmma_src1_bank
+            target[cid] = banks.pop()
+
+    # Phase 5: ds_load addr_bank = src0_bank of the wmmaChain in the
+    # region hosting the ds_load.  (src0 because ds_load's operand[1]
+    # is encoded in the src0 MSB slot, matching the wmma's src0.)
+    for dc in dchains:
+        addr_banks: set[int] = set()
+        for ld in dc.ds_loads:
+            r = _loop_region_of(ld, loop_bb, cbranch_idx)
+            if r is None:
+                continue
+            for c in loop_wmmas_per_region.get(r, []):
+                b = result.wmma_src0_bank.get(id(c))
+                if b is not None:
+                    addr_banks.add(b)
+        if len(addr_banks) == 1:
+            result.ds_addr_bank[id(dc)] = addr_banks.pop()
+        elif len(addr_banks) > 1:
+            result.conflicts.append(
+                f'DSChain {dc.wmma_chain.canonical}.src{dc.operand_idx - 1}: '
+                f'addr_bank ambiguous across regions {sorted(addr_banks)}')
+
+    # Per-region MSB state.  dst and src2 share a bank (acc == dst for
+    # the wmma, and ds_load's dst sits in that bank by Phase 3); src0
+    # and src1 come from the chain-level assignment so the first-
+    # iteration region (whose wmmas' reaching defs are prologue
+    # ds_loads with no loop region) inherits the steady-state bank
+    # from the chain's other loop regions.
+    for region_idx, chains in sorted(loop_wmmas_per_region.items()):
+        if not chains:
+            continue
+        dst = result.wmma_acc_bank.get(id(chains[0]), 0)
+        s0 = {result.wmma_src0_bank[id(c)] for c in chains
+              if id(c) in result.wmma_src0_bank}
+        s1 = {result.wmma_src1_bank[id(c)] for c in chains
+              if id(c) in result.wmma_src1_bank}
+        src0 = next(iter(s0)) if len(s0) == 1 else 0
+        src1 = next(iter(s1)) if len(s1) == 1 else 0
+        if len(s0) > 1 or len(s1) > 1:
+            result.conflicts.append(
+                f'L{region_idx}: chains disagree on src banks '
+                f'(src0={sorted(s0)}, src1={sorted(s1)})')
+        result.region_msb[region_idx] = (dst, src0, src1, dst)
+
+    return result
 
 
 # -------------------------------------------------------------------------
