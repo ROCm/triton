@@ -20,6 +20,8 @@ from triton.tools.amdgcnas_gfx12 import (
 
 MARKER_R0 = "\t;;#ASMSTART\n\t;; Region 0: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
 MARKER_R1 = "\t;;#ASMSTART\n\t;; Region 1: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
+MARKER_EPI_R0 = ("\t;;#ASMSTART\n\t;; Epilogue Region 0: 2 wmma, 0 GR, 2 LR\n"
+                 "\t;;#ASMEND")
 
 
 # -------------------------------------------------------------------------
@@ -62,7 +64,32 @@ class TestAnnotateRegions:
         mov = next(i for i in insts if i.opcode == 'v_mov_b32')
         wmma = next(i for i in insts if i.opcode.startswith('v_wmma'))
         assert mov.region_idx is None
+        assert mov.region_is_epilogue is None
         assert wmma.region_idx == 0
+        assert wmma.region_is_epilogue is False
+
+    def test_loop_and_epilogue_regions_distinguished(self):
+        # Loop Region 0 and Epilogue Region 0 share the same integer
+        # index but must be distinguishable via region_is_epilogue.
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
+            f"{MARKER_EPI_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[24:31], v[32:39], v[40:47], v[24:31]\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        annotate_regions(prog)
+        wmmas = [i for i in prog.iter_instructions()
+                 if i.opcode.startswith('v_wmma')]
+        assert len(wmmas) == 2
+        assert wmmas[0].region_idx == 0
+        assert wmmas[0].region_is_epilogue is False
+        assert wmmas[1].region_idx == 0
+        assert wmmas[1].region_is_epilogue is True
 
 
 # -------------------------------------------------------------------------

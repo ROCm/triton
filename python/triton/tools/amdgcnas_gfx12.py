@@ -138,6 +138,10 @@ class RegionMarker:
     wmma: int
     ds_load: int
     tdm: int
+    # ``;; Region N`` vs ``;; Epilogue Region N``.  The AMDGPU backend
+    # restarts region numbering in the epilogue, so the ``region`` int
+    # alone doesn't uniquely identify a marker.
+    is_epilogue: bool = False
 
 
 @dataclass
@@ -175,6 +179,7 @@ class Instruction:
     # Stage 2 analysis tags.  Populated by ``annotate_regions`` and chain
     # collectors; None until those passes run.
     region_idx: Optional[int] = None      # enclosing Region marker index
+    region_is_epilogue: Optional[bool] = None  # True for "Epilogue Region N"
     sub_region_idx: Optional[int] = None  # enclosing SubRegion marker index
     wmma_chain: Optional["WMMAChain"] = None
     ds_chain: Optional["DSChain"] = None
@@ -283,7 +288,7 @@ _AGPR_SINGLE = re.compile(r'(?<![a-zA-Z0-9_])a(\d+)(?![a-zA-Z0-9_])')
 #   ;; Epilogue Region 0: 32 wmma, 0 GR, 16 LR, 0 LW, 0 CVT  (epilogue)
 #   ; region 0: wmma=32 ds_load=16 tdm=0          (legacy)
 _REGION_MARKER_PROD = re.compile(
-    r';{1,2}\s*(?:Epilogue\s+)?Region\s+(\d+)\s*:\s*'
+    r';{1,2}\s*(Epilogue\s+)?Region\s+(\d+)\s*:\s*'
     r'(\d+)\s+wmma\s*,\s*(\d+)\s+GR\s*,\s*(\d+)\s+LR',
     re.IGNORECASE,
 )
@@ -491,13 +496,14 @@ def _parse_asm_block(lines: list[str]) -> Instruction:
     for ln in lines:
         m = _REGION_MARKER_PROD.search(ln)
         if m:
-            # Production format: (region, wmma, GR, LR).  GR here includes
-            # TDM (global reads); LR is ds_load count.
+            # Production format: (Epilogue?, region, wmma, GR, LR).  GR
+            # here includes TDM (global reads); LR is ds_load count.
             inst.region_marker = RegionMarker(
-                region=int(m.group(1)),
-                wmma=int(m.group(2)),
-                ds_load=int(m.group(4)),
-                tdm=int(m.group(3)),
+                region=int(m.group(2)),
+                wmma=int(m.group(3)),
+                ds_load=int(m.group(5)),
+                tdm=int(m.group(4)),
+                is_epilogue=m.group(1) is not None,
             )
             continue
         m = _REGION_MARKER_LEGACY.search(ln)
@@ -863,18 +869,25 @@ def annotate_regions(program: Program) -> None:
     ``;; Region`` and (if present) ``;; SubRegion`` markers.
 
     Instructions preceding the first marker in a block receive ``None``
-    tags, matching their default state.
+    tags, matching their default state.  Loop-body regions and
+    epilogue regions both use the same integer numbering space, so we
+    also record ``region_is_epilogue`` from the marker's flag -- the
+    pair ``(region_is_epilogue, region_idx)`` uniquely identifies a
+    region.
     """
     for bb in program.blocks:
         cur_region: Optional[int] = None
+        cur_is_epilogue: Optional[bool] = None
         cur_sub: Optional[int] = None
         for inst in bb.instructions:
             if inst.region_marker is not None:
                 cur_region = inst.region_marker.region
+                cur_is_epilogue = inst.region_marker.is_epilogue
                 cur_sub = None
             if inst.subregion_marker is not None:
                 cur_sub = inst.subregion_marker.sub_region
             inst.region_idx = cur_region
+            inst.region_is_epilogue = cur_is_epilogue
             inst.sub_region_idx = cur_sub
 
 
@@ -1121,19 +1134,24 @@ def report_chains(program: Program) -> str:
     wmma_chains = collect_wmma_chains(program)
     ds_chains = collect_ds_chains(program)
 
+    def _fmt_region(inst):
+        if inst.region_idx is None:
+            return None
+        return f'E{inst.region_idx}' if inst.region_is_epilogue else f'L{inst.region_idx}'
+
     lines.append(f"WMMA chains: {len(wmma_chains)}")
     for chain in sorted(wmma_chains, key=lambda c: c.canonical.start):
         bbs = {w.parent_bb.name for w in chain.wmmas if w.parent_bb}
-        regions = sorted({w.region_idx for w in chain.wmmas
-                          if w.region_idx is not None})
+        regions = sorted({_fmt_region(w) for w in chain.wmmas
+                          if _fmt_region(w) is not None})
         lines.append(f"  {chain.summary()} regions={regions} bbs={sorted(bbs)}")
 
     lines.append(f"DS chains: {len(ds_chains)}")
     for chain in sorted(ds_chains,
                         key=lambda c: (c.wmma_chain.canonical.start,
                                        c.operand_idx)):
-        regions = sorted({d.region_idx for d in chain.ds_loads
-                          if d.region_idx is not None})
+        regions = sorted({_fmt_region(d) for d in chain.ds_loads
+                          if _fmt_region(d) is not None})
         lines.append(f"  {chain.summary()} regions={regions}")
 
     return "\n".join(lines)

@@ -206,6 +206,18 @@ _ASM_BLOCK_REGION = textwrap.dedent("""\
 \t;;#ASMEND
 """)
 
+_ASM_BLOCK_REGION_PROD = textwrap.dedent("""\
+\t;;#ASMSTART
+\t;; Region 3: 32 wmma, 1 GR, 16 LR
+\t;;#ASMEND
+""")
+
+_ASM_BLOCK_REGION_EPILOGUE = textwrap.dedent("""\
+\t;;#ASMSTART
+\t;; Epilogue Region 3: 32 wmma, 0 GR, 16 LR, 0 LW, 0 CVT
+\t;;#ASMEND
+""")
+
 _ASM_BLOCK_SUBREGION = textwrap.dedent("""\
 \t;;#ASMSTART
 \t; sub-region 2: wmma=8 ds_load=4 tdm=1
@@ -227,7 +239,35 @@ class TestParseAsmBlocks:
         insts = list(prog.iter_instructions())
         markers = [i.region_marker for i in insts if i.region_marker]
         assert len(markers) == 1
-        assert markers[0] == RegionMarker(region=0, wmma=32, ds_load=16, tdm=0)
+        assert markers[0] == RegionMarker(region=0, wmma=32, ds_load=16, tdm=0,
+                                          is_epilogue=False)
+
+    def test_region_marker_prod_format(self):
+        text = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            + _ASM_BLOCK_REGION_PROD
+            + "\ts_endpgm\n"
+        )
+        prog = parse_asm(text)
+        markers = [i.region_marker for i in prog.iter_instructions() if i.region_marker]
+        assert len(markers) == 1
+        assert markers[0].region == 3
+        assert markers[0].wmma == 32
+        assert markers[0].is_epilogue is False
+
+    def test_epilogue_region_marker_parsed(self):
+        text = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            + _ASM_BLOCK_REGION_EPILOGUE
+            + "\ts_endpgm\n"
+        )
+        prog = parse_asm(text)
+        markers = [i.region_marker for i in prog.iter_instructions() if i.region_marker]
+        assert len(markers) == 1
+        assert markers[0].region == 3
+        assert markers[0].is_epilogue is True
 
     def test_subregion_marker_parsed(self):
         text = (
