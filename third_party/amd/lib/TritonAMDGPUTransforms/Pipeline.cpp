@@ -1,5 +1,6 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/Passes.h" // IWYU pragma: keep
+#include "TritonAMDGPUTransforms/TDMStoresPipeline.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -171,6 +172,17 @@ struct PipelinePass : impl::TritonAMDGPUPipelineBase<PipelinePass> {
         combineWaitOps(moduleOp, useAsyncCopy);
       }
     }
+
+    // Pipeline TDM stores / scatters that survive in loop bodies. Mirrors
+    // NVIDIA's pipelineTMAStores: lift the LDS allocation out of the loop and
+    // hoist the wait so the outgoing async store overlaps the next iteration.
+    // The transformation is correct regardless of the loop's pipeline-stage
+    // count, so we apply it to every loop unconditionally; it returns false
+    // if the loop contains no descriptor stores/scatters.
+    SmallVector<scf::ForOp> loops;
+    moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+    for (scf::ForOp forOp : loops)
+      pipelineTDMStores(forOp);
 
     tt::removePipeliningAttributes(moduleOp);
   }

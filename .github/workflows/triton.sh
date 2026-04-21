@@ -98,6 +98,9 @@ pytest -n 64 --durations=20 --maxfail=1 -k "$K_EXPR" -p no:forked -vv --timeout=
     python/test/unit/language/test_tensor_descriptor.py \
     --deselect 'python/test/unit/language/test_tensor_descriptor.py::test_host_tensor_descriptor_in_tuple[int16]' # Fails after #657 due to s_trap change from upstream #9692
 
+pytest -n 1 --durations=10 --maxfail=1 -p no:forked -vv --timeout=300 --timeout-method=thread \
+    python/test/unit/language/test_pipeliner.py::test_scatter_pipeline
+
 pytest -n 16 --durations=10 python/test/unit/language/test_conversions.py
 
 echo "=== Run Triton GEMM/Attention Tests ==="
