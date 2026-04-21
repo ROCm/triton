@@ -201,72 +201,114 @@ class TestCollectWMMAChains:
 # -------------------------------------------------------------------------
 
 class TestCollectDSChains:
+    # Region markers are required for the new per-region DSChain
+    # structure -- ds_loads outside any region are skipped.
 
     def test_ds_load_feeds_wmma_src0(self):
-        # ds_load writes v[8:15]; wmma reads it as src0 (first src operand).
         src = (
             "; %bb.0:\n"
             ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
             "\tds_load_b128 v[8:11], v100\n"
             "\tds_load_b128 v[12:15], v100 offset:16\n"
             "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
             "\ts_endpgm\n"
         )
         prog = parse_asm(src)
         chains = collect_ds_chains(prog)
         assert len(chains) == 1
         chain = chains[0]
-        assert len(chain.ds_loads) == 2
-        assert chain.operand_idx == 1  # src0 slot
-        assert len(chain.consumers) == 1
-        assert chain.wmma_chain.canonical.ids == list(range(0, 8))
+        assert chain.loading_region == 0
+        assert chain.is_epilogue_region is False
+        assert chain.op_idx == 1  # src0 slot
+        # Two ds_loads form one contiguous tile (v[8:15]) -> one DSGroup.
+        assert len(chain.dsgroups) == 1
+        g = chain.dsgroups[0]
+        assert len(g.ds_loads) == 2
+        assert g.op_idx == 1
+        assert g.tile.ids == list(range(8, 16))
+        assert len(g.consumer_wmmas) == 1
 
     def test_ds_load_feeds_wmma_src1(self):
-        # Same wmma; ds_load targets the second src (src1) slot.
         src = (
             "; %bb.0:\n"
             ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
             "\tds_load_b128 v[16:19], v100\n"
             "\tds_load_b128 v[20:23], v100 offset:16\n"
             "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
             "\ts_endpgm\n"
         )
         prog = parse_asm(src)
         chains = collect_ds_chains(prog)
         assert len(chains) == 1
-        assert chains[0].operand_idx == 2  # src1 slot
+        assert chains[0].op_idx == 2  # src1 slot
 
-    def test_two_tiles_two_chains(self):
-        # Tile A feeds src0; tile B feeds src1.
+    def test_two_tiles_in_one_region_form_one_chain(self):
+        # Two tiles (src0 tile A, src1 tile B) load in the same region.
+        # They would fail the op_idx sanity check because A feeds src0
+        # but B feeds src1 -- they must be in different regions.
+        # Test that feeding a single src slot with two separate tiles
+        # works: both tiles are in the same DSChain with two DSGroups.
         src = (
             "; %bb.0:\n"
             ".LBB0_0:\n"
-            "\tds_load_b128 v[8:11], v100\n"         # tile A part 1
-            "\tds_load_b128 v[12:15], v100 offset:16\n"  # tile A part 2
-            "\tds_load_b128 v[16:19], v101\n"         # tile B part 1
-            "\tds_load_b128 v[20:23], v101 offset:16\n"  # tile B part 2
+            f"{MARKER_R0}\n"
+            "\tds_load_b128 v[8:11], v100\n"
+            "\tds_load_b128 v[12:15], v100 offset:16\n"
+            "\tds_load_b128 v[24:27], v100 offset:32\n"
+            "\tds_load_b128 v[28:31], v100 offset:48\n"
             "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[24:31], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
             "\ts_endpgm\n"
         )
         prog = parse_asm(src)
         chains = collect_ds_chains(prog)
-        assert len(chains) == 2
-        slots = sorted(c.operand_idx for c in chains)
-        assert slots == [1, 2]
+        assert len(chains) == 1
+        c = chains[0]
+        # Two tiles -> two DSGroups, both src0.
+        assert len(c.dsgroups) == 2
+        assert c.op_idx == 1
+        assert all(g.op_idx == 1 for g in c.dsgroups)
+        assert {g.tile.ids[0] for g in c.dsgroups} == {8, 24}
 
     def test_unused_ds_load_not_in_any_chain(self):
-        # ds_load writes to a register no WMMA consumes (e.g., for prologue
-        # address setup).  It should be dropped from the chain list.
+        # ds_load writes to a register no WMMA consumes -- the group gets
+        # dropped, and with no remaining groups the chain is dropped too.
         src = (
             "; %bb.0:\n"
             ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
             "\tds_load_b128 v[100:103], v50\n"  # unused by any wmma
             "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
             "\ts_endpgm\n"
         )
         prog = parse_asm(src)
         chains = collect_ds_chains(prog)
         assert chains == []
+
+    def test_mixed_slot_raises(self):
+        # Two ds_loads form one contiguous tile, but one wmma reads the
+        # tile as src0 and another reads it as src1 -- sanity check
+        # should fire.
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tds_load_b128 v[8:11], v100\n"
+            "\tds_load_b128 v[12:15], v100 offset:16\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[16:23], v[8:15], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        with pytest.raises(ValueError, match="mixed"):
+            collect_ds_chains(prog)
 
 
 # -------------------------------------------------------------------------
@@ -316,32 +358,86 @@ class TestKernelFixture:
         assert len(chains) >= 4, (
             f"{name}: only {len(chains)} WMMA chains")
 
-    def test_ds_chains_cover_all_ds_loads(self, kernel_asm):
-        # Every ds_load in the kernel should feed some WMMA (either in
-        # the same BB or across the prologue→loop boundary).  If this
-        # ever fails, a tensor has been missed by the cross-BB consumer
-        # search.
+    def test_ds_chains_cover_every_region_ds_load(self, kernel_asm):
+        # Under the per-region DSChain model, prologue ds_loads (those
+        # not enclosed by a region marker) are intentionally skipped --
+        # they'll be attached via dependency propagation in Stage 4.
+        # But every ds_load inside a region marker should be in some
+        # DSChain.
         name, text = kernel_asm
         prog = parse_asm(text)
-        all_ds = [i for i in prog.iter_instructions()
-                  if i.opcode.startswith('ds_load')]
+        annotate_regions(prog)
+        region_ds = [i for i in prog.iter_instructions()
+                     if i.opcode.startswith('ds_load') and i.region_idx is not None]
         chains = collect_ds_chains(prog)
         covered = sum(len(c.ds_loads) for c in chains)
-        assert covered == len(all_ds), (
-            f"{name}: {covered}/{len(all_ds)} ds_loads mapped")
+        assert covered == len(region_ds), (
+            f"{name}: {covered}/{len(region_ds)} region-enclosed ds_loads mapped")
 
-    def test_ds_chains_span_prologue_and_loop(self, kernel_asm):
-        # The prologue prefetches first-iteration tiles.  Their ds_loads
-        # should be grouped into the same DSChain as the subsequent loop
-        # ds_loads that refill the same registers.
+    def test_ds_chain_is_per_loading_region(self, kernel_asm):
+        # All ds_loads in one DSChain should share loading_region +
+        # is_epilogue_region.  This is the defining invariant of the
+        # per-region model.
         name, text = kernel_asm
         prog = parse_asm(text)
         chains = collect_ds_chains(prog)
-        cross_bb = [
+        for c in chains:
+            for ld in c.ds_loads:
+                assert ld.region_idx == c.loading_region, (
+                    f"{name}: ds_load region {ld.region_idx} in chain "
+                    f"L{c.loading_region}")
+                assert bool(ld.region_is_epilogue) == c.is_epilogue_region
+
+    def test_ds_chain_sanity_checks_hold(self, kernel_asm):
+        # Every DSChain: shared addr, shared op_idx across its DSGroups.
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        chains = collect_ds_chains(prog)
+        for c in chains:
+            addrs = {g.addr_reg for g in c.dsgroups if g.addr_reg is not None}
+            slots = {g.op_idx for g in c.dsgroups if g.op_idx is not None}
+            assert len(addrs) <= 1, f"{name}: L{c.loading_region} mixed addr"
+            assert len(slots) <= 1, f"{name}: L{c.loading_region} mixed op_idx"
+
+    def test_prologue_loads_attached_to_loop_dsgroups(self, kernel_asm):
+        # Every prologue ds_load (no region marker) should land in some
+        # loop DSGroup's prologue_loads based on tile-match with a
+        # steady-state sibling.  Unmatched ones would be a collection
+        # bug.
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        chains = collect_ds_chains(prog)
+        pre_loads_total = 0
+        attached = 0
+        for inst in prog.iter_instructions():
+            if not inst.opcode.startswith('ds_load'):
+                continue
+            if inst.region_idx is not None:
+                continue
+            pre_loads_total += 1
+            if inst.ds_chain is not None:
+                attached += 1
+        assert pre_loads_total > 0, f'{name}: no prologue ds_loads found'
+        assert attached == pre_loads_total, (
+            f'{name}: only {attached}/{pre_loads_total} prologue ds_loads '
+            f'attached to DSGroups')
+
+    def test_ds_chain_consumers_may_span_regions(self, kernel_asm):
+        # Unlike my earlier sanity guess, per v9/v10 the consumers of a
+        # single region's ds_loads DO span multiple regions (two
+        # regions each, typically).  This is the back-edge / pipeline
+        # reality.
+        name, text = kernel_asm
+        prog = parse_asm(text)
+        chains = collect_ds_chains(prog)
+        multi_region_chains = [
             c for c in chains
-            if len({l.parent_bb.name for l in c.ds_loads}) > 1
+            if len({(w.region_is_epilogue, w.region_idx)
+                    for w in c.consumer_wmmas
+                    if w.region_idx is not None}) > 1
         ]
-        assert cross_bb, f"{name}: no DS chain spans prologue and loop"
+        assert multi_region_chains, (
+            f"{name}: expected some chain's consumers to span regions")
 
     def test_report_chains_runs(self, kernel_asm):
         name, text = kernel_asm

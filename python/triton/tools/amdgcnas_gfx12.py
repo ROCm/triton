@@ -1041,42 +1041,179 @@ def _is_ds_load(inst: Instruction) -> bool:
 
 
 @dataclass
-class DSChain:
-    """A group of ds_load instructions that together populate a single
-    logical tile tensor.
+class DSGroup:
+    """A tile-sized group of ds_load instructions that together load one
+    operand tile for a wmma.
 
-    Two ds_loads belong to the same tile when their destinations feed
-    the same operand slot (``src0``, ``src1``, or ``src2``) of the same
-    WMMAChain.  ``operand_idx`` records that slot.
+    For wmma_f32_16x16x32_f16, a single src0/src1 tile is 8 VGPRs loaded
+    by 2 ``ds_load_b128`` instructions with contiguous dst ranges.  This
+    class keeps those together along with the set of wmma instructions
+    that consume the tile (a single tile can feed many wmmas when
+    WMMAChains share a matrix operand).
+
+    All ds_loads in a DSGroup share the same ``addr`` register (they
+    differ only in the instruction-encoded offset) and feed the same
+    wmma operand slot (``op_idx``).
+
+    ``prologue_loads`` holds any pre-loop ds_loads that prefetch the
+    same tile for the first iteration -- they're scheduled before the
+    loop entry (no region marker), but under the pipelined pattern
+    they mirror the group's steady-state loop loads and write to the
+    same logical tile VGPRs.  Stage 4 renames them alongside
+    ``ds_loads``.
     """
-    wmma_chain: WMMAChain
-    operand_idx: int          # 1 == src0, 2 == src1, 3 == src2 in MLIR order
     ds_loads: list[Instruction] = field(default_factory=list)
-    consumers: list[Instruction] = field(default_factory=list)  # WMMA users
+    consumer_wmmas: list[Instruction] = field(default_factory=list)
+    prologue_loads: list[Instruction] = field(default_factory=list)
+    # 1 = src0, 2 = src1, 3 = src2 (rare).  ``None`` on construction
+    # until the consumer scan fills it in.
+    op_idx: Optional[int] = None
 
+    @property
+    def addr_reg(self) -> Optional[Register]:
+        if not self.ds_loads or len(self.ds_loads[0].operands) < 2:
+            return None
+        regs = self.ds_loads[0].operands[1].regs
+        return regs[0] if regs else None
+
+    @property
     def data_regs(self) -> list[Register]:
-        return [d.dst_reg() for d in self.ds_loads if d.dst_reg()]
+        return [ld.dst_reg() for ld in self.ds_loads if ld.dst_reg()]
+
+    @property
+    def tile(self) -> Optional[Register]:
+        """The combined contiguous VGPR range covered by all data_regs."""
+        regs = self.data_regs
+        if not regs:
+            return None
+        lo = min(r.start for r in regs)
+        hi = max(r.end for r in regs)
+        return Register(kind='v', ids=list(range(lo, hi + 1)))
+
+    @property
+    def all_loads(self) -> list[Instruction]:
+        """Every ds_load writing this tile: steady-state + prologue."""
+        return self.ds_loads + self.prologue_loads
 
     def summary(self) -> str:
-        regs = self.data_regs()
-        span = f"{regs[0]}..{regs[-1]}" if regs else "?"
-        return (f"DSChain(#loads={len(self.ds_loads)}, regs={span}, "
-                f"→ chain dst={self.wmma_chain.canonical}, "
-                f"operand=src{self.operand_idx - 1})")
+        tile = self.tile
+        slot = f'src{self.op_idx - 1}' if self.op_idx is not None else 'src?'
+        extra = f' + {len(self.prologue_loads)} pre' if self.prologue_loads else ''
+        return (f'DSGroup({len(self.ds_loads)} loads{extra}, tile={tile}, '
+                f'{slot}, {len(self.consumer_wmmas)} consumers)')
+
+
+@dataclass
+class DSChain:
+    """All ds_load tile-groups loaded in one region of the program.
+
+    Shape: a DSChain has one loading region (identified by the
+    ``(is_epilogue_region, loading_region)`` pair), and owns one or
+    more :class:`DSGroup` tiles.  Under the LLIR scheduler's design,
+    all the DSGroups within one region:
+
+      * share the same ``addr`` register (the region's base pointer);
+      * share the same ``op_idx`` (all src0 or all src1);
+
+    (enforced by :func:`collect_ds_chains`).  The consumers of those
+    tiles may be wmmas in multiple regions (including the epilogue
+    and, via the loop back-edge, earlier loop regions of the next
+    iteration).
+    """
+    loading_region: int
+    is_epilogue_region: bool
+    dsgroups: list[DSGroup] = field(default_factory=list)
+
+    @property
+    def addr_reg(self) -> Optional[Register]:
+        return self.dsgroups[0].addr_reg if self.dsgroups else None
+
+    @property
+    def op_idx(self) -> Optional[int]:
+        return self.dsgroups[0].op_idx if self.dsgroups else None
+
+    @property
+    def ds_loads(self) -> list[Instruction]:
+        return [ld for g in self.dsgroups for ld in g.ds_loads]
+
+    @property
+    def consumer_wmmas(self) -> list[Instruction]:
+        seen: set[int] = set()
+        out: list[Instruction] = []
+        for g in self.dsgroups:
+            for w in g.consumer_wmmas:
+                if id(w) not in seen:
+                    seen.add(id(w))
+                    out.append(w)
+        return out
+
+    def summary(self) -> str:
+        tag = 'E' if self.is_epilogue_region else 'L'
+        slot = f'src{self.op_idx - 1}' if self.op_idx is not None else 'src?'
+        return (f'DSChain({tag}{self.loading_region}, addr={self.addr_reg}, '
+                f'{slot}, {len(self.dsgroups)} groups, '
+                f'{sum(len(g.ds_loads) for g in self.dsgroups)} loads)')
+
+
+def _find_reaching_consumers(ld: Instruction, pindex: "DefUseIndex",
+                             block_order: dict[str, int]
+                             ) -> tuple[list[Instruction], set[int]]:
+    """For a single ds_load, find every wmma that reads any of its dst
+    VGPRs before the next instruction redefines those VGPRs (true
+    reaching-def consumers, not raw uses).  Also returns the set of
+    operand-slot indices those consumers read the data in."""
+    dst = ld.dst_reg()
+    if dst is None:
+        return [], set()
+    load_key = _program_order(ld, block_order)
+    consumers: list[Instruction] = []
+    consumer_ids: set[int] = set()
+    slots: set[int] = set()
+    for rid in _iter_regs([dst]):
+        next_def_key: Optional[tuple[int, int]] = None
+        for d in pindex.defs.get(rid, []):
+            dk = _program_order(d, block_order)
+            if dk <= load_key:
+                continue
+            if next_def_key is None or dk < next_def_key:
+                next_def_key = dk
+        for u in pindex.uses.get(rid, []):
+            if not u.opcode.startswith('v_wmma'):
+                continue
+            uk = _program_order(u, block_order)
+            if uk <= load_key:
+                continue
+            if next_def_key is not None and uk >= next_def_key:
+                continue
+            # Which operand slot of u reads this rid?
+            for slot_idx, op in enumerate(u.operands[1:], start=1):
+                if any(uid == rid for uid in _iter_regs(op.regs)):
+                    slots.add(slot_idx)
+                    break
+            if id(u) not in consumer_ids:
+                consumer_ids.add(id(u))
+                consumers.append(u)
+    return consumers, slots
 
 
 def collect_ds_chains(program: Program) -> list[DSChain]:
-    """For each ds_load in the program, identify the WMMAChain and
-    operand slot it feeds, and group loads feeding the same
-    (chain, operand) pair into one :class:`DSChain`.
+    """Build per-loading-region DSChains with two-level DSGroup structure.
 
-    The consumer search is program-wide so that ds_loads in the
-    prologue feeding first-iteration loop WMMAs are correctly paired
-    with their loop consumers (and similarly for epilogue chains that
-    span blocks).
+    Within each region, ds_loads are sorted by dst start VGPR and then
+    grouped into DSGroups whose dsts are contiguous (a tile).  Each
+    DSGroup's consumer wmmas are found by reaching-def analysis
+    (instructions reading any of the tile's VGPRs before the next
+    redefinition), and may live in any later region -- including back-
+    edge reads in earlier loop regions of the next iteration, and
+    epilogue regions.
 
-    ds_loads whose output is never consumed by a WMMA (address setup,
-    unused scratch, ...) are omitted from the result.
+    DSGroups with no consumer wmmas (scratch / unused) are dropped.
+    ds_loads that have no enclosing region marker (prologue loads) are
+    also skipped for now; a future pass will attach them via dependency
+    propagation.
+
+    Sanity checks per DSChain (raises on violation): shared addr reg,
+    shared op_idx.
 
     Idempotent: if ``Instruction.ds_chain`` is already populated, the
     existing chains are returned unchanged.
@@ -1091,61 +1228,192 @@ def collect_ds_chains(program: Program) -> list[DSChain]:
     if cached:
         return cached
 
+    annotate_regions(program)
     if not any(i.wmma_chain for i in program.iter_instructions()
                if i.opcode.startswith('v_wmma')):
         collect_wmma_chains(program)
 
-    # Program-wide index + a block-order map so we can compare positions
-    # across basic blocks.
     pindex = build_program_def_use_index(program)
     block_order = {bb.name: i for i, bb in enumerate(program.blocks)}
 
-    chains: dict[tuple[int, int], DSChain] = {}
+    by_region: dict[tuple[bool, int], list[Instruction]] = {}
     for inst in program.iter_instructions():
         if not _is_ds_load(inst):
             continue
-        dst = inst.dst_reg()
-        if dst is None or inst.parent_bb is None:
+        if inst.region_idx is None:
+            continue  # prologue ds_loads skipped; handled via propagation later
+        key = (bool(inst.region_is_epilogue), inst.region_idx)
+        by_region.setdefault(key, []).append(inst)
+
+    chains: list[DSChain] = []
+    for (is_epi, region_idx), loads in by_region.items():
+        # Build tile-per-wmma-operand DSGroups: one DSGroup per distinct
+        # (wmma-operand-range, op_idx) tile read by a consumer.  Each
+        # ds_load is assigned to the tile its dst sits inside.  Under the
+        # LLIR scheduler's design, a tile is the full 8-VGPR operand of
+        # one wmma (filled by 2 ds_load_b128's), shared by multiple
+        # consumer wmmas when the scheduler reuses the tile.
+        tile_map: dict[tuple[tuple[int, ...], int], DSGroup] = {}
+        for ld in loads:
+            consumers, slots = _find_reaching_consumers(
+                ld, pindex, block_order)
+            if not consumers:
+                continue
+            if len(slots) > 1:
+                raise ValueError(
+                    f'ds_load at L{region_idx} feeds mixed operand '
+                    f'slots {sorted(slots)}')
+            slot = next(iter(slots)) if slots else None
+            if slot is None:
+                continue
+            # Pick the tile = consumer's operand[slot] range.  All
+            # consumers of this ds_load should agree on the range
+            # (they share the tile).
+            dst = ld.dst_reg()
+            if dst is None:
+                continue
+            dst_id_set = set(dst.ids)
+            tile_ids: Optional[tuple[int, ...]] = None
+            for u in consumers:
+                if slot >= len(u.operands) or not u.operands[slot].regs:
+                    continue
+                candidate = tuple(u.operands[slot].regs[0].ids)
+                if not dst_id_set.issubset(candidate):
+                    continue
+                if tile_ids is None:
+                    tile_ids = candidate
+                elif tile_ids != candidate:
+                    raise ValueError(
+                        f'ds_load at L{region_idx} dst {dst} has '
+                        f'consumers reading inconsistent tile ranges '
+                        f'{tile_ids} vs {candidate}')
+            if tile_ids is None:
+                continue  # no consumer whose operand range contains this dst
+            key = (tile_ids, slot)
+            g = tile_map.get(key)
+            if g is None:
+                g = DSGroup(op_idx=slot)
+                tile_map[key] = g
+            if ld not in g.ds_loads:
+                g.ds_loads.append(ld)
+            for u in consumers:
+                if (slot < len(u.operands)
+                        and u.operands[slot].regs
+                        and tuple(u.operands[slot].regs[0].ids) == tile_ids
+                        and u not in g.consumer_wmmas):
+                    g.consumer_wmmas.append(u)
+
+        kept = list(tile_map.values())
+        if not kept:
             continue
-        load_key = _program_order(inst, block_order)
-        # Locate the first WMMA consumer of any VGPR in dst's range,
-        # scanning program-wide so prologue ds_loads are paired with
-        # their first-iteration loop WMMA consumer.
-        best_user: Optional[Instruction] = None
-        best_slot: Optional[int] = None
-        best_key: Optional[tuple[int, int]] = None
-        for rid in _iter_regs([dst]):
-            for user in pindex.uses.get(rid, []):
-                if not user.opcode.startswith('v_wmma'):
+
+        # Sanity: per-region shared addr + shared op_idx.
+        addrs = {g.addr_reg for g in kept if g.addr_reg is not None}
+        if len(addrs) > 1:
+            raise ValueError(
+                f'Region {"E" if is_epi else "L"}{region_idx}: DSGroups '
+                f'use mixed addr registers {sorted(str(a) for a in addrs)}')
+        slots = {g.op_idx for g in kept if g.op_idx is not None}
+        if len(slots) > 1:
+            raise ValueError(
+                f'Region {"E" if is_epi else "L"}{region_idx}: DSGroups '
+                f'use mixed operand slots {sorted(slots)}')
+
+        chain = DSChain(
+            loading_region=region_idx,
+            is_epilogue_region=is_epi,
+            dsgroups=kept,
+        )
+        chains.append(chain)
+        for g in kept:
+            for ld in g.ds_loads:
+                ld.ds_chain = chain
+
+    # Attach prologue ds_loads (no region marker) to the loop DSGroup
+    # whose steady-state tile they mirror.  Matching rule: the first
+    # reaching-def wmma consumer defines the tile shape (operand range
+    # + op_idx); we find the DSGroup with the same (tile, op_idx) and
+    # the same addr register.
+    prologue_loads = [
+        inst for inst in program.iter_instructions()
+        if _is_ds_load(inst) and inst.region_idx is None
+    ]
+    if prologue_loads:
+        from collections import defaultdict
+        # Build a lookup from (tile_ids, op_idx) -> list of (DSChain, DSGroup).
+        tile_index: dict[tuple[tuple[int, ...], int],
+                         list[tuple[DSChain, DSGroup]]] = defaultdict(list)
+        for c in chains:
+            if c.is_epilogue_region:
+                continue
+            for g in c.dsgroups:
+                if g.tile is None or g.op_idx is None:
                     continue
-                user_key = _program_order(user, block_order)
-                if user_key <= load_key:
-                    continue
-                # Identify which operand slot the ds_load feeds.
-                slot = None
-                for slot_idx, op in enumerate(user.operands[1:], start=1):
-                    if any(uid == rid for uid in _iter_regs(op.regs)):
-                        slot = slot_idx
+                tile_index[(tuple(g.tile.ids), g.op_idx)].append((c, g))
+
+        for ld in prologue_loads:
+            dst = ld.dst_reg()
+            if dst is None:
+                continue
+            addr_op = ld.operands[1] if len(ld.operands) > 1 else None
+            addr_reg = (addr_op.regs[0]
+                        if addr_op and addr_op.regs else None)
+            # Find the first reaching-def wmma consumer of any of dst's rids.
+            load_key = _program_order(ld, block_order)
+            tile_key: Optional[tuple[tuple[int, ...], int]] = None
+            for rid in _iter_regs([dst]):
+                # Find next def of rid after this prologue load.
+                next_key = None
+                for d in pindex.defs.get(rid, []):
+                    dk = _program_order(d, block_order)
+                    if dk <= load_key:
+                        continue
+                    if next_key is None or dk < next_key:
+                        next_key = dk
+                # First wmma consumer in [load_key, next_key).
+                for u in pindex.uses.get(rid, []):
+                    if not u.opcode.startswith('v_wmma'):
+                        continue
+                    uk = _program_order(u, block_order)
+                    if uk <= load_key:
+                        continue
+                    if next_key is not None and uk >= next_key:
+                        continue
+                    for slot_idx, op in enumerate(u.operands[1:], start=1):
+                        if any(uid == rid for uid in _iter_regs(op.regs)):
+                            if op.regs:
+                                tile_key = (tuple(op.regs[0].ids), slot_idx)
+                            break
+                    if tile_key is not None:
                         break
-                if slot is None:
-                    continue
-                if best_user is None or user_key < best_key:
-                    best_user = user
-                    best_slot = slot
-                    best_key = user_key
-        if best_user is None or best_user.wmma_chain is None:
-            continue
-        key = (id(best_user.wmma_chain), best_slot)
-        chain = chains.get(key)
-        if chain is None:
-            chain = DSChain(wmma_chain=best_user.wmma_chain,
-                            operand_idx=best_slot)
-            chains[key] = chain
-        chain.ds_loads.append(inst)
-        if best_user not in chain.consumers:
-            chain.consumers.append(best_user)
-        inst.ds_chain = chain
-    return list(chains.values())
+                if tile_key is not None:
+                    break
+            if tile_key is None:
+                continue
+            # Find a candidate (chain, group) with matching tile+op_idx.
+            # When multiple loop DSChains load the same tile (e.g.,
+            # stride-4 siblings L3 and L7 both load v[512:519] with
+            # src1+v642 in v9), pick the one with the largest
+            # loading_region: that's the last load of the tile in the
+            # pipeline cycle, hence the slot the prologue is
+            # pre-iterating via the loop back-edge.  Filter by addr
+            # first so pre-loads that use a specific base pointer
+            # don't snap to a sibling that uses a different base.
+            candidates = tile_index.get(tile_key, [])
+            if not candidates:
+                continue
+            if addr_reg is not None:
+                addr_matched = [(c, g) for c, g in candidates
+                                if c.addr_reg == addr_reg]
+                if addr_matched:
+                    candidates = addr_matched
+            picked = max(candidates, key=lambda cg: cg[0].loading_region)
+            c, g = picked
+            if ld not in g.prologue_loads:
+                g.prologue_loads.append(ld)
+            ld.ds_chain = c
+
+    return chains
 
 
 # -------------------------------------------------------------------------
@@ -1176,11 +1444,10 @@ def report_chains(program: Program) -> str:
 
     lines.append(f"DS chains: {len(ds_chains)}")
     for chain in sorted(ds_chains,
-                        key=lambda c: (c.wmma_chain.canonical.start,
-                                       c.operand_idx)):
-        regions = sorted({_fmt_region(d) for d in chain.ds_loads
-                          if _fmt_region(d) is not None})
-        lines.append(f"  {chain.summary()} regions={regions}")
+                        key=lambda c: (c.is_epilogue_region, c.loading_region)):
+        consumer_regions = sorted({_fmt_region(w) for w in chain.consumer_wmmas
+                                   if _fmt_region(w) is not None})
+        lines.append(f"  {chain.summary()} consumers={consumer_regions}")
 
     return "\n".join(lines)
 
@@ -1324,25 +1591,19 @@ def assign_banks(program: Program) -> BankAssignment:
             result.conflicts.append(
                 f'L{region_idx}: wmmaChains span acc banks {sorted(banks)}')
 
-    # Phase 3: ds_load data_bank = acc_bank of the hosting loop region.
+    # Phase 3: ds_load data_bank = acc_bank of the DSChain's loading
+    # region.  Each DSChain is per-region under the new structure, so
+    # the lookup is direct.  Epilogue DSChains don't get banked here --
+    # they'll inherit via dependency propagation in Stage 4.
     for dc in dchains:
-        banks: set[int] = set()
-        for ld in dc.ds_loads:
-            r = _loop_region_of(ld, loop_bb, cbranch_idx)
-            if r is None:
-                continue  # prologue/epilogue ds_loads resolve later
-            # Pick any wmmaChain in region r to read its acc_bank --
-            # by Phase 2 they all agree (or we reported a conflict).
-            chains = loop_wmmas_per_region.get(r, [])
-            if not chains:
-                continue
-            banks.add(result.wmma_acc_bank[id(chains[0])])
-        if len(banks) == 1:
-            result.ds_data_bank[id(dc)] = banks.pop()
-        elif len(banks) > 1:
-            result.conflicts.append(
-                f'DSChain {dc.wmma_chain.canonical}.src{dc.operand_idx - 1}: '
-                f'data_bank ambiguous across regions {sorted(banks)}')
+        if dc.is_epilogue_region:
+            continue
+        hosts = loop_wmmas_per_region.get(dc.loading_region, [])
+        if not hosts:
+            continue
+        bank = result.wmma_acc_bank.get(id(hosts[0]))
+        if bank is not None:
+            result.ds_data_bank[id(dc)] = bank
 
     # Phase 4: per-region src0_bank / src1_bank.  A wmmaChain can span
     # multiple loop regions (e.g., a pipelined accumulator in regions
@@ -1424,24 +1685,22 @@ def assign_banks(program: Program) -> BankAssignment:
             target[cid] = banks.pop()
 
     # Phase 5: ds_load addr_bank = src0_bank of the wmmaChain in the
-    # region hosting the ds_load.  (src0 because ds_load's operand[1]
+    # DSChain's loading region.  (src0 because ds_load's operand[1]
     # is encoded in the src0 MSB slot, matching the wmma's src0.)
     for dc in dchains:
+        if dc.is_epilogue_region:
+            continue
         addr_banks: set[int] = set()
-        for ld in dc.ds_loads:
-            r = _loop_region_of(ld, loop_bb, cbranch_idx)
-            if r is None:
-                continue
-            for c in loop_wmmas_per_region.get(r, []):
-                b = result.wmma_src0_bank.get(id(c))
-                if b is not None:
-                    addr_banks.add(b)
+        for c in loop_wmmas_per_region.get(dc.loading_region, []):
+            b = result.wmma_src0_bank.get(id(c))
+            if b is not None:
+                addr_banks.add(b)
         if len(addr_banks) == 1:
             result.ds_addr_bank[id(dc)] = addr_banks.pop()
         elif len(addr_banks) > 1:
             result.conflicts.append(
-                f'DSChain {dc.wmma_chain.canonical}.src{dc.operand_idx - 1}: '
-                f'addr_bank ambiguous across regions {sorted(addr_banks)}')
+                f'DSChain L{dc.loading_region} src{(dc.op_idx or 1) - 1}: '
+                f'addr_bank ambiguous {sorted(addr_banks)}')
 
     # Per-region MSB state.  dst and src2 share a bank (acc == dst for
     # the wmma, and ds_load's dst sits in that bank by Phase 3); src0
