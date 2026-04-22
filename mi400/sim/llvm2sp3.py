@@ -19,7 +19,7 @@ def hack_for_sellow(sp3):
     f = open(sp3, "r")
     newSp3 = ""
     for l in f:
-        m = re.search("(v_wmma.*) (v.*), (v.*), (v.*), sel_lo\((v.*)\)", l)
+        m = re.search(r"(v_wmma.*) (v.*), (v.*), (v.*), sel_lo\((v.*)\)", l)
         if m:
             print(l)
             l = f"{m.group(1)} {m.group(2)}, {m.group(3)}, {m.group(4)}, {m.group(5)}\n"
