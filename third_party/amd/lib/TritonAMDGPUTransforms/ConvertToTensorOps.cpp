@@ -66,36 +66,6 @@ public:
   }
 };
 
-// Build the index encoding for TDM gather/scatter.
-//
-// Layout: BlockedLayout([1, M], [threadsPerWarp, 1], [1, numWarps], [0, 1])
-// sliced along dim 0 to produce a 1D encoding. M is the max number of row
-// indices per TDM instruction (256 bits / index element bitwidth). The
-// freeVarMasks mechanism in the LLVM lowering adapts the number of active
-// warps and gathers per warp to the actual problem size.
-static SliceEncodingAttr getTDMGatherIndexEncoding(Operation *op) {
-  MLIRContext *ctx = op->getContext();
-  auto indicesType = cast<RankedTensorType>(
-      cast<DescriptorGatherOp>(op).getXOffsets().getType());
-  unsigned idxBitWidth = indicesType.getElementType().getIntOrFloatBitWidth();
-  assert((idxBitWidth == 16 || idxBitWidth == 32) &&
-         "TDM gather/scatter indices must be i16 or i32");
-  unsigned maxIndicesPerInstr = 256 / idxBitWidth;
-
-  unsigned numWarps = triton::gpu::lookupNumWarps(op);
-  unsigned threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(
-      op->getParentOfType<ModuleOp>());
-  auto cgaLayout = CGAEncodingAttr::get1CTALayout(ctx, /*rank=*/2);
-
-  std::array<unsigned, 2> sizePerThread = {1, maxIndicesPerInstr};
-  std::array<unsigned, 2> tPerWarp = {threadsPerWarp, 1};
-  std::array<unsigned, 2> warpsPerCTA = {1, numWarps};
-  std::array<unsigned, 2> order = {0, 1};
-  auto parentEnc = BlockedEncodingAttr::get(ctx, sizePerThread, tPerWarp,
-                                            warpsPerCTA, order, cgaLayout);
-  return SliceEncodingAttr::get(ctx, /*dim=*/0, parentEnc);
-}
-
 struct TensorGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -112,9 +82,9 @@ struct TensorGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
       return failure();
     }
 
-    auto idxEnc = getTDMGatherIndexEncoding(op);
     auto indices = op.getXOffsets();
     auto indicesType = cast<RankedTensorType>(indices.getType());
+    auto idxEnc = getTDMGatherIndexEncoding(op, indicesType);
 
     // NOTE: The shared TritonToTritonGPU conversion (GatherScatterOpPattern)
     // unconditionally applies an NVIDIA-oriented index layout. Because of
