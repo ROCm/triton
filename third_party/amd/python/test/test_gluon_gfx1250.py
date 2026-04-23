@@ -1508,7 +1508,7 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
                                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
                                 NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
                                 PARTITION_DIM: ttgl.constexpr):
-    """TDM load with PartitionedSharedLayout, then store via registers."""
+    """TDM load with PartitionedSharedLayout; LDS read uses WMMA dot layout (transpose path)."""
     num_warps: ttgl.constexpr = ttgl.num_warps()
 
     if PARTITION_DIM == 0:
@@ -1523,6 +1523,8 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
     smem_layout: ttgl.constexpr = PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, inner_layout)
 
     block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
+    DOT_RHS_LAYOUT: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
 
     pid_m = ttgl.program_id(axis=0)
     pid_n = ttgl.program_id(axis=1)
@@ -1536,7 +1538,8 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
-    a = a_buffer.load(layout=block_layout)
+    a_dot = a_buffer.load(layout=DOT_RHS_LAYOUT)
+    a = ttgl.convert_layout(a_dot, block_layout)
 
     offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
     offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, block_layout))
@@ -1545,36 +1548,37 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
     ttgl.store(b_ptr + offs_b, a, mask=b_mask)
 
 
+_PARTITIONED_TDM_PARAMS = [
+    # # --- partitionDim = 0 (rows) ---
+    # 2 partitions x 1 group = 2 pieces along dim0 -> 4 warps covers it
+    (64, 32, 2, 1, 0),
+    # 2 partitions x 2 groups = 4 pieces along dim0 -> 4 warps covers it
+    (64, 32, 2, 2, 0),
+    # 2 partitions x 4 groups = 8 pieces along dim0 -> 4 warps < 8 -> 2 instructions
+    (64, 32, 2, 4, 0),
+    # 2 partitions x 8 groups = 16 pieces along dim0 -> 4 warps < 16 -> 4 instructions
+    (128, 64, 2, 2, 0),
+    # --- partitionDim = 1 (cols) ---
+    # 2 partitions x 1 group = 2 pieces along dim1
+    (32, 64, 2, 1, 1),
+    # 2 partitions x 2 groups = 4 pieces along dim1 -> 4 warps covers it
+    (64, 64, 2, 2, 1),
+    # 2 partitions x 4 groups = 8 pieces along dim1 -> 4 warps < 8 -> 2 instructions
+    (64, 128, 2, 4, 1),
+    # 2 partitions x 8 groups = 16 pieces along dim1 -> 4 warps < 16 -> 4 instructions
+    (64, 256, 2, 8, 1),
+]
+
+
 @pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
-@pytest.mark.parametrize(
-    "BLOCK_M,BLOCK_N,NUM_PARTITIONS,NUM_GROUPS,PARTITION_DIM",
-    [
-        # # --- partitionDim = 0 (rows) ---
-        # 2 partitions x 1 group = 2 pieces along dim0 -> 4 warps covers it
-        (64, 32, 2, 1, 0),
-        # 2 partitions x 2 groups = 4 pieces along dim0 -> 4 warps covers it
-        (64, 32, 2, 2, 0),
-        # 2 partitions x 4 groups = 8 pieces along dim0 -> 4 warps < 8 -> 2 instructions
-        (64, 32, 2, 4, 0),
-        # 2 partitions x 8 groups = 16 pieces along dim0 -> 4 warps < 16 -> 4 instructions
-        (128, 64, 2, 2, 0),
-        # --- partitionDim = 1 (cols) ---
-        # 2 partitions x 1 group = 2 pieces along dim1
-        (32, 64, 2, 1, 1),
-        # 2 partitions x 2 groups = 4 pieces along dim1 -> 4 warps covers it
-        (64, 64, 2, 2, 1),
-        # 2 partitions x 4 groups = 8 pieces along dim1 -> 4 warps < 8 -> 2 instructions
-        (64, 128, 2, 4, 1),
-        # 2 partitions x 8 groups = 16 pieces along dim1 -> 4 warps < 16 -> 4 instructions
-        (64, 256, 2, 8, 1),
-    ],
-)
-@pytest.mark.parametrize("num_warps", [4])
-@pytest.mark.parametrize("M,N", [(256, 256)])
-def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, M, N):
-    """Test TDM async_load with PartitionedSharedLayout (global -> LDS)."""
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,NUM_PARTITIONS,NUM_GROUPS,PARTITION_DIM", _PARTITIONED_TDM_PARAMS)
+def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM):
+    """Test correctness of TDM async_load + transpose LDS load with PartitionedSharedEncodingAttr."""
+    M, N = 256, 256
+    num_warps = 4
+
     torch.manual_seed(42)
-    a = torch.randint(0x0, 0xFFFF, (M, N), dtype=torch.uint16)
+    a = torch.randn((M, N), dtype=torch.float16)
     b = torch.zeros_like(a)
 
     a_device = a.cuda()
@@ -1590,6 +1594,36 @@ def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROU
     total = a.numel()
     assert mismatched == 0, (f"Mismatch: {mismatched}/{total} ({100*mismatched/total:.1f}%) elements differ. "
                              f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}")
+
+
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,NUM_PARTITIONS,NUM_GROUPS,PARTITION_DIM", _PARTITIONED_TDM_PARAMS)
+def test_compile_partitioned_tdm_transpose_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM):
+    """Check that LDS load from PartitionedSharedEncodingAttr lowers to ds_load_tr16 when appropriate."""
+    num_warps = 4
+    signature = {
+        "a_ptr": "*fp16",
+        "b_ptr": "*fp16",
+        "M": "i32",
+        "N": "i32",
+        "BLOCK_M": "constexpr",
+        "BLOCK_N": "constexpr",
+        "NUM_PARTITIONS": "constexpr",
+        "NUM_GROUPS": "constexpr",
+        "PARTITION_DIM": "constexpr",
+    }
+    constexprs = {
+        "BLOCK_M": BLOCK_M,
+        "BLOCK_N": BLOCK_N,
+        "NUM_PARTITIONS": NUM_PARTITIONS,
+        "NUM_GROUPS": NUM_GROUPS,
+        "PARTITION_DIM": PARTITION_DIM,
+    }
+    k = triton.compile(
+        src=gluon._runtime.GluonASTSource(partitioned_tdm_copy_kernel, signature, constexprs),
+        target=GPUTarget("hip", 'gfx1250', 32),
+        options={"num_warps": num_warps},
+    )
+    assert re.search(r"ds_load_tr16", k.asm["amdgcn"]), "expected transpose LDS loads (ds_load_tr16) in amdgcn"
 
 
 @gluon.jit
