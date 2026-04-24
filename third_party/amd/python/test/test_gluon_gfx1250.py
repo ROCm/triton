@@ -4411,23 +4411,23 @@ def test_cache_modifier(loadCM, storeCM, test_kernel):
         if "buffer_load_b128" in line or "global_load_async_to_lds_b128" in line:
             load_found = True
             if loadCM == ".ca":
-                assert ("scope" not in line and "th" not in line)
+                assert "scope" not in line and "th" not in line
             if loadCM == ".cg":
-                assert ("scope:SCOPE_DEV" and "th" not in line)
+                assert "scope:SCOPE_DEV" in line and "th" not in line
             if loadCM == ".cs":
-                assert ("scope" not in line and "th:TH_LOAD_NT" in line)
+                assert "scope" not in line and "th:TH_LOAD_NT" in line
             if loadCM == ".cv":
-                assert ("scope:SCOPE_SYS" in line and "th:TH_LOAD_BYPASS" in line)
+                assert "scope:SCOPE_SYS" in line and "th:TH_LOAD_BYPASS" in line
         if "buffer_store_b128" in line or "global_store_async_from_lds_b128" in line:
             store_found = True
             if storeCM == ".wb":
-                assert ("scope" not in line and "th" not in line)
+                assert "scope" not in line and "th" not in line
             if storeCM == ".cg":
-                assert ("scope:SCOPE_DEV" and "th" not in line)
+                assert "scope:SCOPE_DEV" in line and "th" not in line
             if storeCM == "cs":
-                assert ("scope" not in line and "th:TH_LOAD_NT" in line)
+                assert "scope" not in line and "th:TH_LOAD_NT" in line
             if storeCM == ".wt":
-                assert ("scope:SCOPE_SYS" in line and "th:TH_STORE_BYPASS" in line)
+                assert "scope:SCOPE_SYS" in line and "th:TH_STORE_BYPASS" in line
 
     assert load_found
     assert store_found
