@@ -58,17 +58,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK: #[[$PADDED_C:.*]] = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [512, 64]}>
 // CHECK-NOT: #ttg.padded_shared
 
+// TDM ops feed amdg.async_tdm_wait directly; no ttg.async_commit_group should
+// appear in the lowered IR. The CHECK-NOT lines below are interleaved so that
+// FileCheck enforces the "no commit group" invariant between every adjacent
+// pair of positive matches inside this function.
 // CHECK-LABEL: tt.func @matmul_kernel_make_tensor_descriptor
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<512x32xf16, #[[$PADDED_A]]> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<32x64xf16, #[[$PADDED_B]]> -> !ttg.memdesc<32x64xf16, #[[$PADDED_B]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: scf.for
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<512x32xf16, #[[$PADDED_A]]> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<32x64xf16, #[[$PADDED_B]]> -> !ttg.memdesc<32x64xf16, #[[$PADDED_B]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: }
+// CHECK-NOT: ttg.async_commit_group
 // CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<512x64xf16, #[[$PADDED_C]]>
 
 // -----
@@ -138,9 +145,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<64x64xf8E5M2, #[[$PADDED_B]]> -> !ttg.memdesc<64x64xf8E5M2, #[[$PADDED_B]], #smem, mutable>
 // CHECK: scf.for
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<256x64xf8E5M2, #[[$PADDED_A]]> -> !ttg.memdesc<256x64xf8E5M2, #[[$PADDED_A]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<64x64xf8E5M2, #[[$PADDED_B]]> -> !ttg.memdesc<64x64xf8E5M2, #[[$PADDED_B]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
 // CHECK: }
 // CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<256x64xf16, #[[$PADDED_C]]>
 
@@ -210,8 +215,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<16x64xf32, #[[$PADDED_B]]> -> !ttg.memdesc<16x64xf32, #[[$PADDED_B]], #smem, mutable>
 // CHECK: scf.for
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<256x16xf32, #[[$PADDED_A]]> -> !ttg.memdesc<256x16xf32, #[[$PADDED_A]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<16x64xf32, #[[$PADDED_B]]> -> !ttg.memdesc<16x64xf32, #[[$PADDED_B]], #smem, mutable>
-// CHECK: ttg.async_commit_group tokens
 // CHECK: }
 // CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<256x64xf32, #[[$PADDED_C]]>

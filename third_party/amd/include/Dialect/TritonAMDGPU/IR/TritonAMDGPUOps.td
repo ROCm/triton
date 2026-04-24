@@ -746,9 +746,12 @@ def AsyncCopyLocalToGlobalOp : TT_AMDGPU_Op<"async_copy_local_to_global", [
 // AsyncTDMCopyGlobalToLocalOp
 //===----------------------------------------------------------------------===//
 
-def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local", [AttrSizedOperandSegments,
-    DeclareOpInterfaceMethods<MBarrierOpInterface>,
-    DeclareOpInterfaceMethods<PredicatedOpInterface>]> {
+def AsyncTDMCopyGlobalToLocalOp
+    : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
+                   [AttrSizedOperandSegments,
+                    DeclareOpInterfaceMethods<MBarrierOpInterface>,
+                    DeclareOpInterfaceMethods<PredicatedOpInterface>,
+                    TDMOpInterface]> {
   let summary = "Copy data based on descriptor from global memory to local memory asynchronously";
 
   let description = [{
@@ -790,8 +793,11 @@ def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
 // AsyncTDMCopyLocalToGlobalOp
 //===----------------------------------------------------------------------===//
 
-def AsyncTDMCopyLocalToGlobalOp : TT_AMDGPU_Op<"async_tdm_copy_local_to_global", [AttrSizedOperandSegments,
-    DeclareOpInterfaceMethods<MBarrierOpInterface>]> {
+def AsyncTDMCopyLocalToGlobalOp
+    : TT_AMDGPU_Op<"async_tdm_copy_local_to_global", [AttrSizedOperandSegments,
+                                                      DeclareOpInterfaceMethods<
+                                                          MBarrierOpInterface>,
+                                                      TDMOpInterface]> {
   let summary = "Copy data based on descriptor from local memory to global memory asynchronously";
 
   let description = [{
@@ -823,8 +829,10 @@ def AsyncTDMCopyLocalToGlobalOp : TT_AMDGPU_Op<"async_tdm_copy_local_to_global",
 // AsyncTDMScatterOp
 //===----------------------------------------------------------------------===//
 
-def AsyncTDMScatterOp : TT_AMDGPU_Op<"async_tdm_scatter", [
-    DeclareOpInterfaceMethods<MBarrierOpInterface>]> {
+def AsyncTDMScatterOp
+    : TT_AMDGPU_Op<
+          "async_tdm_scatter", [DeclareOpInterfaceMethods<MBarrierOpInterface>,
+                                TDMOpInterface]> {
   let summary = "Scatter data from local memory to non-contiguous global memory rows asynchronously";
 
   let description = [{
@@ -864,9 +872,11 @@ def AsyncTDMScatterOp : TT_AMDGPU_Op<"async_tdm_scatter", [
 // AsyncTDMGatherOp
 //===----------------------------------------------------------------------===//
 
-def AsyncTDMGatherOp : TT_AMDGPU_Op<"async_tdm_gather", [
-    DeclareOpInterfaceMethods<MBarrierOpInterface>,
-    DeclareOpInterfaceMethods<PredicatedOpInterface>]> {
+def AsyncTDMGatherOp
+    : TT_AMDGPU_Op<
+          "async_tdm_gather", [DeclareOpInterfaceMethods<MBarrierOpInterface>,
+                               DeclareOpInterfaceMethods<PredicatedOpInterface>,
+                               TDMOpInterface]> {
   let summary = "Gather data from non-contiguous global memory rows to local memory asynchronously";
 
   let description = [{
