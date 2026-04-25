@@ -34,8 +34,8 @@ LLVM_LIBRARY_DIR=/llvm LLVM_SYSPATH=/llvm pip3 install --no-build-isolation .
 echo "=== Setup Environment ==="
 
 source /ffm-base/ffmlite_env.sh
-export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
-export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
+#export LD_LIBRARY_PATH=/ffm-update:$LD_LIBRARY_PATH
+#export HSA_MODEL_LIB=/ffm-update/libhsakmtmodel.so
 export HSA_MODEL_NUM_THREADS=1
 # Prefer the NPI ROCm's libraries over the ones shipped with FFM Lite--we need libhipblaslt.so there.
 export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH

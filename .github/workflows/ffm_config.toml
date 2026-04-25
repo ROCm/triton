@@ -1,185 +1,105 @@
-# Copyright © 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-############### ITRACE OPTIONS ###############
-[ffm_enable_itrace]
-    # Enables itrace from command line
-    gclog.ProcessCommand = "class:.*.itrace,debug-3"
-
-[ffm_enable_aql_trace]
-    # Enables AQL Trace from command line
-    gclog.ProcessCommand = "class:shader_ffm.hsakmtmodel,debug-3"
-
+# forces itrace printouts to include all enabled threads/lanes instead of just the first and last active ones
+# this will also dump WMMA matrix data to itrace file for MIs
 [ffm_itrace_all_threads]
-    # forces itrace printouts to include all enabled threads/lanes instead of just the first and last active ones
-    # this will also dump WMMA matrix data to itrace file for MIs
-    dona.component.jitcu_itrace.all_lanes=true
-    ffm_enable_itrace = true
+dona.component.jitcu_itrace.all_lanes=true
+ffm_enable_itrace = true
 
-[ffm_itrace_filter]
-    # filters itrace to only output some instructions. Not compatible with ffm_enable_jit
-    # multiple filters can be used, separated with :, can use wildcards
-    # filter with - at start excludes an instruction
-    # Works like gtest filters - first processes insts to include. If inst matches, then see if this is negated by matching an excluded filter
-    dona.component.jitcu_itrace.instruction_filter="s_*:global_load*:-s_mov*"
-    ffm_enable_itrace = true
-    #Examples of filters:
-    #   Only include v_convolve* ops
-    #       dona.component.jitcu_itrace.instruction_filter="v_convolve*"
-    #   Include everything except v_convolve* ops
-    #       dona.component.jitcu_itrace.instruction_filter="-v_convolve*"
-    #   Include all v_* ops and all s_* ops except s_mov_b32
-    #       dona.component.jitcu_itrace.instruction_filter="v_*:s_*:-s_mov_b32"
+# FFM runs waves serially within a workgroup which causes waves to FFM-yield after signaling on a barrier or semaphore
+# this allows other waves receiving the signal to run, simulating concurrently running waves
+# useful for synchronisation app debugs
+[ffm_debug_sync_signals]
+dona.component.shader_complex.debug_barier_semaphore=true
 
+# dump WMMA matrix data to itrace
+# itrace must be enabled, good alternative to ffm_itrace_all_threads for debugging
 [ffm_itrace_dump_matrix]
-    # dump WMMA matrix data to itrace
-    # itrace must be enabled, good alternative to ffm_itrace_all_threads for debugging
-    dona.component.jitcu_itrace.dump_matrix=true
-    ffm_enable_itrace = true
+dona.component.jitcu_itrace.dump_matrix=true
+ffm_enable_itrace = true
 
+# dump decoded rsrc descriptors (where supported)
+# itrace must be enabled
 [ffm_itrace_dump_rsrc_desc]
-    # dump decoded rsrc descriptors (where supported)
-    # itrace must be enabled
-    dona.component.jitcu_itrace.dump_rsrc_desc=true
+dona.component.jitcu_itrace.dump_rsrc_desc=true
 
+# limits itrace dumps to only VMEM instructions
+# itrace must be enabled
 [ffm_itrace_vmem_only]
-    # limits itrace dumps to only VMEM instructions
-    # itrace must be enabled
-    dona.component.jitcu_itrace.vmem_only=true
-    ffm_enable_itrace = true
+dona.component.jitcu_itrace.vmem_only=true
+ffm_enable_itrace = true
 
+# use fast float implementations instead of the ones in Math Engine
+# JIT-able and typically much faster but is not guaranteed to be bit accurate
+# some operations do not have a fast float implementation; these will fall back to MathEn
+[ffm_use_fast_float]
+dona.component.shader_complex.use_fast_float=true
+
+# enable JIT compile
+# whether this is faster or not depends on the type of the workload
+[ffm_use_jit]
+dona.component.shader_complex.use_jit=true
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to random wave execution order
+# useful for synchronisation app debug
+[ffm_exec_order_random]
+dona.component.shader_complex.exec_order=2
+# Uncomment out the line below to use a specific random seed
+#dona.component.shader_complex.random_seed=962665528
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to decreasing wave execution order
+# useful for synchronisation app debug
+[ffm_exec_order_descending]
+dona.component.shader_complex.exec_order=1
+
+# waves run round-robin, serially within a workgroup in-order of wave ID by default
+# this option changes the execution order to ascending wave execution order, i.e. any time wave 0 can run it will run
+# useful for synchronisation app debug
+[ffm_exec_order_ascending]
+dona.component.shader_complex.exec_order=3
+
+# force memory dependency check for s_wait operations
+# this is for wait counter debug for VGPR/LDS access
+# search "Application Wait Count Debug" on Confluence for details
+[ffm_force_mem_dep_check]
+dona.component.shader_complex.force_mem_dep_check=true
+
+# Allows waves / workgroups / clusters to be run in a timesliced manor.
+# This will enabling coding patterns such as consumer / producer models
+[ffm_enable_time_slicing]
+dona.component.jitcu.enable_time_slicing=true
+
+# only dump itrace for this wave, set to specified debug ID, in hex
 [ffm_itrace_wave_id_filter]
-    # only dump itrace for this wave, set to specified debug ID, in hex
-    dona.component.jitcu_itrace.wave_id=0x0
-    ffm_enable_itrace = true
+dona.component.jitcu_itrace.wave_id=0x1
+ffm_enable_itrace = true
 
+# if set, sgprs, vpgrs and mregs are initialized to a known value. And error message is printed to itrace when trying
+# to read from an uninitialized gpr
+[ffm_validate_gprs]
+dona.component.shader_complex.validate_gprs=true
+
+# if set, enables assertions on things that are legal but usually suggest a problem with the kernel. Can be set individually too - see below
+[ffm_strict_mode]
+dona.component.shader_complex.validate_gprs_strict=true
+dona.component.shader_complex.barrier_checks_strict=true
+
+# if set, sgprs, vpgrs and mregs are initialized to a known value and an assert is triggered when trying to read from an
+# uninitialized gpr
+[ffm_validate_gprs_strict]
+dona.component.shader_complex.validate_gprs_strict=true
+
+# if set, will assert on doing doing legal but probably invalid - e.g. leaving a barrier that already has signals
+[ffm_barrier_checks_strict]
+dona.component.shader_complex.barrier_checks_strict=true
+
+# Enables itrace from command line
+[ffm_enable_itrace]
+    gclog.ProcessCommand = "class:.*.jitcu.itrace,debug-3"
+
+# Use gclog.cfg in current dir
 [ffm_local_gclog_cfg]
-    # Use gclog.cfg in current dir
     gclog.ProcessFile = "gclog.cfg"
 
 [ffm_gclog_flush]
-    # Enable gclog (i.e. itrace) fflush after every line. Slow, but will ensure all dumped on crash or when stepping through code
     gclog.fflush = true
-
-############### WAVE EXECUTION ORDER ###############
-# waves run round-robin, serially within a workgroup in-order of wave ID by default.
-# Options below change this to not round robin, to try and let some waves get ahead
-# This is useful to debug sync issues in kernels
-
-[ffm_exec_order_random]
-    # Execute waves in random order
-    ######## Use with ffm_debug_sync_signals for max effect ########
-    dona.component.shader_complex.exec_order=2
-    # Uncomment out the line below to use a specific random seed
-    #dona.component.shader_complex.random_seed=962665528
-
-[ffm_exec_order_ascending]
-    # Execute waves in ascending order
-    dona.component.shader_complex.exec_order=3
-
-[ffm_exec_order_descending]
-    # Execute waves in descending order
-    dona.component.shader_complex.exec_order=1
-
-############### OTHER KERNEL DEBUG OPTIONS ###############
-
-[ffm_debug_sync_signals]
-    # FFM runs waves serially within a workgroup which causes waves to FFM-yield after signaling on a barrier or semaphore
-    # this allows other waves receiving the signal to run, simulating concurrently running waves
-    # useful for synchronisation app debugs
-    ######## Use with ffm_exec_order_random for max effect ########
-    dona.component.shader_complex.debug_barier_semaphore=true
-
-[ffm_force_mem_dep_check]
-    # Check for s_wait_*cnt intstructions. Not fully implemented
-    dona.component.shader_complex.force_mem_dep_check=true
-
-[ffm_validate_gprs]
-    # if set, sgprs, vpgrs and mregs are initialized to a known value. And error message is printed to itrace when trying
-    # to read from an uninitialized gpr
-    dona.component.shader_complex.validate_gprs=true
-
-[ffm_validate_gprs_strict]
-    # if set, sgprs, vpgrs and mregs are initialized to a known value and an assert is triggered when trying to read from an
-    # uninitialized gpr
-    dona.component.shader_complex.validate_gprs_strict=true
-
-[ffm_barrier_checks_strict]
-    # if set, will assert on doing doing legal but probably invalid - e.g. leaving a barrier that already has signals
-    dona.component.shader_complex.barrier_checks_strict=true
-
-[ffm_lds_oob_strict]
-    # if set, will assert if any LDS instruction attempts to read OOB
-    dona.component.shader_complex.lds_oob_strict_level=2
-
-[ffm_lds_oob_semi_strict]
-    # if set, will assert if any LDS instruction attempts to read OOB
-    # but allows reads of address INT32_MAX (used by SW teams in some cases)
-    dona.component.shader_complex.lds_oob_strict_level=1
-
-
-[ffm_strict_mode]
-    # Enable all strict modes
-    ffm_validate_gprs_strict = true
-    ffm_barrier_checks_strict = true
-    ffm_lds_oob_strict = true
-
-############### General OPTIONS ###############
-
-[ffm_enable_time_slicing]
-    # Allows waves / workgroups / clusters to be run in a timesliced manor.
-    # This will enabling coding patterns such as consumer / producer models
-    dona.component.jitcu.enable_time_slicing=true
-
-[ffm_use_execution_engine]
-    # Use legacy cluster executor path: yes/true enables legacy executor, no/false uses events
-    dona.component.shader_complex.legacy_executor=false
-
-[ffm_use_fast_float]
-    # use fast float implementations instead of the ones in Math Engine
-    # JIT-able and typically much faster but is not guaranteed to be bit accurate
-    # some operations do not have a fast float implementation; these will fall back to MathEn
-    dona.component.shader_complex.use_fast_float=true
-
-[ffm_use_jit]
-    # enable JIT compile
-    # whether this is faster or not depends on the type of the workload
-    dona.component.shader_complex.use_jit=true
-
-# enable AVX implementation for supported ops
-[ffm_use_avx]
-dona.component.shader_complex.use_avx=true
-
-# if enabled, dumps the cumulative execution time per ISA instruction
-# do not use when profiling using other tools as getting the instruction name causes a significant overhead
-[ffm_time_instructions]
-dona.component.shader_complex.time_instructions=true
-
-############### RAY TRACING OPTIONS ###############
-
-[ffm_rt_ignore_prefilter]
-    # Forces ray to always ignore prefilter node packets during traversal
-    dona.component.shader_complex.rt_ignore_prefilter=true
-
-[ffm_rt_disable_strided_hit_buffer]
-    # Controls wether to use the strided (instead of non-strided) mode for calculating the hit buffer address
-    # TODO(pbell) This should be read from STRIDED_HIT_BUFFER_DISABLE control register
-    dona.component.shader_complex.rt_disable_strided_hit_buffer=true
-
-[ffm_rt_bvh_dump_text]
-    # Enables a json dump of the BVH for each unique BVH root encountered during traversal to the working directory.
-    # Note that a rts instruction must cause traversal of the BVH for it be dumped
-    dona.component.shader_complex.rt_bvh_dump="text"
-
-[ffm_rt_bvh_dump_binary]
-    # Enables a binary dump of the BVH for each unique BVH root encountered during traversal to the working directory.
-    # Note that a rts instruction must cause traversal of the BVH for it be dumped
-    dona.component.shader_complex.rt_bvh_dump="binary"
-
-[ffm_rt_bvh_dump_all]
-    # Enables both a binary and json dump of the BVH for each unique BVH root encountered during traversal to the working directory.
-    # Note that a rts instruction must cause traversal of the BVH for it be dumped
-    dona.component.shader_complex.rt_bvh_dump="all"
-
-[ffm_rt_ray_dump_binary]
-    # Enables a per-bvh dump of all rays which are encountered by the RTS.
-    dona.component.shader_complex.rt_ray_dump="binary"
