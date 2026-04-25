@@ -195,6 +195,37 @@ class TestParseInstruction:
         assert inst.trailing_comment is None
         assert inst.dst_reg().ids == [256]
 
+    def test_v_dual_mov_b32_no_comments(self):
+        line = "\tv_dual_mov_b32 v65, v64 :: v_dual_mov_b32 v66, v64"
+        inst = _parse_instruction_line(line)
+        assert inst.opcode == "v_dual_mov_b32"
+        assert inst.dual_issue is True
+        assert len(inst.operands) == 4
+        assert inst.operands[0].regs[0].ids == [65]
+        assert inst.operands[1].regs[0].ids == [64]
+        assert inst.operands[2].regs[0].ids == [66]
+        assert inst.operands[3].regs[0].ids == [64]
+        # Round-trip emit re-inserts the ::
+        assert inst.emit() == "v_dual_mov_b32 v65, v64 :: v_dual_mov_b32 v66, v64"
+
+    def test_v_dual_mov_b32_with_comments(self):
+        line = ("\tv_dual_mov_b32 v180 /*v436*/, v64 "
+                ":: v_dual_mov_b32 v181 /*v437*/, v64")
+        inst = _parse_instruction_line(line)
+        assert inst.opcode == "v_dual_mov_b32"
+        assert inst.dual_issue is True
+        assert len(inst.operands) == 4
+        assert inst.operands[0].regs[0].ids == [436]
+        assert inst.operands[0].regs[0].raw_ids == [180]
+        assert inst.operands[1].regs[0].ids == [64]
+        assert inst.operands[2].regs[0].ids == [437]
+        assert inst.operands[2].regs[0].raw_ids == [181]
+        assert inst.operands[3].regs[0].ids == [64]
+        emitted = inst.emit()
+        assert "::" in emitted
+        assert "v180 /*v436*/" in emitted
+        assert "v181 /*v437*/" in emitted
+
 
 # -------------------------------------------------------------------------
 # Inline asm block (scheduler markers)

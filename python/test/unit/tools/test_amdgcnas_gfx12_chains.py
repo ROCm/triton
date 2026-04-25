@@ -11,6 +11,7 @@ from triton.tools.amdgcnas_gfx12 import (
     WMMAChain,
     allocate_vgprs,
     annotate_regions,
+    apply_allocation,
     assign_banks,
     build_def_use_index,
     can_share_data_vgprs,
@@ -18,6 +19,9 @@ from triton.tools.amdgcnas_gfx12 import (
     collect_wmma_chains,
     emit_program,
     find_region_spans,
+    hoist_loop_invariant_addrs,
+    merge_dscnt_waits,
+    overlap_wmma_with_barrier,
     parse_asm,
     report_chains,
 )
@@ -813,3 +817,89 @@ class TestAllocateVgprs:
             assert new is not None
             assert new.size == 1
             assert new.ids[0] // 256 == ab
+
+
+# -------------------------------------------------------------------------
+# apply_allocation (Stage 4.4+5)
+# -------------------------------------------------------------------------
+
+class TestApplyAllocation:
+
+    def _run_pipeline(self, fixture_glob):
+        import glob
+        matches = glob.glob(fixture_glob)
+        if not matches:
+            pytest.skip(f'fixture not available: {fixture_glob}')
+        with open(matches[0]) as f:
+            text = f.read()
+        prog = parse_asm(text)
+        hoist_loop_invariant_addrs(prog)
+        merge_dscnt_waits(prog)
+        overlap_wmma_with_barrier(prog)
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        apply_allocation(prog, ba, alloc)
+        return prog, ba, alloc
+
+    def _count_acc_init_writes(self, prog):
+        writes = set()
+        for bb in prog.blocks:
+            for inst in bb.instructions:
+                if inst.opcode == 'v_mov_b32_e32' and len(inst.operands) >= 2:
+                    src1 = inst.operands[1].text
+                    if src1 == '0' or src1 == 'v64':
+                        writes.add(inst.operands[0].regs[0].ids[0])
+                elif inst.opcode == 'v_dual_mov_b32' and inst.dual_issue:
+                    for slot in (0, 2):
+                        if slot < len(inst.operands):
+                            op = inst.operands[slot]
+                            if op.regs and op.regs[0].kind == 'v':
+                                writes.add(op.regs[0].ids[0])
+        return writes
+
+    def test_v9_apply_round_trips(self):
+        prog, ba, alloc = self._run_pipeline(
+            '/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        # Re-emit must round-trip through the parser without errors.
+        text = emit_program(prog)
+        re_prog = parse_asm(text)
+        assert len(re_prog.blocks) == len(prog.blocks)
+
+    def test_v9_dual_mov_preserved(self):
+        prog, ba, alloc = self._run_pipeline(
+            '/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        # Every v_dual_mov_b32 in the output must keep the :: separator
+        # and have 4 parsed operands.
+        for bb in prog.blocks:
+            for inst in bb.instructions:
+                if inst.opcode == 'v_dual_mov_b32':
+                    assert inst.dual_issue is True
+                    assert len(inst.operands) == 4
+                    assert ' :: ' in inst.raw_line
+
+    def test_v9_acc_init_covers_all_chains(self):
+        prog, ba, alloc = self._run_pipeline(
+            '/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        writes = self._count_acc_init_writes(prog)
+        expected = set()
+        for c in collect_wmma_chains(prog):
+            new = alloc.acc(c)
+            if new is not None:
+                expected.update(new.ids)
+        # Every allocated acc element should be initialized.
+        assert expected.issubset(writes), (
+            f'missing inits for {sorted(expected - writes)[:10]}')
+
+    def test_v9_budget_bumped(self):
+        prog, ba, alloc = self._run_pipeline(
+            '/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        text = emit_program(prog)
+        # The .amdhsa_next_free_vgpr directive should reflect alloc.budget.
+        assert f'.amdhsa_next_free_vgpr {alloc.budget}' in text
+
+    def test_v10_apply_round_trips(self):
+        prog, ba, alloc = self._run_pipeline(
+            '/home/lixzhang/.triton/cache/*/v10_double_local_prefetch.amdgcn')
+        text = emit_program(prog)
+        re_prog = parse_asm(text)
+        assert len(re_prog.blocks) == len(prog.blocks)

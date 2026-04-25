@@ -184,15 +184,25 @@ class Instruction:
     wmma_chain: Optional["WMMAChain"] = None
     ds_chain: Optional["DSChain"] = None
 
+    # GFX1250 dual-issue: ``v_dual_mov_b32 a, b :: v_dual_mov_b32 c, d``
+    # parses as a single instruction with 4 operands; emit re-inserts the
+    # ``::`` separator.
+    dual_issue: bool = False
+
     def emit(self) -> str:
         # Preserve original line verbatim when the instruction has no
         # structured form (labels, directives, inline asm blocks).
         if self.opcode.startswith('.') or self.opcode == '__asm_block__':
             return self.raw_line
-        parts = [self.opcode]
-        if self.operands:
-            parts.append(", ".join(op.emit() for op in self.operands))
-        line = " ".join(parts)
+        if self.dual_issue and len(self.operands) == 4:
+            left = ", ".join(op.emit() for op in self.operands[:2])
+            right = ", ".join(op.emit() for op in self.operands[2:])
+            line = f"{self.opcode} {left} :: {self.opcode} {right}"
+        else:
+            parts = [self.opcode]
+            if self.operands:
+                parts.append(", ".join(op.emit() for op in self.operands))
+            line = " ".join(parts)
         if self.trailing_comment is not None:
             line = f"{line:<40} ;{self.trailing_comment}"
         return line
@@ -374,39 +384,53 @@ def _parse_operand(text: str) -> Operand:
         return Operand(text=op_text, regs=regs,
                        logical_text=logical_text, suffix=suffix)
 
-    # No comment forms.
+    # No comment forms.  Always carve text into (register, suffix) so
+    # later rewrites that replace ``op.text`` don't lose any trailing
+    # ``offset:N`` modifier.
     m = _VGPR_RANGE.search(text)
     if m:
         lo, hi = int(m.group(1)), int(m.group(2))
         regs.append(Register(kind='v', ids=list(range(lo, hi + 1))))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     m = _SGPR_RANGE.search(text)
     if m:
         lo, hi = int(m.group(1)), int(m.group(2))
         regs.append(Register(kind='s', ids=list(range(lo, hi + 1))))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     m = _AGPR_RANGE.search(text)
     if m:
         lo, hi = int(m.group(1)), int(m.group(2))
         regs.append(Register(kind='a', ids=list(range(lo, hi + 1))))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     m = _VGPR_SINGLE.search(text)
     if m:
         regs.append(Register(kind='v', ids=[int(m.group(1))]))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     m = _SGPR_SINGLE.search(text)
     if m:
         regs.append(Register(kind='s', ids=[int(m.group(1))]))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     m = _AGPR_SINGLE.search(text)
     if m:
         regs.append(Register(kind='a', ids=[int(m.group(1))]))
-        return Operand(text=text, regs=regs)
+        op_text = text[m.start():m.end()]
+        suffix = text[m.end():].lstrip() or None
+        return Operand(text=op_text, regs=regs, suffix=suffix)
 
     # Literal or modifier (``0x80``, ``offset:32``, ``m0``, etc.)
     if text == 'm0':
@@ -458,6 +482,9 @@ def _strip_trailing_comment(line: str) -> tuple[str, Optional[str]]:
     return line, None
 
 
+_DUAL_SEP_RE = re.compile(r'\s+::\s+(v_dual_[A-Za-z0-9_]+)\s+')
+
+
 def _parse_instruction_line(line: str) -> Instruction:
     """Parse a non-empty, non-label instruction line."""
     code, comment = _strip_trailing_comment(line)
@@ -469,12 +496,33 @@ def _parse_instruction_line(line: str) -> Instruction:
 
     head, _, operand_text = stripped.partition(' ')
     opcode = head.strip()
-    operands: list[Operand] = []
-    for part in _split_operands(operand_text):
-        operands.append(_parse_operand(part))
+
+    # Detect GFX1250 dual-issue: ``op a, b :: op c, d``.  The two halves
+    # share the same opcode; we collapse to one Instruction with 4
+    # operands and set ``dual_issue=True`` so emit can restore the
+    # separator.
+    dual_issue = False
+    if opcode.startswith('v_dual_'):
+        m = _DUAL_SEP_RE.search(operand_text)
+        if m and m.group(1) == opcode:
+            left_text = operand_text[:m.start()]
+            right_text = operand_text[m.end():]
+            operands: list[Operand] = []
+            for part in _split_operands(left_text):
+                operands.append(_parse_operand(part))
+            for part in _split_operands(right_text):
+                operands.append(_parse_operand(part))
+            dual_issue = True
+        else:
+            operands = [_parse_operand(p)
+                        for p in _split_operands(operand_text)]
+    else:
+        operands = [_parse_operand(p)
+                    for p in _split_operands(operand_text)]
 
     inst = Instruction(opcode=opcode, operands=operands,
-                       raw_line=line, trailing_comment=comment)
+                       raw_line=line, trailing_comment=comment,
+                       dual_issue=dual_issue)
     if opcode == 's_set_vgpr_msb' and operands and operands[0].text:
         try:
             inst.msb_bits = _decode_msb(operands[0].text, comment)
@@ -2146,10 +2194,15 @@ def _rebuild_raw_line(inst: Instruction) -> None:
     """Regenerate ``inst.raw_line`` from current opcode/operands.  Used
     after an operand has been rewritten in place so the emitter picks
     up the change."""
-    parts = [inst.opcode]
-    if inst.operands:
-        parts.append(", ".join(op.emit() for op in inst.operands))
-    line = "\t" + " ".join(parts)
+    if inst.dual_issue and len(inst.operands) == 4:
+        left = ", ".join(op.emit() for op in inst.operands[:2])
+        right = ", ".join(op.emit() for op in inst.operands[2:])
+        line = f"\t{inst.opcode} {left} :: {inst.opcode} {right}"
+    else:
+        parts = [inst.opcode]
+        if inst.operands:
+            parts.append(", ".join(op.emit() for op in inst.operands))
+        line = "\t" + " ".join(parts)
     if inst.trailing_comment is not None:
         line = f"{line:<40} ;{inst.trailing_comment}"
     inst.raw_line = line
@@ -2537,6 +2590,844 @@ def hoist_loop_invariant_addrs(program: Program) -> int:
 
 
 # -------------------------------------------------------------------------
+# Stage 4.4+5: apply allocation (rename) and regenerate MSBs
+# -------------------------------------------------------------------------
+#
+# Atomic pass: walks the program once and rewrites every chain operand
+# against the Stage 4.3 ``VGPRAllocation``, materializes preheader
+# copy v_adds for shared bases (v642), repoints LICM-hoisted v_adds
+# to the new addr_bank, strips all in-loop ``s_set_vgpr_msb``
+# instructions, regenerates them everywhere based on actual operand
+# banks, adds a final ``s_wait_alu depctr_va_vdst(0)`` before the
+# loop entry to drain new VALU writes, and bumps the kernel
+# descriptor to ``alloc.budget``.
+#
+# Phases (in order):
+#   A. Build OLD->NEW translation maps from the allocation.
+#   B. Repoint existing LICM-hoisted v_adds + emit preheader copy
+#      v_adds for DSChains using a shared base.
+#   C. Walk every instruction, rewrite operands.
+#   D. Strip every existing s_set_vgpr_msb.
+#   E. Walk every instruction and emit s_set_vgpr_msb instructions
+#      based on actual operand banks (state-tracked).
+#   F. Insert s_wait_alu depctr_va_vdst(0) just before the loop entry.
+#   G. Bump kernel descriptor.
+
+
+def _operand_text_for_register(reg: Register) -> tuple[str, Optional[str]]:
+    """Return (raw_text, logical_text) for an operand's Register.
+    ``logical_text`` is None when the logical id matches the raw id
+    (i.e., bank 0, default MSB)."""
+    if reg.size == 1:
+        raw = f'v{reg.raw_ids[0]}'
+        if reg.ids[0] == reg.raw_ids[0]:
+            return raw, None
+        return raw, f'/*v{reg.ids[0]}*/'
+    raw = f'v[{reg.raw_ids[0]}:{reg.raw_ids[-1]}]'
+    if reg.ids[0] == reg.raw_ids[0]:
+        return raw, None
+    return raw, f'/*v[{reg.ids[0]}:{reg.ids[-1]}]*/'
+
+
+def _replace_operand_register(op: Operand, new_reg: Register) -> None:
+    """Replace ``op``'s first VGPR Register with ``new_reg`` in-place.
+    Updates ``op.text``, ``op.logical_text``, and ``op.regs[0]`` while
+    preserving ``op.suffix`` (e.g., ``offset:32``)."""
+    if not op.regs:
+        return
+    op.regs[0] = new_reg
+    raw_text, logical_text = _operand_text_for_register(new_reg)
+    op.text = raw_text
+    # Preserve presence/absence of logical comment based on whether
+    # the new register actually needs one (non-zero MSB).
+    op.logical_text = logical_text
+
+
+def _make_msb_instruction(state: tuple[int, int, int, int],
+                          prev_state: tuple[int, int, int, int]) -> Instruction:
+    """Build an ``s_set_vgpr_msb`` Instruction with low byte = new
+    state and high byte = previous state's encoded byte (matches
+    LLVM's gfx1250 emission: bits 8-15 carry the prior MSB context
+    for the validity/commit tracker)."""
+    new_low = _encode_msb_byte(*state)
+    prev_low = _encode_msb_byte(*prev_state)
+    imm = (prev_low << 8) | new_low
+    return _make_msb_instruction_from_imm(imm)
+
+
+def _make_msb_instruction_from_imm(imm: int) -> Instruction:
+    """Build an ``s_set_vgpr_msb`` Instruction with the exact 16-bit
+    immediate.  Decodes the low byte for the trailing comment."""
+    low = imm & 0xff
+    dst, src0, src1, src2 = _decode_msb_imm(f"{low:#x}")
+    line = (f"\ts_set_vgpr_msb {imm:#x}                   "
+            f";  msbs: dst={dst} src0={src0} "
+            f"src1={src1} src2={src2}")
+    return _parse_instruction_line(line)
+
+
+# =====================================================================
+# Faithful port of LLVM's AMDGPULowerVGPREncoding.cpp
+# =====================================================================
+#
+# Slot layout matches LLVM: ``Ops = [src0, src1, src2, vdst]`` where
+# each slot is an ``Optional[int]`` -- ``None`` means "no demand"
+# (carry-forward from prior context); a value means "this slot must
+# be at this bank for the current instruction".
+#
+# The hardware encoding has src0 in bits 1-0, src1 in 3-2, src2 in
+# 5-4, dst in 7-6 (low byte).  High byte is the previous low byte
+# (validity/commit tracker).
+
+
+class _ModeTy:
+    """Mirror of LLVM's ModeTy: 4 optional MSB slots."""
+    __slots__ = ('ops',)
+
+    def __init__(self, ops: Optional[list] = None):
+        # ops[0]=src0, ops[1]=src1, ops[2]=src2, ops[3]=vdst.
+        # Each is Optional[int] (None = no demand).
+        self.ops = list(ops) if ops is not None else [None, None, None, None]
+
+    def copy(self) -> '_ModeTy':
+        return _ModeTy(self.ops)
+
+    def update(self, new: '_ModeTy') -> tuple[bool, bool]:
+        """LLVM's update: for each slot where new has a demand, write
+        it into self.  Returns ``(updated, rewritten)``:
+          updated: True iff any slot changed
+          rewritten: True iff a slot that was previously SET is being
+                     overwritten with a different value (forces a new
+                     MSB emit instead of piggybacking)."""
+        updated = False
+        rewritten = False
+        for i in range(4):
+            new_v = new.ops[i]
+            if new_v is None:
+                continue
+            cur_v = self.ops[i]
+            cur_or_zero = 0 if cur_v is None else cur_v
+            if new_v != cur_or_zero:
+                updated = True
+                if cur_v is not None:
+                    rewritten = True
+            self.ops[i] = new_v
+        return updated, rewritten
+
+    def is_compatible(self, new: '_ModeTy') -> bool:
+        """True iff ``new``'s demands are already satisfied by self."""
+        for i in range(4):
+            d = new.ops[i]
+            if d is None:
+                continue
+            cur_or_zero = 0 if self.ops[i] is None else self.ops[i]
+            if d != cur_or_zero:
+                return False
+        return True
+
+    def encode(self) -> int:
+        """Encoded low byte (8 bits)."""
+        v = 0
+        for i, o in enumerate(self.ops):
+            v |= (0 if o is None else (o & 3)) << (i * 2)
+        return v
+
+    def __repr__(self):
+        return f"_ModeTy({self.ops})"
+
+
+# ---- per-instruction-class operand -> slot mapping -----------------
+#
+# Returns a list of length 4 where each entry is the index into
+# ``inst.operands[]`` for that MSB slot (or None if no operand maps
+# to that slot for this opcode class).  Slots are
+# [src0, src1, src2, vdst] matching LLVM's _ModeTy layout.
+
+def _msb_slot_to_operand_index(inst: Instruction
+                               ) -> Optional[list[Optional[int]]]:
+    """Return mapping from MSB slot (0=src0, 1=src1, 2=src2, 3=vdst)
+    to ``inst.operands`` index, or None if this opcode has no MSB
+    encoding.  Mirrors LLVM's ``getVGPRLoweringOperandTables``.
+    """
+    op = inst.opcode
+    if not op:
+        return None
+
+    # Dual-issue VOPD (v_dual_mov_b32 a, b :: v_dual_mov_b32 c, d).
+    # Parsed as 4 operands [dst1, src1_lane, dst2, src2_lane].  X and
+    # Y components must share the same dst and src0 banks; we expose
+    # the X component into vdst/src0 slots.  Source operand bank
+    # assignment: for a single ``v_dual_mov_b32`` lane, the source is
+    # in the src0 slot.
+    if inst.dual_issue and len(inst.operands) >= 4:
+        # X component: inst.operands[0]=dstX, [1]=src0X.
+        # Y: [2]=dstY, [3]=src0Y.  Both lanes share the same MSB
+        # context -- we register both via slots 0 and 3.
+        return [1, None, None, 0]
+
+    # DS instructions (ds_load, ds_store, ds_read, ds_write):
+    # VDSOps = {addr, data0, data1, vdst}.  In assembly textual order:
+    #   ds_load_b*  : op[0]=vdst, op[1]=addr [, offset suffix]
+    #   ds_store_b* : op[0]=addr, op[1]=data0 [, op[2]=data1 ...]
+    if op.startswith('ds_'):
+        if op.startswith('ds_load') or op.startswith('ds_read'):
+            # vdst at op[0], addr at op[1].
+            return [1 if len(inst.operands) >= 2 else None, None, None,
+                    0 if inst.operands else None]
+        if op.startswith('ds_store') or op.startswith('ds_write'):
+            # addr at op[0], data0 at op[1], data1 at op[2] (b96+).
+            slots = [None, None, None, None]
+            if inst.operands:
+                slots[0] = 0
+            if len(inst.operands) >= 2:
+                slots[1] = 1
+            if len(inst.operands) >= 3:
+                slots[2] = 2
+            return slots
+        # Other ds_ ops (ds_swizzle, ds_consume, ds_append, ...):
+        # be conservative and skip.
+        return None
+
+    # Buffer / typed-buffer instructions:
+    #   buffer_load_*  : op[0]=vdst,  op[1]=vaddr, op[2]=srsrc, op[3]=soffset
+    #   buffer_store_* : op[0]=vdata, op[1]=vaddr, op[2]=srsrc, op[3]=soffset
+    if op.startswith('buffer_') or op.startswith('tbuffer_'):
+        if op.startswith('buffer_load') or op.startswith('tbuffer_load'):
+            return [1 if len(inst.operands) >= 2 else None, None, None,
+                    0 if inst.operands else None]
+        if op.startswith('buffer_store') or op.startswith('tbuffer_store'):
+            # vdata in vdst slot (the data being stored), vaddr in src0.
+            return [1 if len(inst.operands) >= 2 else None, None, None,
+                    0 if inst.operands else None]
+        return None
+
+    # Flat / global / scratch:
+    #   flat_load_*    : op[0]=vdst,  op[1]=vaddr
+    #   flat_store_*   : op[0]=vaddr, op[1]=vdata
+    if (op.startswith('flat_') or op.startswith('global_')
+            or op.startswith('scratch_')):
+        if 'load' in op:
+            return [1 if len(inst.operands) >= 2 else None, None, None,
+                    0 if inst.operands else None]
+        if 'store' in op:
+            return [0 if inst.operands else None,
+                    1 if len(inst.operands) >= 2 else None, None, None]
+        if 'atomic' in op:
+            # vaddr at op[0], vdata at op[1].  Most atomics also have
+            # vdst==op[0] when GLC is set, but treat as src0/src1.
+            return [0 if inst.operands else None,
+                    1 if len(inst.operands) >= 2 else None, None, None]
+        return None
+
+    # Image:
+    #   image_*  : op[0]=vdata, op[1..]=vaddr0,vaddr1,vaddr2
+    if op.startswith('image_'):
+        return [1 if len(inst.operands) >= 2 else None,
+                2 if len(inst.operands) >= 3 else None,
+                3 if len(inst.operands) >= 4 else None,
+                0 if inst.operands else None]
+
+    # Tensor instructions on gfx1250 (tensor_load_to_lds etc.) -- no
+    # VGPR operands typically; fall through (no demand) and let the
+    # state carry over.
+    if op.startswith('tensor_'):
+        return None
+
+    # VOP1/VOP2/VOP3/VOP3P/VOPC/DPP -- regular VALU.
+    # Order in assembly: vdst, src0 [, src1 [, src2]].
+    if op.startswith('v_'):
+        slots = [None, None, None, None]
+        # vdst at op[0]
+        if inst.operands:
+            slots[3] = 0
+        # src0 at op[1]
+        if len(inst.operands) >= 2:
+            slots[0] = 1
+        # src1 at op[2]
+        if len(inst.operands) >= 3:
+            slots[1] = 2
+        # src2 at op[3]
+        if len(inst.operands) >= 4:
+            slots[2] = 3
+        return slots
+
+    # SALU and others have no VGPR demand.
+    return None
+
+
+def _compute_new_mode(inst: Instruction) -> _ModeTy:
+    """Build a fresh _ModeTy for ``inst`` -- only slots whose mapped
+    operand is a VGPR get a demand."""
+    new = _ModeTy()
+    mapping = _msb_slot_to_operand_index(inst)
+    if mapping is None:
+        return new
+    for slot, op_idx in enumerate(mapping):
+        if op_idx is None or op_idx >= len(inst.operands):
+            continue
+        op = inst.operands[op_idx]
+        if op.regs and op.regs[0].kind == 'v':
+            new.ops[slot] = op.regs[0].msb()
+    return new
+
+
+# Legacy 4-tuple-based helpers, retained as adapters for callers
+# elsewhere in the file.
+
+def _msb_demands_for_inst(inst: Instruction,
+                          ) -> tuple[Optional[int], Optional[int],
+                                     Optional[int], Optional[int]]:
+    """Legacy adapter returning ``(dst, src0, src1, src2)`` demands."""
+    new = _compute_new_mode(inst)
+    return (new.ops[3], new.ops[0], new.ops[1], new.ops[2])
+
+
+def _required_msb_for_inst(inst: Instruction,
+                           current: tuple[int, int, int, int],
+                           ) -> tuple[int, int, int, int]:
+    """Legacy adapter -- reset-unused emission semantics."""
+    del current
+    demands = _msb_demands_for_inst(inst)
+    return tuple(d if d is not None else 0 for d in demands)
+
+
+def _instruction_uses_vgpr(inst: Instruction) -> bool:
+    """True if any operand of inst is a VGPR.  Used to gate MSB
+    regeneration: SALU instructions don't need an MSB context."""
+    for op in inst.operands:
+        for r in op.regs:
+            if r.kind == 'v':
+                return True
+    return False
+
+
+def apply_allocation(program: Program,
+                     ba: BankAssignment,
+                     alloc: VGPRAllocation,
+                     verbose: bool = False) -> None:
+    """Rewrite ``program`` in place to use the VGPR layout from
+    ``alloc``.  Strips existing ``s_set_vgpr_msb`` instructions and
+    regenerates them based on actual operand banks.  No-op when
+    ``alloc`` is empty (e.g., no self-loop)."""
+    if not alloc.wmma_acc:
+        return  # nothing to apply
+
+    from collections import defaultdict
+
+    annotate_regions(program)
+    pindex = build_program_def_use_index(program)
+    block_order = {bb.name: i for i, bb in enumerate(program.blocks)}
+    wchains = collect_wmma_chains(program)
+    dchains = collect_ds_chains(program)
+
+    loop_range = _loop_body_range(program)
+    loop_bb, cbranch_idx = (loop_range if loop_range is not None
+                            else (None, None))
+    preheader_bb = (_find_preheader(program, loop_bb)
+                    if loop_bb is not None else None)
+
+    # ---- Phase A: build maps -------------------------------------
+
+    # acc: per-WMMAChain, OLD canonical's first id -> (chain, new Register).
+    acc_chain_by_old_first: dict[int, WMMAChain] = {}
+    for c in wchains:
+        if alloc.acc(c) is None:
+            continue
+        acc_chain_by_old_first[c.canonical.ids[0]] = c
+
+    # ds_load -> DSGroup.
+    ds_load_to_group: dict[int, DSGroup] = {}
+    # Prologue loads need their dst rewritten (to land in the chain's
+    # new data-tile slot) but not their addr -- the prologue uses a
+    # different base pointer than the steady-state loop body
+    # (e.g., v0 vs v807 in v9).
+    is_prologue_load: set[int] = set()
+    for dc in dchains:
+        for g in dc.dsgroups:
+            for ld in g.ds_loads:
+                ds_load_to_group[id(ld)] = g
+            for ld in g.prologue_loads:
+                ds_load_to_group[id(ld)] = g
+                is_prologue_load.add(id(ld))
+
+    # DSGroup -> DSChain.
+    dsgroup_to_chain: dict[int, DSChain] = {}
+    for dc in dchains:
+        for g in dc.dsgroups:
+            dsgroup_to_chain[id(g)] = dc
+
+    # ``DSGroup.tile`` is a property derived from ``ds_loads[*].dst_reg``;
+    # once Phase C rewrites the first ds_load's dst, the property
+    # changes and the second ds_load can't be relocated correctly.
+    # Snapshot the *old* tile of each group here so Phase C uses a
+    # stable reference.
+    dsgroup_old_tile: dict[int, Register] = {}
+    for dc in dchains:
+        for g in dc.dsgroups:
+            t = g.tile
+            if t is not None:
+                dsgroup_old_tile[id(g)] = t
+
+    # OLD addr_reg's first id -> list[DSChain] (multiple chains can
+    # share the same current addr base, e.g., v642 in v9).
+    addr_old_first_to_chains: dict[int, list[DSChain]] = defaultdict(list)
+    for dc in dchains:
+        if dc.is_epilogue_region:
+            continue
+        if dc.addr_reg is None or alloc.addr(dc) is None:
+            continue
+        addr_old_first_to_chains[dc.addr_reg.ids[0]].append(dc)
+
+    # ---- Phase B: addr v_adds ------------------------------------
+
+    # Phase-B-touched instructions that Phase C must skip: the new addr
+    # we write here may collide with a WMMAChain canonical's first id,
+    # which Phase C's else-branch would otherwise re-rewrite to the new
+    # acc start.  E.g., L2's new addr=v448 collides with WMMA chain
+    # canonical=v[448:455] (renamed to v[64:71]).
+    phase_b_handled: set[int] = set()
+
+    # Step B1: re-target existing LICM-hoisted v_adds.  An LICM v_add
+    # has the shape ``v_add_nc_u32_e32 v_X /*log_X*/, imm, v_base``
+    # where v_X is the addr_reg of exactly one DSChain.  We change
+    # its dst to the chain's allocated new addr.
+    if preheader_bb is not None:
+        addr_to_dschain: dict[int, DSChain] = {}
+        for dc in dchains:
+            if dc.is_epilogue_region or dc.addr_reg is None:
+                continue
+            if alloc.addr(dc) is None:
+                continue
+            # Multiple DSChains can share an addr; the LICM v_add (if
+            # any) produces a UNIQUE addr.  An addr that's only
+            # produced once (by a hoisted v_add) is unique to one
+            # chain; an addr that's set in the prologue (v642) is not.
+            shared = len(addr_old_first_to_chains.get(
+                dc.addr_reg.ids[0], [])) > 1
+            if not shared:
+                addr_to_dschain[dc.addr_reg.ids[0]] = dc
+
+        for inst in preheader_bb.instructions:
+            if inst.opcode != 'v_add_nc_u32_e32':
+                continue
+            if (len(inst.operands) < 3
+                    or not inst.operands[0].regs
+                    or inst.operands[1].text.strip() == '0'):
+                continue
+            dst_old = inst.operands[0].regs[0]
+            dc = addr_to_dschain.get(dst_old.ids[0])
+            if dc is None:
+                continue
+            new_addr = alloc.addr(dc)
+            _replace_operand_register(inst.operands[0], new_addr)
+            _rebuild_raw_line(inst)
+            phase_b_handled.add(id(inst))
+
+    # Step B2: emit new copy v_adds for DSChains whose current addr
+    # is shared (v642-style).  One copy per chain.  Insert in the
+    # preheader, just before the closing ``s_set_vgpr_msb 0x4000``
+    # reset that LICM puts there (or at the end if no such reset).
+    if preheader_bb is not None:
+        # Group by old shared addr base.
+        for old_first, chains_using_base in addr_old_first_to_chains.items():
+            if len(chains_using_base) <= 1:
+                continue  # not shared; covered by step B1
+            # Pick a "source" DSChain to read its addr_reg (any will
+            # do, they're all the same register).
+            base_reg = chains_using_base[0].addr_reg
+            for dc in chains_using_base:
+                new_addr = alloc.addr(dc)
+                if new_addr is None:
+                    continue
+                if (new_addr.ids == base_reg.ids
+                        and new_addr.raw_ids == base_reg.raw_ids):
+                    continue  # identity rename: copy would be a no-op
+                # Build: v_add_nc_u32_e32 <new_addr>, 0, <base_reg>
+                # We let _build_v_add_copy_line construct the text.
+                new_text, new_logical = _operand_text_for_register(new_addr)
+                base_text, base_logical = _operand_text_for_register(base_reg)
+                dst_op = (f'{new_text} {new_logical}'
+                          if new_logical else new_text)
+                base_op = (f'{base_text} {base_logical}'
+                           if base_logical else base_text)
+                line = (f'\tv_add_nc_u32_e32 {dst_op}, 0, {base_op}')
+                copy_inst = _parse_instruction_line(line)
+                copy_inst.parent_bb = preheader_bb
+                # Find insertion point: before the last s_set_vgpr_msb
+                # of the preheader (the loop-entry MSB reset).
+                insert_idx = len(preheader_bb.instructions)
+                for i in range(len(preheader_bb.instructions) - 1, -1, -1):
+                    if (preheader_bb.instructions[i].opcode
+                            == 's_set_vgpr_msb'):
+                        insert_idx = i
+                        break
+                preheader_bb.instructions.insert(insert_idx, copy_inst)
+                phase_b_handled.add(id(copy_inst))
+
+    # ---- Phase C: walk all instructions and rewrite operands -----
+
+    def _find_dsgroup_via_reaching_def(read_inst: Instruction,
+                                       op: Operand
+                                       ) -> Optional[DSGroup]:
+        """For a wmma's src or a non-chain read of a tile, find the
+        DSGroup whose ds_load most recently wrote the operand's data."""
+        if not op.regs or op.regs[0].kind != 'v':
+            return None
+        first_id = op.regs[0].ids[0]
+        rid = ('v', first_id)
+        read_key = _program_order(read_inst, block_order)
+        best = None
+        best_key = None
+        for d in pindex.defs.get(rid, []):
+            if not _is_ds_load(d):
+                continue
+            dk = _program_order(d, block_order)
+            if dk >= read_key:
+                continue
+            if best is None or dk > best_key:
+                best = d
+                best_key = dk
+        if best is None:
+            return None
+        return ds_load_to_group.get(id(best))
+
+    # Build an OLD acc-id -> WMMAChain map for non-chain rewrites.
+    # An old VGPR id falls inside a chain's canonical range iff that
+    # chain "owns" it.
+    acc_old_id_to_chain: dict[int, WMMAChain] = {}
+    for c in wchains:
+        if alloc.acc(c) is None:
+            continue
+        for old_id in c.canonical.ids:
+            acc_old_id_to_chain[old_id] = c
+
+    def _new_register_for_acc_slice(chain: WMMAChain,
+                                    old_first: int, size: int
+                                    ) -> Optional[Register]:
+        """Get the NEW Register for an old [old_first..old_first+size)
+        slice of chain's acc."""
+        new_acc = alloc.acc(chain)
+        if new_acc is None:
+            return None
+        offset = old_first - chain.canonical.ids[0]
+        if offset < 0 or offset + size > new_acc.size:
+            return None
+        new_start = new_acc.ids[0] + offset
+        return _make_logical_register(new_start, size)
+
+    def _new_register_for_data_slice(group: DSGroup,
+                                     old_first: int, size: int
+                                     ) -> Optional[Register]:
+        """Get the NEW Register for an old slice of a DSGroup tile.
+        Uses the Phase-A tile snapshot (``dsgroup_old_tile``) since the
+        live ``group.tile`` property mutates as Phase C rewrites the
+        ds_load destinations."""
+        new_data = alloc.data(group)
+        if new_data is None:
+            return None
+        old_tile = dsgroup_old_tile.get(id(group))
+        if old_tile is None:
+            return None
+        offset = old_first - old_tile.ids[0]
+        if offset < 0 or offset + size > new_data.size:
+            return None
+        new_start = new_data.ids[0] + offset
+        return _make_logical_register(new_start, size)
+
+    for bb in program.blocks:
+        for inst in bb.instructions:
+            if not inst.opcode or inst.opcode == '__asm_block__':
+                continue
+            opcode = inst.opcode
+
+            if opcode.startswith('v_wmma'):
+                # dst, src2 -> acc.
+                chain = inst.wmma_chain
+                if chain is None or alloc.acc(chain) is None:
+                    continue
+                new_acc = alloc.acc(chain)
+                if inst.operands and inst.operands[0].regs:
+                    _replace_operand_register(inst.operands[0], new_acc)
+                if len(inst.operands) >= 4 and inst.operands[3].regs:
+                    _replace_operand_register(inst.operands[3], new_acc)
+                # src0, src1 -> data tile.
+                for slot in (1, 2):
+                    if slot >= len(inst.operands):
+                        continue
+                    op = inst.operands[slot]
+                    if not op.regs or op.regs[0].kind != 'v':
+                        continue
+                    g = _find_dsgroup_via_reaching_def(inst, op)
+                    if g is None:
+                        continue
+                    new_slice = _new_register_for_data_slice(
+                        g, op.regs[0].ids[0], op.regs[0].size)
+                    if new_slice is not None:
+                        _replace_operand_register(op, new_slice)
+                _rebuild_raw_line(inst)
+
+            elif _is_ds_load(inst):
+                g = ds_load_to_group.get(id(inst))
+                if g is None:
+                    continue
+                # dst -> data half (or other slice) of group.
+                if inst.operands and inst.operands[0].regs:
+                    op = inst.operands[0]
+                    new_slice = _new_register_for_data_slice(
+                        g, op.regs[0].ids[0], op.regs[0].size)
+                    if new_slice is not None:
+                        _replace_operand_register(op, new_slice)
+                # addr -> chain's new addr.  Skip prologue loads:
+                # they prefetch via a different base pointer (e.g., v0
+                # in v9) that the chain's steady-state addr doesn't
+                # alias.
+                if id(inst) not in is_prologue_load:
+                    dc = dsgroup_to_chain.get(id(g))
+                    if (dc is not None and len(inst.operands) >= 2
+                            and alloc.addr(dc) is not None):
+                        new_addr = alloc.addr(dc)
+                        _replace_operand_register(inst.operands[1], new_addr)
+                _rebuild_raw_line(inst)
+
+            elif id(inst) in phase_b_handled:
+                # Phase B already wrote the final dst (a DSChain new
+                # addr) which may collide with a WMMAChain canonical
+                # first id.  Don't second-guess it here.
+                continue
+
+            else:
+                # Non-chain instruction.  Rewrite any operand whose
+                # first VGPR id is in our acc-id map (e.g., acc-init
+                # v_dual_mov_b32, epilogue v_cvt_pk_f16_f32 reading
+                # acc, buffer_store reading output).
+                changed = False
+                for op in inst.operands:
+                    if not op.regs or op.regs[0].kind != 'v':
+                        continue
+                    old_first = op.regs[0].ids[0]
+                    chain = acc_old_id_to_chain.get(old_first)
+                    if chain is None:
+                        continue
+                    new_slice = _new_register_for_acc_slice(
+                        chain, old_first, op.regs[0].size)
+                    if new_slice is not None:
+                        _replace_operand_register(op, new_slice)
+                        changed = True
+                if changed:
+                    _rebuild_raw_line(inst)
+
+    # ---- Phase D: strip all s_set_vgpr_msb -----------------------
+
+    import os as _os_de
+    skip_de = _os_de.environ.get('TRITON_AMDGCN_AS_NO_DE') == '1'
+    if skip_de:
+        return  # Phase D/E disabled; F/G also skipped intentionally
+    for bb in program.blocks:
+        bb.instructions = [i for i in bb.instructions
+                           if i.opcode != 's_set_vgpr_msb']
+        for i, inst in enumerate(bb.instructions):
+            inst.index = i
+
+    # ---- Phase E: regenerate s_set_vgpr_msb (LLVM-faithful) ------
+    # Faithful port of LLVM's ``AMDGPULowerVGPREncoding::run``:
+    #   * ``CurrentMode`` is a 4-slot Optional[int] state; only slots
+    #     touched by an instruction with a VGPR demand are set.
+    #   * On a state transition that *rewrites* a previously-set slot,
+    #     emit a brand new ``s_set_vgpr_msb`` instruction with imm =
+    #     ``NewMode.encode() | (OldCurrent.encode() << 8)`` and reset
+    #     ``CurrentMode = NewMode`` (slots not demanded by NewMode go
+    #     back to None).
+    #   * Otherwise, *piggyback* by mutating the most recently emitted
+    #     MSB's imm to ``CurrentMode.encode() | OldHigh`` (preserves
+    #     accumulated demands).
+    #   * Reset to all-zero at end of each basic block and before
+    #     terminators / branches (LLVM's "non-fall-through BBs start
+    #     with all 4 MSBs zero" convention).
+    #   * Hoist new MSBs back past ``s_delay_alu``, ``s_wait*``, and
+    #     barrier signal/wait instructions (handleCoissue equivalent).
+
+    # Mirror of LLVM's ``isProgramStateInstr`` in handleCoissue:
+    # ``isBarrier(Opc) || isWaitcnt(Opc) || Opc == S_DELAY_ALU``.
+    # ``isWaitcnt`` covers the dscnt/loadcnt/etc. counter waits but
+    # not ``s_wait_alu`` (a depctr instr) or ``s_wait_tensorcnt`` /
+    # ``s_wait_event``.  ``isBarrier`` covers s_barrier_*.
+    _coissue_skip = (
+        's_delay_alu',
+        # isWaitcnt opcodes:
+        's_waitcnt', 's_waitcnt_vscnt', 's_waitcnt_vmcnt',
+        's_waitcnt_expcnt', 's_waitcnt_lgkmcnt',
+        's_wait_loadcnt', 's_wait_loadcnt_dscnt',
+        's_wait_storecnt', 's_wait_storecnt_dscnt',
+        's_wait_samplecnt', 's_wait_bvhcnt', 's_wait_expcnt',
+        's_wait_dscnt', 's_wait_kmcnt', 's_wait_idle',
+        # isBarrier opcodes (synchronization):
+        's_barrier', 's_barrier_signal', 's_barrier_wait',
+        's_barrier_leave', 's_barrier_signal_isfirst',
+        's_barrier_signal_isfirst_imm', 's_barrier_signal_isfirst_m0',
+        's_barrier_signal_imm', 's_barrier_signal_m0',
+    )
+
+    def _is_meta(inst: Instruction) -> bool:
+        """Pseudo-directives that aren't MIR instructions: ``.loc``,
+        ``.file``, etc.  These are debug metadata in MIR and
+        ``handleCoissue`` doesn't see them.  ``__asm_block__``
+        (INLINEASM in MIR) IS a real instruction and stops the walk."""
+        op = inst.opcode
+        return op.startswith('.') if op else True
+
+    def _hoist_back(insts: list[Instruction]) -> int:
+        """Mirror of ``handleCoissue``: walk back past program-state
+        SALUs (delay/wait/barrier) so the new MSB lands before them.
+        Meta pseudo-instructions (``.loc``, asm block markers) are
+        transparent -- LLVM's MIR-level hoist doesn't see them."""
+        i = len(insts)
+        while i > 0 and (insts[i - 1].opcode in _coissue_skip
+                         or _is_meta(insts[i - 1])):
+            i -= 1
+        return i
+
+    def _is_terminator_or_call(inst: Instruction) -> bool:
+        op = inst.opcode
+        if not op:
+            return False
+        return (op.startswith('s_branch') or op.startswith('s_cbranch')
+                or op == 's_setpc_b64' or op == 's_swappc_b64'
+                or op == 's_call_b64' or op == 's_endpgm'
+                or op == 's_endpgm_saved')
+
+    def _emit_set_mode(new_mode: _ModeTy,
+                       new_insts: list[Instruction],
+                       current_mode: _ModeTy,
+                       most_recent_msb: Optional[Instruction],
+                       at_end: bool = False,
+                       ) -> tuple[_ModeTy, Optional[Instruction], bool]:
+        """Apply LLVM's setMode logic.  ``at_end=True`` mirrors LLVM
+        passing ``MBB.instr_end()`` (handleCoissue returns immediately
+        for end iterators), so the new MSB is appended without
+        hoisting back through program-state instrs.
+
+        Returns ``(current_mode, most_recent_msb, changed)``.
+        Mutates ``new_insts`` and the most-recent MSB in-place when
+        piggybacking."""
+        old_mode_bits = current_mode.encode() << 8
+        updated, rewritten = current_mode.update(new_mode)
+        if not updated:
+            return current_mode, most_recent_msb, False
+
+        if most_recent_msb is not None and not rewritten:
+            # Piggyback: rewrite the existing s_set_vgpr_msb's imm.
+            try:
+                old_imm = int(most_recent_msb.operands[0].text, 0)
+            except (ValueError, IndexError):
+                old_imm = 0
+            keep_high = old_imm & 0xff00
+            new_imm = (current_mode.encode() & 0xff) | keep_high
+            most_recent_msb.operands[0].text = f'{new_imm:#x}'
+            most_recent_msb.operands[0].regs = []
+            decoded = _decode_msb_imm(f'{new_imm:#x}')
+            most_recent_msb.msb_bits = decoded
+            most_recent_msb.trailing_comment = (
+                f"  msbs: dst={decoded[0]} src0={decoded[1]} "
+                f"src1={decoded[2]} src2={decoded[3]}")
+            _rebuild_raw_line(most_recent_msb)
+            return current_mode, most_recent_msb, True
+
+        # New emit: imm uses NewMode (not full CurrentMode) so unused
+        # slots are 0.  After emission, CurrentMode collapses back to
+        # NewMode.
+        imm = new_mode.encode() | old_mode_bits
+        msb = _make_msb_instruction_from_imm(imm)
+        insert_at = len(new_insts) if at_end else _hoist_back(new_insts)
+        new_insts.insert(insert_at, msb)
+        return new_mode.copy(), msb, True
+
+    for bb in program.blocks:
+        new_insts: list[Instruction] = []
+        current_mode = _ModeTy()
+        most_recent_msb: Optional[Instruction] = None
+        for inst in bb.instructions:
+            if not inst.opcode or inst.opcode == '__asm_block__':
+                new_insts.append(inst)
+                continue
+            # Reset MSB to (0,0,0,0) before terminators/branches/calls.
+            # LLVM exception: s_endpgm/s_endpgm_saved skip the reset
+            # (just clear CurrentMode internally) since the kernel is
+            # done -- no following instruction can read MSB.
+            if _is_terminator_or_call(inst):
+                if inst.opcode in ('s_endpgm', 's_endpgm_saved'):
+                    current_mode = _ModeTy()
+                elif any(s is not None and s != 0 for s in current_mode.ops):
+                    reset_mode = _ModeTy([0, 0, 0, 0])
+                    current_mode, most_recent_msb, _ = _emit_set_mode(
+                        reset_mode, new_insts, current_mode, most_recent_msb)
+                most_recent_msb = None
+                new_insts.append(inst)
+                continue
+
+            mapping = _msb_slot_to_operand_index(inst)
+            if mapping is not None:
+                new_mode = _compute_new_mode(inst)
+                if not current_mode.is_compatible(new_mode):
+                    current_mode, most_recent_msb, _ = _emit_set_mode(
+                        new_mode, new_insts, current_mode, most_recent_msb)
+            new_insts.append(inst)
+
+        # End-of-BB reset (only if state is non-default and the BB
+        # falls through to the next block).  ``at_end=True`` matches
+        # LLVM passing ``MBB.instr_end()`` so the reset is appended
+        # without hoisting back through program-state instrs.
+        if any(s is not None and s != 0 for s in current_mode.ops):
+            reset_mode = _ModeTy([0, 0, 0, 0])
+            current_mode, most_recent_msb, _ = _emit_set_mode(
+                reset_mode, new_insts, current_mode, most_recent_msb,
+                at_end=True)
+
+        bb.instructions = new_insts
+        for i, inst in enumerate(bb.instructions):
+            inst.index = i
+
+    # ---- Phase F: drain VALU writes before loop entry ------------
+
+    import os as _os_f
+    if (preheader_bb is not None and loop_bb is not None
+            and _os_f.environ.get('TRITON_AMDGCN_AS_NO_F') != '1'):
+        # Insert s_wait_alu depctr_va_vdst(0) BEFORE the LICM-end
+        # MSB reset (the trailing s_set_vgpr_msb 0x...00 that Phase E
+        # appended).  Putting the wait after the MSB reset triggers a
+        # gfx1250 hazard that crashes the simulator.  LLVM emits
+        # s_wait_alu right after the last VALU write; we mirror that
+        # by inserting it just before the LICM-end MSB.
+        wait_inst = _parse_instruction_line(
+            "\ts_wait_alu depctr_va_vdst(0)")
+        wait_inst.parent_bb = preheader_bb
+        # Find the LICM-end reset MSB (last instruction with low byte 0).
+        insert_idx = len(preheader_bb.instructions)
+        for j in range(len(preheader_bb.instructions) - 1, -1, -1):
+            cand = preheader_bb.instructions[j]
+            if cand.opcode != 's_set_vgpr_msb':
+                continue
+            try:
+                if (int(cand.operands[0].text, 0) & 0xff) == 0:
+                    insert_idx = j
+                    break
+            except (ValueError, IndexError):
+                pass
+        preheader_bb.instructions.insert(insert_idx, wait_inst)
+        for i, inst in enumerate(preheader_bb.instructions):
+            inst.index = i
+
+    # ---- Phase G: bump kernel descriptor -------------------------
+
+    import os as _os_g
+    if _os_g.environ.get('TRITON_AMDGCN_AS_NO_G') == '1':
+        return
+    if alloc.budget > 0:
+        current_budget = _vgpr_budget(program)
+        if alloc.budget > current_budget:
+            _set_vgpr_budget(program, alloc.budget)
+
+
+# -------------------------------------------------------------------------
 # Round-trip emit
 # -------------------------------------------------------------------------
 
@@ -2559,15 +3450,42 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
         ``s_wait_dscnt`` instructions.
       - ``overlap_wmma_with_barrier``   reorders wmma across barrier
         signal/wait pairs to hide sync latency.
+      - ``assign_banks`` + ``allocate_vgprs`` + ``apply_allocation``
+        bank-aware VGPR reallocation that minimizes
+        ``s_set_vgpr_msb`` thrash inside the loop.
     """
     program = parse_asm(text)
-    n_hoisted = hoist_loop_invariant_addrs(program)
-    n_waits = merge_dscnt_waits(program)
-    n_barriers = overlap_wmma_with_barrier(program)
+    import os as _os
+    n_hoisted = n_waits = n_barriers = 0
+    if _os.environ.get('TRITON_AMDGCN_AS_NO_PREPASS') != '1':
+        n_hoisted = hoist_loop_invariant_addrs(program)
+        n_waits = merge_dscnt_waits(program)
+        n_barriers = overlap_wmma_with_barrier(program)
+    annotate_regions(program)
+    ba = assign_banks(program)
+    alloc = allocate_vgprs(program, ba)
+    # Stage 4.4+5 is opt-in until the MSB-regen pattern matches LLVM's
+    # exact emission convention (validity/commit byte semantics).
+    if _os.environ.get('TRITON_AMDGCN_AS_APPLY') == '1':
+        # DEBUG: identity allocation to test rewrite-only path
+        if _os.environ.get('TRITON_AMDGCN_AS_IDENTITY') == '1':
+            chains = collect_wmma_chains(program)
+            alloc.wmma_acc = {id(c): c.canonical for c in chains}
+            alloc.ds_chain_addr = {}
+            alloc.ds_group_data = {}
+            for dc in collect_ds_chains(program):
+                if dc.is_epilogue_region:
+                    continue
+                if dc.addr_reg is not None:
+                    alloc.ds_chain_addr[id(dc)] = dc.addr_reg
+                for g in dc.dsgroups:
+                    if g.tile is not None:
+                        alloc.ds_group_data[id(g)] = g.tile
+        apply_allocation(program, ba, alloc, verbose=verbose)
     if verbose:
-        annotate_regions(program)
         print(f"[amdgcnas_gfx12] hoisted {n_hoisted} invariant addr insts, "
               f"merged {n_waits} s_wait_dscnt, "
-              f"hoisted {n_barriers} wmma into barrier pairs")
+              f"hoisted {n_barriers} wmma into barrier pairs, "
+              f"vgpr budget = {alloc.budget}")
         print(report_chains(program))
     return emit_program(program)
