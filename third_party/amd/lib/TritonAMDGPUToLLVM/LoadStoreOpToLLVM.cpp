@@ -953,27 +953,12 @@ struct AsyncCopyGlobalToLocalOpConversion
 
       // Predicate load based on threadPred && swizzledMask
       auto cond = b.and_(threadPred, maybeSwizzledMaskElem);
+      auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
 
-      if (targetInfo.supportsDirectToLDSScattering()) {
-        // On architectures supporting per lane LDS addresses we can mask by
-        // setting the shared address to out of range. The HW will drop the load
-        // before fetching the data from global memory.
-        Value outOfRangeAddress =
-            b.inttoptr(shmemAddr.getType(), b.i32_val(0x7FFFFFFF));
-        Value predicatedAddress = b.select(cond, shmemAddr, outOfRangeAddress);
+      emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem, shmemAddr,
+                    op.getCache(), multicastMask);
 
-        emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem,
-                      predicatedAddress, op.getCache(), multicastMask);
-      } else {
-        // For architectures not supporting per lane LDS addresses we need to
-        // emit a branch
-        auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
-
-        emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem, shmemAddr,
-                      op.getCache(), multicastMask);
-
-        rewriter.setInsertionPointToStart(afterLoadBlock);
-      }
+      rewriter.setInsertionPointToStart(afterLoadBlock);
 
       if (hasOther) {
         emitOtherStore(rewriter, loc, this->getTypeConverter(), vecTy, maskElem,

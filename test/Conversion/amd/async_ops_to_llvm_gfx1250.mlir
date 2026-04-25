@@ -306,10 +306,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %70 = tt.splat %31 : i1 -> tensor<4x32xi1, #blocked>
     %71 = arith.andi %70, %67 : tensor<4x32xi1, #blocked>
 
-    // CHECK: %[[NEG1:.*]] = llvm.mlir.constant(2147483647 : i32)
-    // CHECK-NEXT: %[[OOB_LDS:.*]] = llvm.inttoptr %[[NEG1]] :
-    // CHECK-NEXT: %[[LDS_PTR:.*]] = llvm.select %{{.*}}, %{{.*}}, %[[OOB_LDS]]
-    // CHECK-NEXT: rocdl.global.load.async.to.lds{{.*}} %{{.*}}, %[[LDS_PTR]],
+    // Masked path: guard with cond_br, then async global→LDS (no OOB LDS inttoptr sentinel).
+    // CHECK: llvm.cond_br
+    // CHECK: rocdl.global.load.async.to.lds{{.*}} : !llvm.ptr<1>, !llvm.ptr<3>
+    // CHECK-NEXT: llvm.br
     // CHECK: llvm.cond_br
     // CHECK: llvm.store
     // CHECK-NEXT: llvm.br
@@ -337,5 +337,3 @@ module attributes {ttg.target = "hip:gfx1250", "ttg.num-ctas" = 1 : i32, "ttg.nu
     tt.return
   }
 }
-
-// -----
