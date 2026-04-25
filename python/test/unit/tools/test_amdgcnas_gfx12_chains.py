@@ -11,6 +11,7 @@ from triton.tools.amdgcnas_gfx12 import (
     annotate_regions,
     assign_banks,
     build_def_use_index,
+    can_share_data_vgprs,
     collect_ds_chains,
     collect_wmma_chains,
     emit_program,
@@ -22,6 +23,8 @@ from triton.tools.amdgcnas_gfx12 import (
 
 MARKER_R0 = "\t;;#ASMSTART\n\t;; Region 0: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
 MARKER_R1 = "\t;;#ASMSTART\n\t;; Region 1: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
+MARKER_R2 = "\t;;#ASMSTART\n\t;; Region 2: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
+MARKER_R3 = "\t;;#ASMSTART\n\t;; Region 3: 2 wmma, 0 GR, 2 LR\n\t;;#ASMEND"
 MARKER_EPI_R0 = ("\t;;#ASMSTART\n\t;; Epilogue Region 0: 2 wmma, 0 GR, 2 LR\n"
                  "\t;;#ASMEND")
 
@@ -309,6 +312,113 @@ class TestCollectDSChains:
         prog = parse_asm(src)
         with pytest.raises(ValueError, match="mixed"):
             collect_ds_chains(prog)
+
+
+# -------------------------------------------------------------------------
+# Stage 4.2: DSChain lifetime analysis
+# -------------------------------------------------------------------------
+
+class TestDSChainLifetime:
+
+    def test_lifetime_fields_populated(self):
+        # Two regions, ds_load in R0 with consumer wmma in R1.
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tds_load_b128 v[8:11], v100\n"
+            "\tds_load_b128 v[12:15], v100 offset:16\n"
+            f"{MARKER_R1}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        chains = collect_ds_chains(prog)
+        assert len(chains) == 1
+        c = chains[0]
+        assert c.loading_pos is not None
+        assert c.last_consumer_pos is not None
+        # Loading happens before consumer in program order.
+        assert c.loading_pos < c.last_consumer_pos
+
+    def test_can_share_disjoint_lifetimes(self):
+        # Chain A: load early, consumer shortly after.
+        # Chain B: load after A's consumer, consumer later.
+        # A and B have disjoint lifetimes -> shareable.
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tds_load_b128 v[8:11], v100\n"
+            "\tds_load_b128 v[12:15], v100 offset:16\n"
+            f"{MARKER_R1}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            f"{MARKER_R2}\n"
+            "\tds_load_b128 v[24:27], v200\n"
+            "\tds_load_b128 v[28:31], v200 offset:16\n"
+            f"{MARKER_R3}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[24:31], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        chains = collect_ds_chains(prog)
+        a = next(c for c in chains if c.loading_region == 0)
+        b = next(c for c in chains if c.loading_region == 2)
+        assert can_share_data_vgprs(a, b)
+        assert can_share_data_vgprs(b, a)  # symmetric
+
+    def test_cannot_share_overlapping_lifetimes(self):
+        # Chain A's consumer comes AFTER chain B's load -> overlap.
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tds_load_b128 v[8:11], v100\n"
+            "\tds_load_b128 v[12:15], v100 offset:16\n"
+            f"{MARKER_R1}\n"
+            "\tds_load_b128 v[24:27], v200\n"
+            "\tds_load_b128 v[28:31], v200 offset:16\n"
+            f"{MARKER_R2}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            f"{MARKER_R3}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[24:31], v[16:23], v[0:7]\n"
+            "\ts_cbranch_scc1 .LBB0_0\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        chains = collect_ds_chains(prog)
+        a = next(c for c in chains if c.loading_region == 0)
+        b = next(c for c in chains if c.loading_region == 1)
+        # A loads at R0, consumer in R2. B loads at R1, consumer in R3.
+        # A.last (R2) > B.load (R1) AND B.last (R3) > A.load (R0)
+        # -> lifetimes overlap, cannot share.
+        assert not can_share_data_vgprs(a, b)
+
+    def test_v9_stride4_pairs_can_share(self):
+        # Real v9 fixture: each stride-4 sibling pair should be
+        # shareable.  L0/L4, L1/L5, L2/L6, L3/L7.
+        import glob
+        matches = glob.glob('/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        if not matches:
+            pytest.skip('v9 fixture not available')
+        with open(matches[0]) as f:
+            text = f.read()
+        prog = parse_asm(text)
+        chains = collect_ds_chains(prog)
+        loop_chains_by_region = {
+            c.loading_region: c for c in chains
+            if not c.is_epilogue_region
+        }
+        for r in (0, 1, 2, 3):
+            a = loop_chains_by_region.get(r)
+            b = loop_chains_by_region.get(r + 4)
+            assert a is not None and b is not None, f'L{r} or L{r+4} missing'
+            assert can_share_data_vgprs(a, b), (
+                f'L{r} (load_pos={a.loading_pos}, last={a.last_consumer_pos}) '
+                f'and L{r+4} (load_pos={b.loading_pos}, last={b.last_consumer_pos}) '
+                f'should share but cannot')
 
 
 # -------------------------------------------------------------------------

@@ -1123,6 +1123,17 @@ class DSChain:
     loading_region: int
     is_epilogue_region: bool
     dsgroups: list[DSGroup] = field(default_factory=list)
+    # Program-order positions used by Stage 4.3 to share data VGPRs
+    # between same-bank DSChains with non-overlapping lifetimes.
+    # ``loading_pos`` is the position of the chain's first loop
+    # ds_load (prologue loads attached to the chain are not counted --
+    # they're a Stage-4.4 rewrite concern, not a sharing one).
+    # ``last_consumer_pos`` is the latest reaching-def consumer wmma.
+    # Both keys are ``(block_order_index, instruction_index)`` tuples
+    # produced by :func:`_program_order`.  None if the chain has no
+    # ds_loads or consumers.
+    loading_pos: Optional[tuple[int, int]] = None
+    last_consumer_pos: Optional[tuple[int, int]] = None
 
     @property
     def addr_reg(self) -> Optional[Register]:
@@ -1153,6 +1164,28 @@ class DSChain:
         return (f'DSChain({tag}{self.loading_region}, addr={self.addr_reg}, '
                 f'{slot}, {len(self.dsgroups)} groups, '
                 f'{sum(len(g.ds_loads) for g in self.dsgroups)} loads)')
+
+
+def can_share_data_vgprs(a: "DSChain", b: "DSChain") -> bool:
+    """Return True iff two DSChains' data lifetimes are disjoint -- one's
+    last consumer wmma comes strictly before the other's first ds_load.
+
+    Stage 4.3 uses this to share data VGPRs between same-bank DSChains.
+    For example in v9, L0 (last consumer at L3) and L4 (loading at L4)
+    return True: L0's data is fully consumed by the time L4 overwrites
+    the same physical registers.  Stride-4 sibling pairs L0/L4, L1/L5,
+    L2/L6, L3/L7 all share by this rule, keeping the loop's data VGPR
+    footprint at one set per bank instead of two.
+
+    Returns False if either chain has incomplete lifetime info (no
+    ds_loads or no consumers); callers should treat that as
+    non-shareable.
+    """
+    if (a.loading_pos is None or b.loading_pos is None or
+            a.last_consumer_pos is None or b.last_consumer_pos is None):
+        return False
+    return (a.last_consumer_pos < b.loading_pos
+            or b.last_consumer_pos < a.loading_pos)
 
 
 def _find_reaching_consumers(ld: Instruction, pindex: "DefUseIndex",
@@ -1324,6 +1357,15 @@ def collect_ds_chains(program: Program) -> list[DSChain]:
             is_epilogue_region=is_epi,
             dsgroups=kept,
         )
+        # Compute lifetime positions for VGPR-sharing analysis (Stage 4.3).
+        chain_loads = chain.ds_loads
+        if chain_loads:
+            chain.loading_pos = min(_program_order(ld, block_order)
+                                    for ld in chain_loads)
+        chain_consumers = chain.consumer_wmmas
+        if chain_consumers:
+            chain.last_consumer_pos = max(_program_order(w, block_order)
+                                          for w in chain_consumers)
         chains.append(chain)
         for g in kept:
             for ld in g.ds_loads:
