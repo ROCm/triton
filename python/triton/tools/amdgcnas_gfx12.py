@@ -1388,36 +1388,40 @@ def collect_ds_chains(program: Program) -> list[DSChain]:
         if not kept:
             continue
 
-        # Sanity: per-region shared addr + shared op_idx.
-        addrs = {g.addr_reg for g in kept if g.addr_reg is not None}
-        if len(addrs) > 1:
-            raise ValueError(
-                f'Region {"E" if is_epi else "L"}{region_idx}: DSGroups '
-                f'use mixed addr registers {sorted(str(a) for a in addrs)}')
-        slots = {g.op_idx for g in kept if g.op_idx is not None}
-        if len(slots) > 1:
-            raise ValueError(
-                f'Region {"E" if is_epi else "L"}{region_idx}: DSGroups '
-                f'use mixed operand slots {sorted(slots)}')
-
-        chain = DSChain(
-            loading_region=region_idx,
-            is_epilogue_region=is_epi,
-            dsgroups=kept,
-        )
-        # Compute lifetime positions for VGPR-sharing analysis (Stage 4.3).
-        chain_loads = chain.ds_loads
-        if chain_loads:
-            chain.loading_pos = min(_program_order(ld, block_order)
-                                    for ld in chain_loads)
-        chain_consumers = chain.consumer_wmmas
-        if chain_consumers:
-            chain.last_consumer_pos = max(_program_order(w, block_order)
-                                          for w in chain_consumers)
-        chains.append(chain)
+        # Within a region, DSGroups can use multiple addr registers when
+        # the kernel reads from more than one LDS buffer in the same
+        # region (e.g., v9's epilogue after the dual-buffer refactor:
+        # one tdm.async_store sources its data from buffer A via addr
+        # v642 and another from buffer B via addr v806).  Split into one
+        # DSChain per (addr_reg, op_idx) pair so each chain still
+        # satisfies the "shared addr + shared slot" invariant downstream
+        # passes rely on.  Order: keep insertion order from tile_map for
+        # determinism.
+        from collections import OrderedDict
+        by_key: dict[tuple, list[DSGroup]] = OrderedDict()
         for g in kept:
-            for ld in g.ds_loads:
-                ld.ds_chain = chain
+            key = (g.addr_reg, g.op_idx)
+            by_key.setdefault(key, []).append(g)
+
+        for (addr_key, slot_key), groups in by_key.items():
+            chain = DSChain(
+                loading_region=region_idx,
+                is_epilogue_region=is_epi,
+                dsgroups=groups,
+            )
+            chain_loads = chain.ds_loads
+            if chain_loads:
+                chain.loading_pos = min(_program_order(ld, block_order)
+                                        for ld in chain_loads)
+            chain_consumers = chain.consumer_wmmas
+            if chain_consumers:
+                chain.last_consumer_pos = max(
+                    _program_order(w, block_order)
+                    for w in chain_consumers)
+            chains.append(chain)
+            for g in groups:
+                for ld in g.ds_loads:
+                    ld.ds_chain = chain
 
     # Attach prologue ds_loads (no region marker) to the loop DSGroup
     # whose steady-state tile they mirror.  Matching rule: the first
