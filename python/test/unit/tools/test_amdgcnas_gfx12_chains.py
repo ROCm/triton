@@ -7,7 +7,9 @@ import pytest
 from triton.tools.amdgcnas_gfx12 import (
     BankAssignment,
     DSChain,
+    VGPRAllocation,
     WMMAChain,
+    allocate_vgprs,
     annotate_regions,
     assign_banks,
     build_def_use_index,
@@ -652,3 +654,162 @@ class TestAssignBanks:
         wcs = collect_wmma_chains(prog)
         assert len(wcs) == 1
         assert result.acc_bank(wcs[0]) == 0
+
+
+# -------------------------------------------------------------------------
+# Stage 4.3: bank-scoped VGPR allocator
+# -------------------------------------------------------------------------
+
+class TestAllocateVgprs:
+
+    def _wrap_loop(self, body: str, prologue: str = "") -> str:
+        return (
+            ".text\n"
+            ".globl test_kernel\n"
+            "test_kernel:\n"
+            "; %bb.0:\n"
+            ".Lpre:\n"
+            f"{prologue}"
+            ".Lloop:\n"
+            f"{body}"
+            "\ts_cbranch_scc1 .Lloop\n"
+            "\ts_endpgm\n"
+        )
+
+    def test_no_loop_returns_empty(self):
+        src = (
+            "; %bb.0:\n"
+            ".LBB0_0:\n"
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            "\ts_endpgm\n"
+        )
+        prog = parse_asm(src)
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        assert alloc.wmma_acc == {}
+        assert alloc.budget == 0
+
+    def test_acc_lands_in_right_bank(self):
+        # One wmma in each region -> one chain per region with
+        # acc_bank = region_idx % 4 (Stage 3's rule).
+        body = (
+            f"{MARKER_R0}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[0:7], v[8:15], v[16:23], v[0:7]\n"
+            f"{MARKER_R1}\n"
+            "\tv_wmma_f32_16x16x32_f16 v[24:31], v[32:39], v[40:47], v[24:31]\n"
+        )
+        prog = parse_asm(self._wrap_loop(body))
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        wcs = collect_wmma_chains(prog)
+        for c in wcs:
+            new = alloc.acc(c)
+            assert new is not None
+            bank = ba.acc_bank(c)
+            # New acc should land in the assigned bank (logical id /256).
+            assert new.ids[0] // 256 == bank
+
+    def test_v9_fixture_uses_expected_layout(self):
+        import glob
+        matches = glob.glob('/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        if not matches:
+            pytest.skip('v9 fixture not available')
+        with open(matches[0]) as f:
+            text = f.read()
+        prog = parse_asm(text)
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        wcs = collect_wmma_chains(prog)
+        dcs = collect_ds_chains(prog)
+
+        # 4 banks of 16 wmma chains x 8 VGPRs = 128 acc VGPRs per bank.
+        for bank in range(4):
+            in_bank = [c for c in wcs if ba.acc_bank(c) == bank]
+            assert len(in_bank) == 16, f'bank {bank}: {len(in_bank)} acc chains'
+            for c in in_bank:
+                new = alloc.acc(c)
+                assert new is not None
+                assert new.size == 8
+                assert new.ids[0] >= bank * 256
+                assert new.ids[-1] < (bank + 1) * 256
+
+        # Stride-4 sibling pairs must share their data tile registers
+        # (L0/L4, L1/L5, L2/L6, L3/L7 in v9).
+        loop_chains = {c.loading_region: c for c in dcs
+                       if not c.is_epilogue_region}
+        for r in (0, 1, 2, 3):
+            a = loop_chains[r]
+            b = loop_chains[r + 4]
+            # For each DSGroup of A, find a DSGroup of B with the same
+            # canonical-order index and verify they map to the same
+            # new Register.  We sort each chain's groups by tile.start
+            # to mirror the allocator's canonical mapping.
+            a_groups = sorted(a.dsgroups, key=lambda g: g.tile.ids[0])
+            b_groups = sorted(b.dsgroups, key=lambda g: g.tile.ids[0])
+            assert len(a_groups) == len(b_groups)
+            for ga, gb in zip(a_groups, b_groups):
+                ra = alloc.data(ga)
+                rb = alloc.data(gb)
+                assert ra is not None and rb is not None
+                assert ra.ids == rb.ids, (
+                    f'L{r}/L{r+4} group {ga.tile} <-> {gb.tile}: '
+                    f'{ra} != {rb}')
+
+        # Budget = highest used logical VGPR id + 1.  Bank-aligned
+        # layout means bank 3's tail dictates the budget; expect on
+        # the order of 768 + 192 (acc+data) ~= 960, well under the
+        # 1024 hardware ceiling.
+        assert alloc.budget < 1024, (
+            f'v9 budget {alloc.budget} exceeds 1024 hardware limit')
+
+    def test_v10_fixture_l1_l5_dont_share(self):
+        # In v10, L1 (A_top_next) and L5 (A_top) are different tensors
+        # in the same data_bank with overlapping lifetimes.  The
+        # allocator should give them DIFFERENT VGPR pools.
+        import glob
+        matches = glob.glob(
+            '/home/lixzhang/.triton/cache/*/v10_double_local_prefetch.amdgcn')
+        if not matches:
+            pytest.skip('v10 fixture not available')
+        with open(matches[0]) as f:
+            text = f.read()
+        prog = parse_asm(text)
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        dcs = collect_ds_chains(prog)
+        loop_chains = {c.loading_region: c for c in dcs
+                       if not c.is_epilogue_region}
+        l1 = loop_chains[1]
+        l5 = loop_chains[5]
+        # Same data_bank but different tile pools.
+        assert ba.data_bank(l1) == ba.data_bank(l5)
+        l1_starts = {alloc.data(g).ids[0] for g in l1.dsgroups
+                     if alloc.data(g) is not None}
+        l5_starts = {alloc.data(g).ids[0] for g in l5.dsgroups
+                     if alloc.data(g) is not None}
+        assert l1_starts.isdisjoint(l5_starts), (
+            f'v10: L1 and L5 should NOT share VGPRs but overlap at '
+            f'{l1_starts & l5_starts}')
+
+    def test_addr_one_per_chain_in_addr_bank(self):
+        import glob
+        matches = glob.glob('/home/lixzhang/.triton/cache/*/v9_sliceM.amdgcn')
+        if not matches:
+            pytest.skip('v9 fixture not available')
+        with open(matches[0]) as f:
+            text = f.read()
+        prog = parse_asm(text)
+        ba = assign_banks(prog)
+        alloc = allocate_vgprs(prog, ba)
+        dcs = collect_ds_chains(prog)
+        for c in dcs:
+            if c.is_epilogue_region:
+                continue
+            ab = ba.addr_bank(c)
+            if ab is None:
+                continue
+            new = alloc.addr(c)
+            assert new is not None
+            assert new.size == 1
+            assert new.ids[0] // 256 == ab

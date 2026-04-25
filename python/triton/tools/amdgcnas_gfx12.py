@@ -1770,6 +1770,200 @@ def assign_banks(program: Program) -> BankAssignment:
 
 
 # -------------------------------------------------------------------------
+# Stage 4.3: bank-scoped VGPR allocator
+# -------------------------------------------------------------------------
+#
+# Pure planner: takes Stage 3's BankAssignment and Stage 4.2's
+# DSChain.lifetime info, produces a per-chain mapping from old role
+# to new logical-VGPR Register without modifying the program.
+# Stage 4.4+5 consumes this mapping to do the actual rewrite.
+#
+# Layout per bank (each bank covers 256 logical VGPRs):
+#
+#     [accumulators][shared data tiles][addr regs]
+#
+# Allocation order:
+#
+#   1.  WMMAChain.acc -- 8 contiguous VGPRs per chain in acc_bank.
+#       Sorted by canonical for determinism.  Banks fill from the
+#       bottom of their 256-VGPR range up.
+#
+#   2.  DSGroup.data -- the chain-by-chain logic the user described:
+#       within each data_bank, pack DSChains into "tracks" using
+#       interval scheduling.  Two chains can share a track iff their
+#       data lifetimes are disjoint (Stage 4.2's
+#       can_share_data_vgprs).  Each track gets enough VGPRs for the
+#       largest chain in the track (8 VGPRs per DSGroup tile, summed
+#       over tiles).  Within a track every chain's DSGroups get
+#       mapped to the track's tile slots in canonical order (sorted
+#       by original tile start).  Stride-4 sibling pairs in v9 thus
+#       share the same 64 data VGPRs; v10's L1/L5 fall in different
+#       tracks and consume two 64-VGPR slots in bank 1.
+#
+#   3.  DSChain.addr -- 1 VGPR per loop DSChain in addr_bank.  Each
+#       DSChain gets its own (no sharing); regions whose current addr
+#       is already a hoisted v_add will have that v_add re-targeted,
+#       and regions sharing v642 will get fresh preheader copies in
+#       Stage 4.4+5.
+#
+# Epilogue DSChains and DSChains without a Stage-3 bank are skipped
+# (they inherit via dependency propagation when the rewrite walks
+# them).  Prologue ds_loads attached to a DSGroup share that
+# DSGroup's data Register automatically.
+
+
+@dataclass
+class VGPRAllocation:
+    """Output of :func:`allocate_vgprs`.  All maps are keyed by
+    ``id(chain)`` / ``id(group)`` so we don't need the chain
+    dataclasses to be hashable."""
+    wmma_acc: dict[int, Register] = field(default_factory=dict)
+    ds_group_data: dict[int, Register] = field(default_factory=dict)
+    ds_chain_addr: dict[int, Register] = field(default_factory=dict)
+    # Per-bank highest-allocated logical VGPR id + 1, useful for the
+    # descriptor-bump in Stage 4.4+5.
+    bank_high_water: dict[int, int] = field(default_factory=dict)
+    # ``budget`` = max(bank_high_water.values()), the new
+    # ``.amdhsa_next_free_vgpr`` value.
+    budget: int = 0
+
+    def acc(self, chain: "WMMAChain") -> Optional[Register]:
+        return self.wmma_acc.get(id(chain))
+
+    def data(self, group: "DSGroup") -> Optional[Register]:
+        return self.ds_group_data.get(id(group))
+
+    def addr(self, chain: "DSChain") -> Optional[Register]:
+        return self.ds_chain_addr.get(id(chain))
+
+
+def _make_logical_register(start: int, size: int) -> Register:
+    """Build a logical-VGPR Register at logical id ``start`` covering
+    ``size`` VGPRs.  Computes the raw_id automatically (the same
+    register's raw form under the bank-implied MSB)."""
+    bank = start // 256
+    raw_start = start - bank * 256
+    return Register(
+        kind='v',
+        ids=list(range(start, start + size)),
+        raw_ids=list(range(raw_start, raw_start + size)),
+    )
+
+
+def allocate_vgprs(program: Program,
+                   ba: BankAssignment) -> VGPRAllocation:
+    """Decide a target logical VGPR for every chain role.  No rewrite."""
+    wchains = collect_wmma_chains(program)
+    dchains = collect_ds_chains(program)
+
+    alloc = VGPRAllocation()
+    # Each bank has 256 logical VGPRs at offsets [bank*256, bank*256+256).
+    bank_next: dict[int, int] = {b: b * 256 for b in range(4)}
+
+    # Phase 1: WMMAChain accumulators.
+    sorted_wchains = sorted(wchains, key=lambda c: (
+        ba.acc_bank(c) if ba.acc_bank(c) is not None else 99,
+        c.canonical.start,
+    ))
+    for c in sorted_wchains:
+        bank = ba.acc_bank(c)
+        if bank is None:
+            continue  # epilogue-only chain; not in BankAssignment
+        size = c.canonical.size
+        start = bank_next[bank]
+        if start + size > (bank + 1) * 256:
+            raise ValueError(
+                f'WMMAChain {c.canonical} (bank {bank}) overflows: '
+                f'allocated {start - bank * 256 + size} > 256')
+        alloc.wmma_acc[id(c)] = _make_logical_register(start, size)
+        bank_next[bank] = start + size
+
+    # Phase 2: DSGroup data.  Pack DSChains into tracks per bank using
+    # interval scheduling; each track shares one VGPR pool.
+    from collections import defaultdict as _defaultdict
+    chains_by_data_bank: dict[int, list["DSChain"]] = _defaultdict(list)
+    for c in dchains:
+        if c.is_epilogue_region:
+            continue
+        b = ba.data_bank(c)
+        if b is None:
+            continue
+        chains_by_data_bank[b].append(c)
+
+    for bank, chains_in_bank in chains_by_data_bank.items():
+        chains_sorted = sorted(
+            chains_in_bank,
+            key=lambda c: c.loading_pos if c.loading_pos else (0, 0),
+        )
+        # Greedy interval-graph coloring -- track[i] = list of chains
+        # sharing the same VGPR pool.  Two chains can share iff their
+        # lifetimes are disjoint per Stage 4.2.
+        tracks: list[list["DSChain"]] = []
+        for c in chains_sorted:
+            placed = False
+            for tr in tracks:
+                if all(can_share_data_vgprs(c, other) for other in tr):
+                    tr.append(c)
+                    placed = True
+                    break
+            if not placed:
+                tracks.append([c])
+
+        # Allocate per-track tile pool.  Each DSGroup is one tile
+        # (8 VGPRs in v9/v10).  All chains in a track share the pool;
+        # their DSGroups get mapped to consecutive new tiles in their
+        # original-tile-id order.
+        for tr in tracks:
+            max_groups = max(len(c.dsgroups) for c in tr)
+            tile_size = max((g.tile.size for c in tr for g in c.dsgroups
+                             if g.tile is not None), default=0)
+            if tile_size == 0:
+                continue
+            track_start = bank_next[bank]
+            new_tile_starts = [track_start + i * tile_size
+                               for i in range(max_groups)]
+            track_total = max_groups * tile_size
+            if track_start + track_total > (bank + 1) * 256:
+                raise ValueError(
+                    f'DSChain track in bank {bank} overflows: '
+                    f'{track_start - bank * 256 + track_total} > 256')
+            bank_next[bank] = track_start + track_total
+
+            for c in tr:
+                groups_sorted = sorted(
+                    c.dsgroups,
+                    key=lambda g: g.tile.ids[0] if g.tile else 0,
+                )
+                for i, g in enumerate(groups_sorted):
+                    new_start = new_tile_starts[i]
+                    alloc.ds_group_data[id(g)] = _make_logical_register(
+                        new_start, tile_size)
+
+    # Phase 3: DSChain addrs (1 VGPR each in addr_bank).
+    sorted_addr_chains = sorted(
+        (c for c in dchains
+         if not c.is_epilogue_region and ba.addr_bank(c) is not None),
+        key=lambda c: (ba.addr_bank(c), c.loading_region),
+    )
+    for c in sorted_addr_chains:
+        bank = ba.addr_bank(c)
+        start = bank_next[bank]
+        if start + 1 > (bank + 1) * 256:
+            raise ValueError(
+                f'DSChain L{c.loading_region} addr (bank {bank}) overflows')
+        alloc.ds_chain_addr[id(c)] = _make_logical_register(start, 1)
+        bank_next[bank] = start + 1
+
+    alloc.bank_high_water = dict(bank_next)
+    # Budget = highest used logical VGPR id + 1.  Banks that received
+    # no allocations don't contribute (their bank_next still equals
+    # bank * 256, the empty-bank starting point).
+    used = [v for b, v in bank_next.items() if v > b * 256]
+    alloc.budget = max(used) if used else 0
+    return alloc
+
+
+# -------------------------------------------------------------------------
 # LICM: hoist loop-invariant address computations out of the loop
 # -------------------------------------------------------------------------
 
