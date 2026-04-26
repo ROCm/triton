@@ -1602,8 +1602,11 @@ class BankAssignment:
     wmma_src1_bank: dict[int, int] = field(default_factory=dict)
     ds_data_bank: dict[int, int] = field(default_factory=dict)
     ds_addr_bank: dict[int, int] = field(default_factory=dict)
-    # Per-loop-region expected (dst, src0, src1, src2) MSB tuple.
-    region_msb: dict[int, tuple[int, int, int, int]] = field(default_factory=dict)
+    # Per-region expected (dst, src0, src1, src2) MSB tuple, keyed by
+    # ``(is_epilogue, region_idx)``.  Loop and epilogue regions both
+    # populate this -- chains are computed from a unified view so a
+    # WMMAChain spanning loop and epilogue gets the same bank in both.
+    region_msb: dict[tuple[bool, int], tuple[int, int, int, int]] = field(default_factory=dict)
     # Human-readable messages for inconsistencies the algorithm hit.
     conflicts: list[str] = field(default_factory=list)
 
@@ -1641,10 +1644,36 @@ def _loop_region_of(inst: Instruction, loop_bb: BasicBlock,
     return inst.region_idx
 
 
+def _region_key_of(inst: Instruction, loop_bb: BasicBlock,
+                   cbranch_idx: int) -> Optional[tuple[bool, int]]:
+    """Unified region identifier: ``(is_epilogue, region_idx)`` for any
+    annotated instruction, or None if not in a region.  Loop regions and
+    epilogue regions both contribute; the ``is_epilogue`` flag keeps
+    them distinct since their indices restart at 0 in the AMDGPU
+    backend's emission."""
+    if inst.region_idx is None:
+        return None
+    if inst.region_is_epilogue:
+        return (True, inst.region_idx)
+    if inst.parent_bb is loop_bb and inst.index <= cbranch_idx:
+        return (False, inst.region_idx)
+    return None
+
+
 def assign_banks(program: Program) -> BankAssignment:
     """Compute per-chain bank assignments as described above.  Returns
     an empty :class:`BankAssignment` if the program has no
-    self-branching loop."""
+    self-branching loop.
+
+    Loop regions drive the primary bank assignment via
+    ``region_idx % 4``.  Epilogue regions inherit banks from their
+    WMMAChains -- a WMMAChain that spans loop and epilogue keeps the
+    same acc_bank in both, and within an epilogue region the data and
+    addr banks are computed the same way (data_bank = acc_bank of WMMA
+    in same region; addr_bank = src0_bank of WMMA in same region).
+    Epilogue-only chains (no loop WMMAs) get
+    ``epilogue_region_idx % 4`` as a fallback.
+    """
     annotate_regions(program)
     wchains = collect_wmma_chains(program)
     dchains = collect_ds_chains(program)
@@ -1656,43 +1685,59 @@ def assign_banks(program: Program) -> BankAssignment:
         return result
     loop_bb, cbranch_idx = loop_range
 
-    # Group WMMAChains by the loop regions they appear in.  Visiting
-    # regions in order lets the user's "first region wins" rule play
-    # out deterministically.
+    # Group WMMAChains by region (loop and epilogue, distinguished by
+    # ``(is_epilogue, region_idx)``).  Visiting regions in order lets
+    # the user's "first region wins" rule play out deterministically.
     from collections import defaultdict
-    loop_wmmas_per_region: dict[int, list[WMMAChain]] = defaultdict(list)
+    wmmas_per_region: dict[tuple[bool, int], list[WMMAChain]] = defaultdict(list)
     for c in wchains:
-        seen_regions = set()
+        seen: set[tuple[bool, int]] = set()
         for w in c.wmmas:
-            r = _loop_region_of(w, loop_bb, cbranch_idx)
-            if r is not None and r not in seen_regions:
-                loop_wmmas_per_region[r].append(c)
-                seen_regions.add(r)
+            key = _region_key_of(w, loop_bb, cbranch_idx)
+            if key is not None and key not in seen:
+                wmmas_per_region[key].append(c)
+                seen.add(key)
 
-    # Phase 2: acc_bank per WMMAChain.
-    for region_idx in sorted(loop_wmmas_per_region):
+    # Phase 2: acc_bank per WMMAChain.  Loop regions assign first
+    # (region_idx % 4).  Then for chains that ONLY appear in epilogue
+    # regions, fall back to epilogue_region_idx % 4 -- but in practice
+    # the pipelined-chain pattern means almost every chain has a loop
+    # WMMA.  A WMMAChain spanning loop+epilogue inherits its bank from
+    # the loop appearance and that's reused in both.
+    for (is_epi, region_idx) in sorted(wmmas_per_region):
+        if is_epi:
+            continue
         bank = region_idx % 4
-        for chain in loop_wmmas_per_region[region_idx]:
+        for chain in wmmas_per_region[(is_epi, region_idx)]:
+            if id(chain) not in result.wmma_acc_bank:
+                result.wmma_acc_bank[id(chain)] = bank
+    for (is_epi, region_idx) in sorted(wmmas_per_region):
+        if not is_epi:
+            continue
+        bank = region_idx % 4
+        for chain in wmmas_per_region[(is_epi, region_idx)]:
             if id(chain) not in result.wmma_acc_bank:
                 result.wmma_acc_bank[id(chain)] = bank
 
-    # Verify every loop region's chains agree on acc_bank (i.e., the
-    # user's pipelined-chain assumption holds).  Non-fatal: we record
-    # the conflict and keep going.
-    for region_idx, chains in loop_wmmas_per_region.items():
-        banks = {result.wmma_acc_bank[id(c)] for c in chains}
+    # Sanity: chains in the same region should agree on acc_bank.
+    # Non-fatal -- record conflicts and keep going.
+    for (is_epi, region_idx), chains in wmmas_per_region.items():
+        banks = {result.wmma_acc_bank[id(c)] for c in chains
+                 if id(c) in result.wmma_acc_bank}
         if len(banks) > 1:
+            tag = 'E' if is_epi else 'L'
             result.conflicts.append(
-                f'L{region_idx}: wmmaChains span acc banks {sorted(banks)}')
+                f'{tag}{region_idx}: wmmaChains span acc banks '
+                f'{sorted(banks)}')
 
-    # Phase 3: ds_load data_bank = acc_bank of the DSChain's loading
-    # region.  Each DSChain is per-region under the new structure, so
-    # the lookup is direct.  Epilogue DSChains don't get banked here --
-    # they'll inherit via dependency propagation in Stage 4.
+    # Phase 3: ds_load data_bank = acc_bank of the WMMA chain in the
+    # DSChain's loading region.  Loop and epilogue treated uniformly:
+    # epilogue ds_loads write into a tile in the same bank as the
+    # epilogue region's WMMA acc, matching the per-region-shared dst
+    # bank invariant.
     for dc in dchains:
-        if dc.is_epilogue_region:
-            continue
-        hosts = loop_wmmas_per_region.get(dc.loading_region, [])
+        key = (dc.is_epilogue_region, dc.loading_region)
+        hosts = wmmas_per_region.get(key, [])
         if not hosts:
             continue
         bank = result.wmma_acc_bank.get(id(hosts[0]))
@@ -1700,15 +1745,12 @@ def assign_banks(program: Program) -> BankAssignment:
             result.ds_data_bank[id(dc)] = bank
 
     # Phase 4: per-region src0_bank / src1_bank.  A wmmaChain can span
-    # multiple loop regions (e.g., a pipelined accumulator in regions
-    # N and N+4), and each of its wmmas reads different tiles loaded
-    # by different ds_loads at different scheduled positions.  So
-    # src_bank is not a chain-level property -- it's a *region-level*
+    # multiple regions (loop pipelining or loop->epilogue), and each
+    # of its wmmas reads different tiles loaded by different ds_loads
+    # at different scheduled positions.  So src_bank is a *region-level*
     # property shared by all wmmas in the region.  We find the
     # reaching (most-recent) ds_load def for each wmma's src0 and
-    # src1, and aggregate its bank per region.  A well-scheduled
-    # pipelined loop has one reaching-def region per src slot per
-    # loop region.
+    # src1, and aggregate its bank per region.
     pindex = build_program_def_use_index(program)
     block_order = {bb.name: i for i, bb in enumerate(program.blocks)}
 
@@ -1733,28 +1775,26 @@ def assign_banks(program: Program) -> BankAssignment:
                 best_key = dkey
         if best is None:
             return None
-        r = _loop_region_of(best, loop_bb, cbranch_idx)
-        if r is None:
+        rkey = _region_key_of(best, loop_bb, cbranch_idx)
+        if rkey is None:
             return None
-        hosts = loop_wmmas_per_region.get(r, [])
+        hosts = wmmas_per_region.get(rkey, [])
         if not hosts:
             return None
         return result.wmma_acc_bank.get(id(hosts[0]))
 
-    # Per-region src0/src1 banks -- used both for the region_msb table
-    # and, aggregated, to back-fill WMMAChain-level src banks for
-    # chains whose wmmas all agree.
-    region_src_banks: dict[int, tuple[set[int], set[int]]] = {
-        r: (set(), set()) for r in loop_wmmas_per_region
+    # Per-region src0/src1 banks -- both loop and epilogue.
+    region_src_banks: dict[tuple[bool, int], tuple[set[int], set[int]]] = {
+        k: (set(), set()) for k in wmmas_per_region
     }
     # Track per-chain-per-slot banks across regions so we can summarize
     # to BankAssignment.wmma_src0_bank / src1_bank.
     chain_slot_banks: dict[tuple[int, int], set[int]] = defaultdict(set)
-    for r, chains in loop_wmmas_per_region.items():
-        s0, s1 = region_src_banks[r]
+    for rkey, chains in wmmas_per_region.items():
+        s0, s1 = region_src_banks[rkey]
         for c in chains:
             for w in c.wmmas:
-                if _loop_region_of(w, loop_bb, cbranch_idx) != r:
+                if _region_key_of(w, loop_bb, cbranch_idx) != rkey:
                     continue
                 b0 = _reaching_load_bank(w, 1)
                 b1 = _reaching_load_bank(w, 2)
@@ -1765,13 +1805,15 @@ def assign_banks(program: Program) -> BankAssignment:
                     s1.add(b1)
                     chain_slot_banks[(id(c), 2)].add(b1)
 
-    for r, (s0, s1) in region_src_banks.items():
+    for rkey, (s0, s1) in region_src_banks.items():
+        is_epi, r = rkey
+        tag = 'E' if is_epi else 'L'
         if len(s0) > 1:
             result.conflicts.append(
-                f'L{r}: src0 spans banks {sorted(s0)} (can\'t unify MSB)')
+                f'{tag}{r}: src0 spans banks {sorted(s0)} (can\'t unify MSB)')
         if len(s1) > 1:
             result.conflicts.append(
-                f'L{r}: src1 spans banks {sorted(s1)} (can\'t unify MSB)')
+                f'{tag}{r}: src1 spans banks {sorted(s1)} (can\'t unify MSB)')
 
     for (cid, slot), banks in chain_slot_banks.items():
         if len(banks) == 1:
@@ -1781,30 +1823,32 @@ def assign_banks(program: Program) -> BankAssignment:
     # Phase 5: ds_load addr_bank = src0_bank of the wmmaChain in the
     # DSChain's loading region.  (src0 because ds_load's operand[1]
     # is encoded in the src0 MSB slot, matching the wmma's src0.)
+    # Applies to both loop and epilogue DSChains.
     for dc in dchains:
-        if dc.is_epilogue_region:
-            continue
+        key = (dc.is_epilogue_region, dc.loading_region)
         addr_banks: set[int] = set()
-        for c in loop_wmmas_per_region.get(dc.loading_region, []):
+        for c in wmmas_per_region.get(key, []):
             b = result.wmma_src0_bank.get(id(c))
             if b is not None:
                 addr_banks.add(b)
         if len(addr_banks) == 1:
             result.ds_addr_bank[id(dc)] = addr_banks.pop()
         elif len(addr_banks) > 1:
+            tag = 'E' if dc.is_epilogue_region else 'L'
             result.conflicts.append(
-                f'DSChain L{dc.loading_region} src{(dc.op_idx or 1) - 1}: '
+                f'DSChain {tag}{dc.loading_region} '
+                f'src{(dc.op_idx or 1) - 1}: '
                 f'addr_bank ambiguous {sorted(addr_banks)}')
 
-    # Per-region MSB state.  dst and src2 share a bank (acc == dst for
-    # the wmma, and ds_load's dst sits in that bank by Phase 3); src0
-    # and src1 come from the chain-level assignment so the first-
-    # iteration region (whose wmmas' reaching defs are prologue
-    # ds_loads with no loop region) inherits the steady-state bank
-    # from the chain's other loop regions.
-    for region_idx, chains in sorted(loop_wmmas_per_region.items()):
+    # Per-region MSB state, both loop and epilogue.  dst and src2 share
+    # a bank (acc == dst for the wmma, and ds_load's dst sits in that
+    # bank by Phase 3); src0 and src1 come from the chain-level
+    # assignment.
+    for rkey in sorted(wmmas_per_region):
+        chains = wmmas_per_region[rkey]
         if not chains:
             continue
+        is_epi, region_idx = rkey
         dst = result.wmma_acc_bank.get(id(chains[0]), 0)
         s0 = {result.wmma_src0_bank[id(c)] for c in chains
               if id(c) in result.wmma_src0_bank}
@@ -1813,10 +1857,11 @@ def assign_banks(program: Program) -> BankAssignment:
         src0 = next(iter(s0)) if len(s0) == 1 else 0
         src1 = next(iter(s1)) if len(s1) == 1 else 0
         if len(s0) > 1 or len(s1) > 1:
+            tag = 'E' if is_epi else 'L'
             result.conflicts.append(
-                f'L{region_idx}: chains disagree on src banks '
+                f'{tag}{region_idx}: chains disagree on src banks '
                 f'(src0={sorted(s0)}, src1={sorted(s1)})')
-        result.region_msb[region_idx] = (dst, src0, src1, dst)
+        result.region_msb[rkey] = (dst, src0, src1, dst)
 
     return result
 
@@ -1931,12 +1976,16 @@ def allocate_vgprs(program: Program,
         bank_next[bank] = start + size
 
     # Phase 2: DSGroup data.  Pack DSChains into tracks per bank using
-    # interval scheduling; each track shares one VGPR pool.
+    # interval scheduling; each track shares one VGPR pool.  Loop and
+    # epilogue DSChains are packed together: their lifetimes are
+    # already program-order positions (loading_pos / last_consumer_pos)
+    # spanning the whole function, so ``can_share_data_vgprs`` works
+    # uniformly.  An epilogue tile that's loaded after every loop chain
+    # is fully consumed naturally shares with the matching-bank loop
+    # chain.
     from collections import defaultdict as _defaultdict
     chains_by_data_bank: dict[int, list["DSChain"]] = _defaultdict(list)
     for c in dchains:
-        if c.is_epilogue_region:
-            continue
         b = ba.data_bank(c)
         if b is None:
             continue
@@ -1991,18 +2040,23 @@ def allocate_vgprs(program: Program,
                     alloc.ds_group_data[id(g)] = _make_logical_register(
                         new_start, tile_size)
 
-    # Phase 3: DSChain addrs (1 VGPR each in addr_bank).
+    # Phase 3: DSChain addrs (1 VGPR each in addr_bank).  Both loop and
+    # epilogue addrs are allocated; epilogue chains' addr regs (e.g.,
+    # v9's epilogue uses two LDS buffers via v642 and v646) need fresh
+    # VGPRs in the right bank, same as loop addrs.
     sorted_addr_chains = sorted(
-        (c for c in dchains
-         if not c.is_epilogue_region and ba.addr_bank(c) is not None),
-        key=lambda c: (ba.addr_bank(c), c.loading_region),
+        (c for c in dchains if ba.addr_bank(c) is not None),
+        key=lambda c: (ba.addr_bank(c),
+                       1 if c.is_epilogue_region else 0,
+                       c.loading_region),
     )
     for c in sorted_addr_chains:
         bank = ba.addr_bank(c)
         start = bank_next[bank]
         if start + 1 > (bank + 1) * 256:
+            tag = 'E' if c.is_epilogue_region else 'L'
             raise ValueError(
-                f'DSChain L{c.loading_region} addr (bank {bank}) overflows')
+                f'DSChain {tag}{c.loading_region} addr (bank {bank}) overflows')
         alloc.ds_chain_addr[id(c)] = _make_logical_register(start, 1)
         bank_next[bank] = start + 1
 
@@ -2973,11 +3027,12 @@ def apply_allocation(program: Program,
                 dsgroup_old_tile[id(g)] = t
 
     # OLD addr_reg's first id -> list[DSChain] (multiple chains can
-    # share the same current addr base, e.g., v642 in v9).
+    # share the same current addr base, e.g., v642 in v9).  Includes
+    # epilogue chains so an epilogue addr like v9's v646 (renamed to
+    # v806 by hoist_loop_invariant_addrs) gets re-targeted alongside
+    # loop addrs.
     addr_old_first_to_chains: dict[int, list[DSChain]] = defaultdict(list)
     for dc in dchains:
-        if dc.is_epilogue_region:
-            continue
         if dc.addr_reg is None or alloc.addr(dc) is None:
             continue
         addr_old_first_to_chains[dc.addr_reg.ids[0]].append(dc)
@@ -2998,7 +3053,7 @@ def apply_allocation(program: Program,
     if preheader_bb is not None:
         addr_to_dschain: dict[int, DSChain] = {}
         for dc in dchains:
-            if dc.is_epilogue_region or dc.addr_reg is None:
+            if dc.addr_reg is None:
                 continue
             if alloc.addr(dc) is None:
                 continue
@@ -3105,6 +3160,123 @@ def apply_allocation(program: Program,
         for old_id in c.canonical.ids:
             acc_old_id_to_chain[old_id] = c
 
+    # Per-chain "live range" in program-order positions.  The else-branch
+    # rewriter must only touch operands that are part of the chain's
+    # accumulator lifecycle -- otherwise it incorrectly rewrites scratch
+    # uses of chain-canonical registers (e.g. v9's prologue computes
+    # v0 = s63 + v643 as the LDS base pointer; its register happens to
+    # live inside chain v[0:7]'s canonical range, but the value has
+    # nothing to do with the chain's accumulator).
+    #
+    # Live range:
+    #   start = position of the chain's FIRST WMMA
+    #   end   = position of the chain's LAST consumer (or last WMMA)
+    # Plus a special set of "pre-WMMA writes that initialize the chain"
+    # which we identify as v_dual_mov_b32 / v_mov_b32_e32 whose dst is
+    # the chain canonical, scheduled in the same BB as the first WMMA
+    # AND with no other VGPR-write to the same register between this
+    # mov and the first WMMA (which would override the broadcast init).
+    chain_first_wmma_pos: dict[int, tuple[int, int]] = {}
+    chain_last_pos: dict[int, tuple[int, int]] = {}
+    # Pre-collect ordered list of (program-order, inst) for forward
+    # scanning -- used to extend each chain's live range past the last
+    # WMMA to cover post-WMMA consumers (v_cvt_pk_f16_f32, ds_store
+    # of the packed-f16 result).
+    ordered_insts = sorted(
+        ((_program_order(inst, block_order), inst)
+         for bb in program.blocks for inst in bb.instructions
+         if inst.opcode and inst.opcode != '__asm_block__'),
+        key=lambda x: x[0])
+    for c in wchains:
+        if alloc.acc(c) is None:
+            continue
+        if not c.wmmas:
+            continue
+        positions = [_program_order(w, block_order) for w in c.wmmas]
+        chain_first_wmma_pos[id(c)] = min(positions)
+        last_wmma = max(positions)
+        canonical_ids = set(c.canonical.ids)
+        chain_wmma_ids = {id(w) for w in c.wmmas}
+        cutoff = last_wmma
+        # Forward scan from past the last WMMA.  An instruction
+        # extends the live range if it READS a chain canonical reg
+        # OR if it's a chain-aware op (v_cvt_pk_f16_f32) that writes
+        # a chain canonical reg (the v_cvt overwrites the f32 acc with
+        # packed f16 -- still part of the chain's lifecycle since the
+        # ds_store later consumes it).  An instruction TERMINATES the
+        # live range if it WRITES a chain canonical reg without being
+        # chain-aware -- that's scratch reuse (e.g., v9's v_lshlrev_b32
+        # v480, 8, v641 to compute LDS-offset bits).
+        terminated = False
+        for ipos, inst in ordered_insts:
+            if terminated:
+                break
+            if ipos <= last_wmma:
+                continue
+            writes_canonical = False
+            if inst.operands:
+                op0 = inst.operands[0]
+                if op0.regs and op0.regs[0].kind == 'v':
+                    if any(rid in canonical_ids
+                           for rid in op0.regs[0].ids):
+                        writes_canonical = True
+                if (inst.opcode == 'v_dual_mov_b32' and inst.dual_issue
+                        and len(inst.operands) >= 3):
+                    op2 = inst.operands[2]
+                    if op2.regs and op2.regs[0].kind == 'v':
+                        if any(rid in canonical_ids
+                               for rid in op2.regs[0].ids):
+                            writes_canonical = True
+            reads_canonical = False
+            for op in inst.operands[1:]:
+                if op.regs and op.regs[0].kind == 'v':
+                    if any(rid in canonical_ids for rid in op.regs[0].ids):
+                        reads_canonical = True
+                        break
+            is_chain_op = (id(inst) in chain_wmma_ids
+                           or inst.opcode.startswith('v_cvt_pk'))
+            if writes_canonical and not is_chain_op:
+                terminated = True
+                continue
+            if reads_canonical or (writes_canonical and is_chain_op):
+                cutoff = ipos
+        chain_last_pos[id(c)] = cutoff
+
+    # Identify chain-init instructions: v_dual_mov_b32 / v_mov_b32_e32
+    # that write to a chain canonical reg before the chain's first WMMA.
+    # The init typically lives in the preheader BB, not the loop body
+    # BB where the WMMAs run, so we must search ALL BBs in program
+    # order up to the first WMMA position.  A single dual_mov can init
+    # TWO different chains (one per dst lane), so we map inst -> set of
+    # chains rather than a single chain.
+    chain_init_inst: dict[int, set] = {}
+    for c in wchains:
+        if alloc.acc(c) is None or not c.wmmas:
+            continue
+        first_wmma = min(c.wmmas, key=lambda w: _program_order(w, block_order))
+        first_pos = _program_order(first_wmma, block_order)
+        canonical_ids = set(c.canonical.ids)
+        for bb in program.blocks:
+            for inst in bb.instructions:
+                inst_pos = _program_order(inst, block_order)
+                if inst_pos >= first_pos:
+                    continue
+                if inst.opcode not in ('v_dual_mov_b32', 'v_mov_b32_e32'):
+                    continue
+                if inst.opcode == 'v_dual_mov_b32' and inst.dual_issue:
+                    dst_indices = (0, 2)
+                else:
+                    dst_indices = (0,)
+                for di in dst_indices:
+                    if di >= len(inst.operands):
+                        continue
+                    op = inst.operands[di]
+                    if not op.regs or op.regs[0].kind != 'v':
+                        continue
+                    if op.regs[0].ids[0] in canonical_ids:
+                        chain_init_inst.setdefault(id(inst), set()).add(id(c))
+                        break
+
     def _new_register_for_acc_slice(chain: WMMAChain,
                                     old_first: int, size: int
                                     ) -> Optional[Register]:
@@ -3138,6 +3310,14 @@ def apply_allocation(program: Program,
         new_start = new_data.ids[0] + offset
         return _make_logical_register(new_start, size)
 
+    import os as _os_dbg
+    _debug_phase_c = _os_dbg.environ.get('TRITON_AMDGCN_AS_DEBUG_PHASE_C') == '1'
+    _debug_log: list[str] = []
+
+    def _logop(inst: Instruction, action: str) -> None:
+        if _debug_phase_c:
+            _debug_log.append(f'{action}: {inst.raw_line.strip()[:120]}')
+
     for bb in program.blocks:
         for inst in bb.instructions:
             if not inst.opcode or inst.opcode == '__asm_block__':
@@ -3148,8 +3328,10 @@ def apply_allocation(program: Program,
                 # dst, src2 -> acc.
                 chain = inst.wmma_chain
                 if chain is None or alloc.acc(chain) is None:
+                    _logop(inst, '[wmma  no-chain ]')
                     continue
                 new_acc = alloc.acc(chain)
+                _logop(inst, f'[wmma  acc {chain.canonical}->{new_acc} ]')
                 if inst.operands and inst.operands[0].regs:
                     _replace_operand_register(inst.operands[0], new_acc)
                 if len(inst.operands) >= 4 and inst.operands[3].regs:
@@ -3163,6 +3345,9 @@ def apply_allocation(program: Program,
                         continue
                     g = _find_dsgroup_via_reaching_def(inst, op)
                     if g is None:
+                        if _debug_phase_c:
+                            _debug_log.append(
+                                f'  [wmma  src{slot} no-dsg op={op.regs[0]}]')
                         continue
                     new_slice = _new_register_for_data_slice(
                         g, op.regs[0].ids[0], op.regs[0].size)
@@ -3173,8 +3358,10 @@ def apply_allocation(program: Program,
             elif _is_ds_load(inst):
                 g = ds_load_to_group.get(id(inst))
                 if g is None:
+                    _logop(inst, '[dsld  no-group ]')
                     continue
                 # dst -> data half (or other slice) of group.
+                _logop(inst, f'[dsld  group={id(g)%1000} new={alloc.data(g)} ]')
                 if inst.operands and inst.operands[0].regs:
                     op = inst.operands[0]
                     new_slice = _new_register_for_data_slice(
@@ -3197,28 +3384,130 @@ def apply_allocation(program: Program,
                 # Phase B already wrote the final dst (a DSChain new
                 # addr) which may collide with a WMMAChain canonical
                 # first id.  Don't second-guess it here.
+                _logop(inst, '[phB-handled    ]')
                 continue
 
             else:
-                # Non-chain instruction.  Rewrite any operand whose
-                # first VGPR id is in our acc-id map (e.g., acc-init
-                # v_dual_mov_b32, epilogue v_cvt_pk_f16_f32 reading
-                # acc, buffer_store reading output).
+                # Non-chain instruction.  Rewrite operands ONLY if the
+                # instruction is part of one of the matched chain's
+                # accumulator lifecycle (init, accumulation in a WMMA,
+                # or post-accumulation consumption like v_cvt /
+                # ds_store).  Without this filter, any prologue scratch
+                # using chain-canonical registers (e.g., v0 used as the
+                # LDS base pointer in v9 before the loop entry) would
+                # be wrongly rewritten to the chain's new acc location,
+                # leaving the prologue ds_loads reading uninitialized
+                # registers.
+                #
+                # We use a per-chain program-order live range:
+                #   * Reads/writes between first chain WMMA and last
+                #     chain WMMA / consumer: rewrite (acc accesses).
+                #   * Init instructions explicitly identified as the
+                #     chain's broadcast init: rewrite the dst.
+                #   * Anything else (incl. prologue scratch): leave
+                #     unchanged.
+                inst_pos = _program_order(inst, block_order)
+                init_chains = chain_init_inst.get(id(inst), set())
                 changed = False
-                for op in inst.operands:
+                rewrites = []
+                skip_reasons = []
+                for op_idx, op in enumerate(inst.operands):
                     if not op.regs or op.regs[0].kind != 'v':
                         continue
                     old_first = op.regs[0].ids[0]
                     chain = acc_old_id_to_chain.get(old_first)
                     if chain is None:
                         continue
+                    in_range = False
+                    first_pos = chain_first_wmma_pos.get(id(chain))
+                    last_pos = chain_last_pos.get(id(chain))
+                    if first_pos is not None and last_pos is not None:
+                        if first_pos <= inst_pos <= last_pos:
+                            in_range = True
+                    if not in_range and id(chain) in init_chains:
+                        in_range = True
+                    if not in_range:
+                        # This chain's lifecycle hasn't started yet at this
+                        # program point -- treat the operand as a scratch
+                        # use of a register that *happens* to lie in the
+                        # chain canonical range, and leave it alone.
+                        skip_reasons.append(
+                            f'op{op_idx} v{old_first}: out-of-range '
+                            f'(chain {chain.canonical} '
+                            f'live=[{first_pos}, {last_pos}], pos={inst_pos})')
+                        continue
                     new_slice = _new_register_for_acc_slice(
                         chain, old_first, op.regs[0].size)
                     if new_slice is not None:
+                        rewrites.append(
+                            f'op{op_idx} {op.regs[0]}->{new_slice} (chain {chain.canonical})')
                         _replace_operand_register(op, new_slice)
                         changed = True
+                if _debug_phase_c:
+                    if rewrites:
+                        suffix = ''
+                        if skip_reasons:
+                            suffix = ' SKIPPED: ' + '; '.join(skip_reasons)
+                        _debug_log.append(
+                            f'[else rewrote {", ".join(rewrites)}]{suffix}: '
+                            f'{inst.raw_line.strip()[:120]}')
+                    elif skip_reasons:
+                        _debug_log.append(
+                            f'[else skipped {"; ".join(skip_reasons)}]: '
+                            f'{inst.raw_line.strip()[:120]}')
+                    elif any(op.regs and op.regs[0].kind == 'v'
+                             for op in inst.operands):
+                        _debug_log.append(
+                            f'[else no-rewrite]: '
+                            f'{inst.raw_line.strip()[:120]}')
                 if changed:
                     _rebuild_raw_line(inst)
+
+    if _debug_phase_c:
+        with open('/tmp/phase_c_log.txt', 'w') as _f:
+            _f.write('\n'.join(_debug_log))
+        print(f'[amdgcnas_gfx12] Phase C log: {len(_debug_log)} entries -> /tmp/phase_c_log.txt')
+
+    # ---- Phase C-split: bank-conflicting v_dual_mov_b32 ----------
+    # LLVM packs adjacent acc inits into ``v_dual_mov_b32 a, src :: b, src``,
+    # which has only ONE dst MSB slot.  When Phase C reallocates a and b
+    # into different banks (typical at chain canonical boundaries), the
+    # dual issue can no longer encode both dsts -- Phase E will pick one
+    # MSB and the other half writes to the wrong physical register.  Split
+    # such conflicts into two single ``v_mov_b32_e32`` instructions; the
+    # cost is one extra cycle at kernel init, never inside the hot loop.
+
+    def _operand_full_text(op: Operand) -> str:
+        parts = [op.text]
+        if op.logical_text is not None:
+            parts.append(op.logical_text)
+        if op.suffix:
+            parts.append(op.suffix)
+        return " ".join(parts)
+
+    for bb in program.blocks:
+        new_insts: list[Instruction] = []
+        for inst in bb.instructions:
+            if (inst.opcode == 'v_dual_mov_b32' and inst.dual_issue
+                    and len(inst.operands) == 4
+                    and inst.operands[0].regs and inst.operands[2].regs
+                    and inst.operands[0].regs[0].kind == 'v'
+                    and inst.operands[2].regs[0].kind == 'v'
+                    and (inst.operands[0].regs[0].ids[0] // 256
+                         != inst.operands[2].regs[0].ids[0] // 256)):
+                line_a = (f'\tv_mov_b32_e32 {_operand_full_text(inst.operands[0])},'
+                          f' {_operand_full_text(inst.operands[1])}')
+                line_b = (f'\tv_mov_b32_e32 {_operand_full_text(inst.operands[2])},'
+                          f' {_operand_full_text(inst.operands[3])}')
+                inst_a = _parse_instruction_line(line_a)
+                inst_b = _parse_instruction_line(line_b)
+                inst_a.parent_bb = bb
+                inst_b.parent_bb = bb
+                new_insts.append(inst_a)
+                new_insts.append(inst_b)
+            else:
+                new_insts.append(inst)
+        bb.instructions = new_insts
 
     # ---- Phase D: strip all s_set_vgpr_msb -----------------------
 

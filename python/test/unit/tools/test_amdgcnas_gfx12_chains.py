@@ -589,8 +589,8 @@ class TestKernelFixture:
         prog = parse_asm(text)
         result = assign_banks(prog)
         for r in (0, 1, 2, 3):
-            m = result.region_msb.get(r)
-            m4 = result.region_msb.get(r + 4)
+            m = result.region_msb.get((False, r))
+            m4 = result.region_msb.get((False, r + 4))
             if m is None or m4 is None:
                 continue
             assert m == m4, (
