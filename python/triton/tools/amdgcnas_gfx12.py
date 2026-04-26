@@ -1949,9 +1949,49 @@ def _make_logical_register(start: int, size: int) -> Register:
 
 def allocate_vgprs(program: Program,
                    ba: BankAssignment) -> VGPRAllocation:
-    """Decide a target logical VGPR for every chain role.  No rewrite."""
+    """Decide a target logical VGPR for every chain role.  No rewrite.
+
+    Scratch-aware: collects every logical VGPR used by an operand in the
+    program that is *not* a chain canonical and *not* a DSGroup tile
+    slot (those are the ids Phase C will move).  These "scratch" ids
+    (e.g., the LDS-base pointer at v642, the v640/v641 bit-fiddling
+    temporaries used to compute LDS offsets in v9's epilogue) must be
+    avoided when allocating chain.acc / DSGroup.data slots -- otherwise
+    a ds_load writing the new tile will silently overwrite a scratch
+    register the kernel is still using, which manifests as the
+    epilogue's ds_store landing at a corrupted LDS offset.
+    """
     wchains = collect_wmma_chains(program)
     dchains = collect_ds_chains(program)
+
+    # Compute the set of scratch logical VGPR ids: everything currently
+    # used by an operand in the program, minus the ids that Phase C
+    # will move (chain canonicals + DSGroup tile slots).
+    all_used = _collect_used_logical_vgprs(program)
+    movable: set[int] = set()
+    for c in wchains:
+        for cid in c.canonical.ids:
+            movable.add(cid)
+    for dc in dchains:
+        for g in dc.dsgroups:
+            if g.tile is not None:
+                for tid in g.tile.ids:
+                    movable.add(tid)
+    scratch_occupied = all_used - movable
+
+    def _alloc_block(bank: int, start: int, size: int) -> int:
+        """Find smallest ``cur >= start`` such that [cur, cur+size) is
+        fully inside bank ``bank`` and disjoint from ``scratch_occupied``.
+        """
+        bank_end = (bank + 1) * 256
+        cur = start
+        while cur + size <= bank_end:
+            if all((cur + i) not in scratch_occupied for i in range(size)):
+                return cur
+            cur += 1
+        raise ValueError(
+            f'no free {size}-VGPR block in bank {bank} '
+            f'starting at {start}')
 
     alloc = VGPRAllocation()
     # Each bank has 256 logical VGPRs at offsets [bank*256, bank*256+256).
@@ -1967,11 +2007,7 @@ def allocate_vgprs(program: Program,
         if bank is None:
             continue  # epilogue-only chain; not in BankAssignment
         size = c.canonical.size
-        start = bank_next[bank]
-        if start + size > (bank + 1) * 256:
-            raise ValueError(
-                f'WMMAChain {c.canonical} (bank {bank}) overflows: '
-                f'allocated {start - bank * 256 + size} > 256')
+        start = _alloc_block(bank, bank_next[bank], size)
         alloc.wmma_acc[id(c)] = _make_logical_register(start, size)
         bank_next[bank] = start + size
 
@@ -2020,14 +2056,10 @@ def allocate_vgprs(program: Program,
                              if g.tile is not None), default=0)
             if tile_size == 0:
                 continue
-            track_start = bank_next[bank]
+            track_total = max_groups * tile_size
+            track_start = _alloc_block(bank, bank_next[bank], track_total)
             new_tile_starts = [track_start + i * tile_size
                                for i in range(max_groups)]
-            track_total = max_groups * tile_size
-            if track_start + track_total > (bank + 1) * 256:
-                raise ValueError(
-                    f'DSChain track in bank {bank} overflows: '
-                    f'{track_start - bank * 256 + track_total} > 256')
             bank_next[bank] = track_start + track_total
 
             for c in tr:
@@ -2052,11 +2084,7 @@ def allocate_vgprs(program: Program,
     )
     for c in sorted_addr_chains:
         bank = ba.addr_bank(c)
-        start = bank_next[bank]
-        if start + 1 > (bank + 1) * 256:
-            tag = 'E' if c.is_epilogue_region else 'L'
-            raise ValueError(
-                f'DSChain {tag}{c.loading_region} addr (bank {bank}) overflows')
+        start = _alloc_block(bank, bank_next[bank], 1)
         alloc.ds_chain_addr[id(c)] = _make_logical_register(start, 1)
         bank_next[bank] = start + 1
 
@@ -2978,6 +3006,27 @@ def apply_allocation(program: Program,
     wchains = collect_wmma_chains(program)
     dchains = collect_ds_chains(program)
 
+    import os as _os_dbg2
+    if _os_dbg2.environ.get('TRITON_AMDGCN_AS_DEBUG_BANKS') == '1':
+        with open('/tmp/banks.log', 'w') as _f:
+            _f.write('# WMMA chains\n')
+            for c in wchains:
+                acc = alloc.wmma_acc.get(id(c))
+                _f.write(f'  WMMAChain({c.canonical}) bank={ba.wmma_acc_bank.get(id(c))} '
+                         f'src0={ba.wmma_src0_bank.get(id(c))} '
+                         f'src1={ba.wmma_src1_bank.get(id(c))} '
+                         f'new={acc}\n')
+            _f.write('# DS chains\n')
+            for dc in dchains:
+                ar = alloc.ds_chain_addr.get(id(dc))
+                tag = 'E' if dc.is_epilogue_region else 'L'
+                _f.write(f'  DSChain({tag}{dc.loading_region}, addr_old={dc.addr_reg}) '
+                         f'data_bank={ba.data_bank(dc)} addr_bank={ba.addr_bank(dc)} '
+                         f'new_addr={ar}\n')
+            _f.write('# region MSB\n')
+            for k in sorted(ba.region_msb):
+                _f.write(f'  region {k}: msb={ba.region_msb[k]}\n')
+
     loop_range = _loop_body_range(program)
     loop_bb, cbranch_idx = (loop_range if loop_range is not None
                             else (None, None))
@@ -3248,14 +3297,21 @@ def apply_allocation(program: Program,
     # BB where the WMMAs run, so we must search ALL BBs in program
     # order up to the first WMMA position.  A single dual_mov can init
     # TWO different chains (one per dst lane), so we map inst -> set of
-    # chains rather than a single chain.
+    # chains rather than a single chain.  We also extend each chain's
+    # live range BACKWARDS to its earliest init position so subsequent
+    # operands reading the chain canonical (e.g., the v9 broadcast
+    # pattern `v_mov v64, 0` then `v_dual_mov v_other, v64` -- v_other
+    # belongs to chain Y but reads v64 which is chain X's element 0)
+    # are also recognised as chain-canonical reads and rewritten.
     chain_init_inst: dict[int, set] = {}
+    chain_earliest_init_pos: dict[int, tuple[int, int]] = {}
     for c in wchains:
         if alloc.acc(c) is None or not c.wmmas:
             continue
         first_wmma = min(c.wmmas, key=lambda w: _program_order(w, block_order))
         first_pos = _program_order(first_wmma, block_order)
         canonical_ids = set(c.canonical.ids)
+        earliest = first_pos
         for bb in program.blocks:
             for inst in bb.instructions:
                 inst_pos = _program_order(inst, block_order)
@@ -3275,7 +3331,15 @@ def apply_allocation(program: Program,
                         continue
                     if op.regs[0].ids[0] in canonical_ids:
                         chain_init_inst.setdefault(id(inst), set()).add(id(c))
+                        if inst_pos < earliest:
+                            earliest = inst_pos
                         break
+        chain_earliest_init_pos[id(c)] = earliest
+        # Extend the chain's live-range start back to the earliest init
+        # so subsequent broadcast-style reads of the canonical (which
+        # happen before the first WMMA) get rewritten too.
+        if earliest < chain_first_wmma_pos.get(id(c), earliest):
+            chain_first_wmma_pos[id(c)] = earliest
 
     def _new_register_for_acc_slice(chain: WMMAChain,
                                     old_first: int, size: int
