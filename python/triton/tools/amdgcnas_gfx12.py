@@ -3903,8 +3903,39 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
                     if g.tile is not None:
                         alloc.ds_group_data[id(g)] = g.tile
         apply_allocation(program, ba, alloc, verbose=verbose)
+        # Post-rewrite cleanup: drop v_nops the new register layout no
+        # longer needs.
+        remove_v_nops_in_loop(program)
+        # Re-tag new Phase-E-emitted s_set_vgpr_msb instructions with
+        # their enclosing region so we can count per region.
+        annotate_regions(program)
         # Always print per-loop-region MSB state when rewriter is on so
         # the user can verify each region collapses to a single MSB.
+        # Also report the actual ``s_set_vgpr_msb`` count per region:
+        # 1 means the region uses one unified MSB context (good); >1
+        # means a mid-region switch (look for ds_load addr / wmma src
+        # bank mismatches).  We skip the loop-exit reset (a final
+        # ``s_set_vgpr_msb 0x...00`` setting all banks to 0 just
+        # before the back-edge branch) since it's bookkeeping, not a
+        # functional context switch.
+        loop_range = _loop_body_range(program)
+        msb_counts: dict[int, int] = {}
+        if loop_range is not None:
+            loop_bb, cbranch_idx = loop_range
+            for inst in loop_bb.instructions:
+                if inst.opcode != 's_set_vgpr_msb':
+                    continue
+                if inst.region_idx is None:
+                    continue
+                if inst.region_is_epilogue:
+                    continue
+                if inst.index > cbranch_idx:
+                    continue
+                # Skip the all-zeros loop-exit reset.
+                if inst.msb_bits == (0, 0, 0, 0):
+                    continue
+                msb_counts[inst.region_idx] = (
+                    msb_counts.get(inst.region_idx, 0) + 1)
         loop_msbs = sorted(((r, ba.region_msb[(False, r)])
                             for (is_epi, r) in ba.region_msb
                             if not is_epi),
@@ -3913,13 +3944,9 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
             print("[amdgcnas_gfx12] per-loop-region MSB "
                   "(dst, src0, src1, src2):")
             for r, (d, s0, s1, s2) in loop_msbs:
-                print(f"  L{r}: dst={d} src0={s0} src1={s1} src2={s2}")
-        # Post-rewrite cleanup: drop v_nops the new register layout no
-        # longer needs.
-        n_nops = remove_v_nops_in_loop(program)
-        if n_nops:
-            print(f"[amdgcnas_gfx12] removed {n_nops} v_nop(s) "
-                  f"from loop body")
+                cnt = msb_counts.get(r, 0)
+                print(f"  L{r}: dst={d} src0={s0} src1={s1} src2={s2} "
+                      f"  ({cnt} s_set_vgpr_msb)")
     if verbose:
         print(f"[amdgcnas_gfx12] hoisted {n_hoisted} invariant addr insts, "
               f"merged {n_waits} s_wait_dscnt, "
