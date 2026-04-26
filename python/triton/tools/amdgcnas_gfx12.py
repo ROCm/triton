@@ -1517,8 +1517,8 @@ def collect_ds_chains(program: Program) -> list[DSChain]:
 def report_chains(program: Program) -> str:
     """Build a human-readable summary of the chains in the program.
 
-    Intended for ``TRITON_ENABLE_AMDGCN_AS=2`` runs and for debugging the
-    upcoming bank-assignment stage.  Format is informational only.
+    Intended for ``TRITON_ENABLE_AMDGCNAS_PEEPHOLE=2`` runs and for
+    debugging the bank-assignment stage.  Format is informational only.
     """
     lines: list[str] = []
     wmma_chains = collect_wmma_chains(program)
@@ -3859,7 +3859,7 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
     alloc = allocate_vgprs(program, ba)
     # Stage 4.4+5 is opt-in until the MSB-regen pattern matches LLVM's
     # exact emission convention (validity/commit byte semantics).
-    if _os.environ.get('TRITON_AMDGCN_AS_APPLY') == '1':
+    if _os.environ.get('TRITON_ENABLE_AMDGCNAS_VGPR_REWRITER') == '1':
         # DEBUG: identity allocation to test rewrite-only path
         if _os.environ.get('TRITON_AMDGCN_AS_IDENTITY') == '1':
             chains = collect_wmma_chains(program)

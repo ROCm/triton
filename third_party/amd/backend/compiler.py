@@ -430,8 +430,9 @@ class HIPBackend(BaseBackend):
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
-        if amdgcn_as_level in ("1", "2"):
+        amdgcnas_peephole_level = os.environ.get(
+            "TRITON_ENABLE_AMDGCNAS_PEEPHOLE", "0")
+        if amdgcnas_peephole_level in ("1", "2"):
             fns[0].add_fn_attr("amdgpu-agpr-alloc", "256")
         cluster_dim = metadata["num_ctas"]
         fns[0].add_fn_attr("amdgpu-cluster-dims", f"{cluster_dim},1,1")
@@ -542,13 +543,15 @@ class HIPBackend(BaseBackend):
             amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, features, flags,
                                            options.enable_fp_fusion, False)
 
-        amdgcn_as_level = os.environ.get("TRITON_ENABLE_AMDGCN_AS", "0")
-        if amdgcn_as_level in ("1", "2"):
+        amdgcnas_peephole_level = os.environ.get(
+            "TRITON_ENABLE_AMDGCNAS_PEEPHOLE", "0")
+        if amdgcnas_peephole_level in ("1", "2"):
             is_gfx12 = options.arch.startswith("gfx12")
             if is_gfx12:
                 from triton.tools.amdgcnas_gfx12 import amdgcnas_gfx12
-                amdgcn = amdgcnas_gfx12(amdgcn, verbose=(amdgcn_as_level == "2"))
-            elif amdgcn_as_level == "1":
+                amdgcn = amdgcnas_gfx12(
+                    amdgcn, verbose=(amdgcnas_peephole_level == "2"))
+            elif amdgcnas_peephole_level == "1":
                 amdgcn = amdgcn_as(amdgcn, False)
             else:
                 amdgcn = amdgcn_as(amdgcn, True)
