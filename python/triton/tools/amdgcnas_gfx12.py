@@ -3820,6 +3820,34 @@ def apply_allocation(program: Program,
             _set_vgpr_budget(program, alloc.budget)
 
 
+def remove_v_nops_in_loop(program: Program) -> int:
+    """Drop ``v_nop`` instructions inside the self-branching loop body.
+
+    LLVM emits these to cover register-file / VOPD / scoreboard hazards
+    that are sensitive to the SOURCE-program register layout (which
+    register number reads which on which cycle).  After Stage 5's VGPR
+    rewrite re-allocates chain accumulators and tile slots into
+    different banks, the producer/consumer registers no longer collide
+    in the same access slot, so the nops aren't covering anything.  We
+    scope the removal to the loop body only -- the prologue/epilogue
+    nops aren't on the hot path so we leave them alone for safety.
+
+    Returns the number of nops removed.  Idempotent.
+    """
+    loop_range = _loop_body_range(program)
+    if loop_range is None:
+        return 0
+    loop_bb, _cbranch_idx = loop_range
+    kept = [inst for inst in loop_bb.instructions if inst.opcode != 'v_nop']
+    removed = len(loop_bb.instructions) - len(kept)
+    if removed == 0:
+        return 0
+    loop_bb.instructions = kept
+    for i, inst in enumerate(loop_bb.instructions):
+        inst.index = i
+    return removed
+
+
 # -------------------------------------------------------------------------
 # Round-trip emit
 # -------------------------------------------------------------------------
@@ -3875,6 +3903,23 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
                     if g.tile is not None:
                         alloc.ds_group_data[id(g)] = g.tile
         apply_allocation(program, ba, alloc, verbose=verbose)
+        # Always print per-loop-region MSB state when rewriter is on so
+        # the user can verify each region collapses to a single MSB.
+        loop_msbs = sorted(((r, ba.region_msb[(False, r)])
+                            for (is_epi, r) in ba.region_msb
+                            if not is_epi),
+                           key=lambda x: x[0])
+        if loop_msbs:
+            print("[amdgcnas_gfx12] per-loop-region MSB "
+                  "(dst, src0, src1, src2):")
+            for r, (d, s0, s1, s2) in loop_msbs:
+                print(f"  L{r}: dst={d} src0={s0} src1={s1} src2={s2}")
+        # Post-rewrite cleanup: drop v_nops the new register layout no
+        # longer needs.
+        n_nops = remove_v_nops_in_loop(program)
+        if n_nops:
+            print(f"[amdgcnas_gfx12] removed {n_nops} v_nop(s) "
+                  f"from loop body")
     if verbose:
         print(f"[amdgcnas_gfx12] hoisted {n_hoisted} invariant addr insts, "
               f"merged {n_waits} s_wait_dscnt, "
