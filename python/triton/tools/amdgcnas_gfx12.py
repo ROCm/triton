@@ -3920,6 +3920,13 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
         # functional context switch.
         loop_range = _loop_body_range(program)
         msb_counts: dict[int, int] = {}
+        # Read the ACTUAL emitted MSB (post-Phase-E) for each loop
+        # region, not ba.region_msb -- the latter is the bank-assignment
+        # planner's chain-level inference, which falls back to 0 when
+        # ambiguous; Phase E uses tighter per-instruction demands so the
+        # emitted MSB can disagree with the planner.  We grab the first
+        # non-reset s_set_vgpr_msb in each region and report its bits.
+        first_msb: dict[int, tuple[int, int, int, int]] = {}
         if loop_range is not None:
             loop_bb, cbranch_idx = loop_range
             for inst in loop_bb.instructions:
@@ -3936,14 +3943,15 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
                     continue
                 msb_counts[inst.region_idx] = (
                     msb_counts.get(inst.region_idx, 0) + 1)
-        loop_msbs = sorted(((r, ba.region_msb[(False, r)])
-                            for (is_epi, r) in ba.region_msb
-                            if not is_epi),
-                           key=lambda x: x[0])
-        if loop_msbs:
+                first_msb.setdefault(inst.region_idx, inst.msb_bits)
+        loop_regions = sorted(r for (is_epi, r) in ba.region_msb
+                              if not is_epi)
+        if loop_regions:
             print("[amdgcnas_gfx12] per-loop-region MSB "
                   "(dst, src0, src1, src2):")
-            for r, (d, s0, s1, s2) in loop_msbs:
+            for r in loop_regions:
+                bits = first_msb.get(r, (0, 0, 0, 0))
+                d, s0, s1, s2 = bits
                 cnt = msb_counts.get(r, 0)
                 print(f"  L{r}: dst={d} src0={s0} src1={s1} src2={s2} "
                       f"  ({cnt} s_set_vgpr_msb)")
