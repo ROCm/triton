@@ -3262,9 +3262,27 @@ def apply_allocation(program: Program,
                 break
             if ipos <= last_wmma:
                 continue
+            # Determine which operand index (if any) is the dst for
+            # this opcode.  For most VALU ops it's op[0]; for STORES
+            # (buffer_store/ds_store/flat_store/etc.), op[0] is the
+            # data/vaddr SOURCE -- so a buffer_store reading the chain
+            # canonical must EXTEND the live range, not terminate it.
+            opc = inst.opcode or ''
+            is_store = (opc.startswith('buffer_store')
+                        or opc.startswith('tbuffer_store')
+                        or opc.startswith('ds_store')
+                        or opc.startswith('ds_write')
+                        or opc.startswith('flat_store')
+                        or opc.startswith('global_store')
+                        or opc.startswith('scratch_store')
+                        or opc.startswith('tensor_store')
+                        or opc.startswith('image_store'))
+            dst_op_idx: Optional[int] = None
+            if not is_store and inst.operands:
+                dst_op_idx = 0
             writes_canonical = False
-            if inst.operands:
-                op0 = inst.operands[0]
+            if dst_op_idx is not None and dst_op_idx < len(inst.operands):
+                op0 = inst.operands[dst_op_idx]
                 if op0.regs and op0.regs[0].kind == 'v':
                     if any(rid in canonical_ids
                            for rid in op0.regs[0].ids):
@@ -3277,7 +3295,10 @@ def apply_allocation(program: Program,
                                for rid in op2.regs[0].ids):
                             writes_canonical = True
             reads_canonical = False
-            for op in inst.operands[1:]:
+            # Stores: every operand is a read.  Otherwise: skip op[0]
+            # (the dst we already classified above).
+            read_start = 0 if is_store else 1
+            for op in inst.operands[read_start:]:
                 if op.regs and op.regs[0].kind == 'v':
                     if any(rid in canonical_ids for rid in op.regs[0].ids):
                         reads_canonical = True
