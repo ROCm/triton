@@ -1824,8 +1824,23 @@ def assign_banks(program: Program) -> BankAssignment:
     # DSChain's loading region.  (src0 because ds_load's operand[1]
     # is encoded in the src0 MSB slot, matching the wmma's src0.)
     # Applies to both loop and epilogue DSChains.
+    #
+    # Use per-region s0 (the set of src0 banks observed for WMMAs in
+    # this loading region) rather than per-chain wmma_src0_bank.  A
+    # chain that spans multiple loop+epi regions can have ambiguous
+    # CHAIN-level src0_bank (different ds_load tracks reach src0 in
+    # different regions) yet still have a deterministic src0_bank
+    # within ONE region -- which is what the addr's MSB needs to share
+    # with.  Using the region's s0 lets the addr land in the same MSB
+    # slot as the WMMA's src0 reads in that region (saves an MSB switch
+    # per ds_load issue in v9 regions 2/3/6/7).
     for dc in dchains:
         key = (dc.is_epilogue_region, dc.loading_region)
+        s0 = region_src_banks.get(key, (set(), set()))[0]
+        if len(s0) == 1:
+            result.ds_addr_bank[id(dc)] = next(iter(s0))
+            continue
+        # Fallback: per-chain src0 bank.
         addr_banks: set[int] = set()
         for c in wmmas_per_region.get(key, []):
             b = result.wmma_src0_bank.get(id(c))
