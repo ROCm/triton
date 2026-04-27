@@ -151,6 +151,10 @@ struct TMAScatterLowering : public OpRewritePattern<DescriptorScatterOp> {
 
   LogicalResult matchAndRewrite(DescriptorScatterOp op,
                                 PatternRewriter &rewriter) const override {
+    auto indicesType = cast<RankedTensorType>(op.getXOffsets().getType());
+    if (!indicesType.getElementType().isInteger(32))
+      return op.emitOpError("NVIDIA TMA scatter only supports i32 indices");
+
     auto createStore = [&](Value desc, Value alloc) {
       triton::nvidia_gpu::AsyncTMAScatterOp::create(rewriter, op.getLoc(), desc,
                                                     op.getXOffsets(),

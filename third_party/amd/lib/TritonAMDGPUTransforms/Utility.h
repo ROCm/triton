@@ -51,7 +51,7 @@ getEncodingFromDescriptor(Operation *op, RankedTensorType tensorType,
 // freeVarMasks mechanism in the LLVM lowering adapts the number of active
 // warps and gathers per warp to the actual problem size.
 triton::gpu::SliceEncodingAttr
-getTDMGatherIndexEncoding(Operation *op, RankedTensorType indicesType);
+getTDMGatherScatterIndexEncoding(Operation *op, RankedTensorType indicesType);
 
 // Returns the given |inputValue|'s dot user result encoding and updates |opIdx|
 // and |vecSize| with which dot operand |inputValue| is fed into if possible.

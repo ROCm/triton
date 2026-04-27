@@ -84,7 +84,7 @@ struct TensorGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
 
     auto indices = op.getXOffsets();
     auto indicesType = cast<RankedTensorType>(indices.getType());
-    auto idxEnc = getTDMGatherIndexEncoding(op, indicesType);
+    auto idxEnc = getTDMGatherScatterIndexEncoding(op, indicesType);
 
     // NOTE: The shared TritonToTritonGPU conversion (GatherScatterOpPattern)
     // unconditionally applies an NVIDIA-oriented index layout. Because of
@@ -142,6 +142,51 @@ public:
   }
 };
 
+struct TensorScatterLowering : public OpRewritePattern<DescriptorScatterOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(DescriptorScatterOp op,
+                                PatternRewriter &rewriter) const override {
+    MLIRContext *ctx = op.getContext();
+    Attribute sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
+    auto loc = op.getLoc();
+    Value desc = op.getDesc();
+    mlir::TypedValue<RankedTensorType> src = op.getSrc();
+    auto tensorType = src.getType();
+
+    auto encoding = getEncodingFromDescriptor(op, tensorType, desc);
+    if (!encoding) {
+      op.emitError() << "Could not create encoding for descriptor scatter";
+      return failure();
+    }
+
+    auto indices = op.getXOffsets();
+    auto indicesType = cast<RankedTensorType>(indices.getType());
+    auto idxEnc = getTDMGatherScatterIndexEncoding(op, indicesType);
+
+    // NOTE: The shared TritonToTritonGPU conversion (GatherScatterOpPattern)
+    // unconditionally applies an NVIDIA-oriented index layout. Re-layout the
+    // indices into the AMD TDM-friendly encoding so the LLVM lowering can use
+    // a single TDM instruction per row group.
+    if (indicesType.getEncoding() != idxEnc) {
+      auto newIdxType = RankedTensorType::get(
+          indicesType.getShape(), indicesType.getElementType(), idxEnc);
+      indices = ConvertLayoutOp::create(rewriter, loc, newIdxType, indices);
+    }
+
+    MemDescType memDescType =
+        MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
+                         encoding, sharedMemorySpace, /*mutableMemory=*/true);
+    Value alloc = LocalAllocOp::create(rewriter, loc, memDescType, src);
+    amdgpu::AsyncTDMScatterOp::create(rewriter, loc, op.getDesc(), indices,
+                                      op.getYOffset(), alloc,
+                                      /*barrier=*/Value{});
+    amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct TritonAMDGPUConvertToTensorOps
     : impl::TritonAMDGPUConvertToTensorOpsBase<TritonAMDGPUConvertToTensorOps> {
 
@@ -150,8 +195,8 @@ struct TritonAMDGPUConvertToTensorOps
     ModuleOp m = getOperation();
 
     mlir::RewritePatternSet patterns(context);
-    patterns.add<TensorLoadLowering, TensorGatherLowering, TensorStoreLowering>(
-        context);
+    patterns.add<TensorLoadLowering, TensorGatherLowering, TensorStoreLowering,
+                 TensorScatterLowering>(context);
     if (applyPatternsGreedily(m, std::move(patterns)).failed())
       signalPassFailure();
   }

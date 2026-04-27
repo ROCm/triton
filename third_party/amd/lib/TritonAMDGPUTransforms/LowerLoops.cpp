@@ -97,7 +97,7 @@ TDMChainOps createTDMAsyncGather(tt::DescriptorGatherOp gatherOp, Value alloc,
         // the incoming indices don't already have it.
         auto indices = gatherOp.getXOffsets();
         auto indicesType = cast<RankedTensorType>(indices.getType());
-        auto idxEnc = getTDMGatherIndexEncoding(gatherOp, indicesType);
+        auto idxEnc = getTDMGatherScatterIndexEncoding(gatherOp, indicesType);
         if (indicesType.getEncoding() != idxEnc) {
           auto newIdxType = RankedTensorType::get(
               indicesType.getShape(), indicesType.getElementType(), idxEnc);

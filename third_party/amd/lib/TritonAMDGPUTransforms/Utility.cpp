@@ -470,8 +470,8 @@ composePaddedLayoutWMMA(int opIdx, unsigned vecWidth,
       context, {{padInterval, padAmount}}, order, shape, CGALayout);
 }
 
-ttg::SliceEncodingAttr getTDMGatherIndexEncoding(Operation *op,
-                                                 RankedTensorType indicesType) {
+ttg::SliceEncodingAttr
+getTDMGatherScatterIndexEncoding(Operation *op, RankedTensorType indicesType) {
   MLIRContext *ctx = op->getContext();
   unsigned idxBitWidth = indicesType.getElementType().getIntOrFloatBitWidth();
   assert((idxBitWidth == 16 || idxBitWidth == 32) &&
