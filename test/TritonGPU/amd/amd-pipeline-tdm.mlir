@@ -62,6 +62,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // appear in the lowered IR. The CHECK-NOT lines below are interleaved so that
 // FileCheck enforces the "no commit group" invariant between every adjacent
 // pair of positive matches inside this function.
+//
+// The loop body and epilogue each emit two adjacent amdg.async_tdm_wait ops
+// (one per descriptor_load) which combineRedundantWaitOps folds into a single
+// wait taking both tokens; the matched two-operand wait below proves the fold.
 // CHECK-LABEL: tt.func @matmul_kernel_make_tensor_descriptor
 // CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<512x32xf16, #[[$PADDED_A]]> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
@@ -69,6 +73,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<32x64xf16, #[[$PADDED_B]]> -> !ttg.memdesc<32x64xf16, #[[$PADDED_B]], #smem, mutable>
 // CHECK-NOT: ttg.async_commit_group
 // CHECK: scf.for
+// CHECK: amdg.async_tdm_wait %{{[^,]+}}, %{{[^,]+}} {num = 0 : i32}
+// CHECK-NOT: amdg.async_tdm_wait
 // CHECK-NOT: ttg.async_commit_group
 // CHECK: async_tdm_copy_global_to_local {{.*}} : !tt.tensordesc<512x32xf16, #[[$PADDED_A]]> -> !ttg.memdesc<512x32xf16, #[[$PADDED_A]], #smem, mutable>
 // CHECK-NOT: ttg.async_commit_group
@@ -76,6 +82,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK-NOT: ttg.async_commit_group
 // CHECK: }
 // CHECK-NOT: ttg.async_commit_group
+// CHECK: amdg.async_tdm_wait %{{[^,]+}}, %{{[^,]+}} {num = 0 : i32}
+// CHECK-NOT: amdg.async_tdm_wait
 // CHECK: tt.descriptor_store {{.*}} : !tt.tensordesc<512x64xf16, #[[$PADDED_C]]>
 
 // -----
