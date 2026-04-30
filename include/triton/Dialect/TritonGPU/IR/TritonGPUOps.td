@@ -351,7 +351,6 @@ def TTG_MemDescReinterpretOp : TTG_Op<"memdesc_reinterpret", [Pure, MemDescViewT
   }];
 
   let hasFolder = 1;
-  let hasVerifier = 1;
 }
 
 def TTG_LocalLoadOp : TTG_Op<"local_load", [LocalLoadTrait]> {
