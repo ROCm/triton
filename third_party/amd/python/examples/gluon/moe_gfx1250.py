@@ -1554,7 +1554,7 @@ def main(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype,
             x = 2**-(torch.randint(4, 8, (batch * n_expts_act, dim2 // 2), device=dev, dtype=torch.float16))
             x = x.to(x_dtype)
 
-    if action != "e2e":
+    if action not in ("e2e", "combine"):
         return x.cpu()
 
     if "combine" in actions:
