@@ -56,28 +56,28 @@
   "BATCH8_SEQLENQ512_SEQLENK512_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN64_f16_attn_fwd_pipelined_kernel": {
     "sgpr_count": 62,
     "sgpr_spill_count": 0,
-    "vgpr_count": 805,
+    "vgpr_count": 806,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 21056,
+    "code_len_in_byte": 21320,
     "occupancy": 1
   },
   "BATCH8_SEQLENQ1024_SEQLENK1024_QHEADS8_KVHEADS8_HEADSZ128_BM128_BN128_f16_attn_fwd_pipelined_kernel": {
     "sgpr_count": 62,
     "sgpr_spill_count": 0,
-    "vgpr_count": 1006,
+    "vgpr_count": 999,
     "vgpr_spill_count": 0,
     "scratch_size": 0,
-    "code_len_in_byte": 34912,
+    "code_len_in_byte": 34360,
     "occupancy": 1
   },
   "BATCH8_SEQLENQ1024_SEQLENK1024_QHEADS8_KVHEADS8_HEADSZ128_BM256_BN64_f16_attn_fwd_pipelined_kernel": {
     "sgpr_count": 62,
     "sgpr_spill_count": 0,
     "vgpr_count": 512,
-    "vgpr_spill_count": 144,
-    "scratch_size": 384,
-    "code_len_in_byte": 22540,
+    "vgpr_spill_count": 159,
+    "scratch_size": 380,
+    "code_len_in_byte": 22820,
     "occupancy": 2
   }
 }
