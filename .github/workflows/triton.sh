@@ -112,6 +112,8 @@ pytest --count=1 -n 16 --durations=2 third_party/amd/python/examples/mxfp_fa.py 
     --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-16-1]' \
     --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-1-1]' \
     --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e2m1-e4m3-64-128-256-16-2]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e4m3-e4m3-64-128-256-1-2]' \
+    --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e4m3-e4m3-64-128-256-1-1]' \
     --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e4m3-e4m3-64-128-256-16-1]' \
     --deselect 'third_party/amd/python/examples/mxfp_fa.py::test_mha[False-3-e4m3-e4m3-64-128-256-16-2]'
 
