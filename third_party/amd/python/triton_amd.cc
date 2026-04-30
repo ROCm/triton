@@ -154,55 +154,6 @@ void addControlConstant(llvm::Module *module, const char *name,
   constant->setVisibility(GlobalVariable::VisibilityTypes::ProtectedVisibility);
 }
 
-// gfx1250: only mark InReg for the first kMaxPreloadBytes of the user-kernarg
-// region, skipping host tensor-descriptor parameters (still advance layout
-// offset). 96B ~= 24 x i32 slots, a practical bound vs. LLVM's
-// ~NumFreeUserSGPRs*4 without calling GCNUserSGPRUsageInfo from here.
-//
-// Kernel LLVM functions include two trailing parameters after the source
-// kernel's formal parameters: global scratch pointer and profile scratch
-// pointer (see amendFuncOp in lib/Conversion/TritonGPUToLLVM/Utility.cpp).
-// Those are not part of the user's kernarg blob and must not be counted here;
-// hence numArgs - 2.
-void setFnArgInRegGfx1250(llvm::Function *kernelFn,
-                          llvm::ArrayRef<unsigned> hostTdArgIdxs) {
-  if (!kernelFn)
-    return;
-
-  llvm::DenseSet<unsigned> hostTdIndices;
-  for (unsigned idx : hostTdArgIdxs)
-    hostTdIndices.insert(idx);
-
-  const unsigned numArgs = static_cast<unsigned>(kernelFn->arg_size());
-  // amendFuncOp (TritonGPUToLLVM/Utility.cpp) appends two pointers after the
-  // kernel's parameters: global scratch and profile scratch. Skip those here.
-  constexpr unsigned kTrailingScratchArgCount = 2;
-  const unsigned numUserArgs = numArgs >= kTrailingScratchArgCount
-                                   ? numArgs - kTrailingScratchArgCount
-                                   : numArgs;
-
-  const llvm::DataLayout &dataLayout = kernelFn->getParent()->getDataLayout();
-  constexpr unsigned kMaxPreloadBytes = 96;
-  uint64_t offset = 0;
-
-  for (unsigned argIndex = 0; argIndex < numUserArgs; ++argIndex) {
-    llvm::Argument *arg = kernelFn->getArg(argIndex);
-    llvm::Type *argTy = arg->getType();
-
-    llvm::Align abiAlign = dataLayout.getABITypeAlign(argTy);
-    uint64_t allocSize = dataLayout.getTypeAllocSize(argTy);
-    uint64_t rangeBegin = llvm::alignTo(offset, abiAlign);
-    uint64_t rangeEnd = rangeBegin + allocSize;
-
-    if (!hostTdIndices.count(argIndex) && !arg->hasByRefAttr() &&
-        !arg->hasNestAttr() && !argTy->isAggregateType() &&
-        rangeEnd <= kMaxPreloadBytes)
-      arg->addAttr(llvm::Attribute::InReg);
-
-    offset = rangeEnd;
-  }
-}
-
 } // namespace
 
 LLD_HAS_DRIVER(elf)
@@ -591,12 +542,6 @@ void init_triton_amd(py::module &&m) {
       arg.addAttr(llvm::Attribute::InReg);
     }
   });
-
-  m.def(
-      "set_fn_arg_inreg_gfx1250",
-      [](llvm::Function *kernelFn, const std::vector<unsigned> &hostTdArgIdxs) {
-        setFnArgInRegGfx1250(kernelFn, hostTdArgIdxs);
-      });
 
   m.def("link_hsaco",
         [](const std::string &inPath, const std::string &outPath) {
