@@ -12,6 +12,7 @@
 #include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/MathExtras.h"
 
 // Provide custom directive handlers for declarative assemblyFormat.
 // They must be visible before including the generated op classes.
@@ -652,6 +653,23 @@ OpFoldResult MemDescReinterpretOp::fold(FoldAdaptor adaptor) {
   return {};
 }
 
+LogicalResult MemDescReinterpretOp::verify() {
+  auto srcTy = getSrc().getType();
+  auto dstTy = getResult().getType();
+  auto kBlock = StringAttr::get(getContext(), "block");
+  auto getNumBroadcastCTADims = [kBlock](MemDescType ty) {
+    auto rank = cast<LayoutEncodingTrait>(ty.getEncoding()).getRank();
+    auto layout =
+        toLinearLayout(ty.getAllocShape().take_back(rank), ty.getEncoding());
+    auto freeVariableMask = layout.getFreeVariableMasks().lookup(kBlock);
+    return llvm::popcount<uint32_t>(freeVariableMask);
+  };
+  if (getNumBroadcastCTADims(srcTy) != getNumBroadcastCTADims(dstTy))
+    return emitError(
+        "source and result must have the same number of broadcast CTA dims");
+  return success();
+}
+
 // LocalAllocOp
 void LocalAllocOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -1003,12 +1021,12 @@ LogicalResult MemDescSubsliceOp::verify() {
 
   auto ctx = getContext();
   LinearLayout ll;
-  if (auto paddedEncoding = dyn_cast<PaddedSharedEncodingAttr>(srcEnc)) {
+  if (auto paddedEncoding = triton::gpu::getPaddedEncoding(srcEnc)) {
     if (paddedEncoding.getRank() < srcTy.getRank()) {
       return emitError("SubSlice of low rank PaddedSharedEncoding from higher "
                        "rank tensors is not supported yet");
     }
-    ll = paddedEncoding.getLinearComponent();
+    ll = triton::gpu::paddedLinearLayout(srcTy);
   } else {
     ll = triton::gpu::toLinearLayout(srcTy);
   }
