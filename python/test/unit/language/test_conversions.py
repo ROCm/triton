@@ -351,7 +351,7 @@ def test_typeconvert_downcast(src_dtype, dst_dtype, rounding, max_repr, device):
         if dst_dtype in FP8_DTYPES and is_hip_rdna3():
             pytest.skip(f"{dst_dtype} is not supported on AMDGPU RDNA3")
         if dst_dtype in ('float8e4b8', 'float8e5b16') and (is_hip_cdna2() or is_hip_rdna4() or is_hip_gfx1250()):
-            pytest.skip(f"{dst_dtype} is not supported on curren AMD GPU")
+            pytest.skip(f"{dst_dtype} is not supported on current AMD GPU")
 
     # dtype : (exponent_bits, mantissa_bits, exponent_bias)
     stuff = {
