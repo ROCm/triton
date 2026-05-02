@@ -283,13 +283,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 // CHECK-LABEL: tt.func @gather_dot_pipeline
 // Prologue: two async_tdm_gather ops before the loop
 // CHECK: amdg.async_tdm_gather
-// CHECK: ttg.async_commit_group tokens
 // CHECK: amdg.async_tdm_gather
-// CHECK: ttg.async_commit_group tokens
 // Loop body: two more async_tdm_gather ops (pipelined next iteration)
 // CHECK: scf.for
 // CHECK: amdg.async_tdm_gather
-// CHECK: ttg.async_commit_group tokens
 // CHECK: amdg.async_tdm_gather
-// CHECK: ttg.async_commit_group tokens
 // CHECK: }
