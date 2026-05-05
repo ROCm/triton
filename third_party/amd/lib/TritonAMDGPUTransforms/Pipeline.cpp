@@ -173,12 +173,12 @@ struct PipelinePass : impl::TritonAMDGPUPipelineBase<PipelinePass> {
       }
     }
 
-    // Pipeline TDM stores / scatters that survive in loop bodies. Mirrors
-    // NVIDIA's pipelineTMAStores: lift the LDS allocation out of the loop and
-    // hoist the wait so the outgoing async store overlaps the next iteration.
-    // The transformation is correct regardless of the loop's pipeline-stage
-    // count, so we apply it to every loop unconditionally; it returns false
-    // if the loop contains no descriptor stores/scatters.
+    // Pipeline TDM stores / scatters that survive in loop bodies: lift the
+    // LDS allocation out of the loop and hoist the wait so the outgoing
+    // async store overlaps the next iteration's compute.  The transformation
+    // is correct regardless of the loop's pipeline-stage count, so we apply
+    // it to every loop unconditionally; it is a no-op when no descriptor
+    // stores or scatters are present.
     SmallVector<scf::ForOp> loops;
     moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
     for (scf::ForOp forOp : loops)

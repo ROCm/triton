@@ -819,6 +819,8 @@ def AsyncTDMCopyLocalToGlobalOp
     DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache
   );
 
+  let results = (outs TTG_AsyncToken:$token);
+
   let assemblyFormat = [{
     $desc `[` $indices `]` `from` $src (`,` `barrier` `=` $barrier^)?
     attr-dict `:` qualified(type($src)) (`,` qualified(type($barrier))^)? `->` qualified(type($desc))

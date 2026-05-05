@@ -6,6 +6,7 @@
 #include "mlir/IR/Builders.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 using namespace mlir;
 
@@ -52,31 +53,33 @@ static Value createAlloc(scf::ForOp &forOp, const TDMStore &store) {
 // Replace one descriptor_{store,scatter} with the pipelined async TDM
 // sequence:
 //
-//   amdg.async_tdm_wait num=0          (wait for previous iter's TDM write
+//   amdg.async_tdm_wait <prevToken>    (wait for previous iter's TDM write
 //                                       to release the LDS buffer)
 //   ttg.local_store src, alloc         (write current iter's data into LDS)
 //   amdg.async_tdm_copy_local_to_global  OR  amdg.async_tdm_scatter
 //
-// This single-buffers the LDS allocation across iterations and lets the
-// outgoing async store overlap with the next iteration's compute.
-static void createTDMAsyncCopy(scf::ForOp forOp, const TDMStore &store,
-                               Value alloc) {
+// `prevToken` is a loop-carried token from the previous iteration's TDM op.
+// Returns the token produced by the new TDM op for loop-carried threading.
+static Value createTDMAsyncCopy(scf::ForOp forOp, const TDMStore &store,
+                                Value alloc, Value prevToken) {
   OpBuilder builder(store.op);
   Location loc = store.op->getLoc();
 
-  ttag::AsyncTDMWait::create(builder, loc, ArrayRef<Value>{}, 0);
+  ttag::AsyncTDMWait::create(builder, loc, prevToken, 0);
   ttg::LocalStoreOp::create(builder, loc, store.src, alloc);
 
+  Value token;
   Value desc = store.desc;
   if (auto storeOp = dyn_cast<tt::DescriptorStoreOp>(store.op)) {
-    ttag::AsyncTDMCopyLocalToGlobalOp::create(builder, loc, desc,
-                                              storeOp.getIndices(), alloc,
-                                              /*barrier=*/Value{});
+    auto copyOp = ttag::AsyncTDMCopyLocalToGlobalOp::create(
+        builder, loc, desc, storeOp.getIndices(), alloc,
+        /*barrier=*/Value{});
+    token = copyOp.getToken();
   } else {
     auto scatterOp = cast<tt::DescriptorScatterOp>(store.op);
-    // Mirror TensorScatterLowering: the shared TritonToTritonGPU pass gives
-    // the indices an NVIDIA-oriented layout, so re-layout them to AMD's TDM
-    // gather/scatter index encoding before issuing the async op.
+    // The shared TritonToTritonGPU pass gives the indices an NVIDIA-oriented
+    // layout, so re-layout them to AMD's TDM gather/scatter index encoding
+    // before issuing the async op.
     auto indices = scatterOp.getXOffsets();
     auto indicesType = cast<RankedTensorType>(indices.getType());
     auto idxEnc = getTDMGatherScatterIndexEncoding(scatterOp, indicesType);
@@ -85,12 +88,14 @@ static void createTDMAsyncCopy(scf::ForOp forOp, const TDMStore &store,
           indicesType.getShape(), indicesType.getElementType(), idxEnc);
       indices = ttg::ConvertLayoutOp::create(builder, loc, newIdxType, indices);
     }
-    ttag::AsyncTDMScatterOp::create(builder, loc, desc, indices,
-                                    scatterOp.getYOffset(), alloc,
-                                    /*barrier=*/Value{});
+    auto scatterTDMOp = ttag::AsyncTDMScatterOp::create(
+        builder, loc, desc, indices, scatterOp.getYOffset(), alloc,
+        /*barrier=*/Value{});
+    token = scatterTDMOp.getRetToken();
   }
 
   store.op->erase();
+  return token;
 }
 
 } // namespace
@@ -114,14 +119,47 @@ bool mlir::pipelineTDMStores(scf::ForOp forOp) {
     storeToAlloc[store.op] = alloc;
   }
 
-  for (const TDMStore &store : stores)
-    createTDMAsyncCopy(forOp, store, storeToAlloc[store.op]);
+  // Create initial "empty" tokens before the loop (one per store).  These
+  // seed the loop-carried token chain; the first iteration's wait will see
+  // num=0 and be a no-op since nothing is in flight yet.
+  OpBuilder preBuilder(forOp);
+  auto tokenTy = ttg::AsyncTokenType::get(forOp.getContext());
+  SmallVector<Value> initTokens;
+  for (size_t i = 0; i < stores.size(); ++i) {
+    auto seedWait = ttag::AsyncTDMWait::create(preBuilder, forOp->getLoc(),
+                                               ArrayRef<Value>{}, 0);
+    initTokens.push_back(seedWait.getRetToken());
+  }
 
-  // After the loop: drain the last in-flight TDM write, then free the
-  // allocation(s).
+  // Add one loop-carried token per store.  addIterArgsToLoop splices the
+  // loop body (no clone), so the Operation* pointers in `stores` and
+  // `storeToAlloc` remain valid.
+  unsigned firstNewArg = forOp.getBody()->getNumArguments();
+  forOp = addIterArgsToLoop(preBuilder, forOp, initTokens);
+
+  // Replace each store with the async TDM sequence, threading the token from
+  // the previous iteration's block arg into the wait and yielding the new
+  // token.
+  SmallVector<Value> newTokens;
+  for (auto [i, store] : llvm::enumerate(stores)) {
+    Value prevToken = forOp.getBody()->getArgument(firstNewArg + i);
+    Value newToken =
+        createTDMAsyncCopy(forOp, store, storeToAlloc[store.op], prevToken);
+    newTokens.push_back(newToken);
+  }
+
+  // Yield the new tokens so they become the next iteration's block args.
+  appendToForOpYield(forOp, newTokens);
+
+  // After the loop: drain the last in-flight TDM writes using the final
+  // tokens, then free the allocation(s).
   OpBuilder builder(forOp);
   builder.setInsertionPointAfter(forOp);
-  ttag::AsyncTDMWait::create(builder, forOp->getLoc(), ArrayRef<Value>{}, 0);
+  unsigned numOrigResults = forOp.getNumResults() - stores.size();
+  SmallVector<Value> finalTokens;
+  for (size_t i = 0; i < stores.size(); ++i)
+    finalTokens.push_back(forOp.getResult(numOrigResults + i));
+  ttag::AsyncTDMWait::create(builder, forOp->getLoc(), finalTokens, 0);
   for (auto it : storeToAlloc)
     ttg::LocalDeallocOp::create(builder, forOp->getLoc(), it.second);
 

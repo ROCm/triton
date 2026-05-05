@@ -12,8 +12,8 @@ namespace mlir {
 // iterations and overlaps the outgoing TDM write with the next
 // iteration's compute.
 //
-// This mirrors NVIDIA's `pipelineTMAStores` and runs after the AMD load
-// pipeliner has finished expanding loads, but before
+// This runs after the AMD load pipeliner has finished expanding loads,
+// but before
 // `tritonamdgpu-convert-tensor-ops` lowers any remaining
 // (non-pipelinable) descriptor stores/scatters.
 //
