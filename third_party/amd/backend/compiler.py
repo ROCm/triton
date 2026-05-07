@@ -516,7 +516,7 @@ class HIPBackend(BaseBackend):
         assert len(names) == 1
         metadata["name"] = names[0]
         # llvm -> hsaco
-        flags = []
+        flags = ['-amdgpu-gfx1250-b0-specific=0']
         features = '-real-true16' if 'gfx11' in options.arch else ''
         ir_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()
         dump_file_id = names[0] + '_' + ir_hash
