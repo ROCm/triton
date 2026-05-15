@@ -863,6 +863,39 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 :
 
 // -----
 
+// COMMON-LABEL: @pipeline_assert
+// COMMON: arith.xori
+// COMMON: arith.ori
+// COMMON: tt.assert
+
+#AL = #triton_gpu.blocked<{sizePerThread = [1, 4], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#BL = #triton_gpu.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#C = #triton_gpu.nvidia_mma<{versionMajor = 2, warpsPerCTA = [4, 1]}>
+#A = #triton_gpu.dot_op<{opIdx = 0, parent = #C, kWidth=2}>
+#B = #triton_gpu.dot_op<{opIdx = 1, parent = #C, kWidth=2}>
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32} {
+  tt.func @pipeline_assert(%lb : index, %ub : index, %step : index,
+                           %a_arg : tensor<128x32xf16, #AL>,
+                           %ptr : tensor<32x128x!tt.ptr<f16>, #BL>,
+                           %mask : tensor<32x128xi1, #BL>) -> tensor<128x128xf32, #C> {
+    %other = arith.constant dense<0.00e+00> : tensor<32x128xf16, #BL>
+    %off = arith.constant dense<1> : tensor<32x128xi32, #BL>
+    %init = arith.constant dense<0.00e+00> : tensor<128x128xf32, #C>
+    %a = triton_gpu.convert_layout %a_arg : tensor<128x32xf16, #AL> -> tensor<128x32xf16, #A>
+    %loop:2 = scf.for %iv = %lb to %ub step %step iter_args(%arg = %ptr, %acc = %init) -> (tensor<32x128x!tt.ptr<f16>, #BL>, tensor<128x128xf32, #C>) {
+      %value = tt.load %arg, %mask, %other : tensor<32x128x!tt.ptr<f16>, #BL>
+      %b = triton_gpu.convert_layout %value : tensor<32x128xf16, #BL> -> tensor<32x128xf16, #B>
+      %dot = tt.dot %a, %b, %acc : tensor<128x32xf16, #A> * tensor<32x128xf16, #B> -> tensor<128x128xf32, #C>
+      tt.assert %mask, "cond must be true" : tensor<32x128xi1, #BL>
+      %next = tt.addptr %arg, %off : tensor<32x128x!tt.ptr<f16>, #BL>, tensor<32x128xi32, #BL>
+      scf.yield %next, %dot : tensor<32x128x!tt.ptr<f16>, #BL>, tensor<128x128xf32, #C>
+    } {tt.num_stages = 2 : i32}
+    tt.return %loop#1 : tensor<128x128xf32, #C>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: nested_loops
 // CHECK: triton_gpu.local_alloc
 // CHECK: scf.for
