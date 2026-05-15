@@ -80,6 +80,22 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     storeOp.getMaskMutable().assign(mask);
     return op;
   }
+  if (auto assertOp = dyn_cast<tt::AssertOp>(op)) {
+    rewriter.setInsertionPoint(assertOp);
+    Location loc = assertOp.getLoc();
+    Value predMask =
+        getPredMask(rewriter, assertOp.getCondition().getType(), {}, pred);
+    Type predType = predMask.getType();
+    Attribute trueAttr = rewriter.getBoolAttr(true);
+    if (auto shapedType = dyn_cast<ShapedType>(predType))
+      trueAttr = DenseElementsAttr::get(shapedType, trueAttr);
+    Value trueValue = rewriter.create<arith::ConstantOp>(loc, predType, trueAttr);
+    Value invertedPred = rewriter.create<arith::XOrIOp>(loc, predMask, trueValue);
+    Value condition =
+        rewriter.create<arith::OrIOp>(loc, assertOp.getCondition(), invertedPred);
+    assertOp.getConditionMutable().assign(condition);
+    return op;
+  }
 
   assert("don't know how to predicate this op" && false);
   return op;
