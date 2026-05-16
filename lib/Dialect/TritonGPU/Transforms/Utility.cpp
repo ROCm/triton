@@ -885,11 +885,11 @@ LogicalResult getConvertBackwardSlice(
       return failure();
     if (failed(updateLayout(currentValue, encoding)))
       return failure();
-    // If the value already has the desired encoding, we can stop here without
-    // adding it to the slice.
-    if (currentValueType.getEncoding() == encoding)
-      continue;
-    slice.insert(currentValue);
+    // Only add to slice if the value needs a layout change. If it already has
+    // the desired encoding, still propagate to operands to detect conflicts,
+    // but do not insert into the slice (no conversion needed for this value).
+    if (currentValueType.getEncoding() != encoding)
+      slice.insert(currentValue);
 
     // If there is already an existing conversion to the target layout, we don't
     // need to propagate to the operands.
