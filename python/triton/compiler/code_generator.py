@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type, Union, Iterable, 
 from .. import knobs, language
 from .._C.libtriton import ir, gluon_ir
 from ..language import constexpr, str_to_ty, tensor, tuple as tl_tuple
-from ..language.core import _unwrap_if_constexpr, base_value, base_type
+from ..language.core import _unwrap_if_constexpr, base_value, base_type, constexpr_type
 # ideally we wouldn't need any runtime component
 from ..runtime.jit import get_full_name, JITCallable, BoundConstexprFunction, ConstexprFunction, JITFunction
 from .._utils import apply_with_path, set_iterable_path, is_namedtuple
@@ -255,6 +255,10 @@ class ASTFunction:
 
         def build_value(path, ty):
             nonlocal cursor, handles
+            if isinstance(ty, constexpr_type):
+                val, cursor = ty._unflatten_ir(handles, cursor)
+                set_iterable_path(vals, path, val)
+                return
             # > set attributes
             attr_specs = self.attrs.get(path, [])
             for attr_name, attr_val in attr_specs:
