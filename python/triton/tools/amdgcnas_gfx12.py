@@ -2009,19 +2009,31 @@ def allocate_vgprs(program: Program,
                     movable.add(tid)
     scratch_occupied = all_used - movable
 
-    def _alloc_block(bank: int, start: int, size: int) -> int:
+    def _alloc_block(bank: int, start: int, size: int,
+                     align: int = 1) -> int:
         """Find smallest ``cur >= start`` such that [cur, cur+size) is
-        fully inside bank ``bank`` and disjoint from ``scratch_occupied``.
+        fully inside bank ``bank``, disjoint from ``scratch_occupied``,
+        and has ``(cur - bank*256) % align == 0``.
+
+        ``align`` is in raw-VGPR units within the bank.  For ds_load_b128
+        tile blocks we need ``align=4`` so each 4-VGPR ds_load_b128 in
+        the tile starts on a 4-aligned raw register (an assembler
+        hardware requirement).
         """
         bank_end = (bank + 1) * 256
+        bank_base = bank * 256
         cur = start
+        # Round cur up to alignment in raw-register space within the bank.
+        raw = cur - bank_base
+        if raw % align != 0:
+            cur += align - (raw % align)
         while cur + size <= bank_end:
             if all((cur + i) not in scratch_occupied for i in range(size)):
                 return cur
-            cur += 1
+            cur += align
         raise ValueError(
             f'no free {size}-VGPR block in bank {bank} '
-            f'starting at {start}')
+            f'starting at {start} with align {align}')
 
     alloc = VGPRAllocation()
     # Each bank has 256 logical VGPRs at offsets [bank*256, bank*256+256).
@@ -2037,7 +2049,9 @@ def allocate_vgprs(program: Program,
         if bank is None:
             continue  # epilogue-only chain; not in BankAssignment
         size = c.canonical.size
-        start = _alloc_block(bank, bank_next[bank], size)
+        # v_wmma_f32_16x16x32_f16's 8-VGPR D/A/B/C operands need a
+        # 4-aligned raw start (assembler hardware requirement).
+        start = _alloc_block(bank, bank_next[bank], size, align=4)
         alloc.wmma_acc[id(c)] = _make_logical_register(start, size)
         bank_next[bank] = start + size
 
@@ -2087,7 +2101,14 @@ def allocate_vgprs(program: Program,
             if tile_size == 0:
                 continue
             track_total = max_groups * tile_size
-            track_start = _alloc_block(bank, bank_next[bank], track_total)
+            # ds_load_b128 requires its 4-VGPR dst to start on a
+            # 4-aligned raw register.  Tiles are split into b128 chunks
+            # at offsets 0, 4, 8, ... within the tile, so as long as
+            # the track start is 4-aligned, every chunk in every tile
+            # is 4-aligned (tile_size is a multiple of 4 for the
+            # wmma_f32_16x16x32_f16 src tiles we handle here).
+            track_start = _alloc_block(bank, bank_next[bank], track_total,
+                                       align=4)
             new_tile_starts = [track_start + i * tile_size
                                for i in range(max_groups)]
             bank_next[bank] = track_start + track_total
