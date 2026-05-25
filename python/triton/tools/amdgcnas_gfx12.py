@@ -637,6 +637,21 @@ def parse_asm(text: str) -> Program:
             in_program = True
             # The basic-block label will follow this line; keep scanning.
 
+        # Inside the function body, LLVM emits ``; %bb.N:`` comments at
+        # every MIR basic-block boundary -- even when no label follows
+        # (e.g., the fall-through block after a conditional back-edge).
+        # Treat these as BB boundaries so a loop body ends at its
+        # back-edge instead of absorbing fall-through epilogue code.
+        if (in_program and current_bb is not None
+                and stripped.startswith('; %bb.')):
+            current_bb = BasicBlock(name="", label_line=None)
+            program.blocks.append(current_bb)
+            inst = Instruction(opcode='', operands=[], raw_line=line,
+                               trailing_comment=None)
+            current_bb.add_inst(inst)
+            i += 1
+            continue
+
         # If we haven't entered any basic block yet, this is header.
         if current_bb is None:
             program.header_lines.append(line)
