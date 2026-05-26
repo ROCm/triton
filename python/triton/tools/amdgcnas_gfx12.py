@@ -2537,28 +2537,63 @@ def hoist_loop_invariant_addrs(program: Program) -> int:
     # that aliases the addr register).  We break that dual role by
     # allocating a fresh VGPR in the same bank for the hoisted v_add
     # and renaming its downstream address-use consumers.
+    # Two opcode shapes count as hoistable address-arith:
+    #   v_add_nc_u32_e32 vdst, imm, vsrc       (imm in op[1], vsrc in op[2])
+    #   v_add3_u32       vdst, imm, 0,    vsrc  (imm in op[1], '0' in op[2], vsrc in op[3])
+    #   v_add3_u32       vdst, 0,   imm,  vsrc  (symmetric form)
+    # The v_add3_u32 forms are semantically equivalent to the 2-op add
+    # since one source is the literal 0.  LLVM sometimes picks the
+    # 3-op encoding under register-pressure heuristics; without
+    # matching it we'd leave one address compute in the loop and force
+    # the rewriter to insert an extra MSB-switch pair around it (this
+    # showed up as L5's 3 s_set_vgpr_msb in pad16).
+    # ``candidate_imm_text[id(inst)]`` carries the literal text for
+    # the emission site, so the emit step doesn't need to re-decode
+    # which operand slot held it.
     candidates: list[tuple[Instruction, Register, bool]] = []
+    candidate_imm_text: dict[int, str] = {}
     for inst in loop_bb.instructions:
-        if inst.opcode != 'v_add_nc_u32_e32':
+        imm_text: Optional[str] = None
+        vsrc_reg: Optional[Register] = None
+        if inst.opcode == 'v_add_nc_u32_e32':
+            if len(inst.operands) < 3:
+                continue
+            # Skip trivial copies -- they're handled via the copies map.
+            if inst.operands[1].text.strip() == '0':
+                continue
+            if not _is_integer_literal(inst.operands[1].text):
+                continue
+            if not inst.operands[0].regs or not inst.operands[2].regs:
+                continue
+            imm_text = inst.operands[1].text
+            vsrc_reg = inst.operands[2].regs[0]
+        elif inst.opcode == 'v_add3_u32':
+            if len(inst.operands) < 4:
+                continue
+            if not inst.operands[0].regs or not inst.operands[3].regs:
+                continue
+            s0 = inst.operands[1].text.strip()
+            s1 = inst.operands[2].text.strip()
+            if (s1 == '0' and s0 != '0'
+                    and _is_integer_literal(inst.operands[1].text)):
+                imm_text = inst.operands[1].text
+            elif (s0 == '0' and s1 != '0'
+                    and _is_integer_literal(inst.operands[2].text)):
+                imm_text = inst.operands[2].text
+            else:
+                continue
+            vsrc_reg = inst.operands[3].regs[0]
+        else:
             continue
-        if len(inst.operands) < 3:
-            continue
-        # Skip trivial copies themselves -- they're handled via the
-        # copies map.
-        if inst.operands[1].text.strip() == '0':
-            continue
-        if not _is_integer_literal(inst.operands[1].text):
-            continue
-        if not inst.operands[0].regs or not inst.operands[2].regs:
-            continue
+
         dst = inst.operands[0].regs[0]
-        src = inst.operands[2].regs[0]
         dst_defs = loop_idx.defs.get((dst.kind, dst.ids[0]), [])
         needs_rename = bool([d for d in dst_defs if d is not inst])
-        root = _resolve_to_loop_invariant(src, loop_bb, pindex, copies)
+        root = _resolve_to_loop_invariant(vsrc_reg, loop_bb, pindex, copies)
         if root is None:
             continue
         candidates.append((inst, root, needs_rename))
+        candidate_imm_text[id(inst)] = imm_text
 
     if not candidates:
         return 0
@@ -2649,7 +2684,10 @@ def hoist_loop_invariant_addrs(program: Program) -> int:
     # into the middle of the hoist sequence, breaking ordering).
     hoisted_lines: list[str] = []
     for (inst, root, _), (new_raw, new_log) in zip(candidates, new_dsts):
-        imm_text = inst.operands[1].text.strip()
+        # Use the matcher-recorded imm text -- it picks the right
+        # operand slot for v_add_nc_u32_e32 (op[1]) and v_add3_u32
+        # (op[1] or op[2] depending on which holds the literal '0').
+        imm_text = candidate_imm_text[id(inst)].strip()
         hoisted_lines.append(
             f"\tv_add_nc_u32_e32 v{new_raw} /*v{new_log}*/, "
             f"{imm_text}, v{root.raw_ids[0]} /*v{root.ids[0]}*/"
