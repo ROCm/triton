@@ -2638,18 +2638,17 @@ def hoist_loop_invariant_addrs(program: Program) -> int:
 
     # Build the raw_line for each hoisted instruction.  The source
     # register is the loop-invariant ``root`` (forwarded through any
-    # trivial copy).  Emit a fresh ``s_set_vgpr_msb`` whenever the
-    # required (dst, src1) bank pair changes between candidates.
+    # trivial copy).  No ``s_set_vgpr_msb`` is emitted here -- the
+    # pipeline-wide ``regen_msbs`` pass that runs after every opt pass
+    # in ``amdgcnas_gfx12`` walks operand banks and emits the right
+    # MSB sequence from scratch.  Emitting MSBs here would also leave
+    # interior ``s_set_vgpr_msb`` instructions that confuse downstream
+    # insertion heuristics (e.g., ``apply_allocation`` Phase B2 scans
+    # for the "last MSB" in the preheader to anchor its copy v_add
+    # insertions; an interior hoist-emitted MSB pulls those copies
+    # into the middle of the hoist sequence, breaking ordering).
     hoisted_lines: list[str] = []
-    last_state: Optional[tuple[int, int, int, int]] = None
     for (inst, root, _), (new_raw, new_log) in zip(candidates, new_dsts):
-        dst_msb = new_log // 256
-        src_msb = root.msb()
-        state = (dst_msb, 0, src_msb, 0)
-        if state != last_state:
-            new_imm = _encode_msb_byte(*state)
-            hoisted_lines.append(f"\ts_set_vgpr_msb {new_imm:#x}")
-            last_state = state
         imm_text = inst.operands[1].text.strip()
         hoisted_lines.append(
             f"\tv_add_nc_u32_e32 v{new_raw} /*v{new_log}*/, "
@@ -2709,13 +2708,14 @@ def hoist_loop_invariant_addrs(program: Program) -> int:
     loop_bb.instructions = [i for i in loop_bb.instructions
                             if id(i) not in to_remove_ids]
 
-    # Update the LLVM-emitted s_set_vgpr_msb instructions in the loop
-    # body AND the epilogue blocks so each one's src0/dst banks match
-    # the (possibly renamed) consumers in its scope.  No-op when
-    # nothing was renamed.
-    loop_idx_in_prog = program.blocks.index(loop_bb)
-    for bb in program.blocks[loop_idx_in_prog:]:
-        _adjust_msbs_for_renames(bb)
+    # MSB context for the renamed consumers is handled by the
+    # pipeline-wide ``regen_msbs`` pass that runs after all opt passes:
+    # since ``amdgcnas_gfx12`` strips every ``s_set_vgpr_msb`` upfront
+    # (via ``strip_all_msbs``), no in-stream MSBs are around to need
+    # patching here.  The earlier ``_adjust_msbs_for_renames`` helper
+    # was a local heuristic that could not split scopes when consumers
+    # disagreed on a bank; ``regen_msbs`` walks operand banks and emits
+    # fresh MSBs at every transition point.
 
     # Re-index both blocks.
     for i, inst in enumerate(preheader_bb.instructions):
@@ -2801,6 +2801,163 @@ def _make_msb_instruction_from_imm(imm: int) -> Instruction:
             f";  msbs: dst={dst} src0={src0} "
             f"src1={src1} src2={src2}")
     return _parse_instruction_line(line)
+
+
+def strip_all_msbs(program: Program) -> int:
+    """Remove every ``s_set_vgpr_msb`` instruction from every basic
+    block in ``program``.  Returns the number of instructions removed.
+
+    Each ``Operand``'s ``Register`` carries its raw + logical ids
+    (populated at parse time from the ``/*v[A:B]*/`` comments LLVM
+    emits), so MSB context can be reconstructed from operand banks
+    alone -- the in-stream ``s_set_vgpr_msb`` instructions are
+    redundant for any analysis pass that just inspects operands.  Use
+    ``regen_msbs`` to put them back."""
+    removed = 0
+    for bb in program.blocks:
+        before = len(bb.instructions)
+        bb.instructions = [i for i in bb.instructions
+                           if i.opcode != 's_set_vgpr_msb']
+        removed += before - len(bb.instructions)
+        for i, inst in enumerate(bb.instructions):
+            inst.index = i
+    return removed
+
+
+def regen_msbs(program: Program) -> None:
+    """Strip every ``s_set_vgpr_msb`` in ``program`` and re-emit them
+    by walking each basic block and tracking the per-slot MSB state
+    that the operand banks demand.
+
+    Faithful port of LLVM's ``AMDGPULowerVGPREncoding::run``:
+      * ``CurrentMode`` is a 4-slot Optional[int] state; only slots
+        touched by an instruction with a VGPR demand are set.
+      * On a state transition that *rewrites* a previously-set slot,
+        emit a brand new ``s_set_vgpr_msb`` with imm =
+        ``NewMode.encode() | (OldCurrent.encode() << 8)``.
+      * Otherwise, *piggyback* by mutating the most recently emitted
+        MSB's imm to ``CurrentMode.encode() | OldHigh``.
+      * Reset to all-zero before terminators/branches/calls and at
+        end of each falling-through BB (LLVM convention).
+      * Hoist new MSBs back past ``s_delay_alu``/``s_wait*``/barrier
+        signal/wait (``handleCoissue`` equivalent).
+
+    Safe to call multiple times -- it strips before emitting.  Other
+    passes (hoist, peephole, allocator-rewrite) can freely modify
+    operands without worrying about MSB consistency; the final
+    ``regen_msbs`` at the end of the pipeline produces a valid
+    ``s_set_vgpr_msb`` stream from scratch."""
+    # Strip first so any leftover MSBs from earlier passes don't
+    # interfere with the re-emit walk.
+    strip_all_msbs(program)
+
+    # Mirror of LLVM's ``isProgramStateInstr`` in handleCoissue:
+    # ``isBarrier(Opc) || isWaitcnt(Opc) || Opc == S_DELAY_ALU``.
+    # ``isWaitcnt`` covers the dscnt/loadcnt/etc. counter waits but
+    # not ``s_wait_alu`` (a depctr instr) or ``s_wait_tensorcnt`` /
+    # ``s_wait_event``.  ``isBarrier`` covers s_barrier_*.
+    coissue_skip = (
+        's_delay_alu',
+        's_waitcnt', 's_waitcnt_vscnt', 's_waitcnt_vmcnt',
+        's_waitcnt_expcnt', 's_waitcnt_lgkmcnt',
+        's_wait_loadcnt', 's_wait_loadcnt_dscnt',
+        's_wait_storecnt', 's_wait_storecnt_dscnt',
+        's_wait_samplecnt', 's_wait_bvhcnt', 's_wait_expcnt',
+        's_wait_dscnt', 's_wait_kmcnt', 's_wait_idle',
+        's_barrier', 's_barrier_signal', 's_barrier_wait',
+        's_barrier_leave', 's_barrier_signal_isfirst',
+        's_barrier_signal_isfirst_imm', 's_barrier_signal_isfirst_m0',
+        's_barrier_signal_imm', 's_barrier_signal_m0',
+    )
+
+    def _is_meta(inst: Instruction) -> bool:
+        op = inst.opcode
+        return op.startswith('.') if op else True
+
+    def _hoist_back(insts: list[Instruction]) -> int:
+        i = len(insts)
+        while i > 0 and (insts[i - 1].opcode in coissue_skip
+                         or _is_meta(insts[i - 1])):
+            i -= 1
+        return i
+
+    def _is_terminator_or_call(inst: Instruction) -> bool:
+        op = inst.opcode
+        if not op:
+            return False
+        return (op.startswith('s_branch') or op.startswith('s_cbranch')
+                or op == 's_setpc_b64' or op == 's_swappc_b64'
+                or op == 's_call_b64' or op == 's_endpgm'
+                or op == 's_endpgm_saved')
+
+    def _emit_set_mode(new_mode: _ModeTy,
+                       new_insts: list[Instruction],
+                       current_mode: _ModeTy,
+                       most_recent_msb: Optional[Instruction],
+                       at_end: bool = False,
+                       ) -> tuple[_ModeTy, Optional[Instruction], bool]:
+        old_mode_bits = current_mode.encode() << 8
+        updated, rewritten = current_mode.update(new_mode)
+        if not updated:
+            return current_mode, most_recent_msb, False
+        if most_recent_msb is not None and not rewritten:
+            try:
+                old_imm = int(most_recent_msb.operands[0].text, 0)
+            except (ValueError, IndexError):
+                old_imm = 0
+            keep_high = old_imm & 0xff00
+            new_imm = (current_mode.encode() & 0xff) | keep_high
+            most_recent_msb.operands[0].text = f'{new_imm:#x}'
+            most_recent_msb.operands[0].regs = []
+            decoded = _decode_msb_imm(f'{new_imm:#x}')
+            most_recent_msb.msb_bits = decoded
+            most_recent_msb.trailing_comment = (
+                f"  msbs: dst={decoded[0]} src0={decoded[1]} "
+                f"src1={decoded[2]} src2={decoded[3]}")
+            _rebuild_raw_line(most_recent_msb)
+            return current_mode, most_recent_msb, True
+        imm = new_mode.encode() | old_mode_bits
+        msb = _make_msb_instruction_from_imm(imm)
+        insert_at = len(new_insts) if at_end else _hoist_back(new_insts)
+        new_insts.insert(insert_at, msb)
+        return new_mode.copy(), msb, True
+
+    for bb in program.blocks:
+        new_insts: list[Instruction] = []
+        current_mode = _ModeTy()
+        most_recent_msb: Optional[Instruction] = None
+        for inst in bb.instructions:
+            if not inst.opcode or inst.opcode == '__asm_block__':
+                new_insts.append(inst)
+                continue
+            if _is_terminator_or_call(inst):
+                if inst.opcode in ('s_endpgm', 's_endpgm_saved'):
+                    current_mode = _ModeTy()
+                elif any(s is not None and s != 0 for s in current_mode.ops):
+                    reset_mode = _ModeTy([0, 0, 0, 0])
+                    current_mode, most_recent_msb, _ = _emit_set_mode(
+                        reset_mode, new_insts, current_mode, most_recent_msb)
+                most_recent_msb = None
+                new_insts.append(inst)
+                continue
+
+            mapping = _msb_slot_to_operand_index(inst)
+            if mapping is not None:
+                new_mode = _compute_new_mode(inst)
+                if not current_mode.is_compatible(new_mode):
+                    current_mode, most_recent_msb, _ = _emit_set_mode(
+                        new_mode, new_insts, current_mode, most_recent_msb)
+            new_insts.append(inst)
+
+        if any(s is not None and s != 0 for s in current_mode.ops):
+            reset_mode = _ModeTy([0, 0, 0, 0])
+            current_mode, most_recent_msb, _ = _emit_set_mode(
+                reset_mode, new_insts, current_mode, most_recent_msb,
+                at_end=True)
+
+        bb.instructions = new_insts
+        for i, inst in enumerate(bb.instructions):
+            inst.index = i
 
 
 # =====================================================================
@@ -3913,6 +4070,14 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
     """
     program = parse_asm(text)
     import os as _os
+    # Strip every ``s_set_vgpr_msb`` upfront so subsequent passes
+    # (hoist, peephole, allocator-rewrite) can freely modify operands
+    # without maintaining the MSB stream.  Each parsed operand's
+    # ``Register`` already carries its (raw, logical) pair from the
+    # ``/*v[A:B]*/`` comments LLVM emitted, so removing the in-stream
+    # MSBs doesn't lose any bank information.  The final ``regen_msbs``
+    # below puts MSBs back, computing them from operand banks alone.
+    strip_all_msbs(program)
     n_hoisted = n_waits = n_barriers = 0
     if _os.environ.get('TRITON_AMDGCN_AS_NO_PREPASS') != '1':
         n_hoisted = hoist_loop_invariant_addrs(program)
@@ -3991,6 +4156,14 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
                 cnt = msb_counts.get(r, 0)
                 print(f"  L{r}: dst={d} src0={s0} src1={s1} src2={s2} "
                       f"  ({cnt} s_set_vgpr_msb)")
+    # Pipeline-wide MSB regeneration: every opt pass above modifies
+    # operands without touching ``s_set_vgpr_msb``.  We now walk the
+    # whole program once and re-emit MSBs based on the actual operand
+    # banks.  Idempotent -- safe even if ``apply_allocation`` already
+    # ran its own Phase E (this strip-and-re-emit produces the same
+    # result on a program that's already in regen-form).
+    regen_msbs(program)
+
     if verbose:
         print(f"[amdgcnas_gfx12] hoisted {n_hoisted} invariant addr insts, "
               f"merged {n_waits} s_wait_dscnt, "
