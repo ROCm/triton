@@ -2003,6 +2003,17 @@ def allocate_vgprs(program: Program,
         for cid in c.canonical.ids:
             movable.add(cid)
     for dc in dchains:
+        # Epilogue chain tiles must stay in scratch_occupied: LLVM may
+        # park them at logical VGPRs that overlap with bank-2/3 slots
+        # where Phase 2 wants to place the in-loop tile track.  If we
+        # add them to ``movable``, the in-loop track lands on top of
+        # those slots, and the resulting numerics drift even though
+        # writers/readers are renamed consistently within each chain.
+        # See pad16 + N-contig + full-opt bug: epilogue tile at
+        # v[642:649] freed v644/v645 from scratch, allowing the
+        # in-loop A-tile track to start at v644 instead of v648.
+        if dc.is_epilogue_region:
+            continue
         for g in dc.dsgroups:
             if g.tile is not None:
                 for tid in g.tile.ids:
