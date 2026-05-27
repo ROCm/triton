@@ -1203,6 +1203,27 @@ class DSChain:
         return self.dsgroups[0].addr_reg if self.dsgroups else None
 
     @property
+    def unique_addr_regs(self) -> list[Register]:
+        """All distinct addr Registers used across the chain's ds_loads,
+        in first-seen order.  For chains whose ds_loads share one addr
+        this is a one-element list (= [self.addr_reg]); when LLVM split
+        the chain across multiple addrs (e.g., pad16 + N-contig +
+        sliceMN L5: v642 for 12 loads and v808 = v642+0xd7e0 for 4 more
+        to keep each ds_load's 16-bit immediate offset in range), the
+        list has multiple entries."""
+        seen: dict[int, Register] = {}
+        for ld in self.ds_loads:
+            if len(ld.operands) < 2:
+                continue
+            regs = ld.operands[1].regs
+            if not regs:
+                continue
+            r = regs[0]
+            if r.ids[0] not in seen:
+                seen[r.ids[0]] = r
+        return list(seen.values())
+
+    @property
     def op_idx(self) -> Optional[int]:
         return self.dsgroups[0].op_idx if self.dsgroups else None
 
@@ -1947,6 +1968,15 @@ class VGPRAllocation:
     wmma_acc: dict[int, Register] = field(default_factory=dict)
     ds_group_data: dict[int, Register] = field(default_factory=dict)
     ds_chain_addr: dict[int, Register] = field(default_factory=dict)
+    # When a DSChain has ds_loads using MULTIPLE distinct addr registers
+    # (LLVM emits this when offsets exceed the 16-bit ds_load immediate
+    # field, e.g., pad16 + N-contig + sliceMN L5's smemB_right buf1:
+    # 12 loads via v642 + 4 loads via v808=v642+0xd7e0), ``ds_chain_addr``
+    # holds the new addr for the chain's primary old addr (= the first
+    # ds_load's addr_reg).  Secondary old addrs get their own new addr
+    # here, keyed by (chain_id, old_addr_first_id) -> new Register.
+    ds_chain_addr_secondary: dict[tuple[int, int], Register] = field(
+        default_factory=dict)
     # Per-bank highest-allocated logical VGPR id + 1, useful for the
     # descriptor-bump in Stage 4.4+5.
     bank_high_water: dict[int, int] = field(default_factory=dict)
@@ -1962,6 +1992,29 @@ class VGPRAllocation:
 
     def addr(self, chain: "DSChain") -> Optional[Register]:
         return self.ds_chain_addr.get(id(chain))
+
+    def addr_for(self, chain: "DSChain",
+                 old_addr_id: int,
+                 primary_old_addr_id: Optional[int] = None
+                 ) -> Optional[Register]:
+        """Look up the new addr for a specific ds_load's old addr id
+        within the chain.  Returns ``ds_chain_addr`` (the chain's
+        primary new addr) when ``old_addr_id`` matches the chain's
+        primary old addr; otherwise consults the secondary map populated
+        for mixed-addr chains.
+
+        ``primary_old_addr_id`` is a static snapshot of
+        ``chain.addr_reg.ids[0]`` taken BEFORE Phase C starts rewriting.
+        Falling back to the property would be wrong: after Phase C
+        rewrites the chain's first ds_load, ``chain.addr_reg`` returns
+        the new register, and subsequent ds_loads with the same old
+        primary id misroute to the (empty) secondary map.
+        """
+        if primary_old_addr_id is None and chain.addr_reg is not None:
+            primary_old_addr_id = chain.addr_reg.ids[0]
+        if old_addr_id == primary_old_addr_id:
+            return self.ds_chain_addr.get(id(chain))
+        return self.ds_chain_addr_secondary.get((id(chain), old_addr_id))
 
 
 def _make_logical_register(start: int, size: int) -> Register:
@@ -1998,6 +2051,14 @@ def allocate_vgprs(program: Program,
     # used by an operand in the program, minus the ids that Phase C
     # will move (chain canonicals + DSGroup tile slots).
     all_used = _collect_used_logical_vgprs(program)
+    # DEBUG: optionally exclude specific logical VGPR ids from all_used to
+    # test what happens when bank-3 scratch shrinks (pad16 right-half bug
+    # investigation: removing 808/809 makes bank-3 scratch match pad8).
+    import os as _os_hack
+    _exclude = _os_hack.environ.get('TRITON_AMDGCN_AS_HACK_EXCLUDE_LOGICAL')
+    if _exclude:
+        for _id in _exclude.split(','):
+            all_used.discard(int(_id.strip()))
     movable: set[int] = set()
     for c in wchains:
         for cid in c.canonical.ids:
@@ -2009,9 +2070,9 @@ def allocate_vgprs(program: Program,
         # add them to ``movable``, the in-loop track lands on top of
         # those slots, and the resulting numerics drift even though
         # writers/readers are renamed consistently within each chain.
-        # See pad16 + N-contig + full-opt bug: epilogue tile at
-        # v[642:649] freed v644/v645 from scratch, allowing the
-        # in-loop A-tile track to start at v644 instead of v648.
+        # See pad16 + full-opt bug: epilogue tile at v[642:649] freed
+        # v644/v645 from scratch, allowing the in-loop A-tile track to
+        # start at v644 instead of v648.
         if dc.is_epilogue_region:
             continue
         for g in dc.dsgroups:
@@ -2149,6 +2210,21 @@ def allocate_vgprs(program: Program,
         start = _alloc_block(bank, bank_next[bank], 1)
         alloc.ds_chain_addr[id(c)] = _make_logical_register(start, 1)
         bank_next[bank] = start + 1
+        # If this chain's ds_loads use multiple distinct old addr
+        # registers (LLVM-split addr-base, see ``unique_addr_regs``
+        # docstring), allocate one extra new addr per *secondary* old
+        # addr in the same bank.  These get emitted as additional
+        # Phase B2 copies (`v_add new_secondary, 0, old_secondary`) and
+        # the per-ds_load Phase C rewrite picks the right one via
+        # ``alloc.addr_for(chain, old_addr_id)``.
+        primary_old_id = c.addr_reg.ids[0] if c.addr_reg is not None else None
+        for r in c.unique_addr_regs:
+            if r.ids[0] == primary_old_id:
+                continue
+            start = _alloc_block(bank, bank_next[bank], 1)
+            alloc.ds_chain_addr_secondary[(id(c), r.ids[0])] = \
+                _make_logical_register(start, 1)
+            bank_next[bank] = start + 1
 
     alloc.bank_high_water = dict(bank_next)
     # Budget = highest used logical VGPR id + 1.  Banks that received
@@ -3299,6 +3375,17 @@ def apply_allocation(program: Program,
             continue
         acc_chain_by_old_first[c.canonical.ids[0]] = c
 
+    # Snapshot each chain's primary old addr id BEFORE Phase C rewrites
+    # any ds_load.  ``chain.addr_reg`` is a property over the first
+    # ds_load's current addr operand; once Phase C rewrites that
+    # ds_load, the property returns the NEW addr and the per-ds_load
+    # ``alloc.addr_for`` lookup misroutes subsequent ds_loads with the
+    # same old primary addr to the (empty) secondary map.
+    chain_primary_old_addr_id: dict[int, int] = {}
+    for dc in dchains:
+        if dc.addr_reg is not None:
+            chain_primary_old_addr_id[id(dc)] = dc.addr_reg.ids[0]
+
     # ds_load -> DSGroup.
     ds_load_to_group: dict[int, DSGroup] = {}
     # Prologue loads need their dst rewritten (to land in the chain's
@@ -3392,6 +3479,31 @@ def apply_allocation(program: Program,
     # is shared (v642-style).  One copy per chain.  Insert in the
     # preheader, just before the closing ``s_set_vgpr_msb 0x4000``
     # reset that LICM puts there (or at the end if no such reset).
+    #
+    # When a chain has ds_loads using multiple old addrs (e.g., pad16
+    # L5: 12 loads via v642 + 4 via v808 = v642+0xd7e0), emit one copy
+    # per unique old addr -- the primary new addr comes from
+    # ``alloc.addr(dc)``, the secondary new addrs come from
+    # ``alloc.ds_chain_addr_secondary`` populated in Phase 3.
+    def _emit_b2_copy(new_addr_reg: Register, src_old_reg: Register) -> None:
+        new_text, new_logical = _operand_text_for_register(new_addr_reg)
+        src_text, src_logical = _operand_text_for_register(src_old_reg)
+        dst_op = (f'{new_text} {new_logical}'
+                  if new_logical else new_text)
+        base_op = (f'{src_text} {src_logical}'
+                   if src_logical else src_text)
+        line = (f'\tv_add_nc_u32_e32 {dst_op}, 0, {base_op}')
+        copy_inst = _parse_instruction_line(line)
+        copy_inst.parent_bb = preheader_bb
+        insert_idx = len(preheader_bb.instructions)
+        for i in range(len(preheader_bb.instructions) - 1, -1, -1):
+            if (preheader_bb.instructions[i].opcode
+                    == 's_set_vgpr_msb'):
+                insert_idx = i
+                break
+        preheader_bb.instructions.insert(insert_idx, copy_inst)
+        phase_b_handled.add(id(copy_inst))
+
     if preheader_bb is not None:
         # Group by old shared addr base.
         for old_first, chains_using_base in addr_old_first_to_chains.items():
@@ -3407,27 +3519,24 @@ def apply_allocation(program: Program,
                 if (new_addr.ids == base_reg.ids
                         and new_addr.raw_ids == base_reg.raw_ids):
                     continue  # identity rename: copy would be a no-op
-                # Build: v_add_nc_u32_e32 <new_addr>, 0, <base_reg>
-                # We let _build_v_add_copy_line construct the text.
-                new_text, new_logical = _operand_text_for_register(new_addr)
-                base_text, base_logical = _operand_text_for_register(base_reg)
-                dst_op = (f'{new_text} {new_logical}'
-                          if new_logical else new_text)
-                base_op = (f'{base_text} {base_logical}'
-                           if base_logical else base_text)
-                line = (f'\tv_add_nc_u32_e32 {dst_op}, 0, {base_op}')
-                copy_inst = _parse_instruction_line(line)
-                copy_inst.parent_bb = preheader_bb
-                # Find insertion point: before the last s_set_vgpr_msb
-                # of the preheader (the loop-entry MSB reset).
-                insert_idx = len(preheader_bb.instructions)
-                for i in range(len(preheader_bb.instructions) - 1, -1, -1):
-                    if (preheader_bb.instructions[i].opcode
-                            == 's_set_vgpr_msb'):
-                        insert_idx = i
-                        break
-                preheader_bb.instructions.insert(insert_idx, copy_inst)
-                phase_b_handled.add(id(copy_inst))
+                _emit_b2_copy(new_addr, base_reg)
+
+        # Emit copies for secondary addrs (mixed-addr chains).  Each
+        # secondary new addr was allocated in Phase 3; we now stage the
+        # `v_add new_secondary, 0, old_secondary` so the loop body's
+        # ds_loads (rewritten by Phase C below) have a register holding
+        # the right LDS base for their original offsets.
+        for dc in dchains:
+            primary_old_id = (dc.addr_reg.ids[0]
+                              if dc.addr_reg is not None else None)
+            for r in dc.unique_addr_regs:
+                if r.ids[0] == primary_old_id:
+                    continue  # primary handled above (or Step B1)
+                new_addr = alloc.ds_chain_addr_secondary.get(
+                    (id(dc), r.ids[0]))
+                if new_addr is None:
+                    continue
+                _emit_b2_copy(new_addr, r)
 
     # ---- Phase C: walk all instructions and rewrite operands -----
 
@@ -3714,12 +3823,22 @@ def apply_allocation(program: Program,
                 # they prefetch via a different base pointer (e.g., v0
                 # in v9) that the chain's steady-state addr doesn't
                 # alias.
+                #
+                # For mixed-addr chains, look up the new addr by the
+                # ds_load's OWN old addr (not the chain's primary)
+                # via ``alloc.addr_for``.  See
+                # ``ds_chain_addr_secondary`` docstring.
                 if id(inst) not in is_prologue_load:
                     dc = dsgroup_to_chain.get(id(g))
                     if (dc is not None and len(inst.operands) >= 2
-                            and alloc.addr(dc) is not None):
-                        new_addr = alloc.addr(dc)
-                        _replace_operand_register(inst.operands[1], new_addr)
+                            and inst.operands[1].regs):
+                        old_addr_id = inst.operands[1].regs[0].ids[0]
+                        primary_old = chain_primary_old_addr_id.get(id(dc))
+                        new_addr = alloc.addr_for(
+                            dc, old_addr_id, primary_old)
+                        if new_addr is not None:
+                            _replace_operand_register(
+                                inst.operands[1], new_addr)
                 _rebuild_raw_line(inst)
 
             elif id(inst) in phase_b_handled:
@@ -4117,8 +4236,18 @@ def amdgcnas_gfx12(text: str, verbose: bool = False) -> str:
         bank-aware VGPR reallocation that minimizes
         ``s_set_vgpr_msb`` thrash inside the loop.
     """
-    program = parse_asm(text)
     import os as _os
+    # DEBUG: override amdgcnas input with a file (used to feed a hand-modified
+    # pre-rewrite assembly through the rewriter for diagnostics).
+    _load_input = _os.environ.get('TRITON_AMDGCN_AS_LOAD_INPUT')
+    if _load_input:
+        with open(_load_input, 'r') as _f:
+            text = _f.read()
+    # DEBUG: dump amdgcnas input to /tmp/amdgcnas_input.amdgcn if env var set
+    if _os.environ.get('TRITON_AMDGCN_AS_DUMP_INPUT') == '1':
+        with open('/tmp/amdgcnas_input.amdgcn', 'w') as _f:
+            _f.write(text)
+    program = parse_asm(text)
     # Strip every ``s_set_vgpr_msb`` upfront so subsequent passes
     # (hoist, peephole, allocator-rewrite) can freely modify operands
     # without maintaining the MSB stream.  Each parsed operand's
