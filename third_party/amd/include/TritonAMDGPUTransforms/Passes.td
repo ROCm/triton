@@ -437,6 +437,13 @@ def TritonAMDGPULdsPrefetch : Pass<"tritonamdgpu-lds-prefetch", "mlir::ModuleOp"
                            "mlir::scf::SCFDialect",
                            "mlir::arith::ArithDialect",
                            "mlir::ROCDL::ROCDLDialect"];
+
+  let options = [
+    Option<"numInstsOverride", "num-insts",
+           "unsigned", /*default*/"0",
+           "Override target matrix instructions per slice tile "
+           "(0 = arch/dtype default: MFMA 8, WMMA 16). For testing.">
+  ];
 }
 
 #endif

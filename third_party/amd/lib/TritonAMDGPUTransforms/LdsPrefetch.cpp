@@ -96,6 +96,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "TritonAMDGPUTransforms/Passes.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
@@ -276,7 +277,8 @@ public:
   Prefetcher() = delete;
   ~Prefetcher() = default;
 
-  Prefetcher(scf::ForOp forOp) : forOp(forOp) {
+  Prefetcher(scf::ForOp forOp, unsigned numInstsOverride = 0)
+      : forOp(forOp), numInstsOverride(numInstsOverride) {
     yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
   }
 
@@ -350,6 +352,10 @@ private:
   unsigned prefetchWidthK;
   /// Store original kWidth to maintain when creating new local_loads.
   unsigned kWidth;
+  /// Override for the target matrix-instructions-per-slice (numInsts). When
+  /// nonzero it replaces the arch/dtype default; 0 means use the default.
+  /// Plumbed from the `num-insts` pass option (mainly for testing).
+  unsigned numInstsOverride;
 };
 
 LogicalResult Prefetcher::initialize() {
@@ -713,8 +719,9 @@ bool Prefetcher::computePrefetchWidthForDotType(Attribute dotEncoding,
       return false;
     }
     // Target a sliced tile spanning ~8 MFMAs (~2x the LDS latency); see the
-    // "Slicing policy" block above for the latency calculation.
-    unsigned numInsts = 8;
+    // "Slicing policy" block above for the latency calculation. The
+    // `num-insts` pass option overrides this default when nonzero.
+    unsigned numInsts = numInstsOverride ? numInstsOverride : 8;
     std::tie(prefetchWidthM, prefetchWidthN, prefetchWidthK) =
         computePrefetchWidth(mSize, nSize, kSize, transA, transB,
                              mfmaEnc.getInstrShape(), mfmaEnc.getWarpsPerCTA(),
@@ -732,8 +739,9 @@ bool Prefetcher::computePrefetchWidthForDotType(Attribute dotEncoding,
       return false;
     }
     // Target a sliced tile spanning ~16 WMMAs (~2x the LDS latency); see the
-    // "Slicing policy" block above for the latency calculation.
-    unsigned numInsts = 16;
+    // "Slicing policy" block above for the latency calculation. The
+    // `num-insts` pass option overrides this default when nonzero.
+    unsigned numInsts = numInstsOverride ? numInstsOverride : 16;
     auto warpsPerCTA = ttg::getWarpsPerCTA(wmmaEnc, dShape);
     std::tie(prefetchWidthM, prefetchWidthN, prefetchWidthK) =
         computePrefetchWidth(mSize, nSize, kSize, transA, transB,
@@ -1116,7 +1124,7 @@ struct TritonAMDGPULdsPrefetchPass
         return;
       }
 
-      triton::amdgpu::Prefetcher prefetcher(forOp);
+      triton::amdgpu::Prefetcher prefetcher(forOp, numInstsOverride);
 
       if (prefetcher.initialize().failed()) {
         LDBG("Prefetching failed.");

@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-lds-prefetch -canonicalize | FileCheck %s --dump-input-context=50
+// RUN: triton-opt %s -split-input-file -tritonamdgpu-lds-prefetch=num-insts=4 -canonicalize | FileCheck %s --dump-input-context=50
 
 // ============================================================================
 // Test 1: slice_k_only — gfx942, MFMA v3, !transA, !transB, async
@@ -662,11 +662,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 // Prologue
 // CHECK: ttg.memdesc_subslice
 // CHECK: scf.for
-// 4 dots (1M x 2N x 2K)
-// CHECK: tt.dot
-// CHECK: tt.dot
-// CHECK: tt.dot
-// CHECK: tt.dot
+// 8 dots (1M x 4N x 2K)
+// CHECK-COUNT-8: tt.dot
 // CHECK-NOT: tt.dot
 // CHECK: scf.yield
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
