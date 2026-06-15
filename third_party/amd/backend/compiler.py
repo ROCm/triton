@@ -101,6 +101,11 @@ class HIPOptions:
     # Example: llvm_fn_attrs="amdgpu-sched-strategy=iterative-ilp,noinline"
     llvm_fn_attrs: str | Tuple[Tuple[str, str], ...] = ""
 
+    # Experimental: overrides the target number of matrix instructions per slice tile used by the
+    # LDS prefetch pass (only takes effect when LDS prefetch is enabled). 0 keeps the arch/dtype
+    # default (MFMA 8, WMMA 16); intended for development, debugging, and tuning.
+    lds_prefetch_num_insts: int = 0
+
     def __post_init__(self):
         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
         warp_size = 32 if gfx_major >= 10 else 64
@@ -280,7 +285,7 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_schedule_loops(pm, options.num_stages)
         amd.passes.ttgpuir.add_pipeline(pm, use_async_copy, use_block_pingpong)
         if is_lds_prefetch_enabled():
-            amd.passes.ttgpuir.add_lds_prefetch(pm)
+            amd.passes.ttgpuir.add_lds_prefetch(pm, options.lds_prefetch_num_insts)
 
         if use_async_copy:
             amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)

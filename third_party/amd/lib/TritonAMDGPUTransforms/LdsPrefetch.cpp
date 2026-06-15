@@ -292,12 +292,11 @@ private:
   /// Compute prefetch widths from dot encoding and shapes.
   /// Returns true if widths were set and this dot should be prefetched;
   /// false to skip this dot (e.g. kSize too small or dot not recognized).
-  bool computePrefetchWidthForDotType(Attribute dotEncoding,
-                                      unsigned aTypeBitWidth,
-                                      ArrayRef<int64_t> dShape, unsigned mSize,
-                                      unsigned nSize, unsigned kSize,
-                                      unsigned kWidth, bool transA,
-                                      bool transB);
+  bool computePrefetchWidthForDotType(Attribute dotEncoding, Type aElemType,
+                                      Type bElemType, ArrayRef<int64_t> dShape,
+                                      unsigned mSize, unsigned nSize,
+                                      unsigned kSize, unsigned kWidth,
+                                      bool transA, bool transB);
 
   std::tuple<unsigned, unsigned, unsigned>
   computePrefetchWidth(unsigned mSize, unsigned nSize, unsigned kSize,
@@ -430,8 +429,8 @@ LogicalResult Prefetcher::initialize() {
     // TODO: calculating the prefetch(slicing) width also needs to examine
     // how the intermediate ops (between dot and local_load) are sliceable.
     if (!computePrefetchWidthForDotType(
-            dotEncoding, aType.getElementTypeBitWidth(), dType.getShape(),
-            mSize, nSize, kSize, kWidth, transA, transB))
+            dotEncoding, aType.getElementType(), bType.getElementType(),
+            dType.getShape(), mSize, nSize, kSize, kWidth, transA, transB))
       continue;
     LDBG("subtile: " << prefetchWidthM << "x" << prefetchWidthN << "x"
                      << prefetchWidthK);
@@ -702,12 +701,65 @@ scf::ForOp Prefetcher::createNewForOp() {
 // LL-based analysis can be added later to lift these restrictions.
 //
 //------------------------------------------------------------------------------
+
+// Compute the arch/dtype default for `numInsts` (the target number of
+// matrix instructions worth of work per sliced dot) when the user does not
+// override it (num-insts=0). The slice must be large enough to hide LDS read
+// latency behind matrix-instruction issue: with `numInsts` instructions in
+// flight we cover ~numInsts * matrix-instruction-cycles of compute, and we
+// want roughly 2x the LDS latency in flight. Hence:
+//
+//     numInsts = 2 * ceil(ldsLatency / mfmaCycles)
+//
+// Both the LDS read latency and the per-instruction matrix cycle count vary by
+// GPU target; the matrix cycle count also varies by operand dtype. We use the
+// *slower* (wider) of the two operand element types since the wider operand
+// dictates the lower matrix-instruction throughput.
+//
+// NOTE: the latency/cycle numbers below are intentionally simple placeholders
+// to be populated/tuned later.
+static unsigned computeDefaultNumInsts(StringRef arch, Type aElemType,
+                                       Type bElemType) {
+  // (1) LDS read latency in cycles, per GPU target.
+  unsigned ldsLatency = 64;
+  if (arch == "gfx1250") {
+    ldsLatency = 64;
+  } else if (arch == "gfx942" || arch == "gfx950" || arch == "gfx951") {
+    ldsLatency = 64;
+  }
+
+  // (2) Matrix-instruction cycles for the slower (wider) of the two operand
+  // dtypes; nested ifs on the dtype bit width (values are placeholders).
+  unsigned aBits = aElemType.getIntOrFloatBitWidth();
+  unsigned bBits = bElemType.getIntOrFloatBitWidth();
+  unsigned slowerBits = std::max(aBits, bBits);
+  unsigned mfmaCycles = 16;
+  if (slowerBits <= 8) {
+    mfmaCycles = 16;
+  } else if (slowerBits <= 16) {
+    mfmaCycles = 16;
+  } else {
+    mfmaCycles = 16;
+  }
+
+  // (3) Size the slice at ~2x the LDS latency, expressed in matrix
+  // instructions: numInsts = 2 * ceil(ldsLatency / mfmaCycles).
+  return 2 * ((ldsLatency + mfmaCycles - 1) / mfmaCycles);
+}
+
 bool Prefetcher::computePrefetchWidthForDotType(Attribute dotEncoding,
-                                                unsigned aTypeBitWidth,
+                                                Type aElemType, Type bElemType,
                                                 ArrayRef<int64_t> dShape,
                                                 unsigned mSize, unsigned nSize,
                                                 unsigned kSize, unsigned kWidth,
                                                 bool transA, bool transB) {
+  // Default `numInsts` derived from GPU target + operand dtype. The `num-insts`
+  // pass option overrides this when nonzero (mainly for testing).
+  ModuleOp module = this->forOp.getOperation()->getParentOfType<ModuleOp>();
+  std::optional<StringRef> arch = getAMDArch(module);
+  unsigned defaultNumInsts =
+      computeDefaultNumInsts(arch ? *arch : StringRef(), aElemType, bElemType);
+
   if (auto mfmaEnc = dyn_cast<ttg::AMDMfmaEncodingAttr>(dotEncoding)) {
     // The slice-size math below treats the dot as an
     // `instrShape * warpsPerCTA` grid, which is only valid for the default
@@ -718,10 +770,10 @@ bool Prefetcher::computePrefetchWidthForDotType(Attribute dotEncoding,
       LDBG("Skipping MFMA with non-unit tilesPerWarp: " << mfmaEnc);
       return false;
     }
-    // Target a sliced tile spanning ~8 MFMAs (~2x the LDS latency); see the
-    // "Slicing policy" block above for the latency calculation. The
+    // Target a sliced tile spanning ~2x the LDS latency in MFMAs; see the
+    // "Slicing policy" block above and computeDefaultNumInsts(). The
     // `num-insts` pass option overrides this default when nonzero.
-    unsigned numInsts = numInstsOverride ? numInstsOverride : 8;
+    unsigned numInsts = numInstsOverride ? numInstsOverride : defaultNumInsts;
     std::tie(prefetchWidthM, prefetchWidthN, prefetchWidthK) =
         computePrefetchWidth(mSize, nSize, kSize, transA, transB,
                              mfmaEnc.getInstrShape(), mfmaEnc.getWarpsPerCTA(),
@@ -738,10 +790,10 @@ bool Prefetcher::computePrefetchWidthForDotType(Attribute dotEncoding,
       LDBG("Skipping warp-swizzled WMMA layout: " << wmmaEnc);
       return false;
     }
-    // Target a sliced tile spanning ~16 WMMAs (~2x the LDS latency); see the
-    // "Slicing policy" block above for the latency calculation. The
+    // Target a sliced tile spanning ~2x the LDS latency in WMMAs; see the
+    // "Slicing policy" block above and computeDefaultNumInsts(). The
     // `num-insts` pass option overrides this default when nonzero.
-    unsigned numInsts = numInstsOverride ? numInstsOverride : 16;
+    unsigned numInsts = numInstsOverride ? numInstsOverride : defaultNumInsts;
     auto warpsPerCTA = ttg::getWarpsPerCTA(wmmaEnc, dShape);
     std::tie(prefetchWidthM, prefetchWidthN, prefetchWidthK) =
         computePrefetchWidth(mSize, nSize, kSize, transA, transB,
