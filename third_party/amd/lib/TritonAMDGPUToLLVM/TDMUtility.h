@@ -91,15 +91,16 @@ void fillTDMDescriptor(RewriterBase &rewriter, Location loc,
 // Scatter writes from LDS to non-contiguous rows in global memory.
 // - rowIndices: which global rows to read from (gather) or write to (scatter)
 // - ldsRowOffset: starting row within shared memory
-// - globalColOffset: starting column in global memory
 // - use32BitIndices: true for 32-bit indices (max 8 rows), false for 16-bit
 // (max 16 rows)
+// The global column offset is no longer passed: it is folded into the
+// descriptor's global_addr by amdg.update_tensor_descriptor before this op.
 void fillTDMDescriptorForGatherScatter(
     RewriterBase &rewriter, Location loc,
     const LLVMTypeConverter *typeConverter, Type elementType,
     SmallVector<int64_t> blockShape, unsigned padInterval, unsigned padAmount,
     Value &group0, Value &group1, Value &group2, Value &group3,
-    Value ldsRowOffset, Value globalColOffset, Value ldsPtr, Value pred,
+    Value ldsRowOffset, Value ldsPtr, Value pred,
     Value barrierPtr, const triton::LinearLayout &cgaLayout, Value ctaId,
     ArrayRef<Value> rowIndices, bool use32BitIndices, bool isGather);
 
@@ -150,10 +151,10 @@ void emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
                           const LLVMTypeConverter *typeConverter,
                           ArrayRef<Value> desc, ArrayRef<int64_t> blockShape,
                           unsigned padInterval, unsigned padAmount,
-                          Value ldsPtr, Value pred, Type elementType,
+                          Value ldsPtr, Type elementType,
                           Value barrierPtr,
                           const triton::LinearLayout &cgaLayout, Value ctaId,
-                          ArrayRef<Value> rowIndices, Value colOffset,
+                          ArrayRef<Value> rowIndices,
                           bool isGather, int numWarps,
                           RankedTensorType indicesType);
 

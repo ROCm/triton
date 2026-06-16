@@ -90,9 +90,14 @@ struct TensorGatherLowering : public OpRewritePattern<DescriptorGatherOp> {
                          encoding, sharedMemorySpace, /*mutableMemory=*/true);
     Value alloc = LocalAllocOp::create(rewriter, loc, memDescType);
     Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
 
-    amdgpu::AsyncTDMGatherOp::create(rewriter, loc, op.getDesc(), indices,
-                                     op.getYOffset(), alloc, pred);
+    // Position the descriptor's column (the old yOffset) and pred on the
+    // descriptor; the pure gather op only supplies the per-instruction row
+    // slices (`indices`) and the LDS destination.
+    Value gatherDesc = createUpdateTDMDescriptorOp(
+        rewriter, loc, op.getDesc(), {zero, op.getYOffset()}, pred);
+    amdgpu::AsyncTDMGatherOp::create(rewriter, loc, gatherDesc, indices, alloc);
     amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
     rewriter.replaceOpWithNewOp<LocalLoadOp>(op, op.getType(), alloc);
     return success();
@@ -167,8 +172,13 @@ struct TensorScatterLowering : public OpRewritePattern<DescriptorScatterOp> {
         MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
                          encoding, sharedMemorySpace, /*mutableMemory=*/true);
     Value alloc = LocalAllocOp::create(rewriter, loc, memDescType, src);
-    amdgpu::AsyncTDMScatterOp::create(rewriter, loc, op.getDesc(), indices,
-                                      op.getYOffset(), alloc,
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+
+    // Position the descriptor's column (the old yOffset) on the descriptor; the
+    // pure scatter op only supplies the row slices (`indices`) and the LDS src.
+    Value scatterDesc = createUpdateTDMDescriptorOp(
+        rewriter, loc, op.getDesc(), {zero, op.getYOffset()}, /*pred=*/Value{});
+    amdgpu::AsyncTDMScatterOp::create(rewriter, loc, scatterDesc, indices, alloc,
                                       /*barrier=*/Value{});
     amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
     rewriter.eraseOp(op);

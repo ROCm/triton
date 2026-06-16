@@ -1489,8 +1489,8 @@ struct AsyncTDMScatterOpConversion
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
 
-    // Get the destination column offset
-    Value dstColOffset = adaptor.getDstColOffset();
+    // The column offset and pred are carried by the descriptor (set via
+    // update_tensor_descriptor) -- nothing to read off the op.
 
     auto dstRowIndicesType =
         cast<RankedTensorType>(op.getDstRowIndices().getType());
@@ -1520,12 +1520,10 @@ struct AsyncTDMScatterOpConversion
     auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
     int numWarps = triton::gpu::lookupNumWarps(op);
 
-    // Predicate must be i32 (not i1) to match other elements in group0
-    Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
     mlir::LLVM::AMD::emitTDMGatherScatter(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, padInterval,
-        padAmount, srcPtr, pred, elementType, barrierPtr, cgaLayout, ctaId,
-        dstRowIndices, dstColOffset,
+        padAmount, srcPtr, elementType, barrierPtr, cgaLayout, ctaId,
+        dstRowIndices,
         /*isGather=*/false, numWarps, dstRowIndicesType);
 
     rewriter.eraseOp(op);
@@ -1591,8 +1589,8 @@ struct AsyncTDMGatherOpConversion
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
 
-    // Get the source column offset
-    Value srcColOffset = adaptor.getSrcColOffset();
+    // The column offset and pred are carried by the descriptor (set via
+    // update_tensor_descriptor) -- nothing to read off the op.
 
     auto srcRowIndicesType =
         cast<RankedTensorType>(op.getSrcRowIndices().getType());
@@ -1619,8 +1617,8 @@ struct AsyncTDMGatherOpConversion
 
     mlir::LLVM::AMD::emitTDMGatherScatter(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, padInterval,
-        padAmount, dstPtr, op.getPred(), elementType, barrierPtr, cgaLayout,
-        ctaId, srcRowIndices, srcColOffset,
+        padAmount, dstPtr, elementType, barrierPtr, cgaLayout,
+        ctaId, srcRowIndices,
         /*isGather=*/true, numWarps, srcRowIndicesType);
 
     rewriter.eraseOp(op);

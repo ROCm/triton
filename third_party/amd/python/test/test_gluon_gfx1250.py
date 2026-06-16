@@ -4027,8 +4027,12 @@ def tdm_gather_kernel(inp_ptr, out_ptr, src_row_indices_ptr, M_inp, N_inp, strid
     idx_offs = ttgl.arange(0, NUM_INDICES, layout=IDX_LAYOUT)
     src_row_indices = ttgl.load(src_row_indices_ptr + idx_offs)
 
-    # Gather data from non-contiguous rows starting at SRC_COL_OFFSET
-    ttgl.amd.gfx1250.tdm.async_gather(inp_desc, src_row_indices, SRC_COL_OFFSET, smem)
+    # Gather data from non-contiguous rows starting at SRC_COL_OFFSET. The
+    # column offset is carried by the descriptor (positioned via
+    # update_tensor_descriptor); the pure gather only supplies rows + LDS dst.
+    inp_desc = ttgl.amd.gfx1250.tdm.update_tensor_descriptor(inp_desc, add_offsets=[0, SRC_COL_OFFSET],
+                                                             clamp_bounds=True)
+    ttgl.amd.gfx1250.tdm.async_gather(inp_desc, src_row_indices, smem)
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
     # Store gathered data to output using TDM
