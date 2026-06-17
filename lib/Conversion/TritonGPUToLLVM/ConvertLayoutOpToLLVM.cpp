@@ -39,6 +39,10 @@ struct ConvertLayoutOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     MLIRContext *ctx = op.getContext();
 
+    LLVM_DEBUG({
+      llvm::dbgs() << "\n\n[ConvertLayoutOpConversion] common pattern handling\n";
+      llvm::dbgs() << "  op = " << op << "\n";
+      });
     const auto &shape = op.getType().getShape();
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
@@ -54,6 +58,22 @@ struct ConvertLayoutOpConversion
 
     auto dims = conversion.getInDimNames();
     bool alwaysUseWarpShuffle = cvtAlwaysUseWarpShuffle(op);
+    LLVM_DEBUG({
+      llvm::dbgs() << "[ConvertLayoutOpConversion] common pattern reached\n";
+      llvm::dbgs() << "  op = " << op << "\n";
+      llvm::dbgs() << "  conversion in-dims =";
+      for (auto d : dims)
+        llvm::dbgs() << " " << d;
+      llvm::dbgs() << "\n  branch = "
+                   << ((llvm::is_contained(dims, kBlock) ||
+                        llvm::is_contained(dims, kWarp))
+                           ? "shared-mem(LDS)"
+                       : llvm::is_contained(dims, kLane) ? "lane(shuffle/LDS)"
+                       : llvm::is_contained(dims, kRegister)
+                           ? "register(within-thread)"
+                           : "identity(replaceOp)")
+                   << "\n";
+    });
     assert(to_vector(conversion.getInDimNames()) ==
            to_vector(conversion.getOutDimNames()));
     if (llvm::is_contained(dims, kBlock) || llvm::is_contained(dims, kWarp)) {
@@ -76,9 +96,49 @@ struct ConvertLayoutOpConversion
       //         simply reorder the elements of adaptor.getSrc().
       return transferWithinThread(op, conversion, adaptor, rewriter);
     } else {
-      // Cast 5. The two layouts are equivalent. We should probably remove
-      // these in RemoveLayoutConversion.
-      rewriter.replaceOp(op, adaptor.getSrc());
+      // Cast 5. The two layouts are linearly equivalent (empty minimal
+      // conversion) but may carry different layout attributes. We should
+      // probably remove these in RemoveLayoutConversion.
+      //
+      // The hazard: if adaptor.getSrc() is a concrete LLVM value (e.g. the
+      // insertvalue struct of a lowered dot whose result type is tensor<#src>),
+      // the conversion framework tags it as "the LLVM form of tensor<#src>".
+      // Replacing the op with it and then materializing the result for a
+      // consumer expecting tensor<#dst> forces a #src -> #dst bridge. Because
+      // #src and #dst are different attributes, that bridge is NOT a
+      // __pure_type_conversion__, so reconcile-unrealized-casts cannot fold it
+      // and it fails to translate to LLVM IR.
+      //
+      // So repack the source elements into a fresh struct tagged with
+      // op.getType() (tensor<#dst>) precisely when both:
+      //   - the source is already a concrete value (not itself an unrealized
+      //     cast / pure type-conversion materialization, which would otherwise
+      //     stay in pure-cast land and reconcile cleanly), and
+      //   - the result is actually used (an unused result produces no
+      //     consumer materialization, so a plain replaceOp leaves only dead/
+      //     pure casts that reconcile removes -- e.g. the wmma-v2-shortcut
+      //     test; repacking there would only leave dead extractvalue/
+      //     insertvalue behind, as there is no DCE after this pass).
+      // In every other case replacing with adaptor.getSrc() directly is safe.
+      bool srcIsUnrealizedCast = isa_and_nonnull<UnrealizedConversionCastOp>(
+          adaptor.getSrc().getDefiningOp());
+      if (srcIsUnrealizedCast || op.use_empty()) {
+        LLVM_DEBUG({
+          llvm::dbgs() << "replace op with adaptor.getSrc()\n";
+          llvm::dbgs() << adaptor.getSrc() << "\n";
+        });
+        rewriter.replaceOp(op, adaptor.getSrc());
+      }
+      else {
+        auto loc = op.getLoc();
+        auto inVals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
+        Value result = packLLElements(loc, getTypeConverter(), inVals, rewriter,
+                                      op.getType());
+        LLVM_DEBUG({llvm::dbgs() << "replace op with pack/unpacked results\n";
+		llvm::dbgs()<<result<<"\n";
+	});
+        rewriter.replaceOp(op, result);
+      } 
       return success();
     }
   }
