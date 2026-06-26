@@ -1,5 +1,6 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 
 #define DEBUG_TYPE "tritonamdgpu-pipeline-expand-loops"
@@ -29,6 +30,24 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
     dotOp->moveBefore(yield);
     auto ifOpBuilder = ifOp.getElseBodyBuilder();
     scf::YieldOp::create(ifOpBuilder, loc, dotOp->getOperand(2));
+    return ifOp;
+  }
+  if (isa<tt::DescriptorLoadOp>(op)) {
+    auto loc = op->getLoc();
+    auto ifOp = scf::IfOp::create(rewriter, loc, op->getResultTypes(), pred,
+                                  /*withElseRegion=*/true);
+    auto thenB = ifOp.getThenBodyBuilder();
+    auto yield = scf::YieldOp::create(thenB, loc, op->getResults());
+    op->moveBefore(yield);
+
+    auto elseB = ifOp.getElseBodyBuilder();
+    SmallVector<Value> zeroValues;
+    zeroValues.reserve(op->getNumResults());
+    for (Type resultType : op->getResultTypes()) {
+      zeroValues.push_back(
+          arith::ConstantOp::create(elseB, loc, elseB.getZeroAttr(resultType)));
+    }
+    scf::YieldOp::create(elseB, loc, zeroValues);
     return ifOp;
   }
   return tt::wrapInMaskOp(rewriter, op, pred);
