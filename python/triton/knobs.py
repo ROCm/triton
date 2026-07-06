@@ -542,6 +542,16 @@ class amd_knobs(base_knobs):
     # Enable machine instruction scheduler in MIR swap mode
     swap_mir_enable_misched: env_bool = env_bool("TRITON_SWAP_MIR_ENABLE_MISCHED", False)
 
+    # SGPR kernarg preload (inreg on kernel args): default on for all arches.
+    use_kernarg_preload: env_bool = env_bool("TRITON_HIP_ENABLE_KERNARG_PRELOAD", True)
+    # Comma-separated kernel-name substrings to EXCLUDE from preload (some kernels
+    # fail to compile/link with inreg on gfx1250, e.g. _combined_routing).
+    kernarg_preload_denylist: env_opt_str = env_opt_str("TRITON_HIP_KERNARG_PRELOAD_DENYLIST")
+    # Max number of kernarg dwords to preload into user SGPRs (prefix). Kernels
+    # whose args exceed this get only the fitting prefix marked inreg, which
+    # avoids the over-budget codegen failure on gfx1250. <0 means "all args".
+    kernarg_preload_max_dwords: env_int = env_int("TRITON_HIP_KERNARG_PRELOAD_MAX_DWORDS", 24)
+
 
 class proton_knobs(base_knobs):
     disable: env_bool = env_bool("TRITON_PROTON_DISABLE", False)

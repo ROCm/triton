@@ -811,8 +811,18 @@ class HIPBackend(BaseBackend):
         #
         # TODO(tyb0807): Disabled when using MIR swap/dump because the value is
         # not serializable to/from MIR YAML
-        if not (knobs.amd.swap_mir or knobs.amd.dump_mir):
-            amd.set_all_fn_arg_inreg(kernel_fn)
+        enable_kernarg_preload = knobs.amd.use_kernarg_preload
+        if enable_kernarg_preload and not (knobs.amd.swap_mir or knobs.amd.dump_mir):
+            # Budget-aware preload: only the prefix of args that fits the user-SGPR
+            # budget is marked inreg (see set_all_fn_arg_inreg). This avoids the
+            # over-budget codegen failure on gfx1250 (e.g. _combined_routing ->
+            # lld empty-object error) without needing a per-kernel denylist.
+            # A name denylist is still honored for fully excluding specific kernels.
+            _deny_raw = knobs.amd.kernarg_preload_denylist
+            _deny = [d for d in (_deny_raw if _deny_raw is not None else "").split(",") if d]
+            _kname = kernel_fn.name
+            if not any(d in _kname for d in _deny):
+                amd.set_all_fn_arg_inreg(kernel_fn, knobs.amd.kernarg_preload_max_dwords)
 
         if knobs.compilation.enable_asan:
             paths = [get_amd_bitcode_path(name) for name in ("asanrtl", "ocml", "ockl")]

@@ -553,14 +553,30 @@ void init_triton_amd(py::module_ &m) {
     return false;
   });
 
-  m.def("set_all_fn_arg_inreg", [](llvm::Function *fn) {
-    for (llvm::Argument &arg : fn->args()) {
-      // Check for incompatible attributes.
-      if (arg.hasByRefAttr() || arg.hasNestAttr())
-        continue;
-      arg.addAttr(llvm::Attribute::InReg);
-    }
-  });
+  m.def(
+      "set_all_fn_arg_inreg",
+      [](llvm::Function *fn, int maxDwords) {
+        // AMDGPU kernarg preload loads a *prefix* of the kernarg segment into
+        // user SGPRs, which are scarce (~16 dwords on gfx1250). Blanket inreg
+        // on a many-arg kernel asks the backend to preload more than the SGPR
+        // budget, which fails codegen (empty object -> lld error). Mark only
+        // the contiguous prefix of args whose total size fits maxDwords; a
+        // negative maxDwords means "all args" (legacy behavior).
+        const llvm::DataLayout &DL = fn->getParent()->getDataLayout();
+        int used = 0;
+        for (llvm::Argument &arg : fn->args()) {
+          // Check for incompatible attributes.
+          if (arg.hasByRefAttr() || arg.hasNestAttr())
+            continue;
+          int dwords =
+              static_cast<int>((DL.getTypeAllocSize(arg.getType()) + 3) / 4);
+          if (maxDwords >= 0 && used + dwords > maxDwords)
+            break; // preload is a prefix; stop once the budget is exceeded.
+          arg.addAttr(llvm::Attribute::InReg);
+          used += dwords;
+        }
+      },
+      py::arg("fn"), py::arg("max_dwords") = -1);
 
   m.def(
       "link_hsaco",
