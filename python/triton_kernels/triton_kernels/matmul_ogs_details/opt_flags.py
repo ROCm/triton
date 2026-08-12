@@ -123,21 +123,38 @@ def make_default_opt_flags_amd(
     if epilogue_subtile is None:
         epilogue_subtile = 1
 
-    # specific configs for F16 x MXFP4 on CDNA4
-    # Note that these configs will exceed LDS usage with async copy enabled
-    if is_cdna4 and bitwidth(lhs_dtype) == 16 and bitwidth(rhs_dtype) == 4 and precision_config.weight_scale is not None:
-        split_k = 1
-        if m <= 1024:
-            target_kernel_kwargs["waves_per_eu"] = 3
-            block_n = 128
-            block_k = 256
-            num_warps = 4
-        else:
+    if bitwidth(lhs_dtype) == 16 and bitwidth(rhs_dtype) == 4 and precision_config.weight_scale is not None:
+        # specific configs for F16 x MXFP4 on CDNA4
+        # Note that these configs will exceed LDS usage with async copy enabled
+        if is_cdna4:
+            split_k = 1
+            if m <= 1024:
+                target_kernel_kwargs["waves_per_eu"] = 3
+                block_n = 128
+                block_k = 256
+                num_warps = 4
+            else:
+                target_kernel_kwargs["waves_per_eu"] = 0
+                block_m = 64
+                block_n = 512
+                block_k = 256
+                num_warps = 8
+
+        # Specific configs for F16 x MXFP4 on RDNA.
+        if get_rdna_version() in (3, 4):
+            split_k = 1
             target_kernel_kwargs["waves_per_eu"] = 0
-            block_m = 64
-            block_n = 512
-            block_k = 256
-            num_warps = 8
+            num_stages = 1
+            if m <= 512:
+                block_m = 16
+                block_n = 64
+                block_k = 512
+                num_warps = 4
+            else:
+                block_m = 64
+                block_n = 128
+                block_k = 128
+                num_warps = 4
 
     def replace_with_valid_constraint(k: str, v):
         if constraints.get(k, None) is not None:
