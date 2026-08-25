@@ -37,6 +37,14 @@ def max_allowable_mn(
     return 1 if m * n >= max_mn else split_k
 
 
+def _is_async_copy_enabled_on_gfx950() -> bool:
+    try:
+        from triton.backends.amd.compiler import is_async_copy_enabled
+        return bool(is_async_copy_enabled("gfx950"))
+    except ImportError:
+        return bool(triton.knobs.amd.use_async_copy)
+
+
 def all_constraints_satisfied(opt_flags: OptFlags, constraints: dict) -> bool:
     _split_k_constraints = ['split_k', 'max_allowable_mn']
     assert all(getattr(opt_flags, ck) == cv for ck, cv in constraints.items() if cv is not None and ck not in _split_k_constraints)
@@ -125,20 +133,22 @@ def make_default_opt_flags_amd(
 
     if bitwidth(lhs_dtype) == 16 and bitwidth(rhs_dtype) == 4 and precision_config.weight_scale is not None:
         # specific configs for F16 x MXFP4 on CDNA4
-        # Note that these configs will exceed LDS usage with async copy enabled
         if is_cdna4:
             split_k = 1
+            cdna4_num_stages = 1 if _is_async_copy_enabled_on_gfx950() else 2
             if m <= 1024:
                 target_kernel_kwargs["waves_per_eu"] = 3
                 block_n = 128
                 block_k = 256
                 num_warps = 4
+                num_stages = cdna4_num_stages
             else:
                 target_kernel_kwargs["waves_per_eu"] = 0
                 block_m = 64
                 block_n = 512
                 block_k = 256
                 num_warps = 8
+                num_stages = cdna4_num_stages
 
         # Specific configs for F16 x MXFP4 on RDNA.
         if get_rdna_version() in (3, 4):
