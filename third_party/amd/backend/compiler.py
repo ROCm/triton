@@ -336,6 +336,11 @@ def get_llvm_flags(options):
     # s_wait_alu va_vdst waits in expert scheduling mode.
     if options.arch == "gfx1250" and is_expert_scheduling_enabled(options.arch):
         flags.append("amdgpu-anti-hints-for-va-vdst")
+    # LLVM has no per-function attribute for the AMDGPU register pressure
+    # trackers yet. They help kernels that request waves_per_eu > 1 and would
+    # otherwise spill, but regress single-wave MFMA kernels that already fit.
+    if options.arch in ["gfx942", "gfx950"] and options.waves_per_eu > 1:
+        flags.append("amdgpu-use-amdgpu-trackers")
     # User-requested options come last so they override the defaults above.
     flags.extend(f"{name}={value}" for name, value in options.llvm_cl_opts)
     return flags
