@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -7,6 +8,18 @@ import triton
 current_target = triton.runtime.driver.active.get_current_target()
 if current_target.arch not in ("gfx950", "gfx942", "gfx90a", "gfx908"):
     pytest.skip(allow_module_level=True)
+
+
+@pytest.fixture(autouse=True)
+def keep_packed_fp32_ops():
+    # These tests are about the ScalarizePackedFOps pass, so opt out of the
+    # gfx950 CDNA4 erratum workaround, which would otherwise strip every packed
+    # FP32 op before the pass can be observed. See
+    # test_cdna4_packed_fp32_erratum.py.
+    triton.knobs.amd.disable_packed_fp32_ops = False
+    yield
+    triton.knobs.amd.disable_packed_fp32_ops = triton.knobs.env
+    os.environ.pop("TRITON_HIP_DISABLE_PACKED_FP32_OPS", None)
 
 
 def get_func_body(llir):

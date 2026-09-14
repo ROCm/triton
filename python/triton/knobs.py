@@ -530,6 +530,11 @@ class amd_knobs(base_knobs):
 
     scalarize_packed_fops: env_bool = env_bool("AMDGCN_SCALARIZE_PACKED_FOPS")
 
+    # Workaround for the CDNA4 MFMA operand read-skip erratum; see
+    # disable_packed_fp32_ops() in third_party/amd/backend/compiler.py.
+    # Unset = auto (on for gfx950 kernels that contain MFMA/WMMA), 1/0 to force.
+    disable_packed_fp32_ops: env_opt_bool = env_opt_bool("TRITON_HIP_DISABLE_PACKED_FP32_OPS")
+
     # Path to dump MIR files for debugging/analysis
     dump_mir: env_opt_str = env_opt_str("TRITON_DUMP_MIR")
     # Path to externally-provided MIR files to use instead of generated ones

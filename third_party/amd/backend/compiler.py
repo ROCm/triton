@@ -57,6 +57,37 @@ def disable_real_true16_feature(arch):
     return '-real-true16' if arch.startswith('gfx11') else ''
 
 
+# The MFMA/WMMA intrinsic calls tt.dot lowers to.
+_mfma_intrinsic_re = re.compile(r"@llvm\.amdgcn\.(?:mfma|smfmac|wmma)\.")
+
+
+def disable_packed_fp32_ops(arch, llvm_ir):
+    """Workaround for the CDNA4 MFMA operand read-skip erratum.
+
+    See llvm/llvm-project#206825 (and internally ROCM-27743, DEGGIGX90-5078).
+    On gfx950 an MFMA whose srcA/srcB already sits in the XDL buffer skips its
+    VGPR read, and the read-suppression is wrongly applied to the VALU path as
+    well: a v_pk_* op co-executing on *another wave* skips its own operand read
+    and consumes a stale register. The result is silent, nondeterministic wrong
+    results that only appear near full CU occupancy.
+
+    Dropping the packed-FP32 opcodes removes the only instruction class the
+    erratum can victimize. We do it just for kernels that contain MFMA/WMMA so
+    that fp32-VALU-bound kernels keep double-rate packed math. Note the residual
+    exposure: a kernel with no MFMA of its own can still be victimized by a
+    concurrent MFMA kernel sharing the CU -- set
+    TRITON_HIP_DISABLE_PACKED_FP32_OPS=1 to force the workaround on everywhere.
+
+    Revert once the hardware/LLVM fix lands.
+    """
+    forced = knobs.amd.disable_packed_fp32_ops
+    if forced is not None:
+        return forced
+    if arch != 'gfx950':
+        return False
+    return _mfma_intrinsic_re.search(llvm_ir) is not None
+
+
 def _parse_llvm_fn_attrs(attrs):
     if not isinstance(attrs, str):
         return tuple(attrs)
@@ -544,7 +575,10 @@ class HIPBackend(BaseBackend):
             flags.append("amdgpu-use-amdgpu-trackers")
         if is_expert_scheduling_enabled(options.arch):
             flags.append("amdgpu-expert-scheduling-mode")
-        features = disable_real_true16_feature(options.arch)
+        features = [disable_real_true16_feature(options.arch)]
+        if disable_packed_fp32_ops(options.arch, src):
+            features.append('-packed-fp32-ops')
+        features = ','.join(f for f in features if f)
         ir_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()
         dump_file_id = names[0] + '_' + ir_hash
         _ = llvm.translate_to_mir(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
@@ -596,4 +630,16 @@ class HIPBackend(BaseBackend):
 
     @functools.lru_cache()
     def hash(self):
-        return f'{self.target}'
+        # Codegen knobs that change the generated code but are not implied by
+        # anything else in the cache key; without them a flipped knob silently
+        # reuses a stale binary.
+        extra = []
+        # Only keyed on when explicitly forced: in the default (auto) mode the
+        # decision follows from the arch and the LLVM IR, both already part of
+        # the key, so keying on it would only churn caches.
+        forced = knobs.amd.disable_packed_fp32_ops
+        if forced is not None:
+            extra.append(f'packed-fp32-ops={not forced}')
+        if knobs.amd.scalarize_packed_fops:
+            extra.append('scalarize-packed-fops')
+        return '-'.join([f'{self.target}', *extra])
