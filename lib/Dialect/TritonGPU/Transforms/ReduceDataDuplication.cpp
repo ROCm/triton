@@ -38,6 +38,13 @@ public:
       auto srcEncoding = srcType.getEncoding();
       if (isa<triton::gpu::SharedEncodingTrait>(srcEncoding))
         return;
+      // Do not materialize sub-byte tensors through local memory. The LLVM
+      // lowering for convert_layout already widens these transfers to i8 and
+      // truncates them back to their logical element type.
+      Type elementType = srcType.getElementType();
+      if (elementType.isIntOrFloat() &&
+          elementType.getIntOrFloatBitWidth() < 8)
+        return;
       auto dstDotOp =
           dyn_cast<triton::gpu::DotOperandEncodingAttr>(dstType.getEncoding());
       if (!dstDotOp)
