@@ -1163,7 +1163,8 @@ Value packLLVector(Location loc, ValueRange vals, RewriterBase &rewriter) {
   return vec;
 }
 
-std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp) {
+std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp, Type valType) {
+  bool isFloat = isa<FloatType>(getElementTypeOrSelf(valType));
   switch (atomicOp) {
   case RMWOp::AND:
     return LLVM::AtomicBinOp::_and;
@@ -1176,9 +1177,9 @@ std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp) {
   case RMWOp::FADD:
     return LLVM::AtomicBinOp::fadd;
   case RMWOp::MAX:
-    return LLVM::AtomicBinOp::max;
+    return isFloat ? LLVM::AtomicBinOp::fmax : LLVM::AtomicBinOp::max;
   case RMWOp::MIN:
-    return LLVM::AtomicBinOp::min;
+    return isFloat ? LLVM::AtomicBinOp::fmin : LLVM::AtomicBinOp::min;
   case RMWOp::UMAX:
     return LLVM::AtomicBinOp::umax;
   case RMWOp::UMIN:

@@ -2247,7 +2247,7 @@ struct AtomicRMWOpConversion
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
     Type atomicElementType = getElementTypeOrSelf(op.getVal().getType());
-    auto binOp = matchAtomicOp(op.getAtomicRmwOp());
+    auto binOp = matchAtomicOp(op.getAtomicRmwOp(), op.getVal().getType());
     // MAX/MIN normally denote signed integer atomics. Float-typed Triton IR
     // uses the same RMW enum values, so select LLVM's floating operations.
     if (isa<FloatType>(atomicElementType)) {
