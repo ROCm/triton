@@ -159,6 +159,20 @@ tt.func @ub_poison() {
 
 // -----
 
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 2 : i32} {
+tt.func @roundeven(%ptr: !tt.ptr<f32>) {
+  // CHECK-LABEL: @roundeven
+  %ptrs = tt.splat %ptr : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>>
+  %input = tt.load %ptrs : tensor<128x!tt.ptr<f32>>
+  // CHECK: math.roundeven {{.*}} : tensor<128xf32, #{{.*}}>
+  %rounded = math.roundeven %input : tensor<128xf32>
+  tt.store %ptrs, %rounded : tensor<128x!tt.ptr<f32>>
+  tt.return
+}
+}
+
+// -----
+
 // CHECK-LABEL: @cf_br
 tt.func @cf_br(%ptr: !tt.ptr<i32>) {
   %cst = arith.constant dense<1> : tensor<128xi32>

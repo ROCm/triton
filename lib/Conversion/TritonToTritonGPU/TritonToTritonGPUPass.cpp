@@ -1,5 +1,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -121,6 +122,7 @@ void populateMathPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
   // Rewrite rule
   patterns.add<GenericOpPattern<math::ExpOp>, GenericOpPattern<math::Exp2Op>,
                GenericOpPattern<math::FloorOp>, GenericOpPattern<math::CeilOp>,
+               GenericOpPattern<math::RoundEvenOp>,
                GenericOpPattern<math::CosOp>, GenericOpPattern<math::SinOp>,
                GenericOpPattern<math::LogOp>, GenericOpPattern<math::Log2Op>,
                GenericOpPattern<math::ErfOp>, GenericOpPattern<math::AbsFOp>,
