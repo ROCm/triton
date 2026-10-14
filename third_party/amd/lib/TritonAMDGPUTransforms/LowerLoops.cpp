@@ -473,7 +473,9 @@ bool hasEnoughCTABytesForDirectToLds(tt::LoadOp loadOp,
 // Return whether the shared-memory swizzle maps every register and lane of
 // srcTy to a source lane within the same warp.
 static bool swizzlesInsideWarp(RankedTensorType srcTy,
-                               ttg::SwizzledSharedEncodingAttr enc) {
+                               ttg::SwizzledSharedEncodingAttr enc,
+                               unsigned loadVec,
+                               const triton::AMD::TargetInfo &targetInfo) {
   // maxPhase == 1 means no swizzling, so `requiresSrcPtrSwizzling` is false in
   // the lowering and there is no lane shuffle.
   if (!enc || enc.getMaxPhase() == 1)
@@ -500,9 +502,17 @@ static bool swizzlesInsideWarp(RankedTensorType srcTy,
   auto kWarp = StringAttr::get(ctx, "warp");
   auto kBlock = StringAttr::get(ctx, "block");
 
-  // Mirror emitSwizzledLaneOffsets, which normalizes the swizzled-vs-flat
-  // offset delta by the vector size to turn it into a lane offset.
-  int64_t vec = enc.getVec();
+  // Mirror emitSwizzledLaneOffsets, which divides the swizzled-vs-flat offset
+  // delta by the load's vector to turn it into a lane offset. Cap loadVec the
+  // way CoalesceAsyncCopy does, by the register-to-shared run and by the widths
+  // the target can write to LDS.
+  int64_t vec = triton::AMD::fitToValidDirectToLdsVecSize(
+      std::min<unsigned>(loadVec, regToSharedSwizzled.getNumConsecutiveInOut()),
+      srcTy.getElementTypeBitWidth(), targetInfo);
+  // No supported width means the load cannot go direct-to-LDS at all, so the
+  // shuffle this guards against is never emitted.
+  if (vec == 0)
+    return true;
   // Enumerate lanes over the layout's own lane dimension: apply() silently
   // ignores index bits above the in-dim size, so an out-of-range lane would
   // alias onto a smaller one and yield a meaningless offset.
@@ -536,8 +546,9 @@ static bool swizzlesInsideWarp(RankedTensorType srcTy,
 // maxPhase monotonically reduces the swizzle reach, and maxPhase == 1 always
 // passes, so the search terminates on the largest safe value.
 static ttg::SharedEncodingTrait
-clampSwizzleForDirectToLds(RankedTensorType srcTy,
-                           ttg::SharedEncodingTrait enc) {
+clampSwizzleForDirectToLds(RankedTensorType srcTy, ttg::SharedEncodingTrait enc,
+                           unsigned loadVec,
+                           const triton::AMD::TargetInfo &targetInfo) {
   auto swizz = dyn_cast_or_null<ttg::SwizzledSharedEncodingAttr>(enc);
   if (!swizz)
     return enc;
@@ -549,7 +560,7 @@ clampSwizzleForDirectToLds(RankedTensorType srcTy,
             : ttg::SwizzledSharedEncodingAttr::get(
                   swizz.getContext(), swizz.getVec(), swizz.getPerPhase(),
                   maxPhase, swizz.getOrder(), swizz.getCGALayout());
-    if (swizzlesInsideWarp(srcTy, candidate)) {
+    if (swizzlesInsideWarp(srcTy, candidate, loadVec, targetInfo)) {
       if (candidate != swizz)
         LDBG("Clamped direct-to-LDS swizzle maxPhase "
              << swizz.getMaxPhase() << " -> " << maxPhase
@@ -673,10 +684,18 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
         loadOp && useAsyncCopy &&
         canBeConvertedToAsyncLoad(numBuffers, loadOp, sharedEncoding,
                                   axisInfoAnalysis, targetInfo);
+    unsigned asyncCopyVec = 1;
+    if (canUseAsyncCopy) {
+      asyncCopyVec = axisInfoAnalysis.getContiguity(loadOp.getPtr());
+      if (auto mask = loadOp.getMask())
+        asyncCopyVec = std::min<unsigned>(
+            asyncCopyVec, axisInfoAnalysis.getMaskAlignment(mask));
+    }
     // On non-scatter targets, direct-to-LDS realizes the shared-memory swizzle
     // by shuffling source pointers between lanes, which must stay in one warp.
     if (canUseAsyncCopy && !targetInfo.supportsDirectToLdsScatter()) {
-      auto clampedEncoding = clampSwizzleForDirectToLds(ty, sharedEncoding);
+      auto clampedEncoding = clampSwizzleForDirectToLds(
+          ty, sharedEncoding, asyncCopyVec, targetInfo);
       // Clamping changes the shared layout used by the final eligibility
       // check, so verify that the load remains convertible.
       canUseAsyncCopy = canBeConvertedToAsyncLoad(
@@ -703,10 +722,8 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
     }
 
     if (canUseAsyncCopy) {
-      unsigned vec = axisInfoAnalysis.getContiguity(loadOp.getPtr());
-      if (auto mask = loadOp.getMask())
-        vec = std::min<unsigned>(vec, axisInfoAnalysis.getMaskAlignment(mask));
-      loadToStreamOp[loadOp] = createAsyncCopy(loadOp, alloc, extractIdx, vec);
+      loadToStreamOp[loadOp] =
+          createAsyncCopy(loadOp, alloc, extractIdx, asyncCopyVec);
       continue;
     }
 
