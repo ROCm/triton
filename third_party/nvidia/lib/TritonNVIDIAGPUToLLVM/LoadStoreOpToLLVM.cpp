@@ -948,7 +948,7 @@ public:
           !targetInfo.supportNativeBF16AtomicAdd()) {
         assert(vec == 1 && packed == 1);
         // Lower atomic bin-op and sem to LLVM
-        auto llvmAtomicBinOp = matchAtomicOp(atomicRmwAttr);
+        auto llvmAtomicBinOp = matchAtomicOp(atomicRmwAttr, op.getVal().getType());
         auto llvmAtomicMemOrdering = getMemoryOrdering(op.getSem());
 
         // Generate dominating undef

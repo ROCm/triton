@@ -68,7 +68,7 @@ FailureOr<Value> emitSharedAtomicRMW(ConversionPatternRewriter &rewriter,
                                      bool isCluster, Value pred,
                                      const NVIDIA::TargetInfo &targetInfo) {
   if (!pred && !usePtxForHalfAdd(rmwOp, valueElemTy, targetInfo)) {
-    auto binOp = matchAtomicOp(rmwOp);
+    auto binOp = matchAtomicOp(rmwOp, valueElemTy);
     if (!binOp)
       return failure();
     return LLVM::AtomicRMWOp::create(rewriter, loc, *binOp, ptr, value,

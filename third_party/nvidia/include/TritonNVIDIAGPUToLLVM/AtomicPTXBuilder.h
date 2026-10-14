@@ -182,7 +182,7 @@ emitAtomicRMW(ConversionPatternRewriter &rewriter, Location loc,
         stringifyMemSyncScope(scope).str(), pred, vec, packed,
         PtxAtomicAddrSpace::Global,
         returnOld ? PtxAtomicInstr::Atom : PtxAtomicInstr::Red);
-  auto binOp = matchAtomicOp(rmwOpAttr);
+  auto binOp = matchAtomicOp(rmwOpAttr, valueElemTy);
   auto ordering = getMemoryOrdering(sem);
   if (!binOp || !ordering)
     return failure();
