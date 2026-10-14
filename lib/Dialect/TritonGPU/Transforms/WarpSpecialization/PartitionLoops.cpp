@@ -489,7 +489,10 @@ LogicalResult triton::gpu::partitionLoop(LoopLikeOpInterface loop) {
     return success();
 
   auto numPartitions = partitions.getNumPartitions();
-  auto defaultPartition = partitions.getPartition((int)0);
+  // Use an explicitly unsigned literal: `(int)0` is also a null-pointer
+  // constant, making the call ambiguous between getPartition(unsigned) and
+  // getPartition(Operation*) under clang-cl.
+  auto defaultPartition = partitions.getPartition(0u);
   auto loopVarCategories = classifyLoopVars(loop, defaultPartition, partitions);
   auto [loopVarIndices, newResultIndices] =
       getLoopVarIndicesToKeep(loop, defaultPartition, loopVarCategories);
