@@ -93,6 +93,7 @@ public:
   ArrayRef<StringRef> getUnsupportedWmmaFeatures() const;
   bool supportsHwScaledUpcast() const;
   bool supportsHwScaledDowncast() const;
+  bool supportsFp8Dot4Fma() const;
 
   bool supportBitwidth16Elementwise() const;
   bool supportBitwidth32Elementwise() const;
