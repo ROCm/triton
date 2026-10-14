@@ -271,23 +271,51 @@ bool TargetFeatures::supportsClusterLoadBitWidth(int bitWidth) const {
 }
 
 bool TargetFeatures::supportsBufferAtomicRMW() const {
-  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4,
-                             ISAFamily::RDNA3, ISAFamily::RDNA4m,
+  // On older AMD GPUs BUFFER_ATOMIC_* silently drops writes against
+  // fine-grained pinned host memory. rocmlirTriton's external memory
+  // contract (docs/kernel_assumptions.md) excludes fine-grained
+  // allocations, so that hazard does not apply and buffer atomic RMW is
+  // safe on every family that has the instructions. Per-type FP restrictions
+  // are handled separately in supportsBufferAtomicFadd; integer RMW (ADD/AND/
+  // OR/XOR/MIN/MAX/SWAP) is available universally.
+  return llvm::is_contained({ISAFamily::GCN5_1, ISAFamily::CDNA1,
+                             ISAFamily::CDNA2, ISAFamily::CDNA3,
+                             ISAFamily::CDNA4, ISAFamily::RDNA3,
                              ISAFamily::RDNA4, ISAFamily::GFX1250},
                             getISAFamily());
 }
 
 bool TargetFeatures::supportsBufferAtomicFadd(Type elementType) const {
-  auto isaFamily = getISAFamily();
-  if (isaFamily == ISAFamily::CDNA3 && elementType.isBF16())
+  if (!(elementType.isF16() || elementType.isBF16() || elementType.isF32() ||
+        elementType.isF64()))
     return false;
-  if (isaFamily == ISAFamily::RDNA3 && !elementType.isF32())
+
+  switch (getISAFamily()) {
+  // gfx906 / gfx101x / gfx103x have no FP buffer-atomic-add at all.
+  case ISAFamily::GCN5_1:
+  case ISAFamily::Unknown:
     return false;
-  if (isaFamily == ISAFamily::RDNA4m)
+  case ISAFamily::CDNA1:
+    // gfx908: BUFFER_ATOMIC_ADD_F32 and PK_ADD_F16; no F64.
+    return elementType.isF32() || elementType.isF16();
+  case ISAFamily::CDNA2:
+    // gfx90a: BUFFER_ATOMIC_ADD_F32/F64 and PK_ADD_F16.
+    return elementType.isF32() || elementType.isF16() || elementType.isF64();
+  case ISAFamily::CDNA3:
+    // gfx942: no BUFFER_ATOMIC_PK_ADD_BF16.
+    return !elementType.isBF16();
+  case ISAFamily::CDNA4:
+  case ISAFamily::GFX1250:
+    return true;
+  case ISAFamily::RDNA3:
+  case ISAFamily::RDNA4m:
+    // gfx11: only BUFFER_ATOMIC_ADD_F32 (no F64 ADD, no PK_ADD variants).
     return elementType.isF32();
-  if (isaFamily == ISAFamily::RDNA4 && elementType.isF64())
-    return false;
-  return true;
+  case ISAFamily::RDNA4:
+    // gfx12: no BUFFER_ATOMIC_ADD_F64.
+    return !elementType.isF64();
+  }
+  return false;
 }
 
 bool TargetFeatures::supportsBufferAtomicFMinMax(Type elementType) const {
