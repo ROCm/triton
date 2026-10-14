@@ -35,6 +35,18 @@ using triton::amdgpu::TargetFeatures;
 constexpr char AttrDecomposedDotScaledSource[] =
     "amdg.decomposed_dot_scaled_source";
 
+// Copy discardable attributes from the original dot onto a freshly created dot
+// so downstream metadata survives the accelerate-matmul rewrite. Keeping them
+// discardable is required so downstream passes (e.g.
+// rock-set-matmul-output-transpose) can still find them via getDiscardableAttr.
+static void copyDiscardableAttrs(Operation *from, Value to) {
+  Operation *toOp = to.getDefiningOp();
+  if (!toOp)
+    return;
+  for (NamedAttribute attr : from->getDiscardableAttrs())
+    toOp->setDiscardableAttr(attr.getName(), attr.getValue());
+}
+
 int getMfmaVersion(ISAFamily isaFamily) {
   switch (isaFamily) {
   case ISAFamily::CDNA1:
@@ -807,6 +819,7 @@ public:
                                  b, newAcc, dotOp.getInputPrecision(),
                                  dotOp.getMaxNumImpreciseAcc());
     }
+    copyDiscardableAttrs(dotOp, newDot);
 
     Value dotOutput =
         convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),
@@ -1150,6 +1163,7 @@ public:
     auto newDot = triton::DotScaledOp::create(
         rewriter, dotOp.getLoc(), newRetType, a, b, newAcc, newAScale,
         newBScale, aElemType, bElemType, dotOp.getFastMath());
+    copyDiscardableAttrs(dotOp, newDot);
 
     rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dotOp, oldRetType,
                                                       newDot);
@@ -1375,6 +1389,7 @@ public:
     auto newDot = triton::DotScaledOp::create(
         rewriter, dotOp.getLoc(), newRetType, a, b, newAcc, newAScale,
         newBScale, aElemType, bElemType, dotOp.getFastMath());
+    copyDiscardableAttrs(dotOp, newDot);
 
     rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dotOp, oldRetType,
                                                       newDot);
@@ -1598,6 +1613,7 @@ public:
     auto newDot = tt::DotOp::create(
         rewriter, dotOp.getLoc(), newRetType, castedA, castedB, newAcc,
         dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
+    copyDiscardableAttrs(dotOp, newDot);
 
     Value dotOutput = convertAndCastTensor(rewriter, newDot, oldRetEncoding,
                                            oldRetType.getElementType());
@@ -1707,6 +1723,7 @@ public:
       auto newDot = DotOp::create(
           rewriter, dotOp.getLoc(), newC.getType(), dotOp.getA(), dotOp.getB(),
           newC, dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
+      copyDiscardableAttrs(dotOp, newDot);
       auto newD = castToElTy(rewriter, newDot.getResult(), f16_ty);
       rewriter.replaceOp(dotOp, newD);
       return success();
@@ -1749,6 +1766,7 @@ public:
     auto newDot = DotOp::create(rewriter, dotOp.getLoc(), newC.getType(), newA,
                                 newB, newC, dotOp.getInputPrecision(),
                                 dotOp.getMaxNumImpreciseAcc());
+    copyDiscardableAttrs(dotOp, newDot);
     auto newD = castToElTy(rewriter, newDot.getResult(), dotTypes.d);
 
     rewriter.replaceOp(dotOp, newD);
