@@ -265,15 +265,23 @@ bool TargetFeatures::supportsClusterLoadBitWidth(int bitWidth) const {
 }
 
 bool TargetFeatures::supportsBufferAtomicRMW() const {
-  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4,
-                             ISAFamily::RDNA3, ISAFamily::RDNA4m,
-                             ISAFamily::RDNA4, ISAFamily::CDNA5},
-                            getISAFamily());
+  // On older AMD GPUs BUFFER_ATOMIC_* silently drops writes against
+  // fine-grained pinned host memory. rocmlirTriton's external memory
+  // contract (docs/kernel_assumptions.md) excludes fine-grained
+  // allocations, so that hazard does not apply and buffer atomic RMW is
+  // safe on every family that has the instructions. Per-type FP restrictions
+  // are handled separately in supportsBufferAtomicFadd; integer RMW (ADD/AND/
+  // OR/XOR/MIN/MAX/SWAP) is available universally.
+  return llvm::is_contained(
+      {ISAFamily::CDNA2, ISAFamily::CDNA3, ISAFamily::CDNA4, ISAFamily::RDNA3,
+       ISAFamily::RDNA4m, ISAFamily::RDNA4, ISAFamily::CDNA5},
+      getISAFamily());
 }
 
 bool TargetFeatures::supportsBufferAtomicFadd(Type elementType) const {
   auto isaFamily = getISAFamily();
-  if (isaFamily == ISAFamily::CDNA3 && elementType.isBF16())
+  if ((isaFamily == ISAFamily::CDNA3 || isaFamily == ISAFamily::CDNA2) &&
+      elementType.isBF16())
     return false;
   if (isaFamily == ISAFamily::RDNA3 && !elementType.isF32())
     return false;
