@@ -26,6 +26,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
@@ -156,6 +157,10 @@ public:
       return mlir::failure();
 
     if (!cvtOp.getResult().hasOneUse())
+      return mlir::failure();
+
+    triton::FuncOp funcOp = stOp->getParentOfType<triton::FuncOp>();
+    if (funcOp && funcOp->getDiscardableAttr("rock.prefer_lds_epilogue"))
       return mlir::failure();
 
     auto newEncoding =
