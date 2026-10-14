@@ -21,6 +21,7 @@ enum class ISAFamily {
   RDNA3,
   RDNA4m,
   RDNA4,
+  GFX1310,
 };
 
 class TargetFeatures {
