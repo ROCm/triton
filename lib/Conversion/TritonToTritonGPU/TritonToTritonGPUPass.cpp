@@ -110,7 +110,8 @@ void populateArithPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<arith::ExtUIOp>, GenericOpPattern<arith::ExtSIOp>,
       GenericOpPattern<arith::ExtFOp>, GenericOpPattern<arith::SIToFPOp>,
       GenericOpPattern<arith::FPToSIOp>, GenericOpPattern<arith::FPToUIOp>,
-      GenericOpPattern<arith::UIToFPOp>>(typeConverter, context);
+      GenericOpPattern<arith::UIToFPOp>, GenericOpPattern<arith::BitcastOp>>(
+      typeConverter, context);
 }
 
 void populateMathPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
