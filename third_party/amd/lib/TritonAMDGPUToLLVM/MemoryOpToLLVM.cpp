@@ -564,7 +564,7 @@ struct LocalAtomicScatterRMWOpConversion
       return failure();
     LocalAtomicScatterRMWInfo &info = *lowering;
 
-    auto binOp = matchAtomicOp(op.getAtomicRmwOp());
+    auto binOp = matchAtomicOp(op.getAtomicRmwOp(), op.getValues().getType());
     if (!binOp)
       return rewriter.notifyMatchFailure(op, "Unsupported RMW operation");
 

@@ -730,7 +730,7 @@ SmallVector<Value> unpackLLVector(Location loc, Value llvmVec,
 
 Value packLLVector(Location loc, ValueRange vals, RewriterBase &rewriter);
 
-std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp);
+std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp, Type valType);
 
 std::optional<LLVM::AtomicOrdering> getMemoryOrdering(MemSemantic memOrdering);
 
