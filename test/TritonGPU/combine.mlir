@@ -2677,7 +2677,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.thr
   // generate more expensive code.
   // CHECK-LABEL: @hoist_with_free_convert
   tt.func public @hoist_with_free_convert(%arg0: tensor<128x256xf32, #mma1>, %arg1: tensor<128x1xf32, #mma>) -> tensor<128x256xf32, #blocked> {
-    // CHECK: ttg.convert_layout
+    // CHECK-NOT: ttg.convert_layout
     // CHECK: tt.broadcast
     // CHECK: ttg.convert_layout
     // CHECK: tt.return
