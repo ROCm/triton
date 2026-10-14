@@ -17,6 +17,13 @@
 // CHECK-LABEL: buffer_load_cg
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
   tt.func @buffer_load_cg(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset: tensor<128xi32, #blocked> {tt.divisibility = 16 : i32}) {
+    // The resource descriptor is built by createResourceDescriptor with the
+    // RDNA-family flags word 822243328 ((7<<12)|(4<<15)|(1<<24)|(3<<28)); the
+    // CDNA path (e.g. gfx942) emits 159744 instead. This is emitted for the
+    // whole RDNA family (RDNA2/RDNA3/gfx1170/RDNA4), so both the gfx1150 and
+    // gfx1170 RUN lines above share this check.
+    // CHECK: %[[flags:.*]] = llvm.mlir.constant(822243328 : i32) : i32
+    // CHECK: rocdl.make.buffer.rsrc {{.*}}, {{.*}}, {{.*}}, %[[flags]]
     // .cg load on RDNA3.5: aux = 1 (GLC)
     // CHECK: rocdl.raw.ptr.buffer.load {{.*}}, {{.*}}, {{.*}}, 1
     %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_normal>} : !tt.ptr<f32> -> tensor<128xf32, #blocked>
