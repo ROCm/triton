@@ -83,6 +83,8 @@ ISAFamily computeISAFamily(StringRef arch) {
   // See https://llvm.org/docs/AMDGPUUsage.html#processors for how to
   // categorize the following target gfx architectures. Parse the gfx number
   // directly here instead of depending on LLVM's target parser.
+  if (major == 13 && minor == 1)
+    return ISAFamily::GFX1310;
   if (major == 12 && minor == 5)
     return ISAFamily::CDNA5;
 
@@ -287,7 +289,8 @@ bool TargetFeatures::supportsBufferAtomicFadd(Type elementType) const {
     return false;
   if (isaFamily == ISAFamily::RDNA4m)
     return elementType.isF32();
-  if (isaFamily == ISAFamily::RDNA4 && elementType.isF64())
+  if ((isaFamily == ISAFamily::RDNA4 || isaFamily == ISAFamily::GFX1310) &&
+      elementType.isF64())
     return false;
   return true;
 }
@@ -407,6 +410,7 @@ bool isRDNA(ISAFamily isaFamily) {
   case ISAFamily::RDNA3:
   case ISAFamily::RDNA4m:
   case ISAFamily::RDNA4:
+  case ISAFamily::GFX1310:
     return true;
   default:
     return false;
