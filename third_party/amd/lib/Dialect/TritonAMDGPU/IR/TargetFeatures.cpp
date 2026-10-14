@@ -371,6 +371,11 @@ bool TargetFeatures::supportsHwScaledDowncast() const {
   return getISAFamily() == ISAFamily::CDNA4 || supportsCvtPkScalePk8();
 }
 
+bool TargetFeatures::supportsFp8Dot4Fma() const {
+  return getISAFamily() == ISAFamily::RDNA4 ||
+         getISAFamily() == ISAFamily::RDNA4m;
+}
+
 bool TargetFeatures::supportBitwidth16Elementwise() const { return true; }
 
 bool TargetFeatures::supportBitwidth32Elementwise() const {
