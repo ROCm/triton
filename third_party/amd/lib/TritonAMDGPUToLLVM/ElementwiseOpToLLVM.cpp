@@ -21,6 +21,7 @@ using mlir::triton::gpu::ElementwiseOpConversion;
 using mlir::triton::gpu::ElementwiseOpConversionBase;
 using mlir::triton::gpu::ElementwiseToIntrinsicOpConversion;
 using mlir::triton::gpu::getFunctionType;
+using mlir::triton::gpu::getLLVMFastmathFlags;
 using mlir::triton::gpu::MultipleOperandsRange;
 using triton::amdgpu::ISAFamily;
 
@@ -29,10 +30,11 @@ namespace {
 template <typename OP>
 Value EmitDualBF16ElementwiseOp(Location loc,
                                 ConversionPatternRewriter &rewriter,
-                                MultipleOperandsRange operands) {
+                                MultipleOperandsRange operands,
+                                LLVM::FastmathFlagsAttr fastmathFlags) {
   auto v0 = AMD::convertBf16ToFp32(loc, rewriter, operands[0][0]);
   auto v1 = AMD::convertBf16ToFp32(loc, rewriter, operands[0][1]);
-  auto result = OP::create(rewriter, loc, f32_ty, v0, v1);
+  auto result = OP::create(rewriter, loc, f32_ty, v0, v1, fastmathFlags);
   return AMD::convertFp32ToBf16(loc, rewriter, result, RoundingMode::RTNE);
 }
 
@@ -60,8 +62,9 @@ struct PackedArithOpConversion
     for (unsigned i = 0, e = operands[0].size(); i < e; ++i)
       packedOperands.push_back(
           packLLVector(loc, {operands[0][i], operands[1][i]}, rewriter));
-    Value vr = LLVMOp::create(rewriter, loc, packedOperands[0].getType(),
-                              packedOperands);
+    LLVMOp vr = LLVMOp::create(rewriter, loc, packedOperands[0].getType(),
+                               packedOperands);
+    vr.setFastmathFlagsAttr(getLLVMFastmathFlags(op));
     return unpackLLVector(loc, vr, rewriter);
   }
 };
@@ -77,10 +80,11 @@ struct FMulOpConversion
     auto lhsElemTy = getElementTypeOrSelf(op.getLhs());
     auto rhsElemTy = getElementTypeOrSelf(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FMulOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FMulOp>(
+          loc, rewriter, operands, getLLVMFastmathFlags(op))};
     } else {
       return {LLVM::FMulOp::create(rewriter, loc, elemTy, operands[0][0],
-                                   operands[0][1])};
+                                   operands[0][1], getLLVMFastmathFlags(op))};
     }
   }
 };
@@ -96,10 +100,11 @@ struct FAddOpConversion
     auto lhsElemTy = getElementTypeOrSelf(op.getLhs());
     auto rhsElemTy = getElementTypeOrSelf(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FAddOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FAddOp>(
+          loc, rewriter, operands, getLLVMFastmathFlags(op))};
     } else {
       return {LLVM::FAddOp::create(rewriter, loc, elemTy, operands[0][0],
-                                   operands[0][1])};
+                                   operands[0][1], getLLVMFastmathFlags(op))};
     }
   }
 };
@@ -115,10 +120,11 @@ struct FSubOpConversion
     auto lhsElemTy = getElementTypeOrSelf(op.getLhs());
     auto rhsElemTy = getElementTypeOrSelf(op.getRhs());
     if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {EmitDualBF16ElementwiseOp<LLVM::FSubOp>(loc, rewriter, operands)};
+      return {EmitDualBF16ElementwiseOp<LLVM::FSubOp>(
+          loc, rewriter, operands, getLLVMFastmathFlags(op))};
     } else {
       return {LLVM::FSubOp::create(rewriter, loc, elemTy, operands[0][0],
-                                   operands[0][1])};
+                                   operands[0][1], getLLVMFastmathFlags(op))};
     }
   }
 };
@@ -241,7 +247,9 @@ struct ExpOpConversionApprox
       return {};
 
     const double log2e = 1.4426950408889634;
-    Value prod = b.fmul(f32_ty, operands[0][0], b.f32_val(log2e));
+    auto fastmathFlags = getLLVMFastmathFlags(op);
+    Value prod =
+        b.fmul(f32_ty, operands[0][0], b.f32_val(log2e), fastmathFlags);
 
     // Here we use llvm.exp2.f32 instead of math::Exp2Op. The latter
     // flushes denorms by default, but we want to preserve denorms by default
@@ -251,7 +259,10 @@ struct ExpOpConversionApprox
     LLVM::LLVMFuncOp funcOp =
         appendOrGetExternFuncOp(rewriter, op, funcName, funcType);
 
-    return {LLVM::createLLVMCallOp(rewriter, loc, funcOp, prod).getResult()};
+    auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, prod);
+    if (fastmathFlags)
+      callOp.setFastmathFlagsAttr(fastmathFlags);
+    return {callOp.getResult()};
   }
 };
 
