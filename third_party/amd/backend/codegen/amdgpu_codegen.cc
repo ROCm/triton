@@ -390,6 +390,9 @@ triton_amdgpu_compile(const char *llvmIR, size_t llvmIRSize,
                                      llvm::CodeGenFileType::AssemblyFile))
       return fail("AMD target cannot emit AMDGCN assembly", error);
     codegen.run(*module);
+    if (context.getDiagHandlerPtr()->HasErrors)
+      return fail("AMD target had errors while emitting AMDGCN assembly",
+                  error);
   }
 
   if (options->enableTiming) {
