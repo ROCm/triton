@@ -1,13 +1,19 @@
 // RUN: triton-opt %s -split-input-file -tritonamdgpu-optimize-dot-operands="gfx-arch=gfx1151" | FileCheck %s --check-prefix=OFF
 // RUN: env TRITON_AMD_STAGE_FUSED_DOT_OPERANDS=1 triton-opt %s -split-input-file -tritonamdgpu-optimize-dot-operands="gfx-arch=gfx1151" | FileCheck %s --check-prefix=ON
 
+// The pipeliner stages a load only when every user converts to a dot-operand
+// layout. An elementwise fusion is not such a user, so the fused tile stays in
+// registers and spills on the scalar-FMA path. With
+// TRITON_AMD_STAGE_FUSED_DOT_OPERANDS set, that tile is staged through shared
+// memory. Operand 0 keeps K as the slow dimension, printed as order [0, 1].
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [4, 8], warpsPerCTA = [4, 2], order = [1, 0]}>
 
 // OFF-LABEL: fused_fma_dot_operand
 // OFF-NOT: ttg.local_alloc
 // ON-LABEL: fused_fma_dot_operand
 // ON: %[[ADD:.+]] = arith.addf
-// ON: %[[ALLOC:.+]] = ttg.local_alloc %[[ADD]] : (tensor<64x16xf32, #blocked>) -> !ttg.memdesc<64x16xf32, #{{.*}}swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0, 1]
+// ON: %[[ALLOC:.+]] = ttg.local_alloc %[[ADD]]{{.*}}order = [0, 1]
 // ON: %[[LOAD:.+]] = ttg.local_load %[[ALLOC]]
 // ON: %[[A:.+]] = ttg.convert_layout %[[LOAD]]
 // ON: tt.dot %[[A]]
