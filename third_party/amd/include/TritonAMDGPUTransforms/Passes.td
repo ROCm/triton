@@ -328,6 +328,9 @@ def TritonAMDGPUOptimizeDotOperands : Pass<"tritonamdgpu-optimize-dot-operands",
 
   let description = [{
     Perform transformations to promote shared memory reuse between matrix multiplication operands.
+    When TRITON_AMD_STAGE_FUSED_DOT_OPERANDS is set, a scalar-FMA dot operand
+    produced by an elementwise op is staged through shared memory so the
+    pipeliner does not keep the fused tile in registers.
   }];
 
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
