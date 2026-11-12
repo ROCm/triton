@@ -6,7 +6,7 @@
 // RUN: triton-opt %s -split-input-file --convert-triton-gpu-to-llvm='compute-capability=100 ptx-version=92' -cse | FileCheck --check-prefixes=FP8,FP4,PACKED,FP16-NATIVE %s
 // RUN: triton-opt %s -split-input-file --convert-triton-gpu-to-llvm='compute-capability=103 ptx-version=92' -cse | FileCheck --check-prefixes=SM103,FP8,FP4,PACKED,FP16-NATIVE %s
 // RUN: split-file %s %t
-// RUN: triton-opt %t/fp4-ptx.mlir --convert-triton-gpu-to-llvm='compute-capability=90 ptx-version=83' --convert-nv-gpu-to-llvm | mlir-translate --mlir-to-llvmir | opt -O3 -S | llc -mtriple=nvptx64-nvidia-cuda -mcpu=sm_90 -mattr=+ptx83 | FileCheck %s --check-prefix=FP4-PTX
+// RUN: %if nvptx-registered-target %{ triton-opt %t/fp4-ptx.mlir --convert-triton-gpu-to-llvm='compute-capability=90 ptx-version=83' --convert-nv-gpu-to-llvm | mlir-translate --mlir-to-llvmir | opt -O3 -S | llc -mtriple=nvptx64-nvidia-cuda -mcpu=sm_90 -mattr=+ptx83 | FileCheck %s --check-prefix=FP4-PTX %}
 
 //--- lowerings.mlir
 
