@@ -556,33 +556,43 @@ def get_git_commit_hash(length=8):
         return ""
 
 
-def get_git_branch():
-    try:
-        cmd = ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
-        return subprocess.check_output(cmd).strip().decode('utf-8')
-    except Exception:
-        return ""
+def get_rocm_version() -> str:
+    """Return the ROCm version being built against as "X.Y.0", or "" if none is found."""
+    version = os.environ.get("TRITON_ROCM_VERSION", "")
+    if not version:
+        # TheRock ROCm is a pip package of the building python. Query it in isolated mode
+        # so pip's PEP 517 build environment doesn't hide the caller's site-packages.
+        try:
+            version = subprocess.check_output(
+                [sys.executable, "-I", "-c", "import importlib.metadata as m; print(m.version('rocm-sdk-core'))"],
+                stderr=subprocess.DEVNULL, text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            version = ""
+    if not version:
+        try:
+            version = Path(os.environ.get("ROCM_PATH", "/opt/rocm"), ".info", "version").read_text().strip()
+        except OSError:
+            version = ""
+    # Keep major.minor only (7.2.2 -> 7.2.0), the names build_triton_wheel.sh uses.
+    m = re.match(r"(\d+)\.(\d+)", version)
+    return f"{m[1]}.{m[2]}.0" if m else ""
 
 
 def get_git_version_suffix():
-    if not is_git_repo():
-        return ""  # Not a git checkout
-    branch = get_git_branch()
-    if branch.startswith("release"):
-        return ""
-    else:
-        return get_git_commit_hash()
+    # "+amd[.rocm<X.Y.Z>][.git<hash>]" on every branch, matching the wheels built by
+    # build_triton_wheel.sh, so source builds also report the ROCm and commit they come from.
+    rocm = get_rocm_version()
+    git_hash = get_git_commit_hash()[len("+git"):] if is_git_repo() else ""
+    return "+amd" + (f".rocm{rocm}" if rocm else "") + (f".git{git_hash}" if git_hash else "")
 
 
 def get_triton_version_suffix():
-    # Either "" or "+<githash>", "<githash>" itself does not contain any plus-characters.
-    git_sfx = get_git_version_suffix()
-    # Should start with "+" that will replaced with "-" if needed
-    env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", "")
-    # version suffix can only contain one plus-character
-    if "+" in git_sfx and "+" in env_sfx:
-        env_sfx = env_sfx.replace("+", "-")
-    return git_sfx + env_sfx
+    # TRITON_WHEEL_VERSION_SUFFIX, when set, replaces the automatic "+amd.rocm<ver>.git<hash>"
+    # suffix entirely (e.g. "+amd.rocm10.2.0.git1234abcd"; "" gives the bare version).
+    env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX")
+    if env_sfx is not None:
+        return env_sfx
+    return get_git_version_suffix()
 
 
 # keep it separate for easy substitution
