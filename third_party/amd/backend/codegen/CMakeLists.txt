@@ -53,15 +53,28 @@ llvm_map_components_to_libnames(TRITON_AMD_LLVM_LIBRARIES
     AMDGPUCodeGen AMDGPUDesc AMDGPUInfo AMDGPUAsmParser AMDGPUUtils
     IRReader IPO ScalarOpts TransformUtils Analysis CodeGen MIRParser Target
     Support)
+
+# Linking a shared LLVM gives up the isolated option registry that the static
+# libraries provide; this is opt-in for deployments that ship one LLVM DLL.
+option(TRITON_AMD_CODEGEN_SHARED_LLVM
+       "Link the AMD code generator against the LLVM shared library" OFF)
+if(TRITON_AMD_CODEGEN_SHARED_LLVM)
+  if(NOT LLVM_LINK_LLVM_DYLIB)
+    message(FATAL_ERROR "TRITON_AMD_CODEGEN_SHARED_LLVM requires an LLVM built with LLVM_LINK_LLVM_DYLIB")
+  endif()
+  set(TRITON_AMD_LLVM_LIBRARIES LLVM)
+endif()
 target_link_libraries(triton_amd_codegen PRIVATE
                       ${TRITON_AMD_LLVM_LIBRARIES})
 
-foreach(llvm_library IN LISTS TRITON_AMD_LLVM_LIBRARIES)
-  get_target_property(llvm_library_type ${llvm_library} TYPE)
-  if(NOT llvm_library_type STREQUAL "STATIC_LIBRARY")
-    message(FATAL_ERROR "Standalone AMD code generation requires static LLVM libraries: ${llvm_library}")
-  endif()
-endforeach()
+if(NOT TRITON_AMD_CODEGEN_SHARED_LLVM)
+  foreach(llvm_library IN LISTS TRITON_AMD_LLVM_LIBRARIES)
+    get_target_property(llvm_library_type ${llvm_library} TYPE)
+    if(NOT llvm_library_type STREQUAL "STATIC_LIBRARY")
+      message(FATAL_ERROR "Standalone AMD code generation requires static LLVM libraries: ${llvm_library}")
+    endif()
+  endforeach()
+endif()
 
 set_target_properties(triton_amd_codegen PROPERTIES
     CXX_VISIBILITY_PRESET hidden
